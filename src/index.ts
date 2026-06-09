@@ -40,15 +40,6 @@ import {
 } from './extraction';
 import { bindExtractionContext } from './extraction/context';
 import {
-  bindOhosApiDbForProject,
-  restoreOhosApiDbAttach,
-  ohosApiDbPackageName,
-  resetArkTSBatch,
-  type OhosApiDbBinding,
-  OHOS_API_DB_PATH_META,
-  OHOS_API_VERSION_META,
-} from './extraction/languages/arkts';
-import {
   ReferenceResolver,
   createResolver,
   ResolutionResult,
@@ -198,10 +189,6 @@ export class HomeGraph {
       this.queries,
       this.traverser
     );
-    restoreOhosApiDbAttach(this.queries);
-    if (!this.queries.getOhosApiDbPath()) {
-      bindOhosApiDbForProject(this.projectRoot, this.queries);
-    }
   }
 
   /**
@@ -350,14 +337,14 @@ export class HomeGraph {
    * files is O(1) regardless of size, reclaims the disk, and sidesteps opening
    * (and running migrations against) the poisoned database entirely.
    */
-  static async recreate(projectRoot: string): Promise<HomeGraph> {
+  static async recreate(projectRoot: string): Promise<CodeGraph> {
     await initGrammars();
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if initialized — recreate REBUILDS an existing project; it is not a
     // first-time `init`.
     if (!isInitialized(resolvedRoot)) {
-      throw new Error(`HomeGraph not initialized in ${resolvedRoot}. Run init() first.`);
+      throw new Error(`CodeGraph not initialized in ${resolvedRoot}. Run init() first.`);
     }
 
     const dbPath = getDatabasePath(resolvedRoot);
@@ -370,8 +357,8 @@ export class HomeGraph {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(
         `Could not rebuild the index — the database file is in use (${reason}). ` +
-          `Stop any running HomeGraph MCP server/daemon for this project and retry, ` +
-          `or remove the ${getHomeGraphDir(resolvedRoot)} directory and run "homegraph init".`
+          `Stop any running CodeGraph MCP server/daemon for this project and retry, ` +
+          `or remove the ${getCodeGraphDir(resolvedRoot)} directory and run "codegraph init".`
       );
     }
 
@@ -379,7 +366,7 @@ export class HomeGraph {
     const db = DatabaseConnection.initialize(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    return new HomeGraph(db, queries, resolvedRoot);
+    return new CodeGraph(db, queries, resolvedRoot);
   }
 
   /**
@@ -519,14 +506,6 @@ export class HomeGraph {
             this.queries.setMetadata('indexed_with_version', HomeGraphPackageVersion);
             this.queries.setMetadata('indexed_with_extraction_version', String(EXTRACTION_VERSION));
           } catch { /* metadata is advisory — never fail an index over it */ }
-
-          const languages = Object.entries(this.getStats().filesByLanguage)
-            .filter(([, count]) => count > 0)
-            .map(([lang]) => lang);
-          const ohosBinding = bindOhosApiDbForProject(this.projectRoot, this.queries, languages);
-          if (ohosBinding && 'code' in ohosBinding) {
-            result.errors.push({ message: ohosBinding.message, severity: 'warning', code: ohosBinding.code });
-          }
         }
 
         return result;
@@ -758,13 +737,6 @@ export class HomeGraph {
   }
 
   /**
-   * Access the underlying query layer. Used by the MCP query-cache layer.
-   */
-  getQueryBuilder(): QueryBuilder {
-    return this.queries;
-  }
-
-  /**
    * Which engine built the current index: the package version + extraction
    * version stamped at the last full `indexAll`. Either field is null for an
    * index built before stamping existed (treated as stale). See
@@ -775,19 +747,6 @@ export class HomeGraph {
     const ev = this.queries.getMetadata('indexed_with_extraction_version');
     const parsed = ev != null ? parseInt(ev, 10) : NaN;
     return { version, extractionVersion: Number.isFinite(parsed) ? parsed : null };
-  }
-
-  /** Bound OHOS API db for this project, if any. */
-  getOhosApiBinding(): OhosApiDbBinding | null {
-    const version = this.queries.getMetadata(OHOS_API_VERSION_META);
-    const dbPath = this.queries.getMetadata(OHOS_API_DB_PATH_META);
-    if (!version || !dbPath) return null;
-    return {
-      version,
-      dbPath,
-      packageName: ohosApiDbPackageName(version),
-      installed: false,
-    };
   }
 
   /**
@@ -1266,7 +1225,6 @@ export class HomeGraph {
    */
   clear(): void {
     this.queries.clear();
-    resetArkTSBatch();
   }
 
   /**

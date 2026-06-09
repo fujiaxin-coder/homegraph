@@ -7,7 +7,6 @@
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
-import * as os from 'os';
 import * as crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import {
@@ -19,22 +18,14 @@ import {
 } from '../types';
 import { QueryBuilder } from '../db/queries';
 import { extractFromSource } from './tree-sitter';
-import { ParseWorkerPool, resolveParsePoolSize } from './parse-pool';
 import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, requiresInProcessExtraction, initGrammars, loadGrammarsForLanguages } from './grammars';
-import { loadExtensionOverrides, loadIncludeIgnoredPatterns, loadExcludePatterns } from '../project-config';
+import { loadExtensionOverrides, loadIncludeIgnoredPatterns } from '../project-config';
 import { isHomeGraphDataDir } from '../directory';
 import { logDebug, logWarn } from '../errors';
 import { validatePathWithinRoot, normalizePath } from '../utils';
 import ignore, { Ignore } from 'ignore';
 import { detectFrameworks } from '../resolution/frameworks';
 import type { ResolutionContext } from '../resolution/types';
-import { setArkTSBatchProgressCallback, isArktsBatchRunning } from './context';
-import {
-  isArkTSBatchPersisted,
-  primeArkTSBatch,
-  resetArkTSBatch,
-  drainArkTSIndexNotices,
-} from './languages/arkts';
 
 /**
  * Number of files to read in parallel during indexing.
@@ -76,12 +67,10 @@ const WORKER_RECYCLE_INTERVAL = 250;
  * Progress callback for indexing operations
  */
 export interface IndexProgress {
-  phase: 'scanning' | 'parsing' | 'arkts-batch' | 'storing' | 'resolving';
+  phase: 'scanning' | 'parsing' | 'storing' | 'resolving';
   current: number;
   total: number;
   currentFile?: string;
-  /** ArkTS batch sub-step (scene build vs per-file persist). */
-  subphase?: 'scene' | 'persist';
 }
 
 /**
@@ -177,35 +166,12 @@ const DEFAULT_IGNORE_DIRS: ReadonlySet<string> = new Set([
   '.cache',
 ]);
 
-/**
- * Android resource directory types. A `res/` tree holds ONLY non-code resources —
- * layouts, drawables, value bags (strings/colors/styles), menus, navigation
- * graphs — split into one typed subdirectory per kind, optionally density/locale/
- * version-qualified (`values-es`, `drawable-hdpi`, `layout-v21`, …). None of it
- * yields an extractable code symbol, yet on an Android app it DOMINATES the tree
- * (one report: 26k XML files = 97% of the project, 0 symbols), bloating the DB,
- * slowing indexing, and skewing both the file count and `codegraph_explore`
- * results (#1047). So these are excluded by default. The structure is
- * self-identifying — a non-Android project has no `res/layout/` etc., so it's
- * untouched — and the only XML that DOES produce symbols (MyBatis mappers) lives
- * under `src/main/resources/`, never `res/`, so nothing useful is dropped.
- * `res/raw/` is deliberately NOT here: it holds arbitrary bundled assets that can
- * be code-ish (a `.sql` schema, a `.js`), so we leave it indexed. Override any of
- * these with a `.gitignore` negation (e.g. `!res/values/`).
- */
-const ANDROID_RES_TYPES: readonly string[] = [
-  'anim', 'animator', 'color', 'drawable', 'font', 'layout',
-  'menu', 'mipmap', 'navigation', 'transition', 'values', 'xml',
-];
-
 /** Gitignore-style patterns for the `ignore` matcher: the dirs above plus a few globs. */
 const DEFAULT_IGNORE_PATTERNS: string[] = [
   ...Array.from(DEFAULT_IGNORE_DIRS, (d) => `${d}/`),
   '*.egg-info/',     // Python packaging metadata
   'cmake-build-*/',  // CLion / CMake build trees
   'bazel-*/',        // Bazel output symlink trees
-  // Android resource dirs at any depth, with their qualifier variants (#1047).
-  ...ANDROID_RES_TYPES.map((t) => `**/res/${t}*/`),
 ];
 
 /** True if `buf` decodes as strict UTF-8 (no invalid byte sequences). */
@@ -314,20 +280,6 @@ function defaultsOnlyIgnore(): Ignore {
  */
 function loadIncludeIgnoredMatcher(rootDir: string): Ignore | null {
   const patterns = loadIncludeIgnoredPatterns(rootDir);
-  return patterns.length > 0 ? ignore().add(patterns) : null;
-}
-
-/**
- * Matcher for the project's `codegraph.json` `exclude` patterns — paths to keep
- * OUT of the index even when git-tracked, which `.gitignore` cannot do (#999).
- * The escape hatch for a committed vendor/theme/SDK directory. Returns `null`
- * when nothing is excluded (the zero-config default → no overhead). Matched
- * against project-root-relative paths, so it applies uniformly across the whole
- * workspace, including inside embedded repos (excluding `static/` means gone
- * everywhere). Built once per scan/sync/scope operation from the scan root.
- */
-function loadExcludeMatcher(rootDir: string): Ignore | null {
-  const patterns = loadExcludePatterns(rootDir);
   return patterns.length > 0 ? ignore().add(patterns) : null;
 }
 
@@ -469,25 +421,12 @@ function findNestedGitRepos(absDir: string, relPrefix: string): string[] {
 export class ScopeIgnore {
   private embedded: Array<{ root: string; matcher: Ignore }>;
   private defaults: Ignore = defaultsOnlyIgnore();
-  constructor(
-    private rootMatcher: Ignore,
-    embedded: Array<{ root: string; matcher: Ignore }>,
-    /**
-     * Project `codegraph.json` `exclude` patterns (#999), matched against the
-     * full root-relative path. Wins over everything else — an explicit user
-     * exclude applies even to tracked files and even inside embedded repos.
-     */
-    private exclude: Ignore | null = null,
-  ) {
+  constructor(private rootMatcher: Ignore, embedded: Array<{ root: string; matcher: Ignore }>) {
     // Longest root first so paths in nested embedded repos hit the innermost matcher.
     this.embedded = [...embedded].sort((a, b) => b.root.length - a.root.length);
   }
 
   ignores(rel: string): boolean {
-    // User `exclude` (#999) is checked first and against the full root-relative
-    // path: it must drop git-TRACKED paths (which `.gitignore` can't) and apply
-    // everywhere, including ancestors of embedded repos.
-    if (this.exclude && this.exclude.ignores(rel)) return true;
     for (const { root, matcher } of this.embedded) {
       if (rel.startsWith(root)) {
         const inner = rel.slice(root.length);
@@ -516,42 +455,7 @@ export function buildScopeIgnore(rootDir: string, embeddedRoots?: Iterable<strin
   return new ScopeIgnore(
     buildDefaultIgnore(rootDir),
     roots.map((root) => ({ root, matcher: buildDefaultIgnore(path.join(rootDir, root)) })),
-    loadExcludeMatcher(rootDir),
   );
-}
-
-/**
- * Whether an embedded repo found as a tracked gitlink (mode 160000, #1031/#1033)
- * must be SKIPPED rather than indexed. A gitlink is tracked, so `.gitignore`
- * can't untrack it — but the discovery passes for it must still honor the same
- * scope rules as every other path, or a gitignored reference/data dir full of
- * `git add`ed clones gets pulled into the index against the user's stated intent
- * (#1065). Two reasons to skip:
- *   1. It sits in a built-in default-ignored location — an npm git-dependency
- *      under `node_modules` is never project code; not even an explicit opt-in
- *      revives it (matches `findIgnoredEmbeddedRepos`).
- *   2. The parent repo's own `.gitignore` covers its path and the project did
- *      NOT opt that path in via `codegraph.json` `includeIgnored`. The gitignore
- *      rule is the user's stated intent to keep that path out of scope, exactly
- *      as for an UNtracked embedded repo — respect it by default, opt back in
- *      with `includeIgnored` (#514, #970, #976).
- * `relDir` is repoDir-relative (trailing-slashed); `prefix` is repoDir's
- * scan-root-relative path so the `includeIgnored` pattern is matched on the full
- * scan-root-relative path. `defaults` is `defaultsOnlyIgnore()` and `repoIgnore`
- * is `buildDefaultIgnore(repoDir)` (defaults + the repo's own `.gitignore`),
- * both passed in so they're built once per repo level rather than per gitlink.
- */
-function gitlinkEmbeddedRepoSkipped(
-  relDir: string,
-  prefix: string,
-  defaults: Ignore,
-  repoIgnore: Ignore,
-  includeIgnored: Ignore | null,
-): boolean {
-  if (defaults.ignores(relDir)) return true;        // default-ignored — never index, opt-in can't revive
-  if (!repoIgnore.ignores(relDir)) return false;    // not ignored at all — index as before (#1031/#1033)
-  // Gitignored by the repo's own rules — skip unless the project opted it in.
-  return !includeIgnored?.ignores(normalizePath(prefix + relDir));
 }
 
 /**
@@ -586,22 +490,6 @@ export function discoverEmbeddedRepoRoots(rootDir: string): string[] {
         }
       }
     } catch { /* untracked listing failed — ignored-side discovery still runs */ }
-    // Unexpanded gitlinks (mode 160000) with a real checkout on disk — embedded
-    // repos `git add`ed without `.gitmodules`, or submodules not active here. The
-    // untracked listing above can't see them (they're tracked), so find them the
-    // same way collectGitFiles does, keeping watcher scope == indexer scope.
-    // (#1031, #1033)
-    try {
-      const gitOpts: GitLsFilesOpts = { cwd: repoAbs, encoding: 'utf-8', timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true };
-      const repoIgnore = buildDefaultIgnore(repoAbs);
-      for (const rel of listGitlinkRels(gitOpts)) {
-        const relDir = rel.endsWith('/') ? rel : rel + '/';
-        // A gitlink under a gitignored path is respected (not indexed) unless the
-        // project opted it in — same rule as the untracked-ignored kind (#1065).
-        if (gitlinkEmbeddedRepoSkipped(relDir, prefix, defaults, repoIgnore, includeIgnored)) continue;
-        if (classifyGitDir(path.join(repoAbs, rel)) === 'embedded') candidates.push(relDir);
-      }
-    } catch { /* staged listing failed — other discovery still runs */ }
     candidates.push(...findIgnoredEmbeddedRepos(repoAbs, includeIgnored, prefix));
     for (const rel of candidates) {
       const full = normalizePath(prefix + rel);
@@ -659,101 +547,22 @@ function findIgnoredEmbeddedRepos(repoDir: string, includeIgnored: Ignore | null
  * found) is recorded in `embeddedRoots` so callers can exempt its files from the
  * parent's own gitignore rules.
  */
-type GitLsFilesOpts = {
-  cwd: string;
-  encoding: 'utf-8';
-  timeout: number;
-  maxBuffer: number;
-  stdio: ['pipe', 'pipe', 'pipe'];
-  windowsHide: boolean;
-};
-
-/**
- * Collect tracked paths and unexpanded gitlinks (mode 160000) from `git ls-files`.
- *
- * Prefer one `-s --recurse-submodules` pass (git ≥2.38). Older git rejects that
- * combo ("unsupported mode"), so fall back to `-c --recurse-submodules` for
- * expanded submodule files plus a plain `-s` pass for gitlink detection (#1031).
- */
-function listTrackedGitFiles(
-  gitOpts: GitLsFilesOpts,
-  prefix: string,
-  files: Set<string>,
-): string[] {
-  const gitlinkRels: string[] = [];
-  const ingestStaged = (tracked: string): void => {
-    for (const entry of tracked.split('\0')) {
-      if (!entry) continue;
-      const tab = entry.indexOf('\t');
-      if (tab === -1) continue; // --stage always emits "<mode> <object> <stage>\t<path>"
-      const rel = entry.slice(tab + 1);
-      if (entry.slice(0, 6) === '160000') {
-        gitlinkRels.push(rel); // an unexpanded gitlink — recursed into below, not a source file itself
-        continue;
-      }
-      files.add(normalizePath(prefix + rel));
-    }
-  };
-
-  try {
-    ingestStaged(execFileSync('git', ['ls-files', '-z', '-s', '--recurse-submodules'], gitOpts));
-    return gitlinkRels;
-  } catch {
-    // Older git: submodule expansion and gitlink mode detection need two passes.
-    const cached = execFileSync('git', ['ls-files', '-z', '-c', '--recurse-submodules'], gitOpts);
-    for (const rel of cached.split('\0')) {
-      if (rel) files.add(normalizePath(prefix + rel));
-    }
-    ingestStaged(execFileSync('git', ['ls-files', '-z', '-s'], gitOpts));
-    return gitlinkRels;
-  }
-}
-
-/** Unexpanded gitlink paths (mode 160000) from `git ls-files --stage`. */
-function listGitlinkRels(gitOpts: GitLsFilesOpts): string[] {
-  const rels: string[] = [];
-  const ingest = (staged: string): void => {
-    for (const entry of staged.split('\0')) {
-      if (!entry || entry.slice(0, 6) !== '160000') continue;
-      const tab = entry.indexOf('\t');
-      if (tab === -1) continue;
-      rels.push(entry.slice(tab + 1));
-    }
-  };
-  try {
-    ingest(execFileSync('git', ['ls-files', '-z', '-s', '--recurse-submodules'], gitOpts));
-  } catch {
-    ingest(execFileSync('git', ['ls-files', '-z', '-s'], gitOpts));
-  }
-  return rels;
-}
-
 function collectGitFiles(repoDir: string, prefix: string, files: Set<string>, embeddedRoots?: Set<string>, includeIgnored: Ignore | null = null): void {
-  const gitOpts: GitLsFilesOpts = { cwd: repoDir, encoding: 'utf-8', timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true };
+  const gitOpts = { cwd: repoDir, encoding: 'utf-8' as const, timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], windowsHide: true };
 
   // Tracked files. --recurse-submodules pulls in files from active submodules,
   // which the index would otherwise represent only as a commit pointer.
   // Without this, monorepos using submodules index 0 files. (See issue #147.)
   // Note: --recurse-submodules only supports -c/--cached and --stage modes — it
   // can't be combined with -o, so untracked files are gathered separately below.
-  //
-  // We use --stage (-s) rather than -c so each entry carries its file mode. That
-  // lets us spot gitlink entries (mode 160000) that --recurse-submodules did NOT
-  // expand: a nested repo `git add`ed without a `.gitmodules` entry, or a
-  // submodule that isn't active/initialized in this checkout. Such a gitlink
-  // falls through every pass — it's tracked, so the untracked `-o` listing below
-  // never reports it, and --recurse-submodules only expands ACTIVE submodules —
-  // so its source would be silently skipped, leaving only the super-repo's own
-  // files indexed. We collect those gitlinks here and recurse into them below.
-  // (An active submodule is expanded inline by --recurse-submodules and so never
-  // surfaces as a 160000 entry — only the unhandled gitlinks do.) (#1031, #1033)
-  //
   // -z gives NUL-separated, unquoted output so non-ASCII (e.g. CJK) paths
   // survive verbatim. Without it git octal-escapes and double-quotes such paths
   // (the core.quotepath default), and the quoted form never matches a real file
-  // on disk → those files are silently dropped from the index. (#541) With -s the
-  // path follows a TAB after the `<mode> <object> <stage>` prefix.
-  const gitlinkRels = listTrackedGitFiles(gitOpts, prefix, files);
+  // on disk → those files are silently dropped from the index. (#541)
+  const tracked = execFileSync('git', ['ls-files', '-z', '-c', '--recurse-submodules'], gitOpts);
+  for (const rel of tracked.split('\0')) {
+    if (rel) files.add(normalizePath(prefix + rel));
+  }
 
   // Untracked files (submodules manage their own untracked state). Embedded git
   // repos surface here as a single "subdir/" entry that git refuses to descend
@@ -777,31 +586,6 @@ function collectGitFiles(repoDir: string, prefix: string, files: Set<string>, em
       continue;
     }
     files.add(normalizePath(prefix + rel));
-  }
-
-  // Gitlink entries (mode 160000) that --recurse-submodules left unexpanded —
-  // an embedded repo `git add`ed without `.gitmodules`, or a submodule not
-  // active/initialized in this checkout. When such a gitlink has a real working
-  // tree on disk it is distinct first-party code we must index as its own
-  // embedded repo: the tracked pass skipped its contents and the untracked pass
-  // never sees it (it's tracked, not "other"). A gitlink with no checkout on disk
-  // (an uninitialized submodule — empty dir, no `.git`) has nothing to index and
-  // is left alone, as is a submodule worktree (a duplicate view, #945). (#1031, #1033)
-  if (gitlinkRels.length > 0) {
-    const defaults = defaultsOnlyIgnore();
-    const repoIgnore = buildDefaultIgnore(repoDir);
-    for (const rel of gitlinkRels) {
-      const relDir = rel.endsWith('/') ? rel : rel + '/';
-      // A gitlink under a gitignored path is respected (not indexed) unless the
-      // project opted it in via `includeIgnored` — keep tracked gitlinks under
-      // the same scope rule as the untracked-ignored kind below (#1065).
-      if (gitlinkEmbeddedRepoSkipped(relDir, prefix, defaults, repoIgnore, includeIgnored)) continue;
-      const childDir = path.join(repoDir, rel);
-      // 'embedded' = a real .git checkout on disk; 'worktree' and 'none' are skipped.
-      if (classifyGitDir(childDir) !== 'embedded') continue;
-      embeddedRoots?.add(normalizePath(prefix + relDir));
-      collectGitFiles(childDir, prefix + relDir, files, embeddedRoots, includeIgnored);
-    }
   }
 
   // Embedded repos hidden by THIS repo's ignore rules (`/packages/` in a
@@ -894,14 +678,14 @@ function getGitChangedFiles(rootDir: string): GitChanges | null {
     // Custom extension → language overrides from the project's homegraph.json,
     // so change detection sees the same custom-extension files the full index does.
     const overrides = loadExtensionOverrides(rootDir);
-    collectGitStatus(rootDir, '', changes, overrides, loadIncludeIgnoredMatcher(rootDir), loadExcludeMatcher(rootDir));
+    collectGitStatus(rootDir, '', changes, overrides, loadIncludeIgnoredMatcher(rootDir));
     return changes;
   } catch {
     return null;
   }
 }
 
-function collectGitStatus(repoDir: string, prefix: string, out: GitChanges, overrides?: Record<string, Language>, includeIgnored: Ignore | null = null, exclude: Ignore | null = null): void {
+function collectGitStatus(repoDir: string, prefix: string, out: GitChanges, overrides?: Record<string, Language>, includeIgnored: Ignore | null = null): void {
   const output = execFileSync(
     'git',
     ['status', '--porcelain', '--no-renames'],
@@ -948,11 +732,6 @@ function collectGitStatus(repoDir: string, prefix: string, out: GitChanges, over
     // Added (`??`) / modified files inside an excluded dir must not enter the
     // index — match against the repo-relative path, same as the full scan. (#766)
     if (ig.ignores(rel)) continue;
-    // User `codegraph.json` `exclude` (#999) is project-root-relative, so it's
-    // matched against the full path — sync must not re-add a tracked file the
-    // full index now keeps out. Deletions above stay unfiltered so a file that
-    // WAS indexed before an exclude was added still cleans itself out.
-    if (exclude && exclude.ignores(filePath)) continue;
 
     if (statusCode === '??') {
       out.added.push(filePath);
@@ -968,11 +747,11 @@ function collectGitStatus(repoDir: string, prefix: string, out: GitChanges, over
   // and they are left alone (#970, #976), mirroring the full-index scan.
   for (const rel of untrackedDirs) {
     for (const repoRel of findNestedGitRepos(path.join(repoDir, rel), rel)) {
-      collectGitStatus(path.join(repoDir, repoRel), prefix + repoRel, out, overrides, includeIgnored, exclude);
+      collectGitStatus(path.join(repoDir, repoRel), prefix + repoRel, out, overrides, includeIgnored);
     }
   }
   for (const rel of findIgnoredEmbeddedRepos(repoDir, includeIgnored, prefix)) {
-    collectGitStatus(path.join(repoDir, rel), prefix + rel, out, overrides, includeIgnored, exclude);
+    collectGitStatus(path.join(repoDir, rel), prefix + rel, out, overrides, includeIgnored);
   }
 }
 
@@ -1157,13 +936,7 @@ function scanDirectoryWalk(
 
   // Seed a base matcher with the built-in default ignores (merged with the root
   // .gitignore so a negation can override). Nested .gitignores still layer per-dir.
-  const baseMatchers: ScopedIgnore[] = [{ dir: rootDir, ig: buildDefaultIgnore(rootDir) }];
-  // Project `codegraph.json` `exclude` patterns (#999), rooted at the project so
-  // `isIgnored` matches them against root-relative paths — same coverage the
-  // git path gets via ScopeIgnore, for non-git projects.
-  const exclude = loadExcludeMatcher(rootDir);
-  if (exclude) baseMatchers.push({ dir: rootDir, ig: exclude });
-  walk(rootDir, baseMatchers);
+  walk(rootDir, [{ dir: rootDir, ig: buildDefaultIgnore(rootDir) }]);
   return files;
 }
 
@@ -1305,19 +1078,6 @@ export class ExtractionOrchestrator {
     this.detectedFrameworkNames = null;
     const frameworkNames = this.ensureDetectedFrameworks(files);
 
-    resetArkTSBatch();
-    setArkTSBatchProgressCallback((batchProgress) => {
-      onProgress?.({
-        phase: 'arkts-batch',
-        current: batchProgress.current,
-        total: batchProgress.total,
-        currentFile: batchProgress.currentFile,
-        subphase: batchProgress.subphase,
-      });
-    });
-
-    try {
-
     if (signal?.aborted) {
       return {
         success: false,
@@ -1352,178 +1112,178 @@ export class ExtractionOrchestrator {
       neededLanguages.push('cpp');
     }
 
-    // Parse files on a pool of worker threads (keeps the main thread free for UI
-    // and uses every core). Falls back to in-process parsing when the compiled
-    // worker is unavailable (e.g. running from source in tests).
+    // Try to use a worker thread for parsing (keeps main thread unblocked for UI).
+    // Falls back to in-process parsing if the compiled worker is unavailable (e.g. tests).
     const parseWorkerPath = path.join(__dirname, 'parse-worker.js');
     const useWorker = fs.existsSync(parseWorkerPath);
+    let WorkerClass: typeof import('worker_threads').Worker | null = null;
 
-    let pool: ParseWorkerPool | null = null;
     if (useWorker) {
-      // CODEGRAPH_PARSE_WORKERS: explicit worker count; 1 = the old single-worker
-      // behaviour (the conservative rollback). Unset → clamp(cores-1, 1, 8).
-      const poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.cpus().length);
-      pool = new ParseWorkerPool({
-        languages: neededLanguages,
-        size: poolSize,
-        workerScriptPath: parseWorkerPath,
-        recycleInterval: WORKER_RECYCLE_INTERVAL,
-        parseTimeoutMs: PARSE_TIMEOUT_MS,
-        log,
-      });
-      log(`Parse worker pool: ${poolSize} worker(s)`);
+      const { Worker } = await import('worker_threads');
+      WorkerClass = Worker;
     } else {
-      // In-process fallback: load grammars locally and parse on the main thread.
+      // In-process fallback: load grammars locally
       await loadGrammarsForLanguages(neededLanguages);
     }
 
-    /**
-     * Parse one file: on the pool when available (the promise REJECTS on a worker
-     * crash/timeout — the caller records it and the retry pass re-attempts), or
-     * in-process synchronously as the no-worker fallback. The language is resolved
-     * here on the main thread, where the codegraph.json overrides are loaded.
-     */
-    const parseFile = (filePath: string, content: string): Promise<ExtractionResult> => {
-      const language = detectLanguage(filePath, content, overrides);
-      if (!pool || requiresInProcessExtraction(language)) {
-        return Promise.resolve(extractFromSource(filePath, content, language, frameworkNames));
+    // --- Worker lifecycle management ---
+    // The worker can crash (OOM in WASM) or hang on pathological files.
+    // We track pending parse promises and handle both cases:
+    //   - Timeout: terminate + restart the worker, reject the timed-out request
+    //   - Crash: reject all pending promises, restart for remaining files
+    let parseWorker: import('worker_threads').Worker | null = null;
+    let nextId = 0;
+    let workerParseCount = 0;
+    const pendingParses = new Map<number, {
+      resolve: (result: ExtractionResult) => void;
+      reject: (err: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }>();
+
+    function rejectAllPending(reason: string): void {
+      for (const [id, pending] of pendingParses) {
+        clearTimeout(pending.timer);
+        pendingParses.delete(id);
+        pending.reject(new Error(reason));
       }
-      return pool.requestParse({ filePath, content, language, frameworkNames });
-    };
+    }
 
-    // --- Bounded rolling-window dispatch, ordered commit ---
-    // Reads stay batched/parallel; parses run concurrently across the pool; the
-    // SQLite store stays on the main thread (it isn't thread-safe). Crucially we
-    // COMMIT results in original file order, not parse-completion order: the
-    // resolution phase (run after indexing) resolves an ambiguous reference to one
-    // of several same-named candidates by the nodes' DB insertion order, so a
-    // stable commit order keeps the resulting graph deterministic — byte-identical
-    // to the single-worker path — instead of drifting with parse timing. The
-    // `completed` buffer holds at most ~windowSize out-of-order results, so memory
-    // stays bounded.
-    const windowSize = pool ? Math.max(4, pool.size * 2) : 1;
-    const inFlight = new Set<Promise<void>>();
-    const completed = new Map<number,
-      | { ok: true; filePath: string; content: string; stats: fs.Stats; result: ExtractionResult }
-      | { ok: false; filePath: string; err: unknown }>();
-    let nextSeq = 0;       // file-order sequence assigned at dispatch
-    let nextToStore = 0;   // cursor: next sequence to commit
-    let aborted = false;
-
-    const storeResult = (filePath: string, content: string, stats: fs.Stats, result: ExtractionResult): void => {
-      processed++;
-
-      // Store in database on main thread (SQLite is not thread-safe)
-      if (result.nodes.length > 0 || result.errors.length === 0) {
-        const language = detectLanguage(filePath, content, overrides);
-        this.storeExtractionResult(filePath, content, language, stats, result);
-      }
-
-      if (result.errors.length > 0) {
-        for (const err of result.errors) {
-          if (!err.filePath) err.filePath = filePath;
+    function attachWorkerHandlers(w: import('worker_threads').Worker): void {
+      w.on('message', (msg: { type: string; id?: number; result?: ExtractionResult }) => {
+        if (msg.type === 'parse-result' && msg.id !== undefined) {
+          const pending = pendingParses.get(msg.id);
+          if (pending) {
+            clearTimeout(pending.timer);
+            pendingParses.delete(msg.id);
+            pending.resolve(msg.result!);
+          }
         }
-        errors.push(...result.errors);
-      }
-
-      if (result.nodes.length > 0) {
-        filesIndexed++;
-        totalNodes += result.nodes.length;
-        totalEdges += result.edges.length;
-      } else if (result.errors.some((e) => e.severity === 'error')) {
-        filesErrored++;
-      } else {
-        // Files with no symbols but no errors (yaml, twig, properties) are
-        // tracked at the file level — count them as indexed so the CLI doesn't
-        // misleadingly report "No files found to index".
-        const lang = detectLanguage(filePath, content, overrides);
-        if (isFileLevelOnlyLanguage(lang)) {
-          filesIndexed++;
-        } else {
-          filesSkipped++;
-        }
-      }
-
-      onProgress?.({ phase: 'parsing', current: processed, total, currentFile: filePath });
-    };
-
-    const recordParseFailure = (filePath: string, err: unknown): void => {
-      processed++;
-      filesErrored++;
-      errors.push({
-        message: err instanceof Error ? err.message : String(err),
-        filePath,
-        severity: 'error',
-        code: 'parse_error',
       });
-      onProgress?.({ phase: 'parsing', current: processed, total });
-    };
 
-    // Commit buffered parses to the DB in file order, advancing the cursor over
-    // contiguous completed results. Runs after each parse settles (and once more
-    // after the drain). storeResult / recordParseFailure run here single-threaded,
-    // so shared counters and SQLite writes never race despite parallel parsing.
-    const flushOrdered = (): void => {
-      if (aborted) return;
-      while (completed.has(nextToStore)) {
-        const item = completed.get(nextToStore)!;
-        completed.delete(nextToStore);
-        nextToStore++;
-        if (item.ok) storeResult(item.filePath, item.content, item.stats, item.result);
-        else recordParseFailure(item.filePath, item.err);
-      }
-    };
+      w.on('error', (err) => {
+        logWarn('Parse worker error', { error: err.message });
+        rejectAllPending(`Worker error: ${err.message}`);
+      });
 
-    // Dispatch one file's parse (parses run concurrently across the pool), tagged
-    // with its file-order sequence so flushOrdered commits results in order. The
-    // backpressure below bounds how far parsing runs ahead of the in-order commit.
-    const feed = async (filePath: string, content: string, stats: fs.Stats): Promise<void> => {
-      const seq = nextSeq++;
-      const p = (async () => {
-        try {
-          const result = await parseFile(filePath, content);
-          completed.set(seq, { ok: true, filePath, content, stats, result });
-        } catch (parseErr) {
-          completed.set(seq, { ok: false, filePath, err: parseErr });
+      w.on('exit', (code) => {
+        if (code !== 0 && pendingParses.size > 0) {
+          logWarn('Parse worker exited unexpectedly', { code });
+          rejectAllPending(`Worker exited with code ${code}`);
         }
-        flushOrdered();
-      })();
-      const tracked = p.finally(() => { inFlight.delete(tracked); });
-      inFlight.add(tracked);
-      // Backpressure on the dispatched-but-not-yet-committed count (in-flight +
-      // buffered), not just in-flight: a slow file sitting at the commit cursor
-      // lets later parses finish and buffer, which would otherwise grow without
-      // bound. Wait for parses to settle (each may advance the cursor) until the
-      // window has room. `inFlight.size > 0` guards against an empty race — the
-      // cursor file is always still in flight when the window is full.
-      while (nextSeq - nextToStore >= windowSize && inFlight.size > 0) {
-        await Promise.race(inFlight);
-      }
-    };
+        // Clear reference so we know to respawn, reset count so
+        // the fresh worker gets a full cycle before recycling.
+        if (parseWorker === w) {
+          parseWorker = null;
+          workerParseCount = 0;
+        }
+      });
+    }
 
-    const firstEtsFile = files.find((f) => detectLanguage(f, undefined, overrides) === 'arkts');
-    if (firstEtsFile) {
-      await primeArkTSBatch(this.rootDir, this.queries, firstEtsFile);
-      errors.push(...drainArkTSIndexNotices());
+    async function ensureWorker(): Promise<import('worker_threads').Worker> {
+      if (parseWorker) return parseWorker;
+      log('Spawning new parse worker...');
+      parseWorker = new WorkerClass!(parseWorkerPath);
+      attachWorkerHandlers(parseWorker);
+
+      // Load grammars in the new worker
+      await new Promise<void>((resolve, reject) => {
+        parseWorker!.once('message', (msg: { type: string }) => {
+          if (msg.type === 'grammars-loaded') resolve();
+          else reject(new Error(`Unexpected message: ${msg.type}`));
+        });
+        parseWorker!.postMessage({ type: 'load-grammars', languages: neededLanguages });
+      });
+
+      return parseWorker;
+    }
+
+    if (WorkerClass) {
+      await ensureWorker();
+    }
+
+    /**
+     * Recycle the worker thread to reclaim WASM memory.
+     * Terminates the current worker and clears the reference so
+     * ensureWorker() will spawn a fresh one on the next call.
+     */
+    function recycleWorker(): void {
+      if (!parseWorker) return;
+      log(`Recycling worker after ${workerParseCount} parses (heap: ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB RSS)`);
+      const w = parseWorker;
+      parseWorker = null;
+      workerParseCount = 0;
+      // Fire-and-forget: worker.terminate() can hang if WASM is stuck
+      w.terminate().catch(() => {});
+    }
+
+    async function requestParse(filePath: string, content: string): Promise<ExtractionResult> {
+      // Resolve the language on the main thread (where the project's
+      // homegraph.json overrides are loaded) and hand it to the worker, so the
+      // worker never needs the override map itself.
+      const language = detectLanguage(filePath, content, overrides);
+
+      if (!WorkerClass || requiresInProcessExtraction(language)) {
+        // In-process fallback (also required for languages whose extractors
+        // cannot run in a worker thread).
+        return extractFromSource(
+          filePath,
+          content,
+          language,
+          frameworkNames
+        );
+      }
+
+      // Recycle the worker before the next parse if we've hit the threshold.
+      // This destroys the WASM linear memory (which can grow but never shrink)
+      // and starts a fresh worker with a clean heap.
+      if (workerParseCount >= WORKER_RECYCLE_INTERVAL) {
+        await recycleWorker();
+      }
+
+      const worker = await ensureWorker();
+      const id = nextId++;
+      workerParseCount++;
+
+      // Scale timeout for large files: base 10s + 10s per 100KB
+      const timeoutMs = PARSE_TIMEOUT_MS + Math.floor(content.length / 100_000) * 10_000;
+
+      return new Promise<ExtractionResult>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingParses.delete(id);
+          log(`TIMEOUT: ${filePath} exceeded ${timeoutMs}ms — killing worker`);
+          // Reject FIRST — worker.terminate() can hang if WASM is stuck
+          parseWorker = null;
+          workerParseCount = 0;
+          reject(new Error(`Parse timed out after ${timeoutMs}ms`));
+          // Fire-and-forget: kill the stuck worker in the background
+          worker.terminate().catch(() => {});
+        }, timeoutMs);
+
+        pendingParses.set(id, { resolve, reject, timer });
+        worker.postMessage({ type: 'parse', id, filePath, content, frameworkNames, language });
+      });
     }
 
     for (let i = 0; i < files.length; i += FILE_IO_BATCH_SIZE) {
-      if (signal?.aborted) { aborted = true; break; }
+      if (signal?.aborted) {
+        if (parseWorker) (parseWorker as import('worker_threads').Worker).terminate().catch(() => {});
+        return {
+          success: false,
+          filesIndexed,
+          filesSkipped,
+          filesErrored,
+          nodesCreated: totalNodes,
+          edgesCreated: totalEdges,
+          errors: [{ message: 'Aborted', severity: 'error' }, ...errors],
+          durationMs: Date.now() - startTime,
+        };
+      }
 
       const batch = files.slice(i, i + FILE_IO_BATCH_SIZE);
 
       // Read files in parallel (with path validation before any I/O)
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
-          if (isArkTSBatchPersisted(fp)) {
-            return {
-              filePath: fp,
-              content: null as string | null,
-              stats: null as fs.Stats | null,
-              error: null as Error | null,
-              arktsBatchSkipped: true as const,
-            };
-          }
           try {
             // Indexing read: follow in-root symlinks the directory walk already
             // descended into (the `../` guard still applies) so files reached
@@ -1542,29 +1302,29 @@ export class ExtractionOrchestrator {
         })
       );
 
-      // Dispatch each readable file into the bounded parse window; the window
-      // stores results on the main thread as they arrive.
-      for (const fileEntry of fileContents) {
-        const { filePath, content, stats, error } = fileEntry;
-        const arktsBatchSkipped = 'arktsBatchSkipped' in fileEntry && fileEntry.arktsBatchSkipped;
-
-        if (signal?.aborted) { aborted = true; break; }
-
-        if (isArkTSBatchPersisted(filePath) || arktsBatchSkipped) {
-          processed++;
-          filesIndexed++;
-          onProgress?.({ phase: 'parsing', current: processed, total, currentFile: filePath });
-          continue;
+      // Send to worker for parsing, store results on main thread
+      for (const { filePath, content, stats, error } of fileContents) {
+        if (signal?.aborted) {
+          if (parseWorker) (parseWorker as import('worker_threads').Worker).terminate().catch(() => {});
+          return {
+            success: false,
+            filesIndexed,
+            filesSkipped,
+            filesErrored,
+            nodesCreated: totalNodes,
+            edgesCreated: totalEdges,
+            errors: [{ message: 'Aborted', severity: 'error' }, ...errors],
+            durationMs: Date.now() - startTime,
+          };
         }
 
-        if (!isArktsBatchRunning()) {
-          onProgress?.({
-            phase: 'parsing',
-            current: processed,
-            total,
-            currentFile: filePath,
-          });
-        }
+        // Report progress before parsing (show current file being worked on)
+        onProgress?.({
+          phase: 'parsing',
+          current: processed,
+          total,
+          currentFile: filePath,
+        });
 
         if (error || content === null || stats === null) {
           processed++;
@@ -1575,7 +1335,6 @@ export class ExtractionOrchestrator {
             severity: 'error',
             code: 'read_error',
           });
-          onProgress?.({ phase: 'parsing', current: processed, total });
           continue;
         }
 
@@ -1597,33 +1356,56 @@ export class ExtractionOrchestrator {
           continue;
         }
 
-        // Parse on the pool (main thread stays unblocked). Errors/timeouts are
-        // handled inside feed() → recordParseFailure, feeding the retry pass.
-        await feed(filePath, content, stats);
+        // Parse in worker thread (main thread stays unblocked).
+        // Wrapped in try/catch to handle worker timeouts and crashes gracefully.
+        let result: ExtractionResult;
+        try {
+          result = await requestParse(filePath, content);
+        } catch (parseErr) {
+          processed++;
+          filesErrored++;
+          errors.push({
+            message: parseErr instanceof Error ? parseErr.message : String(parseErr),
+            filePath,
+            severity: 'error',
+            code: 'parse_error',
+          });
+          continue;
+        }
+
+        processed++;
+
+        // Store in database on main thread (SQLite is not thread-safe)
+        if (result.nodes.length > 0 || result.errors.length === 0) {
+          const language = detectLanguage(filePath, content, overrides);
+          this.storeExtractionResult(filePath, content, language, stats, result);
+        }
+
+        if (result.errors.length > 0) {
+          for (const err of result.errors) {
+            if (!err.filePath) err.filePath = filePath;
+          }
+          errors.push(...result.errors);
+        }
+
+        if (result.nodes.length > 0) {
+          filesIndexed++;
+          totalNodes += result.nodes.length;
+          totalEdges += result.edges.length;
+        } else if (result.errors.some((e) => e.severity === 'error')) {
+          filesErrored++;
+        } else {
+          // Files with no symbols but no errors (yaml, twig, properties) are
+          // tracked at the file level — count them as indexed so the CLI
+          // doesn't misleadingly report "No files found to index".
+          const lang = detectLanguage(filePath, content, overrides);
+          if (isFileLevelOnlyLanguage(lang)) {
+            filesIndexed++;
+          } else {
+            filesSkipped++;
+          }
+        }
       }
-
-      if (aborted) break;
-    }
-
-    // Drain parses still in flight (skip on abort — we tear down below instead),
-    // then commit any results the cursor hasn't reached yet.
-    if (!aborted) {
-      await Promise.all(inFlight);
-      flushOrdered();
-    }
-
-    if (signal?.aborted || aborted) {
-      if (pool) await pool.destroy();
-      return {
-        success: false,
-        filesIndexed,
-        filesSkipped,
-        filesErrored,
-        nodesCreated: totalNodes,
-        edgesCreated: totalEdges,
-        errors: [{ message: 'Aborted', severity: 'error' }, ...errors],
-        durationMs: Date.now() - startTime,
-      };
     }
 
     // Report 100% so the progress bar doesn't hang at 99%
@@ -1646,19 +1428,17 @@ export class ExtractionOrchestrator {
         (e.message.includes('Worker exited') || e.message.includes('memory access out of bounds'))
     );
 
-    if (retryableErrors.length > 0 && pool) {
+    if (retryableErrors.length > 0 && WorkerClass) {
       log(`Retrying ${retryableErrors.length} files that failed due to WASM memory errors...`);
-
-      // Fresh WASM heaps for the retry phase. A retry that still crashes its
-      // worker makes the pool respawn it, so later retries keep landing on clean
-      // workers too.
-      pool.recycleAll();
 
       const stillFailing: typeof retryableErrors = [];
 
       for (const errEntry of retryableErrors) {
         const filePath = errEntry.filePath!;
         if (signal?.aborted) break;
+
+        // Fresh worker for every retry — maximum WASM headroom
+        recycleWorker();
 
         let content: string;
         try {
@@ -1671,7 +1451,7 @@ export class ExtractionOrchestrator {
 
         let result: ExtractionResult;
         try {
-          result = await parseFile(filePath, content);
+          result = await requestParse(filePath, content);
         } catch {
           stillFailing.push(errEntry);
           continue;
@@ -1698,11 +1478,12 @@ export class ExtractionOrchestrator {
       // code nodes but consume parser memory.
       if (stillFailing.length > 0) {
         log(`${stillFailing.length} files still failing — retrying with comments stripped...`);
-        pool.recycleAll();
 
         for (const errEntry of stillFailing) {
           const filePath = errEntry.filePath!;
           if (signal?.aborted) break;
+
+          recycleWorker();
 
           let fullContent: string;
           try {
@@ -1722,7 +1503,7 @@ export class ExtractionOrchestrator {
 
           let result: ExtractionResult;
           try {
-            result = await parseFile(filePath, stripped);
+            result = await requestParse(filePath, stripped);
           } catch {
             continue;
           }
@@ -1744,8 +1525,11 @@ export class ExtractionOrchestrator {
       }
     }
 
-    // Shut down the parse worker pool.
-    if (pool) await pool.destroy();
+    // Shut down parse worker and clear any pending timers
+    rejectAllPending('Indexing complete');
+    if (parseWorker) {
+      (parseWorker as import('worker_threads').Worker).terminate().catch(() => {});
+    }
 
     return {
       success: filesIndexed > 0 || errors.filter((e) => e.severity === 'error').length === 0,
@@ -1757,9 +1541,6 @@ export class ExtractionOrchestrator {
       errors,
       durationMs: Date.now() - startTime,
     };
-    } finally {
-      setArkTSBatchProgressCallback(null);
-    }
   }
 
   /**
@@ -1894,15 +1675,6 @@ export class ExtractionOrchestrator {
 
     // Detect language (honoring the project's homegraph.json extension overrides)
     const language = detectLanguage(relativePath, content, loadExtensionOverrides(this.rootDir));
-    if (isArkTSBatchPersisted(relativePath)) {
-      return {
-        nodes: [],
-        edges: [],
-        unresolvedReferences: [],
-        errors: [],
-        durationMs: 0,
-      };
-    }
     if (!isLanguageSupported(language)) {
       return {
         nodes: [],
@@ -2168,49 +1940,17 @@ export class ExtractionOrchestrator {
 
     // Index changed files
     const total = filesToIndex.length;
-    const overrides = loadExtensionOverrides(this.rootDir);
-    const needsArkTS = filesToIndex.some((f) => detectLanguage(f, undefined, overrides) === 'arkts');
-    if (needsArkTS) {
-      setArkTSBatchProgressCallback((batchProgress) => {
-        onProgress?.({
-          phase: 'arkts-batch',
-          current: batchProgress.current,
-          total: batchProgress.total,
-          currentFile: batchProgress.currentFile,
-          subphase: batchProgress.subphase,
-        });
+    for (let i = 0; i < filesToIndex.length; i++) {
+      const filePath = filesToIndex[i]!;
+      onProgress?.({
+        phase: 'parsing',
+        current: i + 1,
+        total,
+        currentFile: filePath,
       });
-      const firstEts = filesToIndex.find(
-        (f) => detectLanguage(f, undefined, overrides) === 'arkts'
-      )!;
-      await primeArkTSBatch(this.rootDir, this.queries, firstEts);
-    }
-    try {
-      for (let i = 0; i < filesToIndex.length; i++) {
-        const filePath = filesToIndex[i]!;
-        if (isArkTSBatchPersisted(filePath)) {
-          onProgress?.({
-            phase: 'parsing',
-            current: i + 1,
-            total,
-            currentFile: filePath,
-          });
-          continue;
-        }
-        onProgress?.({
-          phase: 'parsing',
-          current: i + 1,
-          total,
-          currentFile: filePath,
-        });
 
-        const result = await this.indexFile(filePath);
-        nodesUpdated += result.nodes.length;
-      }
-    } finally {
-      if (needsArkTS) {
-        setArkTSBatchProgressCallback(null);
-      }
+      const result = await this.indexFile(filePath);
+      nodesUpdated += result.nodes.length;
     }
 
     return {
