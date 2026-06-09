@@ -10,7 +10,7 @@ import * as path from 'path';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown' | 'arkts'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -45,6 +45,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
  * File extension to Language mapping
  */
 export const EXTENSION_MAP: Record<string, Language> = {
+  '.ets': 'arkts',
   '.ts': 'typescript',
   '.tsx': 'tsx',
   // ESM/CJS TypeScript module extensions — parsed as TS (no JSX). (#366)
@@ -118,16 +119,17 @@ export const EXTENSION_MAP: Record<string, Language> = {
 };
 
 /**
- * Whether a file is one CodeGraph can parse, based purely on its extension.
+ * Whether a file is one HomeGraph can parse, based purely on its extension.
  * This is the single source of truth for "should we index this file" — derived
  * from EXTENSION_MAP so parser support and indexing selection never drift.
  *
  * `overrides` is the project's validated custom extension → language map (from
- * `codegraph.json`); when present its extensions count as indexable in addition
+ * `homegraph.json`); when present its extensions count as indexable in addition
  * to the built-ins. Omitting it is byte-identical to the zero-config behavior.
  */
 export function isSourceFile(filePath: string, overrides?: Record<string, Language>): boolean {
   if (isPlayRoutesFile(filePath)) return true; // Play `conf/routes` is extensionless
+  if (isArkModuleJson5(filePath)) return true;
   if (isShopifyLiquidJson(filePath)) return true; // Shopify OS 2.0 JSON templates / section groups
   const dot = filePath.lastIndexOf('.');
   if (dot < 0) return false;
@@ -157,6 +159,11 @@ export function isPlayRoutesFile(filePath: string): boolean {
     filePath.endsWith('/conf/routes') ||
     filePath.endsWith('.routes')
   );
+}
+
+/** HarmonyOS module manifest — parsed by the arkts-entry framework extractor. */
+export function isArkModuleJson5(filePath: string): boolean {
+  return filePath.endsWith('module.json5');
 }
 
 /**
@@ -228,7 +235,7 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
       languageCache.set(lang, language);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[CodeGraph] Failed to load ${lang} grammar — parsing will be unavailable: ${message}`);
+      console.warn(`[HomeGraph] Failed to load ${lang} grammar — parsing will be unavailable: ${message}`);
       unavailableGrammarErrors.set(lang, message);
     }
   }
@@ -274,13 +281,15 @@ export function getParser(language: Language): Parser | null {
  * Detect language from file extension.
  *
  * `overrides` is the project's validated custom extension → language map (from
- * `codegraph.json`); when present its mappings take precedence over the built-in
+ * `homegraph.json`); when present its mappings take precedence over the built-in
  * `EXTENSION_MAP`. Omitting it is byte-identical to the zero-config behavior.
  */
 export function detectLanguage(filePath: string, source?: string, overrides?: Record<string, Language>): Language {
   // Play `conf/routes` has no grammar — route through the no-symbol path; the
   // Play framework resolver extracts route nodes from it.
   if (isPlayRoutesFile(filePath)) return 'yaml';
+  if (isArkModuleJson5(filePath)) return 'yaml';
+  if (isArkModuleJson5(filePath)) return 'yaml';
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   // Shopify OS 2.0 JSON templates / section groups → the Liquid extractor (it
   // links each section `"type"` to its `sections/<type>.liquid`).
@@ -318,6 +327,7 @@ function looksLikeObjc(source: string): boolean {
  * Returns true if the grammar exists, even if not yet loaded.
  */
 export function isLanguageSupported(language: Language): boolean {
+  if (language === 'arkts') return true;
   if (language === 'svelte') return true; // custom extractor (script block delegation)
   if (language === 'vue') return true; // custom extractor (script block delegation)
   if (language === 'astro') return true; // custom extractor (frontmatter/script block delegation)
@@ -335,6 +345,7 @@ export function isLanguageSupported(language: Language): boolean {
  * Check if a grammar has been loaded and is ready for parsing.
  */
 export function isGrammarLoaded(language: Language): boolean {
+  if (language === 'arkts') return true;
   if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
@@ -352,6 +363,11 @@ export function isGrammarLoaded(language: Language): boolean {
  */
 export function isFileLevelOnlyLanguage(language: Language): boolean {
   return language === 'yaml' || language === 'twig' || language === 'properties';
+}
+
+/** Languages that must be parsed in-process (no parse worker). */
+export function requiresInProcessExtraction(language: Language): boolean {
+  return language === 'arkts';
 }
 
 /**
@@ -405,6 +421,7 @@ export function getUnavailableGrammarErrors(): Partial<Record<Language, string>>
  */
 export function getLanguageDisplayName(language: Language): string {
   const names: Record<Language, string> = {
+    arkts: 'ArkTS',
     typescript: 'TypeScript',
     javascript: 'JavaScript',
     tsx: 'TypeScript (TSX)',

@@ -1,11 +1,11 @@
 {
-  "name": "@colbymchenry/codegraph",
+  "name": "homegraph",
   "version": "1.1.1",
   "description": "Supercharge AI coding agents with semantic code intelligence — surgical context, fewer tool calls, faster answers. 100% local.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "codegraph": "./dist/bin/codegraph.js"
+    "homegraph": "./dist/bin/homegraph.js"
   },
   "files": [
     "dist",
@@ -13,11 +13,11 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && npm run copy-assets && node -e \"require('fs').chmodSync('dist/bin/codegraph.js', 0o755)\"",
+    "build": "tsc && npm run copy-assets && node -e \"require('fs').chmodSync('dist/bin/homegraph.js', 0o755)\"",
     "preuninstall": "node dist/bin/uninstall.js",
     "copy-assets": "node -e \"const fs=require('fs');fs.mkdirSync('dist/db',{recursive:true});fs.copyFileSync('src/db/schema.sql','dist/db/schema.sql');fs.mkdirSync('dist/extraction/wasm',{recursive:true});fs.readdirSync('src/extraction/wasm').filter(f=>f.endsWith('.wasm')).forEach(f=>fs.copyFileSync('src/extraction/wasm/'+f,'dist/extraction/wasm/'+f))\"",
     "dev": "tsc --watch",
-    "cli": "npm run build && node dist/bin/codegraph.js",
+    "cli": "npm run build && node dist/bin/homegraph.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:eval": "vitest run __tests__/evaluation/",
@@ -47,6 +47,7 @@
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^20.19.30",
     "@types/picomatch": "^4.0.2",
+    "arkanalyzer": "^1.0.90",
     "typescript": "^5.0.0",
     "vitest": "^2.1.9"
   },

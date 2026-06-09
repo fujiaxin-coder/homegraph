@@ -179,7 +179,7 @@ export class QueryBuilder {
   // Project-name tokens (go.mod / package.json / repo dir), normalized. A query
   // word matching one is dropped from path-relevance scoring — it names the
   // whole project, not a symbol, so it carries no discriminative signal (#720).
-  // Set once by the CodeGraph instance; empty by default (no down-weighting).
+  // Set once by the HomeGraph instance; empty by default (no down-weighting).
   private projectNameTokens: Set<string> = new Set();
 
   // Node cache for frequently accessed nodes (LRU-style, max 1000 entries)
@@ -264,7 +264,7 @@ export class QueryBuilder {
 
     // Validate required fields to prevent SQLite bind errors
     if (!node.id || !node.kind || !node.name || !node.filePath || !node.language) {
-      console.error('[CodeGraph] Skipping node with missing required fields:', {
+      console.error('[HomeGraph] Skipping node with missing required fields:', {
         id: node.id,
         kind: node.kind,
         name: node.name,
@@ -352,7 +352,7 @@ export class QueryBuilder {
 
     // Validate required fields
     if (!node.id || !node.kind || !node.name || !node.filePath || !node.language) {
-      console.error('[CodeGraph] Skipping node update with missing required fields:', node.id);
+      console.error('[HomeGraph] Skipping node update with missing required fields:', node.id);
       return;
     }
 
@@ -593,7 +593,7 @@ export class QueryBuilder {
    * `route` nodes (framework-emitted: Express/Gin/Flask/Rails/Drupal/etc.).
    * Used by handleContext on small repos to inline the project's routing
    * config when the agent's query is about request flow — eliminating the
-   * "Glob + Read routes.rb" pattern that beats codegraph on tiny realworld
+   * "Glob + Read routes.rb" pattern that beats homegraph on tiny realworld
    * template repos.
    *
    * Excludes test/generated files from candidacy. Returns null if there
@@ -1443,6 +1443,23 @@ export class QueryBuilder {
       targetName: row.target_name,
       targetKind: row.target_kind,
     }));
+  }
+
+  /**
+   * Remove ArkTS RTA call edges persisted at batch scope (cross-file).
+   * Per-file edges are removed by {@link deleteFile} during re-index.
+   */
+  deleteArkTSCrossFileCallEdges(): number {
+    const result = this.db
+      .prepare(
+        `DELETE FROM edges
+         WHERE kind = 'calls'
+           AND provenance = 'heuristic'
+           AND metadata LIKE '%"synthesizedBy":"arkanalyzer"%'
+           AND metadata LIKE '%"sourceFile"%'`
+      )
+      .run();
+    return result.changes;
   }
 
   // ===========================================================================

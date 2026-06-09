@@ -1,5 +1,5 @@
 /**
- * CodeGraph Type Definitions
+ * HomeGraph Type Definitions
  *
  * Core types for the semantic knowledge graph system.
  */
@@ -64,6 +64,7 @@ export type EdgeKind =
  * runtime-iterable const array.
  */
 export const LANGUAGES = [
+  'arkts',
   'typescript',
   'javascript',
   'tsx',
