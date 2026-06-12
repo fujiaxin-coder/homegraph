@@ -5,7 +5,6 @@
  */
 
 import type HomeGraph from '../index';
-import type { QueryPool } from './query-pool';
 import { findNearestHomeGraphRoot } from '../directory';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
@@ -29,30 +28,7 @@ import {
 } from 'fs';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { isGeneratedFile } from '../extraction/generated-detection';
-import { isOhosApiFilePath, OHOS_API_FILE_PREFIX } from '../extraction/languages/arkts';
 import { scanDynamicDispatch } from './dynamic-boundaries';
-import {
-  buildMcpQueryCacheKey,
-  ensureMcpQueryCacheValid,
-  getMcpQueryCacheEntry,
-  isCacheableMcpTool,
-  isMcpQueryCacheEnabled,
-  setMcpQueryCacheEntry,
-} from './query-cache';
-
-/** ViewTree structural `references` vias — not UI event bindings. */
-const VIEWTREE_STRUCTURE_VIAS = new Set([
-  'child-component',
-  'state-binding',
-  'Prop',
-  'Link',
-  'builder',
-  'builder-param',
-]);
-
-// Spec knowledge-graph tooling — loaded lazily so the MCP startup path
-// doesn't pull in SQLite / spec-graph layers before the daemon binds.
-import type { SqliteDatabase } from '../db/sqlite-adapter';
 
 /**
  * An expected, recoverable "homegraph can't serve this" condition — most
@@ -350,31 +326,6 @@ function numberSourceLines(slice: string, firstLineNumber: number): string {
   return out.join('\n');
 }
 
-/** Primary signature line (first line when overloads are stored newline-separated). */
-function primarySignatureLine(signature: string): string {
-  return signature.split('\n')[0]?.trim() ?? signature.trim();
-}
-
-/** Render a stored signature (single line or newline-separated overloads) for MCP output. */
-function formatNodeSignatureBlock(signature: string): string[] {
-  const lines = signature.split('\n').map((l) => l.trim()).filter(Boolean);
-  if (lines.length <= 1) {
-    return lines.length ? [`**Signature:** \`${lines[0]}\``] : [];
-  }
-  return [
-    '**Signature:**',
-    `- \`${lines[0]}\` (primary)`,
-    ...lines.slice(1).map((l) => `- \`${l}\` (overload)`),
-  ];
-}
-
-function formatInlineSignature(signature: string): string {
-  const primary = primarySignatureLine(signature);
-  const overloadCount = signature.split('\n').filter((l) => l.trim()).length - 1;
-  if (overloadCount <= 0) return primary;
-  return `${primary} (+${overloadCount} overload${overloadCount === 1 ? '' : 's'})`;
-}
-
 /**
  * Unique line-prefix for a per-file source section in homegraph_explore output.
  * Issue #778: tool results dropped ATX headings (`####`, `##`, `###`) for bold
@@ -386,12 +337,6 @@ function formatInlineSignature(signature: string): string {
  * (`reasoning/reasoner.ts`) both key off to cut on whole file sections.
  */
 const FILE_SECTION_PREFIX = '**`';
-// Placeholder for codegraph_explore's "Found N symbols across M files." line.
-// The honest N/M can only be known after the final truncation drops trailing
-// sections (#1046), so the header is emitted as this sentinel and substituted
-// at the very end. This bracketed token never occurs in rendered source or a
-// file path, so the final string-replace can't collide.
-const SUMMARY_SENTINEL = '[[codegraph-explore-summary]]';
 function fileSectionHeader(filePath: string, suffix: string): string {
   return suffix
     ? `${FILE_SECTION_PREFIX}${filePath}\`** — ${suffix}`
@@ -468,34 +413,6 @@ export interface ToolDefinition {
     properties: Record<string, PropertySchema>;
     required?: string[];
   };
-  /** Behavioral hints for clients (see {@link ToolAnnotations}). */
-  annotations?: ToolAnnotations;
-}
-
-/**
- * MCP ToolAnnotations — behavioral hints a client MAY use to decide how, or
- * whether, to run a tool (introduced in the 2025-03-26 spec, carried in
- * 2025-06-18). They are advisory and never to be trusted for security, but
- * clients gate on them: Cursor's Ask mode, for one, refuses any MCP tool that
- * doesn't advertise `readOnlyHint: true` (issue #1018).
- *
- * The field is purely additive — a client that predates annotations ignores it
- * — so codegraph advertises these even though `initialize` still negotiates the
- * 2024-11-05 protocol version.
- *
- * https://modelcontextprotocol.io/specification/2025-06-18/schema#toolannotations
- */
-export interface ToolAnnotations {
-  /** Human-readable title for the tool. */
-  title?: string;
-  /** If true, the tool does not modify its environment. Default (unset): false. */
-  readOnlyHint?: boolean;
-  /** Meaningful only when NOT read-only: may the tool perform destructive updates? */
-  destructiveHint?: boolean;
-  /** If true, repeat calls with the same arguments have no additional effect. */
-  idempotentHint?: boolean;
-  /** If true, the tool interacts with an open world of external entities. */
-  openWorldHint?: boolean;
 }
 
 interface PropertySchema {
@@ -522,24 +439,6 @@ export interface ToolResult {
 const projectPathProperty: PropertySchema = {
   type: 'string',
   description: 'Absolute path to the project to query (or any directory inside it) — homegraph uses the nearest .homegraph/ index at or above that path. Omit to use this session\'s default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).',
-};
-
-/**
- * EVERY homegraph tool is query-only: it reads the pre-built index and never
- * mutates the workspace (indexing is the user's explicit CLI call, never the
- * agent's). Advertising this read-only contract lets clients that gate on it run
- * the tools where a possibly-mutating tool would be blocked — most concretely,
- * Cursor's Ask mode, which rejects any MCP tool lacking `readOnlyHint: true`
- * (issue #1018). `idempotentHint`: a repeated query has no additional effect.
- * `openWorldHint: false`: the domain is the closed local index, not an open
- * external world. Shared so the contract is declared once; a hypothetical
- * mutating tool would simply not reference it.
- */
-const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
 };
 
 /**
@@ -576,7 +475,6 @@ export const tools: ToolDefinition[] = [
       },
       required: ['query'],
     },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'homegraph_callers',
@@ -601,7 +499,6 @@ export const tools: ToolDefinition[] = [
       },
       required: ['symbol'],
     },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'homegraph_callees',
@@ -626,7 +523,6 @@ export const tools: ToolDefinition[] = [
       },
       required: ['symbol'],
     },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'homegraph_impact',
@@ -651,7 +547,6 @@ export const tools: ToolDefinition[] = [
       },
       required: ['symbol'],
     },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'homegraph_node',
@@ -693,7 +588,6 @@ export const tools: ToolDefinition[] = [
       },
       required: [],
     },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'homegraph_explore',
@@ -714,7 +608,6 @@ export const tools: ToolDefinition[] = [
       },
       required: ['query'],
     },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'homegraph_status',
@@ -725,7 +618,6 @@ export const tools: ToolDefinition[] = [
         projectPath: projectPathProperty,
       },
     },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'homegraph_files',
@@ -759,145 +651,8 @@ export const tools: ToolDefinition[] = [
         projectPath: projectPathProperty,
       },
     },
-    annotations: READ_ONLY_ANNOTATIONS,
-  },
-  {
-    name: 'homegraph_spec_match',
-    description:
-      'Match a new spec/feature description against the Commit4Spec knowledge graph using FTS5 full-text search. ' +
-      'Returns the most similar historical specs with their associated commits and code fragments. ' +
-      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Spec text (title + description) to match against historical specs.',
-        },
-        repoPath: {
-          type: 'string',
-          description: 'Path to the repository root. Defaults to the current working directory.',
-        },
-        topK: {
-          type: 'number',
-          description: 'Maximum number of similar specs to return (default: 5).',
-          default: 5,
-        },
-        includeFragments: {
-          type: 'boolean',
-          description: 'Whether to include full code diffs per commit (default: true).',
-          default: true,
-        },
-        dbPath: {
-          type: 'string',
-          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
-        },
-      },
-      required: ['query'],
-    },
-    annotations: READ_ONLY_ANNOTATIONS,
-  },
-  {
-    name: 'homegraph_spec_find',
-    description:
-      'Find which specs are related to the given file path by matching against code-fragment file paths ' +
-      'in the Commit4Spec knowledge graph. Traverses code_fragment_nodes → commit_fragment_relations ' +
-      '→ spec_commit_relations → spec_nodes. Useful for answering "which specs does this file affect?" ' +
-      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        filePath: {
-          type: 'string',
-          description: 'File path to look up (substring LIKE match). E.g. "src/auth.ts" or "src/auth".',
-        },
-        repoPath: {
-          type: 'string',
-          description: 'Path to the repository root. Defaults to the current working directory.',
-        },
-        dbPath: {
-          type: 'string',
-          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
-        },
-      },
-      required: ['filePath'],
-    },
-    annotations: READ_ONLY_ANNOTATIONS,
-  },
-  {
-    name: 'homegraph_spec_trace',
-    description:
-      'Trace a code symbol (function, method, class) back to its associated design Specs in the Commit4Spec ' +
-      'knowledge graph. Resolves the symbol via the HomeGraph code index, then matches against code-fragment ' +
-      'records in the Spec database using five-dimensional scoring: file-path match, code-diff content search ' +
-      '(FTS5), Spec title/subtitle name match, Spec recency, and line-range overlap. ' +
-      'Returns ranked Specs with score breakdowns even when exact line overlap is absent — code drifts over ' +
-      'time, so recency and content matching compensate. ' +
-      'The Spec DB defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        symbol: {
-          type: 'string',
-          description: 'Symbol name (bare or qualified). E.g. "authenticate", "AuthService.login", "auth::validate".',
-        },
-        file: {
-          type: 'string',
-          description: 'File path for disambiguation when multiple symbols share the same name (optional).',
-        },
-        line: {
-          type: 'number',
-          description: 'Line number for disambiguation (optional).',
-        },
-        repoPath: {
-          type: 'string',
-          description: 'Path to the repository root. Defaults to the current working directory.',
-        },
-        topK: {
-          type: 'number',
-          description: 'Maximum number of matching Specs to return (default: 10).',
-          default: 10,
-        },
-        dbPath: {
-          type: 'string',
-          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
-        },
-      },
-      required: ['symbol'],
-    },
-    annotations: READ_ONLY_ANNOTATIONS,
   },
 ];
-
-/**
- * Return `defs` with `projectPath` marked `required` in each tool's inputSchema.
- *
- * Used for the NO-DEFAULT-PROJECT tool surface (issue #993): when the MCP server
- * has no default project to fall back to — a gateway server started outside any
- * repo, or a monorepo root whose `.codegraph/` indexes live only in sub-projects
- * — every call MUST carry an explicit `projectPath`, so the schema should say so.
- * A `required` field is a HIGH-salience channel (MCP clients surface and often
- * validate it), unlike the instructions text the reporter found too weak to stop
- * the agent omitting the param. When a default project IS open, callers leave
- * projectPath optional and never call this.
- *
- * Pure: clones each tool's schema rather than mutating the shared module-level
- * `tools` array (reused by every session and the static surface). A tool that
- * doesn't expose projectPath, or already requires it, is returned untouched;
- * explore's `['query']` becomes `['query', 'projectPath']`, and a tool with no
- * `required` list (status/files) gains `['projectPath']`.
- */
-function withRequiredProjectPath(defs: ToolDefinition[]): ToolDefinition[] {
-  return defs.map((tool) => {
-    if (!tool.inputSchema.properties.projectPath) return tool;
-    const required = tool.inputSchema.required ?? [];
-    if (required.includes('projectPath')) return tool;
-    return {
-      ...tool,
-      inputSchema: { ...tool.inputSchema, required: [...required, 'projectPath'] },
-    };
-  });
-}
 
 /**
  * Allowlist-filtered tool definitions WITHOUT an engine — the static surface the
@@ -908,11 +663,24 @@ function withRequiredProjectPath(defs: ToolDefinition[]): ToolDefinition[] {
 export function getStaticTools(): ToolDefinition[] {
   const raw = process.env.HOMEGRAPH_MCP_TOOLS ?? process.env.HOMEGRAPH_MCP_TOOLS;
   if (!raw || !raw.trim()) {
-    return tools;
+    return tools.filter(t => DEFAULT_MCP_TOOLS.has(t.name.replace(/^homegraph_/, '')));
   }
   const allow = new Set(raw.split(',').map(s => s.trim().replace(/^homegraph_/, '').replace(/^homegraph_/, '')).filter(Boolean));
   return allow.size ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, ''))) : tools;
 }
+
+/**
+ * The MCP tools served by DEFAULT (short names). Pared to ONLY `homegraph_explore`
+ * — the single tool that reliably earns its place: one capped call returns the
+ * verbatim source of the relevant symbols grouped by file. Every other tool is a
+ * narrower slice of what explore already does, and presence itself steers
+ * mis-picks, so they are no longer LISTED to agents.
+ *
+ * The other defined tools (`node`, `search`, `callers`, plus callees/impact/files/
+ * status) remain fully functional — handlers stay, the library API and CLI are
+ * untouched, and `HOMEGRAPH_MCP_TOOLS=explore,node,...` re-enables any of them.
+ */
+const DEFAULT_MCP_TOOLS = new Set(['explore']);
 
 /**
  * Tool handler that executes tools against a HomeGraph instance
@@ -942,23 +710,8 @@ export class ToolHandler {
   // huge repo can't hang the first call (#905); cleared on first await so
   // subsequent calls don't pay any cost.
   private catchUpGate: Promise<void> | null = null;
-  // Optional worker-thread pool for off-loop read-tool dispatch (daemon mode).
-  // When set + healthy, the heavy read tools run on a worker so the daemon's
-  // main loop stays free for the MCP transport under concurrent load. Null in
-  // direct/in-process mode (one client, no concurrency to parallelize).
-  private queryPool: QueryPool | null = null;
 
   constructor(private cg: HomeGraph | null) {}
-
-  /**
-   * Engine-only: attach (or detach with null) the worker-thread query pool. The
-   * shared daemon sets this once its default project is open; the workers each
-   * hold their own WAL read connection and run {@link executeReadTool}. A
-   * worker's own ToolHandler never has a pool, so there is no nested off-loading.
-   */
-  setQueryPool(pool: QueryPool | null): void {
-    this.queryPool = pool;
-  }
 
   /**
    * Update the default HomeGraph instance (e.g. after lazy initialization)
@@ -1032,11 +785,10 @@ export class ToolHandler {
 
   /**
    * Optional allowlist of exposed tools, parsed from the HOMEGRAPH_MCP_TOOLS
-   * env var (comma-separated short names, e.g. "explore,search,node").
-   * Unset/empty → every tool is exposed. Set → only the listed tools are
-   * exposed. Lets an operator (or an A/B harness) trim the tool surface
-   * without rebuilding the client config; the ablated tool is then truly
-   * absent from ListTools rather than merely denied on call.
+   * env var (comma-separated short names, e.g. "trace,search,node,context").
+   * Unset/empty → every tool is exposed. Lets an operator (or an A/B harness)
+   * trim the tool surface without rebuilding the client config; the ablated
+   * tool is then truly absent from ListTools rather than merely denied on call.
    * Matching is on the short form, so "node" and "homegraph_node" both work.
    */
   private toolAllowlist(): Set<string> | null {
@@ -1061,22 +813,13 @@ export class ToolHandler {
    */
   getTools(): ToolDefinition[] {
     const allow = this.toolAllowlist();
-    // No explicit allowlist → expose every defined tool. An allowlist trims
-    // the surface to only the listed short names.
+    // No explicit allowlist → the default 4-tool surface (see
+    // DEFAULT_MCP_TOOLS for the evidence). An allowlist replaces the
+    // default entirely, so any defined tool can be re-enabled.
     let visible = allow
       ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, '')))
-      : tools;
-    // No default project loaded → no-root-index case (#993): a gateway server
-    // started outside any repo, or a monorepo root whose indexes live in
-    // sub-projects. With nothing to fall back to, EVERY call needs an explicit
-    // projectPath, so mark it required in the schema — a high-salience nudge the
-    // agent acts on, where SERVER_INSTRUCTIONS_NO_ROOT_INDEX's prose alone
-    // wasn't enough (the reporter had to add an AGENTS.md note). `this.cg` is
-    // settled by `retryInitIfNeeded()` before `handleToolsList` calls us, so a
-    // null here means "genuinely no default", not a startup race. When a default
-    // IS open we leave projectPath optional (below): a bare call falls back to
-    // it, exactly as in the common single-project launch.
-    if (!this.cg) return withRequiredProjectPath(visible);
+      : tools.filter(t => DEFAULT_MCP_TOOLS.has(t.name.replace(/^homegraph_/, '')));
+    if (!this.cg) return visible;
 
     try {
       const stats = this.cg.getStats();
@@ -1501,59 +1244,38 @@ export class ToolHandler {
         if (typeof check === 'object' && check !== undefined) return check;
       }
 
-      const projectPath = args.projectPath as string | undefined;
-      const cacheEnabled = isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
-      let cacheKey: string | undefined;
-      let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
-
-      if (cacheEnabled) {
-        try {
-          const cacheCg = this.getHomeGraph(projectPath);
-          cacheQueries = cacheCg.getQueryBuilder();
-          ensureMcpQueryCacheValid(cacheQueries, () => cacheCg.getLastIndexedAt());
-          let fileCount: number | undefined;
-          try {
-            fileCount = cacheCg.getStats().fileCount;
-          } catch {
-            fileCount = undefined;
-          }
-          cacheKey = buildMcpQueryCacheKey(toolName, args, fileCount);
-          const cached = getMcpQueryCacheEntry(cacheQueries, cacheKey);
-          if (cached) {
-            const withWorktree = this.withWorktreeNotice(cached, projectPath);
-            return this.withStalenessNotice(withWorktree, projectPath);
-          }
-        } catch {
-          // No indexed project — fall through; handler returns guidance.
-        }
+      // Read tools resolve through a single result variable so cross-cutting
+      // notices — worktree-index mismatch (issue #155) and per-file
+      // staleness (issue #403) — can be applied in one place. status embeds
+      // its own verbose worktree warning but still flows through the
+      // staleness wrapper so its pending-files section stays consistent
+      // with what the read tools surface.
+      let result: ToolResult;
+      switch (toolName) {
+        case 'homegraph_search':
+          result = await this.handleSearch(args); break;
+        case 'homegraph_callers':
+          result = await this.handleCallers(args); break;
+        case 'homegraph_callees':
+          result = await this.handleCallees(args); break;
+        case 'homegraph_impact':
+          result = await this.handleImpact(args); break;
+        case 'homegraph_explore':
+          result = await this.handleExplore(args); break;
+        case 'homegraph_node':
+          result = await this.handleNode(args); break;
+        case 'homegraph_status':
+          // status embeds the pending-files list as a first-class section
+          // (see handleStatus), so we skip the auto-banner wrapper here to
+          // avoid duplicating the same info at the top of the response.
+          return await this.handleStatus(args);
+        case 'homegraph_files':
+          result = await this.handleFiles(args); break;
+        default:
+          return this.errorResult(`Unknown tool: ${toolName}`);
       }
-
-      // homegraph_status reports watcher state (pending files, degraded mode,
-      // worktree warning) and embeds its own sections — it must run on the MAIN
-      // thread against the watched default instance, so it is NEVER off-loaded to
-      // a worker (whose read connection has no watcher). It also skips the
-      // auto-banner wrapper to avoid duplicating its own pending-files section.
-      if (toolName === 'homegraph_status') {
-        return await this.handleStatus(args);
-      }
-
-      // Read tools: off-load the CPU-heavy dispatch to the worker pool when one
-      // is attached and healthy (daemon mode), so the daemon's single event loop
-      // stays free for the MCP transport under concurrent load — otherwise N
-      // concurrent explores serialize AND starve the transport until the whole
-      // batch drains (clients then time out). With no pool (direct mode) or a
-      // degraded one, dispatch runs in-process exactly as before. Either way the
-      // result flows through the cross-cutting notices — worktree-index mismatch
-      // (#155) and per-file staleness (#403) — which need the watched MAIN
-      // instance and so are always applied here, never in the worker.
-      const result = (this.queryPool && this.queryPool.healthy)
-        ? await this.queryPool.run(toolName, args)
-        : await this.executeReadTool(toolName, args);
-      if (cacheEnabled && cacheKey && cacheQueries && !result.isError) {
-        setMcpQueryCacheEntry(cacheQueries, cacheKey, toolName, result);
-      }
-      const withWorktree = this.withWorktreeNotice(result, projectPath);
-      return this.withStalenessNotice(withWorktree, projectPath);
+      const withWorktree = this.withWorktreeNotice(result, args.projectPath as string | undefined);
+      return this.withStalenessNotice(withWorktree, args.projectPath as string | undefined);
     } catch (err) {
       // Expected condition, not a malfunction: answer as a SUCCESS so the
       // agent keeps trusting the toolset for projects that ARE indexed.
@@ -1574,59 +1296,6 @@ export class ToolHandler {
   }
 
   /**
-   * Run a single read tool to completion and return its raw {@link ToolResult},
-   * classifying expected failures the same way {@link execute}'s catch does so
-   * the SHAPE is identical whether dispatch runs in-process or on a worker:
-   * NotIndexed → success-shaped guidance, PathRefusal → clean error, anything
-   * else → internal-error-with-retry. Never throws.
-   *
-   * This is the worker thread's entry point (see {@link ./query-worker}) and the
-   * in-process fallback for {@link execute}. It deliberately does NOT run the
-   * catch-up gate or the staleness/worktree notices — those need the daemon's
-   * watched main instance and stay on the main thread. Cross-cutting allowlist +
-   * path validation already ran in {@link execute} before routing here.
-   */
-  async executeReadTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
-    try {
-      return await this.dispatchTool(toolName, args);
-    } catch (err) {
-      if (err instanceof NotIndexedError) {
-        return this.textResult(err.message);
-      }
-      if (err instanceof PathRefusalError) {
-        return this.errorResult(err.message);
-      }
-      return this.errorResult(
-        `Tool execution failed: ${err instanceof Error ? err.message : String(err)}. ` +
-        'This is an internal homegraph error — retry the call once; if it persists, ' +
-        'continue without homegraph for this task.'
-      );
-    }
-  }
-
-  /**
-   * Pure dispatch over the read tools — the switch, with no gate, no notices, no
-   * allowlist/validation (the caller owns those). `homegraph_status` is handled
-   * on the main thread in {@link execute} and never reaches here. May throw
-   * NotIndexed/PathRefusal, which {@link executeReadTool} classifies.
-   */
-  private async dispatchTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
-    switch (toolName) {
-      case 'homegraph_search': return await this.handleSearch(args);
-      case 'homegraph_callers': return await this.handleCallers(args);
-      case 'homegraph_callees': return await this.handleCallees(args);
-      case 'homegraph_impact': return await this.handleImpact(args);
-      case 'homegraph_explore': return await this.handleExplore(args);
-      case 'homegraph_node': return await this.handleNode(args);
-      case 'homegraph_files': return await this.handleFiles(args);
-      case 'homegraph_spec_match': return await this.handleSpecMatch(args);
-      case 'homegraph_spec_find': return await this.handleSpecFind(args);
-      case 'homegraph_spec_trace': return await this.handleSpecTrace(args);
-      default: return this.errorResult(`Unknown tool: ${toolName}`);
-    }
-  }
-
-  /**
    * Handle homegraph_search
    */
   private async handleSearch(args: Record<string, unknown>): Promise<ToolResult> {
@@ -1639,8 +1308,8 @@ export class ToolHandler {
     // NodeKind is 'type_alias'. Without the mapping, kind: "type" silently
     // matched nothing — a filter value we advertise must work.
     const kind = rawKind === 'type' ? 'type_alias' : rawKind;
-    const rawLimit = Number(args.limit);
-    const limit = clamp(isNaN(rawLimit) ? 10 : rawLimit, 1, 100);
+    const rawLimit = Number(args.limit) || 10;
+    const limit = clamp(rawLimit, 1, 100);
 
     const results = cg.searchNodes(query, {
       limit,
@@ -1912,16 +1581,6 @@ export class ToolHandler {
     return this.textResult(this.truncateOutput(sections.join('\n') + filterNote));
   }
 
-  /** Whether a graph edge may be traversed by homegraph_explore's main Flow BFS. */
-  private isExploreFlowEdge(edge: Edge): boolean {
-    if (edge.kind === 'calls') return true;
-    if (edge.kind !== 'references' || edge.provenance !== 'heuristic') return false;
-    const m = edge.metadata as Record<string, unknown> | undefined;
-    if (m?.synthesizedBy !== 'viewtree') return false;
-    const via = typeof m.via === 'string' ? m.via : '';
-    return via.length > 0 && !VIEWTREE_STRUCTURE_VIAS.has(via);
-  }
-
   /**
    * Describe a synthesized (dynamic-dispatch) edge for human output: how the
    * callback was wired up — the bridge static parsing can't see. Returns null
@@ -1972,30 +1631,6 @@ export class ToolHandler {
         compact: `dynamic: Vue ${ev} handler`,
         registeredAt,
       };
-    }
-    if (m?.synthesizedBy === 'viewtree') {
-      const via = typeof m.via === 'string' ? m.via : '';
-      if (via === 'Prop') {
-        return {
-          label: `@Prop one-way state transfer (parent → child)`,
-          compact: `state: @Prop one-way${at}`,
-          registeredAt,
-        };
-      }
-      if (via === 'Link') {
-        return {
-          label: `@Link two-way state transfer (parent ↔ child)`,
-          compact: `state: @Link two-way${at}`,
-          registeredAt,
-        };
-      }
-      if (via && !VIEWTREE_STRUCTURE_VIAS.has(via)) {
-        return {
-          label: `ArkUI event \`.${via}\` — bound handler (dynamic dispatch)`,
-          compact: `dynamic: ArkUI .${via}${at}`,
-          registeredAt,
-        };
-      }
     }
     if (m?.synthesizedBy === 'interface-impl') {
       return {
@@ -2191,7 +1826,7 @@ export class ToolHandler {
           if (id !== seed.id && named.has(id) && depth > deepDepth) { deep = id; deepDepth = depth; }
           if (depth >= MAX_HOPS - 1) continue;
           for (const c of cg.getCallees(id)) {
-            if (!this.isExploreFlowEdge(c.edge) || parent.has(c.node.id)) continue;
+            if (c.edge.kind !== 'calls' || parent.has(c.node.id)) continue;
             const newStreak = named.has(c.node.id) ? 0 : streak + 1;
             if (newStreak > MAX_BRIDGE) continue;
             parent.set(c.node.id, { prev: id, edge: c.edge, node: c.node });
@@ -2740,19 +2375,11 @@ export class ToolHandler {
     // trace endpoint picker uses) and inject it as an entry, so every symbol the
     // agent explicitly named is in the subgraph and its file is scored.
     const namedSeedIds = new Set<string>();
-    // The subset of named seeds that earns the named-FIRST sort tier. We still
-    // SEED every ≤3-def name (so RWR / flow ranking is unchanged), but only the
-    // most-substantive def is tiered — a bare name's unrelated namesakes (Go's
-    // `NewClient` = real client + test fake + xds pool) must not fill the tier
-    // and crowd out the real answer file (grpc's `dialoptions.go`). Corroborated
-    // overloads (the query also named the type) all earn it. (#1064)
-    const tierSeedIds = new Set<string>();
     {
       const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro)$/i;
       const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
       const isTestPath = (p: string) => /(^|\/)(tests?|specs?|__tests__|testdata|mocks?|fixtures?)\//i.test(p) || /\.(test|spec)\.[a-z]+$/i.test(p);
       const bodyLines = (n: Node) => Math.max(0, (n.endLine ?? n.startLine) - n.startLine);
-      const callerCount = (n: Node) => { try { return cg.getCallers(n.id).length; } catch { return 0; } };
       const tokens = [...new Set(
         query.split(/[\s,()[\]]+/)
           .map((t) => t.replace(FILE_EXT, '').trim())
@@ -2793,22 +2420,11 @@ export class ToolHandler {
         // capped; else fall back to the single most-substantive def. This is the
         // explore-side mirror of homegraph_node's overload disambiguation.
         let picks: Node[];
-        let tierPicks: Node[]; // subset that earns the named-first tier (#1064)
         if (cands.length <= 3) {
           picks = cands;
-          // Centrality de-noise: tier the most-substantive def PLUS any co-named
-          // def of comparable centrality (a real overload/wrapper — excalidraw's
-          // `mutateElement` lives in mutateElement.ts, App.tsx AND Scene.ts, all
-          // within ~2x callers). EXCLUDE a vastly-less-central namesake (Go's
-          // `NewClient`: real client 492 callers vs xds-pool 11, test-fake 3 →
-          // ratio <0.025) so it doesn't fill the tier and crowd out the answer.
-          const counts = new Map(cands.map((c) => [c.id, callerCount(c)]));
-          const maxCallers = Math.max(1, ...counts.values());
-          tierPicks = cands.filter((c, i) => i === 0 || (counts.get(c.id) ?? 0) >= maxCallers * 0.25);
         } else {
           const ctx = cands.filter(inNamedContext);
           picks = ctx.length > 0 ? ctx.slice(0, 4) : cands.slice(0, 1);
-          tierPicks = picks; // corroborated overloads (or the single fallback) all earn it
         }
         for (const n of picks) {
           if (!subgraph.nodes.has(n.id)) subgraph.nodes.set(n.id, n);
@@ -2819,7 +2435,6 @@ export class ToolHandler {
           // so a named symbol FTS already gathered never sorted to the top.)
           namedSeedIds.add(n.id);
         }
-        for (const n of tierPicks) tierSeedIds.add(n.id);
       }
     }
 
@@ -2832,38 +2447,6 @@ export class ToolHandler {
     for (const edge of subgraph.edges) {
       if (entryNodeIds.has(edge.source)) connectedToEntry.add(edge.target);
       if (entryNodeIds.has(edge.target)) connectedToEntry.add(edge.source);
-    }
-
-    // CHANGE SURFACE (#1064): a named method's signature types — its parameter
-    // and return types — are part of what you'd edit to "add a parameter to X",
-    // yet they can be lexically dissimilar to the query ("add a parameter to
-    // NewClient" shares no words with `dialoptions.go`, which defines NewClient's
-    // `DialOption`) and sit a hop away. COLLECT them here from each named-seed
-    // callable's outgoing signature edges (full graph — the type is often not in
-    // the subgraph); the decision to surface one is DEFERRED to the buried-rescue
-    // pass below, which fires only when the type's file would otherwise be
-    // dropped — so a well-connected type (excalidraw's element types, Alamofire's
-    // `DataRequest` on a flow query) is left to rank on its own and never
-    // displaces a flow-central file. Bounded: only the few named seeds, only the
-    // types in their signatures.
-    const CALLABLE_KINDS = new Set(['method', 'function', 'component', 'constructor']);
-    const TYPE_KINDS = new Set(['class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'type_alias']);
-    const SIG_EDGE = new Set(['references', 'type_of', 'returns']);
-    const changeSurfaceCandidates: Node[] = [];
-    const seenChangeSurface = new Set<string>();
-    for (const seedId of tierSeedIds) {
-      const seedNode = subgraph.nodes.get(seedId);
-      if (!seedNode || !CALLABLE_KINDS.has(seedNode.kind)) continue;
-      let outs: Edge[] = [];
-      try { outs = cg.getOutgoingEdges(seedId); } catch { continue; }
-      for (const e of outs) {
-        if (!SIG_EDGE.has(e.kind)) continue;
-        const tgt = cg.getNode(e.target);
-        if (!tgt || !TYPE_KINDS.has(tgt.kind) || namedSeedIds.has(tgt.id)) continue;
-        if (seenChangeSurface.has(tgt.id)) continue;
-        seenChangeSurface.add(tgt.id);
-        changeSurfaceCandidates.push(tgt);
-      }
     }
 
     for (const node of subgraph.nodes.values()) {
@@ -2995,29 +2578,6 @@ export class ToolHandler {
       const n = subgraph.nodes.get(id);
       if (n) entryFiles.add(n.filePath);
     }
-    // Buried-rescue pass (#1064): surface a named method's signature type ONLY
-    // when its file is genuinely buried — near-zero graph mass AND not lexically
-    // matched. That is the invisible case (grpc's `DialOption` → `dialoptions.go`,
-    // g≈0, 0 term hits): reachable but ranked nowhere, so the agent greps. A
-    // well-connected type file (excalidraw element types, Alamofire `DataRequest`)
-    // is NOT buried and is left alone — rescuing it would displace a flow-central
-    // file (App.tsx, Validation.swift). Buried is judged on the PRE-rescue graph,
-    // so injecting the type below can't make it look connected. A rescued file is
-    // injected (so it renders), force-kept (gate + relevantFiles), and tiered.
-    const changeSurfaceFiles = new Set<string>();
-    for (const t of changeSurfaceCandidates) {
-      const fp = t.filePath;
-      const buried = (fileGraphScore.get(fp) ?? 0) < maxGraph * 0.06
-        && (fileTermHits.get(fp) ?? 0) < 2;
-      if (!buried) continue;
-      changeSurfaceFiles.add(fp);
-      if (!subgraph.nodes.has(t.id)) subgraph.nodes.set(t.id, t);
-      let group = fileGroups.get(fp);
-      if (!group) { group = { nodes: [], score: 0 }; fileGroups.set(fp, group); }
-      if (!group.nodes.some((n) => n.id === t.id)) group.nodes.push(t);
-      group.score = Math.max(group.score, 45);
-      if (!relevantFiles.some(([f]) => f === fp)) relevantFiles.push([fp, group]);
-    }
 
     // Relevance gate (so the generous budget is a CEILING, not a target): keep a
     // file only if it is STRUCTURALLY relevant by ANY of:
@@ -3036,7 +2596,6 @@ export class ToolHandler {
         (fileGraphScore.get(fp) ?? 0) >= maxGraph * 0.06
         || centralFiles.has(fp)
         || entryFiles.has(fp)
-        || changeSurfaceFiles.has(fp)
         || (fileTermHits.get(fp) ?? 0) >= 2,
       );
       if (gated.length >= 2) relevantFiles = gated;
@@ -3052,14 +2611,10 @@ export class ToolHandler {
     // in other files (`Validation.swift`), falls outside the budget, and the
     // agent Reads it. The named file is the answer — rank it at the top.
     const namedSeedFiles = new Set<string>();
-    for (const id of tierSeedIds) {
+    for (const id of namedSeedIds) {
       const n = subgraph.nodes.get(id);
       if (n) namedSeedFiles.add(n.filePath);
     }
-    // A rescued change-surface file (only the genuinely-buried ones — see the
-    // buried-rescue pass) is the lexically-dissimilar answer; give it the named
-    // tier so it isn't buried under files that merely share surface words (#1064).
-    for (const fp of changeSurfaceFiles) namedSeedFiles.add(fp);
 
     // Multi-term corroboration tier: a file that is BOTH (a) an entry/central file
     // (a search root, named seed, or graph-central hub — i.e. structurally part of
@@ -3127,16 +2682,9 @@ export class ToolHandler {
     const lines: string[] = [
       `**Exploration: ${query}**`,
       '',
-      // Curated summary — filled in after the source loop (see below). We do NOT
-      // report `subgraph.nodes.size` / `fileGroups.size` here: that's the raw
-      // candidate gather, which a broad natural-language query inflates wildly
-      // (260 symbols / 124 files on a 636-file repo) even though only a handful
-      // render. Reporting the pool read as "260 results to wade through" when the
-      // real, correctly-ranked answer is the few files below (#1046).
-      '',
+      `Found ${subgraph.nodes.size} symbols across ${fileGroups.size} files.`,
       '',
     ];
-    const summaryLineIdx = 2;
 
     // Blast radius (always-on, compact): for the entry symbols, who depends on
     // them + which tests cover them — locations only, no source — so the agent
@@ -3244,9 +2792,6 @@ export class ToolHandler {
 
     let totalChars = lines.join('\n').length;
     let filesIncluded = 0;
-    // Paths we actually render source for below. Drives the curated header count
-    // (#1046) — it must reflect what we show, not the raw candidate gather.
-    const renderedFilePaths: string[] = [];
     let anyFileTrimmed = false;
 
     for (const [filePath, group] of sortedFiles) {
@@ -3260,25 +2805,6 @@ export class ToolHandler {
       const fileNecessary = group.nodes.some(n =>
         entryNodeIds.has(n.id) || flow.pathNodeIds.has(n.id) || flow.uniqueNamedNodeIds.has(n.id));
       if (!fileNecessary && totalChars > budget.maxOutputChars * 0.9) continue;
-
-      if (isOhosApiFilePath(filePath)) {
-        const rel = filePath.slice(OHOS_API_FILE_PREFIX.length);
-        const syms = group.nodes
-          .filter((n) => n.kind !== 'import' && n.kind !== 'export')
-          .sort((a, b) => a.startLine - b.startLine);
-        if (syms.length === 0) continue;
-
-        lines.push(fileSectionHeader(rel, 'HarmonyOS SDK API (prebuilt db)'));
-        lines.push('');
-        for (const n of syms) {
-          const sig = n.signature || n.docstring || `${n.kind} ${n.qualifiedName || n.name}`;
-          lines.push(`\`${sig}\``);
-        }
-        lines.push('');
-        totalChars = lines.join('\n').length;
-        filesIncluded++;
-        continue;
-      }
 
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) continue;
@@ -3405,7 +2931,6 @@ export class ToolHandler {
             : 'skeleton (signatures only — homegraph_explore a name for its full body; do NOT Read)';
           lines.push(fileSectionHeader(filePath, `${names} · ${tag}`), '', '```' + lang, skel.join('\n'), '```', '');
           totalChars += skel.join('\n').length + 120;
-          renderedFilePaths.push(filePath);
           filesIncluded++;
           continue;
         }
@@ -3456,7 +2981,6 @@ export class ToolHandler {
         }
         lines.push(wholeHeader, '', '```' + lang, wholeSection, '```', '');
         totalChars += wholeSection.length + 200;
-        renderedFilePaths.push(filePath);
         filesIncluded++;
         continue;
       }
@@ -3741,15 +3265,8 @@ export class ToolHandler {
       lines.push('');
 
       totalChars += fileSection.length + 200;
-      renderedFilePaths.push(filePath);
       filesIncluded++;
     }
-
-    // The curated header count is computed from the files that SURVIVE the final
-    // truncation (see end of method) — `filesIncluded` can over-count when the
-    // hard ceiling drops trailing sections — so leave a sentinel here and fill it
-    // in once the output is final.
-    lines[summaryLineIdx] = SUMMARY_SENTINEL;
 
     // Add remaining files as references (from both relevant and peripheral files).
     // Small projects (per budget) skip this — the relevant story already fits
@@ -3809,7 +3326,6 @@ export class ToolHandler {
     const output = flow.text + lines.join('\n');
 
     const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
-    let finalText: string;
     if (output.length > hardCeiling) {
       // Cut at a FILE-SECTION boundary (the last ``**` `` file header before the
       // ceiling) so we drop whole trailing file-sections rather than slicing
@@ -3820,33 +3336,9 @@ export class ToolHandler {
       const lastSection = cut.lastIndexOf('\n' + FILE_SECTION_PREFIX);
       const boundary = lastSection > hardCeiling * 0.5 ? lastSection : cut.lastIndexOf('\n');
       const safe = boundary > 0 ? cut.slice(0, boundary) : cut;
-      finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For any area not covered, run another homegraph_explore with the specific names — do NOT Read these files.)';
-    } else {
-      finalText = output;
+      return this.textResult(safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For any area not covered, run another homegraph_explore with the specific names — do NOT Read these files.)');
     }
-
-    // Curated header (#1046): substitute the sentinel with the count of files
-    // whose source SURVIVES in the final text — not `subgraph`/`fileGroups` (the
-    // raw gather a broad query inflates) and not `filesIncluded` (which can
-    // over-count when the ceiling above drops trailing sections). A file counts
-    // only if its section header is still present; its relevant (non-import)
-    // symbols are summed for N. Files we couldn't fit are still named under "Not
-    // shown above" + the budget note, so nothing is silently dropped.
-    const survivors = renderedFilePaths.filter((fp) =>
-      finalText.includes(`${FILE_SECTION_PREFIX}${fp}\``));
-    const shownSymbols = survivors.reduce((sum, fp) => {
-      const g = fileGroups.get(fp);
-      if (!g) return sum;
-      return sum + new Set(
-        g.nodes.filter((n) => n.kind !== 'import' && n.kind !== 'export').map((n) => n.id),
-      ).size;
-    }, 0);
-    const summaryLine = survivors.length > 0
-      ? `Found ${shownSymbols} symbol${shownSymbols === 1 ? '' : 's'} across ${survivors.length} file${survivors.length === 1 ? '' : 's'}.`
-      : `Found ${subgraph.nodes.size} symbol${subgraph.nodes.size === 1 ? '' : 's'} across ${fileGroups.size} file${fileGroups.size === 1 ? '' : 's'}.`;
-    finalText = finalText.replace(SUMMARY_SENTINEL, summaryLine);
-
-    return this.textResult(finalText);
+    return this.textResult(output);
   }
 
   /**
@@ -4028,7 +3520,7 @@ export class ToolHandler {
     const symbolMap = (heading: string, limit = 200): string[] => {
       const lines: string[] = [heading];
       for (const n of nodes.slice(0, limit)) {
-        const sig = n.signature ? ` ${formatInlineSignature(n.signature)}` : '';
+        const sig = n.signature ? ` ${n.signature.replace(/\s+/g, ' ').trim()}` : '';
         lines.push(`- \`${n.name}\` (${n.kind})${sig} — :${n.startLine}`);
       }
       if (nodes.length > limit) lines.push(`- … +${nodes.length - limit} more`);
@@ -4472,388 +3964,6 @@ export class ToolHandler {
   }
 
   // =========================================================================
-  // handleSpecMatch — Commit4Spec knowledge-graph search
-  // =========================================================================
-
-  /**
-   * Match a spec/feature description against the Commit4Spec knowledge graph.
-   *
-   * Uses FTS5 full-text search to find the most similar historical specs,
-   * returning each with its linked commits and optional code fragments.
-   * The database lives at `.homegraph/commit4spec/commit4spec.db` by default and is
-   * separate from the HomeGraph code-symbol index — this tool works whether
-   * or not the code index is present.
-   */
-  private async handleSpecMatch(args: Record<string, unknown>): Promise<ToolResult> {
-    const query = this.validateString(args.query, 'query');
-    if (typeof query !== 'string') return query;
-
-    const repoPath = args.repoPath as string | undefined;
-    const explicitDbPath = args.dbPath as string | undefined;
-    const topKRaw = Number(args.topK);
-    const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 5 : topKRaw, 50));
-    const includeFragments = args.includeFragments !== false;
-
-    // Lazily require spec modules so the MCP startup path stays lean.
-    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
-    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
-    const { searchAndGetContext } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
-    const {
-      truncateCodeDiff,
-      truncateSubtitles,
-      computeBudgetProfile,
-    } = require('../spec/utils') as typeof import('../spec/utils');
-
-    // Resolve the database path.
-    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
-
-    // Open the database.
-    let db: SqliteDatabase;
-    try {
-      db = createDatabase(dbPath).db;
-    } catch (err) {
-      return this.errorResult(
-        `Failed to open Commit4Spec database at "${dbPath}": ` +
-        `${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-
-    try {
-      // Search and traverse.
-      const contexts = searchAndGetContext(db, query, topK, includeFragments);
-
-      if (contexts.length === 0) {
-        return this.textResult(
-          JSON.stringify({
-            query: query.slice(0, 200),
-            matched_count: 0,
-            results: [],
-          }, null, 2)
-        );
-      }
-
-      // Build budget profile for truncation.
-      const profile = computeBudgetProfile(contexts.length);
-
-      // Serialize to JSON (matching Python's spec_contexts_to_results format).
-      const results = contexts.map((ctx) => {
-        const subtitles = profile.tier === 'vlarge'
-          ? [] // vlarge disables subtitles entirely
-          : truncateSubtitles(ctx.spec.subtitles, 200, profile.maxContents);
-
-        const commits = ctx.commits.slice(0, profile.maxContents || 5).map((c) => {
-          const cd: Record<string, unknown> = {
-            hash: c.commit.hash,
-            message: c.commit.message,
-            relation_type: c.relationType,
-          };
-
-          if (includeFragments) {
-            const maxFrags = profile.maxFragments || 3;
-            cd.fragments = c.fragments.slice(0, maxFrags).map((f) => ({
-              file_path: f.filePath,
-              change_type: f.changeType,
-              start_line: f.startLine,
-              end_line: f.endLine,
-              code_diff: truncateCodeDiff(f.codeDiff),
-            }));
-          }
-
-          return cd;
-        });
-
-        return {
-          spec_id: ctx.spec.id,
-          title: ctx.spec.title,
-          subtitles,
-          file_path: ctx.spec.filePath,
-          commits,
-        };
-      });
-
-      const response = {
-        query: query.slice(0, 200),
-        matched_count: results.length,
-        results,
-      };
-
-      const json = JSON.stringify(response, null, 2);
-
-      // Hard cap to MAX_OUTPUT_LENGTH to prevent context bloat.
-      if (json.length <= MAX_OUTPUT_LENGTH) {
-        return this.textResult(json);
-      }
-
-      // When the full payload exceeds the cap, drop fragments first,
-      // then trim commits, then trim the whole thing.
-      if (includeFragments) {
-        const slimResults = results.map((r) => ({
-          ...r,
-          commits: r.commits.map((c: Record<string, unknown>) => {
-            const { fragments: _, ...rest } = c;
-            return rest;
-          }),
-        }));
-        const slim = JSON.stringify({ ...response, results: slimResults }, null, 2);
-        if (slim.length <= MAX_OUTPUT_LENGTH) {
-          return this.textResult(
-            `(Fragments elided — output exceeded ${MAX_OUTPUT_LENGTH} chars)\n\n` + slim
-          );
-        }
-      }
-
-      // Fallback: truncate at a newline to avoid broken JSON.
-      return this.textResult(this.truncateOutput(json));
-    } finally {
-      db.close();
-    }
-  }
-
-  // =========================================================================
-  // handleSpecFind — file-path based spec lookup
-  // =========================================================================
-
-  /**
-   * Find which specs are related to the given file path by matching against
-   * code-fragment file paths in the Commit4Spec knowledge graph.
-   *
-   * Traverses: filePath → code_fragment_nodes → commit_fragment_relations
-   * → spec_commit_relations → spec_nodes.
-   */
-  private async handleSpecFind(args: Record<string, unknown>): Promise<ToolResult> {
-    const filePath = this.validateString(args.filePath, 'filePath');
-    if (typeof filePath !== 'string') return filePath;
-
-    const repoPath = args.repoPath as string | undefined;
-    const explicitDbPath = args.dbPath as string | undefined;
-
-    // Lazily require spec modules so the MCP startup path stays lean.
-    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
-    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
-    const { findSpecsByFilePath } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
-
-    // Resolve the database path.
-    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
-
-    // Open the database.
-    let db: SqliteDatabase;
-    try {
-      db = createDatabase(dbPath).db;
-    } catch (err) {
-      return this.errorResult(
-        `Failed to open Commit4Spec database at "${dbPath}": ` +
-        `${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-
-    try {
-      const result = findSpecsByFilePath(db, filePath);
-
-      const response = {
-        filePath,
-        matched_count: result.matched_count,
-        truncated: result.truncated,
-        results: result.results,
-      };
-
-      const json = JSON.stringify(response, null, 2);
-      if (json.length <= MAX_OUTPUT_LENGTH) {
-        return this.textResult(json);
-      }
-
-      // Truncate: reduce results
-      const slim = {
-        ...response,
-        results: response.results.slice(0, Math.max(1, Math.floor(response.results.length / 2))),
-      };
-      const slimJson = JSON.stringify(slim, null, 2);
-      if (slimJson.length <= MAX_OUTPUT_LENGTH) {
-        return this.textResult(`(Results trimmed to fit output limit)\n\n${slimJson}`);
-      }
-
-      return this.textResult(this.truncateOutput(json));
-    } finally {
-      db.close();
-    }
-  }
-
-  // =========================================================================
-  // handleSpecTrace — code symbol → Spec reverse trace
-  // =========================================================================
-
-  /**
-   * Trace a code symbol back to its associated Specs.
-   *
-   * Uses the HomeGraph code index to resolve the symbol to AST-level node(s),
-   * then queries the Commit4Spec knowledge graph for associated Specs via
-   * five-dimensional scoring (file-path, content FTS5, name FTS5, recency,
-   * line overlap).
-   *
-   * This bridges the two databases: homegraph.db (code entities) →
-   * commit4spec.db (Spec knowledge graph).
-   */
-  private async handleSpecTrace(args: Record<string, unknown>): Promise<ToolResult> {
-    const symbol = this.validateString(args.symbol, 'symbol');
-    if (typeof symbol !== 'string') return symbol;
-
-    const fileRaw = this.validateOptionalPath(args.file, 'file');
-    if (typeof fileRaw === 'object') return fileRaw;
-    const file: string | undefined = fileRaw;
-    const line = typeof args.line === 'number' ? args.line : undefined;
-    const repoPath = args.repoPath as string | undefined;
-    const explicitDbPath = args.dbPath as string | undefined;
-    const topKRaw = Number(args.topK);
-    const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 10 : topKRaw, 50));
-
-    // Lazily require all needed modules
-    const HomeGraph = loadHomeGraph();
-    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
-    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
-    const { findSpecsByCodeSymbol } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
-    const { initSpecSchema, runSpecMigrations, getCurrentSpecVersion, CURRENT_SPEC_SCHEMA_VERSION } = require('../spec/db/schema') as typeof import('../spec/db/schema');
-
-    // Resolve project path for the code graph
-    const projectPath = repoPath || process.cwd();
-
-    // Open the HomeGraph code index
-    let cg: HomeGraph;
-    try {
-      cg = await HomeGraph.open(projectPath);
-    } catch (err) {
-      return this.errorResult(
-        `Failed to open HomeGraph code index at "${projectPath}": ` +
-        `${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-
-    try {
-      // Step 1: Resolve symbol to nodes via findSymbolMatches
-      let nodes = this.findSymbolMatches(cg, symbol);
-
-      if (nodes.length === 0) {
-        await cg.close();
-        return this.textResult(JSON.stringify({
-          symbol,
-          error: `No code entities found for symbol "${symbol}".`,
-          matches: [],
-        }, null, 2));
-      }
-
-      // Disambiguate by file/line if provided
-      if (file) {
-        // Use endsWith for precise file path matching
-        nodes = nodes.filter((n) => n.filePath.endsWith(file));
-      }
-      if (line !== undefined && nodes.length > 1) {
-        const closest = nodes.reduce((best, n) => {
-          const bestDist = Math.abs(best.startLine - line!) + Math.abs(best.endLine - line!);
-          const curDist = Math.abs(n.startLine - line!) + Math.abs(n.endLine - line!);
-          return curDist < bestDist ? n : best;
-        });
-        nodes = [closest];
-      }
-
-      // Take the best disambiguated node
-      const node = nodes[0];
-      if (!node) {
-        await cg.close();
-        return this.textResult(JSON.stringify({
-          symbol,
-          error: `Could not resolve symbol "${symbol}" to a specific code entity.`,
-          matches: [],
-        }, null, 2));
-      }
-
-      // Step 2: Resolve the Spec database path
-      const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
-
-      // Step 3: Open the Spec database
-      let db: SqliteDatabase;
-      try {
-        db = createDatabase(dbPath).db;
-      } catch (err) {
-        await cg.close();
-        return this.errorResult(
-          `Failed to open Commit4Spec database at "${dbPath}": ` +
-          `${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-
-      try {
-        // Ensure schema is up to date
-        initSpecSchema(db);
-        const currentVersion = getCurrentSpecVersion(db);
-        if (currentVersion < CURRENT_SPEC_SCHEMA_VERSION) {
-          runSpecMigrations(db, currentVersion);
-        }
-
-        // Step 4: Query Specs for the code entity
-        const result = findSpecsByCodeSymbol(db, {
-          name: node.name,
-          qualifiedName: node.qualifiedName,
-          kind: node.kind,
-          filePath: node.filePath,
-          startLine: node.startLine,
-          endLine: node.endLine,
-        }, topK);
-
-        // Step 5: Serialize the response
-        const response = {
-          symbol,
-          entity: {
-            name: result.entity.name,
-            qualifiedName: result.entity.qualifiedName,
-            kind: result.entity.kind,
-            filePath: result.entity.filePath,
-            startLine: result.entity.startLine,
-            endLine: result.entity.endLine,
-          },
-          matched_count: result.matches.length,
-          total_candidates: result.totalCandidates,
-          matches: result.matches.map((m) => ({
-            spec_id: m.spec.id,
-            title: m.spec.title,
-            status: m.spec.status,
-            version: m.spec.version,
-            file_path: m.spec.filePath,
-            score: Math.round(m.score * 1000) / 1000,
-            score_detail: {
-              file_path: Math.round(m.scoreDetail.filePathScore * 1000) / 1000,
-              content: Math.round(m.scoreDetail.contentScore * 1000) / 1000,
-              name: Math.round(m.scoreDetail.nameScore * 1000) / 1000,
-              recency: Math.round(m.scoreDetail.recencyScore * 1000) / 1000,
-              line_overlap: Math.round(m.scoreDetail.overlapScore * 1000) / 1000,
-            },
-            fragment_count: m.fragmentCount,
-            commit_count: m.commitCount,
-          })),
-        };
-
-        const json = JSON.stringify(response, null, 2);
-        if (json.length <= MAX_OUTPUT_LENGTH) {
-          return this.textResult(json);
-        }
-
-        // Truncate: reduce matches
-        const slim = {
-          ...response,
-          matches: response.matches.slice(0, Math.max(1, Math.floor(topK / 2))),
-        };
-        const slimJson = JSON.stringify(slim, null, 2);
-        if (slimJson.length <= MAX_OUTPUT_LENGTH) {
-          return this.textResult(`(Results trimmed to fit output limit)\n\n${slimJson}`);
-        }
-
-        return this.textResult(this.truncateOutput(json));
-      } finally {
-        try { db.close(); } catch { /* best effort */ }
-      }
-    } finally {
-      try { await cg.close(); } catch { /* best effort */ }
-    }
-  }
-
-  // =========================================================================
   // Symbol resolution helpers
   // =========================================================================
 
@@ -5037,7 +4147,7 @@ export class ToolHandler {
       // Compact format: one line per result with key info
       lines.push(`**${node.name}** (${node.kind})`);
       lines.push(`${node.filePath}${location}`);
-      if (node.signature) lines.push(`\`${formatInlineSignature(node.signature)}\``);
+      if (node.signature) lines.push(`\`${node.signature}\``);
       lines.push('');
     }
 
@@ -5119,7 +4229,7 @@ export class ToolHandler {
     const lines = [`**Members (${children.length}):**`, ''];
     for (const c of children) {
       const loc = c.startLine ? `:${c.startLine}` : '';
-      const sig = c.signature ? ` — \`${formatInlineSignature(c.signature)}\`` : '';
+      const sig = c.signature ? ` — \`${c.signature}\`` : '';
       lines.push(`- ${c.name} (${c.kind})${loc}${sig}`);
     }
     return lines.join('\n');
@@ -5134,7 +4244,7 @@ export class ToolHandler {
     ];
 
     if (node.signature) {
-      lines.push(...formatNodeSignatureBlock(node.signature));
+      lines.push(`**Signature:** \`${node.signature}\``);
     }
 
     // Only include docstring if it's short and useful

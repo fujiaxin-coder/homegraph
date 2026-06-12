@@ -1,26 +1,26 @@
 /**
- * #383 — CodeGraph indexes config KEYS but must never surface config VALUES.
+ * #383 — HomeGraph indexes config KEYS but must never surface config VALUES.
  *
  * Spring `application.{yml,properties}` keys are indexed as `constant` nodes so
  * `@Value` resolution works, but their values are routinely secrets (DB
- * passwords, API keys, JDBC URLs with embedded creds). CodeGraph must surface
+ * passwords, API keys, JDBC URLs with embedded creds). HomeGraph must surface
  * the KEY and never the value — not in node metadata (docstring/signature),
- * not via `codegraph_explore`'s verbatim source dump, and not via
- * `codegraph_node` `includeCode`. An agent that genuinely needs a value can
- * read the file itself (a deliberate pull); CodeGraph must never volunteer it.
+ * not via `homegraph_explore`'s verbatim source dump, and not via
+ * `homegraph_node` `includeCode`. An agent that genuinely needs a value can
+ * read the file itself (a deliberate pull); HomeGraph must never volunteer it.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import CodeGraph from '../src/index';
+import HomeGraph from '../src/index';
 import { ToolHandler } from '../src/mcp/tools';
 
 const SECRET = 'sk-live-DO-NOT-LEAK-2f9a4c7e1b';
 
 describe('config secret redaction (#383)', () => {
   let tmpDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
   let handler: ToolHandler;
 
   beforeEach(async () => {
@@ -52,7 +52,7 @@ describe('config secret redaction (#383)', () => {
         '}\n',
     );
 
-    cg = CodeGraph.initSync(tmpDir);
+    cg = HomeGraph.initSync(tmpDir);
     await cg.indexAll();
     handler = new ToolHandler(cg);
   });
@@ -81,8 +81,8 @@ describe('config secret redaction (#383)', () => {
     }
   });
 
-  it('codegraph_explore surfaces the config key but NEVER the secret value', async () => {
-    const res = await handler.execute('codegraph_explore', {
+  it('homegraph_explore surfaces the config key but NEVER the secret value', async () => {
+    const res = await handler.execute('homegraph_explore', {
       query: 'DataConfig dbPass apiKey spring.datasource.password app.api.key',
     });
     const text = res.content.map((c) => c.text).join('\n');
@@ -90,8 +90,8 @@ describe('config secret redaction (#383)', () => {
     expect(text).not.toContain(SECRET); // ...but the value is never dumped
   });
 
-  it('codegraph_node includeCode returns the key, not the secret value', async () => {
-    const res = await handler.execute('codegraph_node', {
+  it('homegraph_node includeCode returns the key, not the secret value', async () => {
+    const res = await handler.execute('homegraph_node', {
       symbol: 'spring.datasource.password',
       includeCode: true,
     });

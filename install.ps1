@@ -56,36 +56,4 @@ if (($userPath -split ';') -notcontains $binDir) {
 }
 
 Write-Host "Installed to $dest"
-# 5. Warn if a different homegraph earlier on PATH will shadow this install.
-# Most often a stale `npm i -g homegraph`, whose launcher keeps
-# running its own version-pinned bundle — so `homegraph --version` disagrees
-# with what we just installed (issue #1071). Check both the persisted PATH a
-# fresh shell sees (Machine + User) and this session's PATH (catches dirs a
-# shell profile injects, e.g. conda / npm).
-$expected = Join-Path $binDir 'homegraph.cmd'
-function Find-FirstCodegraph([string]$pathStr) {
-  foreach ($dir in ($pathStr -split ';')) {
-    if (-not $dir) { continue }
-    foreach ($leaf in @('homegraph.cmd', 'homegraph.exe', 'homegraph.bat', 'homegraph.ps1')) {
-      $cand = Join-Path $dir $leaf
-      if (Test-Path -LiteralPath $cand) { return $cand }
-    }
-  }
-  return $null
-}
-$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-$freshPath = ((@($machinePath, [Environment]::GetEnvironmentVariable('Path', 'User')) | Where-Object { $_ }) -join ';')
-$shadow = $null
-foreach ($winner in @((Find-FirstCodegraph $env:Path), (Find-FirstCodegraph $freshPath))) {
-  if ($winner -and ($winner -ne $expected)) { $shadow = $winner; break }
-}
-if ($shadow) {
-  Write-Warning "Another homegraph is earlier on your PATH and will run instead of this install:"
-  Write-Warning "  $shadow"
-  Write-Warning "  (this install: $expected)"
-  Write-Warning "If 'homegraph --version' shows an unexpected version, remove the other copy"
-  Write-Warning "(e.g. 'npm rm -g homegraph') or put '$binDir' first on your PATH."
-}
-
 Write-Host "Run: homegraph --help"
-

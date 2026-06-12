@@ -19,7 +19,7 @@ export type Location = 'global' | 'local';
  * lookup. New targets add a value here when they're added to the
  * registry. Keep these short and lowercase.
  */
-export type TargetId = 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes' | 'gemini' | 'antigravity' | 'kiro';
+export type TargetId = 'claude' | 'cursor' | 'codex' | 'opencode' | 'deveco' | 'codebuddy' | 'hermes' | 'gemini' | 'antigravity' | 'kiro';
 
 /**
  * Result of `target.detect(location)`.
@@ -30,7 +30,7 @@ export type TargetId = 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes' | '
  * acceptable (we still write); false negatives just mean the user
  * has to opt in manually.
  *
- * `alreadyConfigured` reports whether codegraph has already been
+ * `alreadyConfigured` reports whether homegraph has already been
  * wired into this target at this location — drives the
  * "Updated"-vs-"Added" log line and lets `--check` exit 0/1.
  */
@@ -70,7 +70,7 @@ export interface InstallOptions {
   autoAllow: boolean;
   /**
    * Front-load prompt hook (Claude `UserPromptSubmit`) that injects
-   * codegraph_explore context for structural prompts. `true` installs it,
+   * homegraph_explore context for structural prompts. `true` installs it,
    * `false` removes any prior install (so opt-out round-trips), `undefined`
    * leaves it untouched. Targets without a prompt-hook concept ignore it.
    */
@@ -104,7 +104,7 @@ export interface AgentTarget {
   uninstall(loc: Location): WriteResult;
   /**
    * Print the MCP-server snippet a user would paste manually for this
-   * target. Used by `codegraph install --print-config <id>` and by
+   * target. Used by `homegraph install --print-config <id>` and by
    * the README. Must NOT touch the filesystem.
    */
   printConfig(loc: Location): string;

@@ -134,57 +134,33 @@ homegraph uninit             # 删除当前项目的 .homegraph/ 索引
 ## 常用命令
 
 ```bash
-homegraph install              # 配置 AI 助手
-homegraph init -i [path]       # 初始化并索引项目
-homegraph index [path]         # 全量索引（--force 强制重建）
-homegraph sync [path]          # 增量同步变更
-homegraph status [path]        # 查看索引状态
-homegraph query <关键词>        # 搜索符号
-homegraph explore <查询>        # 探索区域（与 MCP homegraph_explore 相同输出）
-homegraph node <符号或文件>      # 读取符号/文件（与 MCP homegraph_node 相同输出）
-homegraph files                # 已索引文件树
-homegraph callers <符号>        # 谁调用了它
-homegraph callees <符号>        # 它调用了谁
-homegraph impact <符号>         # 修改该符号的影响范围
-homegraph affected [files...]  # 根据变更文件查找受影响的测试（支持 --stdin）
-homegraph spec mine            # 从 Git 历史挖掘规格知识图谱（Commit4Spec）
-homegraph spec match <文本>     # 搜索相似历史规格
-homegraph spec evolve install  # 安装 post-commit 钩子，提交后自动演化规格
-homegraph serve --mcp           # 启动 MCP 服务（一般由 Agent 自动拉起）
+homegraph install            # 配置 AI 助手
+homegraph init -i [path]     # 初始化并索引项目
+homegraph index [path]       # 全量索引（--force 强制重建）
+homegraph sync [path]        # 增量同步变更
+homegraph status [path]      # 查看索引状态
+homegraph query <关键词>      # 搜索符号
+homegraph callers <符号>      # 谁调用了它
+homegraph callees <符号>      # 它调用了谁
+homegraph impact <符号>       # 修改该符号的影响范围
+homegraph serve --mcp         # 启动 MCP 服务（一般由 Agent 自动拉起）
 ```
-
-`explore` / `node` 等命令与同名 MCP 工具共享同一套输出，适合没有 MCP 的子 Agent 或脚本直接调用。
 
 ---
 
 ## MCP 工具
 
-Agent 侧工具名前缀为 `homegraph_`。
-
-**暴露规则：** 默认注册全部工具。索引文件数 **少于 500** 的小项目会自动收缩为三个核心工具（`explore` / `search` / `node`）。可通过环境变量 `HOMEGRAPH_MCP_TOOLS`（逗号分隔短名，如 `explore,node`）自定义暴露列表。
-
-**跨项目查询：** 所有工具均支持可选参数 `projectPath`（绝对路径），用于在 monorepo 中查询子项目，或当 MCP 服务器根目录没有索引时指定目标项目。
+Agent 侧工具名前缀为 `homegraph_`：
 
 | 工具 | 用途 |
 |------|------|
-| `homegraph_explore` | **主工具**：一次调用返回相关符号的完整源码、调用路径与影响范围；支持自然语言问题或符号/文件名列表 |
-| `homegraph_search` | 按名称快速搜索符号（仅返回位置，不含源码） |
-| `homegraph_node` | 读取单个符号或整个文件的源码（带行号）及调用关系；可替代 Read 读文件 |
+| `homegraph_explore` | 主要工具：一次返回相关符号源码与调用关系 |
+| `homegraph_search` | 按名称快速定位符号 |
 | `homegraph_callers` / `homegraph_callees` | 查看调用方 / 被调用方 |
-| `homegraph_impact` | 变更影响分析（重构前使用） |
-| `homegraph_files` | 已索引的文件树（支持 glob 过滤、按语言分组） |
-| `homegraph_status` | 索引健康状态（调试用） |
-| `homegraph_spec_match` | 将新需求描述与 Commit4Spec 规格知识图谱做全文匹配，返回相似历史规格及关联提交与代码片段 |
-
-### Commit4Spec（规格知识图谱）
-
-`homegraph_spec_match` 与 `homegraph spec` 子命令基于 Commit4Spec：从 Git 历史中的 `.spec` 目录反向挖掘规格、提交与代码片段，存入 `.homegraph/commit4spec/commit4spec.db`。典型流程：
-
-```bash
-homegraph spec mine              # 首次挖掘
-homegraph spec match "用户登录"   # CLI 侧搜索（与 MCP spec_match 相同能力）
-homegraph spec evolve install    # 可选：每次 commit 后自动更新规格图谱
-```
+| `homegraph_impact` | 变更影响分析 |
+| `homegraph_node` | 单个符号的完整源码与上下文 |
+| `homegraph_files` | 已索引的文件结构 |
+| `homegraph_status` | 索引健康状态 |
 
 ---
 
@@ -192,7 +168,7 @@ homegraph spec evolve install    # 可选：每次 commit 后自动更新规格�
 
 继承上游多语言 tree-sitter 解析，包括但不限于：
 
-TypeScript / JavaScript、Python、Go、Rust、Java、C#、PHP、Ruby、C / C++、Objective-C、Swift、Kotlin、Scala、Dart、Lua、Luau、R、Svelte、Vue、Astro、Liquid、Razor、Pascal / Delphi 等。
+TypeScript / JavaScript、Python、Go、Rust、Java、C#、PHP、Ruby、C / C++、Objective-C、Swift、Kotlin、Scala、Dart、Lua、Luau、Svelte、Vue、Liquid、Pascal / Delphi 等。
 
 **HomeGraph 新增：**
 
@@ -259,7 +235,6 @@ Cursor 等项目级配置写入 `./.cursor/mcp.json`，格式相同。推荐使�
 
 - Node.js **22.5+**（推荐 22 LTS 或 24；使用 Node 内置 `node:sqlite`）
 - 首次索引时会对项目源码做 AST 解析，大型仓库首次 `init -i` 可能需要数分钟
-- WSL2 下若项目位于 Windows 盘符（`/mnt/c` 等）且 MCP 连接不稳定，可设置 `HOMEGRAPH_NO_DAEMON=1` 跳过共享后台服务，每个会话独立运行
 
 ---
 

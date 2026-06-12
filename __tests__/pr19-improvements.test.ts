@@ -252,7 +252,9 @@ export function funcB(): void { funcC(); }
 export function funcC(): void { console.log('c'); }
 `);
 
-    const cg = HomeGraph.initSync(testDir);
+    const cg = HomeGraph.initSync(testDir, {
+      config: { include: ['src/**/*.ts'], exclude: [] },
+    });
 
     await cg.indexAll();
     cg.resolveReferences();
@@ -297,7 +299,7 @@ describe('Best-Candidate Resolution', () => {
 describe('Schema v2 Migration', () => {
   it.skipIf(!HAS_SQLITE)('should have correct current schema version', async () => {
     const { CURRENT_SCHEMA_VERSION } = await import('../src/db/migrations');
-    expect(CURRENT_SCHEMA_VERSION).toBe(7);
+    expect(CURRENT_SCHEMA_VERSION).toBe(6);
   });
 
   it.skipIf(!HAS_SQLITE)('should have migration for version 2', async () => {
@@ -473,7 +475,9 @@ export function myFunc(): void {}
 export function otherFunc(): void { myFunc(); }
 `);
 
-    const cg = HomeGraph.initSync(testDir);
+    const cg = HomeGraph.initSync(testDir, {
+      config: { include: ['src/**/*.ts'], exclude: [] },
+    });
 
     await cg.indexAll();
 
@@ -557,7 +561,9 @@ export function getValue(): number { return 1; }
 export function getValueFromCache(): number { return 2; }
 `);
 
-      const cg = HomeGraph.initSync(tmpDir);
+      const cg = HomeGraph.initSync(tmpDir, {
+        config: { include: ['src/**/*.ts'], exclude: [] },
+      });
       await cg.indexAll();
 
       const handler = new ToolHandler(cg);
@@ -589,7 +595,9 @@ export function handle(): void {}
 export function handle(): void {}
 `);
 
-      const cg = HomeGraph.initSync(tmpDir);
+      const cg = HomeGraph.initSync(tmpDir, {
+        config: { include: ['src/**/*.ts'], exclude: [] },
+      });
       await cg.indexAll();
 
       const handler = new ToolHandler(cg);
@@ -616,7 +624,9 @@ export function handle(): void {}
       fs.mkdirSync(srcDir, { recursive: true });
       fs.writeFileSync(path.join(srcDir, 'a.ts'), `export function foo(): void {}`);
 
-      const cg = HomeGraph.initSync(tmpDir);
+      const cg = HomeGraph.initSync(tmpDir, {
+        config: { include: ['src/**/*.ts'], exclude: [] },
+      });
       await cg.indexAll();
 
       const handler = new ToolHandler(cg);
@@ -681,14 +691,6 @@ describe('Tree-sitter WASM Setup', () => {
 
     expect(pkg.dependencies['tree-sitter']).toBeUndefined();
     expect(pkg.overrides).toBeUndefined();
-  });
-
-  it('should ship arkanalyzer in production dependencies for ArkTS bundle support', () => {
-    const pkgPath = path.join(__dirname, '..', 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-
-    expect(pkg.dependencies['arkanalyzer']).toBeDefined();
-    expect(pkg.devDependencies?.['arkanalyzer']).toBeUndefined();
   });
 });
 
