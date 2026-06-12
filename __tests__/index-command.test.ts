@@ -1,6 +1,6 @@
 /**
- * Regression coverage for issue #874: `codegraph index` produced 0 nodes / 0
- * edges while `codegraph init` worked, and appeared to wipe the graph.
+ * Regression coverage for issue #874: `homegraph index` produced 0 nodes / 0
+ * edges while `homegraph init` worked, and appeared to wipe the graph.
  *
  * Root cause: `index` ran a full extraction against the already-populated DB
  * without clearing it first. Every file's content hash still matched, so the
@@ -18,21 +18,21 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { CodeGraph } from '../src';
+import { HomeGraph } from '../src';
 
-const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
+const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
 function runCodegraph(args: string[], cwd: string): string {
   return execFileSync(process.execPath, [BIN, ...args], {
     cwd,
     encoding: 'utf-8',
-    env: { ...process.env, CODEGRAPH_NO_DAEMON: '1' },
+    env: { ...process.env, HOMEGRAPH_NO_DAEMON: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
 function graphCounts(dir: string): { nodes: number; edges: number } {
-  const cg = CodeGraph.openSync(dir);
+  const cg = HomeGraph.openSync(dir);
   try {
     const stats = cg.getStats();
     return { nodes: stats.nodeCount, edges: stats.edgeCount };
@@ -41,11 +41,11 @@ function graphCounts(dir: string): { nodes: number; edges: number } {
   }
 }
 
-describe('codegraph index — full re-index keeps the graph populated (#874)', () => {
+describe('homegraph index — full re-index keeps the graph populated (#874)', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-index-cmd-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-index-cmd-'));
     // A couple of files with a call edge so there is a non-trivial graph to
     // (fail to) reproduce.
     fs.writeFileSync(

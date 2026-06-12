@@ -16,24 +16,24 @@
  *
  * We detect the marker at install time and write to the right path. On
  * uninstall we sweep BOTH — so a user who installed on the legacy path,
- * was then auto-migrated by Antigravity, and re-ran `codegraph install`
- * doesn't end up with stale codegraph entries in two files.
+ * was then auto-migrated by Antigravity, and re-ran `homegraph install`
+ * doesn't end up with stale homegraph entries in two files.
  *
  * ## Entry shape: no `type: stdio` field
  *
  * Antigravity rejects MCP entries that carry the `type: "stdio"` field
  * the rest of our targets use — the working entries it manages itself
  * (e.g. `code-review-graph`) omit it, and dropping it was load-bearing
- * to get codegraph to appear in the Customizations UI. We build the
+ * to get homegraph to appear in the Customizations UI. We build the
  * entry locally instead of routing through `getMcpServerConfig()`.
  *
  * ## macOS GUI app PATH resolution
  *
  * Antigravity is a GUI Electron app. macOS gives Dock/Finder-launched
  * apps a stripped PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) — nvm-managed
- * tools live outside that, so a bare `codegraph` command fails to spawn
- * even when `which codegraph` resolves in the user's shell. We resolve
- * `codegraph` to its absolute path on macOS at install time. (Linux GUI
+ * tools live outside that, so a bare `homegraph` command fails to spawn
+ * even when `which homegraph` resolves in the user's shell. We resolve
+ * `homegraph` to its absolute path on macOS at install time. (Linux GUI
  * apps inherit user PATH; Windows uses `PATH` env directly — both are
  * fine with the bare command.)
  *
@@ -43,7 +43,7 @@
  * — written by the `./gemini.ts` target. We deliberately don't touch it
  * here so uninstalling Antigravity without uninstalling Gemini CLI
  * leaves CLI instructions intact. Users who install only Antigravity
- * still get a working MCP integration; the prefer-codegraph-over-grep
+ * still get a working MCP integration; the prefer-homegraph-over-grep
  * guidance just won't be present unless they also install the gemini
  * target.
  *
@@ -103,9 +103,9 @@ function preferredMcpConfigPath(): string {
 }
 
 /**
- * Resolve the on-disk path of the `codegraph` binary so a Mac GUI app
+ * Resolve the on-disk path of the `homegraph` binary so a Mac GUI app
  * launched from Dock/Finder (with a stripped PATH) can find it. Falls
- * back to the bare `codegraph` name when:
+ * back to the bare `homegraph` name when:
  *
  *  - we're not on macOS (Linux GUI apps inherit user PATH; Windows
  *    uses env PATH directly), OR
@@ -118,9 +118,9 @@ function preferredMcpConfigPath(): string {
  * nvm-managed tools like ours.
  */
 function resolveCodegraphCommand(): string {
-  if (process.platform !== 'darwin') return 'codegraph';
+  if (process.platform !== 'darwin') return 'homegraph';
   try {
-    const resolved = execSync('command -v codegraph || which codegraph', {
+    const resolved = execSync('command -v homegraph || which homegraph', {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       shell: '/bin/bash',
@@ -130,11 +130,11 @@ function resolveCodegraphCommand(): string {
   } catch {
     /* fall through to bare name */
   }
-  return 'codegraph';
+  return 'homegraph';
 }
 
 /**
- * Build the codegraph MCP-server entry for Antigravity. Distinct from
+ * Build the homegraph MCP-server entry for Antigravity. Distinct from
  * `getMcpServerConfig()` because Antigravity (a) rejects the `type`
  * field and (b) needs an absolute command path on macOS — see file
  * header.
@@ -161,7 +161,7 @@ class AntigravityTarget implements AgentTarget {
     }
     const file = preferredMcpConfigPath();
     const config = readJsonFile(file);
-    const alreadyConfigured = !!config.mcpServers?.codegraph;
+    const alreadyConfigured = !!config.mcpServers?.homegraph;
     // "Installed" heuristic: either the unified config dir, the legacy
     // config dir, or one of the config files exists. Antigravity creates
     // ~/.gemini/ on first launch even before MCP configs.
@@ -183,7 +183,7 @@ class AntigravityTarget implements AgentTarget {
     files.push(writeMcpEntry());
     // If the user originally installed on the legacy path and Antigravity
     // has since migrated, strip the stale legacy entry so they don't
-    // wind up with two competing codegraph configs.
+    // wind up with two competing homegraph configs.
     const legacyCleanup = cleanupLegacyEntry();
     if (legacyCleanup) files.push(legacyCleanup);
     return {
@@ -201,7 +201,7 @@ class AntigravityTarget implements AgentTarget {
     files.push(removeCodegraphFromFile(preferred));
 
     // Also sweep the OTHER path (legacy when preferred is unified, and
-    // vice versa) — handles the migration-half-state case where codegraph
+    // vice versa) — handles the migration-half-state case where homegraph
     // got written to one file but Antigravity now reads from the other.
     const other = preferred === unifiedMcpConfigPath()
       ? legacyMcpConfigPath()
@@ -221,7 +221,7 @@ class AntigravityTarget implements AgentTarget {
       return '# Antigravity IDE has no project-local config — use --location=global.\n';
     }
     const file = preferredMcpConfigPath();
-    const snippet = JSON.stringify({ mcpServers: { codegraph: buildAntigravityEntry() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { homegraph: buildAntigravityEntry() } }, null, 2);
     return `# Add to ${file}\n\n${snippet}\n`;
   }
 
@@ -237,7 +237,7 @@ function writeMcpEntry(): WriteResult['files'][number] {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
   const existing = readJsonFile(file);
-  const before = existing.mcpServers?.codegraph;
+  const before = existing.mcpServers?.homegraph;
   const after = buildAntigravityEntry();
 
   if (jsonDeepEqual(before, after)) {
@@ -246,15 +246,15 @@ function writeMcpEntry(): WriteResult['files'][number] {
   const action: 'created' | 'updated' =
     before ? 'updated' : (fs.existsSync(file) ? 'updated' : 'created');
   if (!existing.mcpServers) existing.mcpServers = {};
-  existing.mcpServers.codegraph = after;
+  existing.mcpServers.homegraph = after;
   writeJsonFile(file, existing);
   return { path: file, action };
 }
 
 /**
- * Strip the codegraph entry from the legacy `~/.gemini/antigravity/mcp_config.json`
+ * Strip the homegraph entry from the legacy `~/.gemini/antigravity/mcp_config.json`
  * if it's present AND we're writing to the unified path. Used by install
- * to migrate users who had codegraph configured on the legacy path
+ * to migrate users who had homegraph configured on the legacy path
  * before Antigravity migrated their config. Returns the file action for
  * reporting, or `null` when there's nothing to clean up.
  */
@@ -263,8 +263,8 @@ function cleanupLegacyEntry(): WriteResult['files'][number] | null {
   const legacy = legacyMcpConfigPath();
   if (!fs.existsSync(legacy)) return null;
   const config = readJsonFile(legacy);
-  if (!config.mcpServers?.codegraph) return null;
-  delete config.mcpServers.codegraph;
+  if (!config.mcpServers?.homegraph) return null;
+  delete config.mcpServers.homegraph;
   if (Object.keys(config.mcpServers).length === 0) {
     delete config.mcpServers;
   }
@@ -275,8 +275,8 @@ function cleanupLegacyEntry(): WriteResult['files'][number] | null {
 function removeCodegraphFromFile(file: string): WriteResult['files'][number] {
   if (!fs.existsSync(file)) return { path: file, action: 'not-found' };
   const config = readJsonFile(file);
-  if (!config.mcpServers?.codegraph) return { path: file, action: 'not-found' };
-  delete config.mcpServers.codegraph;
+  if (!config.mcpServers?.homegraph) return { path: file, action: 'not-found' };
+  delete config.mcpServers.homegraph;
   if (Object.keys(config.mcpServers).length === 0) {
     delete config.mcpServers;
   }

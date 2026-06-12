@@ -2,7 +2,7 @@
  * OpenAI Codex CLI target.
  *
  *   - MCP server entry to `~/.codex/config.toml` as the dotted-key
- *     table `[mcp_servers.codegraph]`. TOML — not JSON — handled by
+ *     table `[mcp_servers.homegraph]`. TOML — not JSON — handled by
  *     the narrow serializer in `./toml.ts`.
  *   - Instructions to `~/.codex/AGENTS.md`.
  *
@@ -31,12 +31,12 @@ import {
   upsertInstructionsEntry,
 } from './shared';
 import {
-  CODEGRAPH_SECTION_END,
-  CODEGRAPH_SECTION_START,
+  HOMEGRAPH_SECTION_END,
+  HOMEGRAPH_SECTION_START,
 } from '../instructions-template';
 import { buildTomlTable, removeTomlTable, upsertTomlTable } from './toml';
 
-const TOML_HEADER = 'mcp_servers.codegraph';
+const TOML_HEADER = 'mcp_servers.homegraph';
 
 function configDir(): string {
   return path.join(os.homedir(), '.codex');
@@ -84,7 +84,7 @@ class CodexTarget implements AgentTarget {
 
     files.push(writeMcpEntry());
 
-    // AGENTS.md gets the short marker-fenced CodeGraph block (#704):
+    // AGENTS.md gets the short marker-fenced HomeGraph block (#704):
     // subagents and non-MCP harnesses read AGENTS.md but never the MCP
     // initialize instructions. Upsert self-heals a stale pre-#529 block.
     files.push(upsertInstructionsEntry(instructionsPath()));
@@ -162,13 +162,13 @@ function writeMcpEntry(): WriteResult['files'][number] {
 }
 
 /**
- * Strip the marker-delimited CodeGraph block from `~/.codex/AGENTS.md`
+ * Strip the marker-delimited HomeGraph block from `~/.codex/AGENTS.md`
  * if a prior install wrote one. Used by both install (self-heal on
  * upgrade) and uninstall — see issue #529.
  */
 function removeInstructionsEntry(): WriteResult['files'][number] {
   const file = instructionsPath();
-  const action = removeMarkedSection(file, CODEGRAPH_SECTION_START, CODEGRAPH_SECTION_END);
+  const action = removeMarkedSection(file, HOMEGRAPH_SECTION_START, HOMEGRAPH_SECTION_END);
   return { path: file, action };
 }
 

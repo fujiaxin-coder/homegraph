@@ -32,7 +32,7 @@
  * (off-thread) and indexing shells out to a child process, so the daemon's main
  * thread only ever does fast, bounded work. The default timeout is ~300× the
  * 5h #850 wedge shorter, yet far longer than any legitimate main-thread block.
- * Opt out with `CODEGRAPH_NO_WATCHDOG=1`; tune with `CODEGRAPH_WATCHDOG_TIMEOUT_MS`.
+ * Opt out with `HOMEGRAPH_NO_WATCHDOG=1`; tune with `HOMEGRAPH_WATCHDOG_TIMEOUT_MS`.
  */
 import * as fs from 'fs';
 import * as os from 'os';
@@ -64,8 +64,8 @@ export function deriveCheckIntervalMs(timeoutMs: number): number {
 
 /** Arming/teardown diagnostics, gated on the existing MCP debug switch. */
 function debug(msg: string): void {
-  if (process.env.CODEGRAPH_MCP_DEBUG) {
-    try { fs.writeSync(2, `[CodeGraph watchdog] ${msg}\n`); } catch { /* ignore */ }
+  if (process.env.HOMEGRAPH_MCP_DEBUG) {
+    try { fs.writeSync(2, `[HomeGraph watchdog] ${msg}\n`); } catch { /* ignore */ }
   }
 }
 
@@ -86,7 +86,7 @@ const fs = require('fs');
 const parentPid = Number(process.argv[1]);
 const timeoutMs = Number(process.argv[2]);
 const secs = Math.round(timeoutMs / 1000);
-const MSG = Buffer.from('[CodeGraph] Main thread unresponsive for ~' + secs + 's — killing the wedged process so a fresh one can start (#850). Disable with CODEGRAPH_NO_WATCHDOG=1.\\n');
+const MSG = Buffer.from('[HomeGraph] Main thread unresponsive for ~' + secs + 's — killing the wedged process so a fresh one can start (#850). Disable with HOMEGRAPH_NO_WATCHDOG=1.\\n');
 function kill() {
   try { fs.writeSync(2, MSG); } catch (e) {}
   try { process.kill(parentPid, 'SIGKILL'); } catch (e) {}
@@ -106,9 +106,9 @@ process.stdin.resume();
  * starting).
  */
 export function installMainThreadWatchdog(): WatchdogHandle | null {
-  if (isEnvTruthy(process.env.CODEGRAPH_NO_WATCHDOG)) return null;
+  if (isEnvTruthy(process.env.HOMEGRAPH_NO_WATCHDOG)) return null;
 
-  const timeoutMs = parseWatchdogTimeoutMs(process.env.CODEGRAPH_WATCHDOG_TIMEOUT_MS);
+  const timeoutMs = parseWatchdogTimeoutMs(process.env.HOMEGRAPH_WATCHDOG_TIMEOUT_MS);
   const checkMs = deriveCheckIntervalMs(timeoutMs);
 
   let child: ChildProcess;

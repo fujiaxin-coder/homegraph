@@ -8,14 +8,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import CodeGraph from '../src/index';
+import HomeGraph from '../src/index';
 
 describe('Context Builder', () => {
   let testDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(async () => {
-    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-context-test-'));
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-context-test-'));
 
     // Create a sample codebase
     const srcDir = path.join(testDir, 'src');
@@ -135,8 +135,8 @@ export function validateEmail(email: string): boolean {
 `
     );
 
-    // Initialize CodeGraph
-    cg = CodeGraph.initSync(testDir, {
+    // Initialize HomeGraph
+    cg = HomeGraph.initSync(testDir, {
       config: {
         include: ['**/*.ts'],
         exclude: [],
