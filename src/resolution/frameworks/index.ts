@@ -27,6 +27,8 @@ import { swiftObjcBridgeResolver } from './swift-objc';
 import { reactNativeBridgeResolver } from './react-native';
 import { expoModulesResolver } from './expo-modules';
 import { fabricViewResolver } from './fabric';
+import { arktsNapiResolver } from './arkts-napi';
+import { arktsEntryResolver } from './arkts-entry';
 
 /**
  * All registered framework resolvers
@@ -70,6 +72,10 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   expoModulesResolver,
   // React Native Fabric / Codegen view components — TS spec → component nodes
   fabricViewResolver,
+  // ArkTS ↔ C++ NAPI bridge
+  arktsNapiResolver,
+  // ArkTS module.json5 pages + loadContent startup wiring
+  arktsEntryResolver,
 ];
 
 /**
@@ -146,3 +152,4 @@ export { swiftObjcBridgeResolver } from './swift-objc';
 export { reactNativeBridgeResolver } from './react-native';
 export { expoModulesResolver } from './expo-modules';
 export { fabricViewResolver } from './fabric';
+export { arktsNapiResolver } from './arkts-napi';
