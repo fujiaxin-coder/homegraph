@@ -1,0 +1,6 @@
+result*.jsonl
+*-scored.jsonl
+agent-*.log
+eval_metrics.log
+eval.log
+report*.txt
