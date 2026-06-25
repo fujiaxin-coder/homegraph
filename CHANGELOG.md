@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- **DevEco Code:** `homegraph install` now writes the global MCP config to `~/.config/deveco` on every platform, including Windows. Earlier versions put it under `%APPDATA%\deveco`, which DevEco Code never reads — so a global install could look successful while DevEco saw no MCP server. Re-run `homegraph install --target=deveco --location=global` to fix an existing setup; stale entries under the old location are cleaned up automatically.
 
 ## [1.1.1] - 2026-06-24
 

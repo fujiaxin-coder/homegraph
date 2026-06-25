@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,6 +23,82 @@ TIME_FMT = "%Y-%m-%d %H:%M:%S.%f"
 HOST_CLAUDE = "claude-code"
 HOST_DEVECO = "deveco-code"
 SUPPORTED_HOSTS = (HOST_CLAUDE, HOST_DEVECO)
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+
+
+def _extract_deveco_json_errors(text: str) -> str | None:
+    """Parse deveco --format json error lines into a short message."""
+    messages: list[str] = []
+    for line in _strip_ansi(text).splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") != "error":
+            continue
+        err = ev.get("error") or {}
+        data = err.get("data") or {}
+        msg = data.get("message") or err.get("message") or err.get("name")
+        if msg and msg not in messages:
+            messages.append(str(msg))
+    if not messages:
+        return None
+    return "; ".join(messages)
+
+
+def _cli_error_summary(stderr: str, stdout: str, *, max_len: int = 400) -> str:
+    """Pick a short user-facing error from CLI stderr/stdout."""
+    for raw in (stderr, stdout):
+        deveco_err = _extract_deveco_json_errors(raw)
+        if deveco_err:
+            return deveco_err[:max_len]
+    for raw in (stderr, stdout):
+        clean = _strip_ansi(raw).strip()
+        if not clean:
+            continue
+        for line in clean.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("error:"):
+                continue
+            if len(line) > 20:
+                return line[:max_len]
+        if clean:
+            return clean[:max_len]
+    return ""
+
+
+def auth_failure_reason(text: str) -> str | None:
+    """Return a user-facing reason if output looks like an auth/login failure."""
+    t = _strip_ansi(text or "").lower()
+    if any(h in t for h in ("not logged in", "please run /login")) or (
+        "/login" in t and "run" in t
+    ):
+        return "Claude Code 未登录，请先运行: claude login"
+    if "credentials cannot be decrypted" in t or "saved provider credentials are unavailable" in t:
+        return (
+            "DevEco Code 本地凭证无法解密。请运行: deveco providers reset，"
+            "然后在 TUI 中重新配置模型，或执行 deveco providers login"
+        )
+    if "deveco providers reset" in t or "deveco auth reset" in t:
+        return (
+            "DevEco Code 未配置或凭证无效。请运行: deveco providers reset，"
+            "然后重新登录/配置 provider"
+        )
+    if "model not found" in t:
+        return (
+            "DevEco 模型名无效。deveco 需要 provider/model 格式（如 zhipuai/glm-4.5-flash），"
+            "可用 `deveco models` 查看；勿把 Judge 的 --model 直接传给 deveco"
+        )
+        return "API Key 无效"
+    if "authentication required" in t or "unauthorized" in t:
+        return "未授权，请检查登录或 API Key"
+    return None
 
 
 def _log_line(log_file: Path | None, msg: str) -> None:
@@ -55,6 +132,19 @@ def find_deveco_cli() -> str:
             return found
     raise FileNotFoundError(
         "未找到 DevEco Code / opencode CLI。请安装 DevEco Code 或 opencode 并加入 PATH。"
+    )
+
+
+def _popen_capture(cmd: list[str], *, cwd: str) -> subprocess.Popen:
+    """Run CLI with UTF-8 stdout/stderr (Windows default locale is often GBK)."""
+    return subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -117,6 +207,16 @@ def parse_claude_stream_json(raw: str) -> dict[str, Any]:
 
     answer = "\n".join(answer_parts).strip()
     output = "\n\n".join(tool_trace + ([answer] if answer else []))
+    auth_err = auth_failure_reason(answer) or auth_failure_reason(raw)
+    if auth_err:
+        return {
+            "output_answer": output,
+            "agent_status": "error",
+            "agent_error": auth_err,
+            "agent_turns": max_turn,
+            "agent_duration_ms": duration_ms,
+            "agent_usage": {"total_tokens": total_tokens} if total_tokens else {},
+        }
     return {
         "output_answer": output,
         "agent_status": "success" if answer else "error",
@@ -171,6 +271,16 @@ def parse_opencode_json_events(raw: str) -> dict[str, Any]:
 
     answer = "\n".join(answer_parts).strip()
     output = "\n\n".join(tool_trace + ([answer] if answer else []))
+    auth_err = auth_failure_reason(answer) or auth_failure_reason(raw)
+    if auth_err:
+        return {
+            "output_answer": output,
+            "agent_status": "error",
+            "agent_error": auth_err,
+            "agent_turns": max_turn,
+            "agent_duration_ms": duration_ms,
+            "agent_usage": {"total_tokens": total_tokens} if total_tokens else {},
+        }
     return {
         "output_answer": output,
         "agent_status": "success" if answer else "error",
@@ -178,6 +288,22 @@ def parse_opencode_json_events(raw: str) -> dict[str, Any]:
         "agent_duration_ms": duration_ms,
         "agent_usage": {"total_tokens": total_tokens} if total_tokens else {},
     }
+
+
+def verify_claude_login() -> None:
+    """Fail fast before burning the whole dataset on 'Not logged in'."""
+    claude = find_claude_cli()
+    proc = subprocess.run(
+        [claude, "-p", "ping", "--output-format", "text", "--max-turns", "1"],
+        capture_output=True,
+        text=True,
+        timeout=45,
+        cwd=os.getcwd(),
+    )
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    reason = auth_failure_reason(combined)
+    if reason:
+        raise RuntimeError(f"{reason}\n（探测输出: {combined.strip()[:200]}）")
 
 
 def run_claude_query(
@@ -223,20 +349,14 @@ def run_claude_query(
         _log_line(log_file, "the 1 turn")
         t0 = time.time()
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(repo),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        proc = _popen_capture(cmd, cwd=str(repo))
         with sample_memory(proc.pid) as sampler:
             try:
                 stdout, stderr = proc.communicate(timeout=timeout_sec)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 stdout, stderr = proc.communicate()
-                mem = sampler.last_stats  # type: ignore[attr-defined]
+                mem = sampler.last_stats
                 _log_memory(log_file, mem)
                 return {
                     "output_answer": "",
@@ -245,9 +365,9 @@ def run_claude_query(
                     "agent_backend": backend,
                     "agent_memory_mb": mem,
                 }
-        mem = sampler.last_stats  # type: ignore[attr-defined]
+        mem = sampler.last_stats
 
-        if proc.returncode != 0 and not stdout.strip():
+        if proc.returncode != 0 and not (stdout or "").strip():
             _log_memory(log_file, mem)
             return {
                 "output_answer": (stderr or "")[:2000],
@@ -258,7 +378,19 @@ def run_claude_query(
             }
 
         _log_line(log_file, "first token")
-        parsed = parse_claude_stream_json(stdout)
+        combined = f"{stdout}\n{stderr}"
+        auth_err = auth_failure_reason(combined)
+        if auth_err:
+            _log_memory(log_file, mem)
+            return {
+                "output_answer": (stdout or stderr or "")[:2000],
+                "agent_status": "error",
+                "agent_error": auth_err,
+                "agent_backend": backend,
+                "agent_host": HOST_CLAUDE,
+                "agent_memory_mb": mem,
+            }
+        parsed = parse_claude_stream_json(stdout or "")
         tokens = (parsed.get("agent_usage") or {}).get("total_tokens") or 0
         if tokens:
             _log_line(log_file, f"totalTokenCount = {tokens}")
@@ -275,6 +407,34 @@ def run_claude_query(
         }
 
 
+def _deveco_project_config_dir(repo: Path) -> Path:
+    """Project-level deveco config (read before ~/.config/deveco/deveco.jsonc)."""
+    return repo / ".deveco"
+
+
+def _write_deveco_project_mcp(repo: Path, *, arm: str, hg_bin: str) -> Path:
+    """Write repo/.deveco/deveco.jsonc for MCP only; credentials stay in ~/.config/deveco."""
+    config_dir = _deveco_project_config_dir(repo)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "deveco.jsonc"
+    if arm == "with":
+        cmd, base_args = _split_hg_bin(hg_bin)
+        body = {
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {
+                "homegraph": {
+                    "type": "local",
+                    "command": [cmd, *base_args, "--path", str(repo.resolve())],
+                    "enabled": True,
+                }
+            },
+        }
+    else:
+        body = {"$schema": "https://opencode.ai/config.json", "mcp": {}}
+    config_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    return config_path
+
+
 def run_deveco_query(
     repo: Path,
     query: str,
@@ -289,33 +449,7 @@ def run_deveco_query(
     cli = find_deveco_cli()
     backend = f"deveco-code-{'with' if arm == 'with' else 'without'}-homegraph"
 
-    config_dir = repo / ".qa_eval_deveco"
-    config_dir.mkdir(exist_ok=True)
-    config_path = config_dir / "opencode.jsonc"
-    if arm == "with":
-        cmd, base_args = _split_hg_bin(hg_bin)
-        config_path.write_text(
-            json.dumps(
-                {
-                    "$schema": "https://opencode.ai/config.json",
-                    "mcp": {
-                        "homegraph": {
-                            "type": "local",
-                            "command": [cmd, *base_args, "--path", str(repo.resolve())],
-                            "enabled": True,
-                        }
-                    },
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-    else:
-        config_path.write_text(
-            '{"$schema":"https://opencode.ai/config.json","mcp":{}}\n',
-            encoding="utf-8",
-        )
+    _write_deveco_project_mcp(repo, arm=arm, hg_bin=hg_bin)
 
     run_cmd = [
         cli,
@@ -334,21 +468,14 @@ def run_deveco_query(
     _log_line(log_file, "the 1 turn")
     t0 = time.time()
 
-    proc = subprocess.Popen(
-        run_cmd,
-        cwd=str(repo),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env={**os.environ, "XDG_CONFIG_HOME": str(config_dir)},
-    )
+    proc = _popen_capture(run_cmd, cwd=str(repo))
     with sample_memory(proc.pid) as sampler:
         try:
             stdout, stderr = proc.communicate(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             proc.kill()
             stdout, stderr = proc.communicate()
-            mem = sampler.last_stats  # type: ignore[attr-defined]
+            mem = sampler.last_stats
             _log_memory(log_file, mem)
             return {
                 "output_answer": "",
@@ -357,20 +484,27 @@ def run_deveco_query(
                 "agent_backend": backend,
                 "agent_memory_mb": mem,
             }
-    mem = sampler.last_stats  # type: ignore[attr-defined]
+    mem = sampler.last_stats
+    combined = f"{stdout or ''}\n{stderr or ''}"
 
-    if proc.returncode != 0 and not stdout.strip():
+    if proc.returncode != 0:
+        auth_err = auth_failure_reason(combined)
+        detail = auth_err or _cli_error_summary(stderr, stdout)
+        err_msg = detail or f"{cli} exit {proc.returncode}"
         _log_memory(log_file, mem)
         return {
-            "output_answer": (stderr or stdout or "")[:2000],
+            "output_answer": _strip_ansi(stderr or stdout or "")[:2000],
             "agent_status": "error",
-            "agent_error": f"{cli} exit {proc.returncode}",
+            "agent_error": err_msg,
             "agent_backend": backend,
+            "agent_host": HOST_DEVECO,
             "agent_memory_mb": mem,
         }
 
     _log_line(log_file, "first token")
-    parsed = parse_opencode_json_events(stdout if stdout.strip() else stderr)
+    out = (stdout or "").strip()
+    err = (stderr or "").strip()
+    parsed = parse_opencode_json_events(out if out else err)
     tokens = (parsed.get("agent_usage") or {}).get("total_tokens") or 0
     if tokens:
         _log_line(log_file, f"totalTokenCount = {tokens}")
@@ -401,7 +535,7 @@ def run_external_dataset(
     if host not in SUPPORTED_HOSTS:
         raise ValueError(f"unknown agent host: {host}")
 
-    from agent_runner import find_homegraph_bin, require_index
+    from agent_runner import find_homegraph_bin, print_agent_progress, require_index, _arm_short
 
     if arm == "with":
         require_index(repo)
@@ -411,23 +545,42 @@ def run_external_dataset(
     if log_file:
         log_file.write_text("", encoding="utf-8")
 
-    runner = run_claude_query if host == HOST_CLAUDE else run_deveco_query
     results: list[dict[str, Any]] = []
+    total = len(dataset)
+    print(f"  → [{host}] {_arm_short(arm)} 臂：共 {total} 题", flush=True)
 
+    auth_abort: str | None = None
     with output.open("w", encoding="utf-8") as f:
         for i, item in enumerate(dataset, 1):
+            if auth_abort:
+                meta = {
+                    "output_answer": "",
+                    "agent_status": "error",
+                    "agent_error": auth_abort,
+                    "agent_backend": f"{host}-{arm}",
+                    "agent_host": host,
+                }
+                print_agent_progress(arm, i, total, str(item.get("id") or i), f"跳过: {auth_abort[:80]}")
+                row = {**item, **meta}
+                results.append(row)
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                f.flush()
+                continue
             q = str(item["query"])
-            logger.info("[%s/%s] %s/%s %s", host, arm, i, len(dataset), item.get("id"))
+            item_id = str(item.get("id") or i)
+            print_agent_progress(arm, i, total, item_id, f"[{host}] 开始…")
+            logger.info("[%s/%s] %s/%s %s", host, arm, i, total, item_id)
             try:
-                meta = runner(
-                    repo,
-                    q,
+                common = dict(
                     arm=arm,
                     hg_bin=hg,
                     log_file=log_file,
                     task_id=i,
-                    model=model,
                 )
+                if host == HOST_CLAUDE:
+                    meta = run_claude_query(repo, q, **common)
+                else:
+                    meta = run_deveco_query(repo, q, model=model, **common)
             except Exception as e:
                 logger.error("External agent failed %s: %s", item.get("id"), e)
                 meta = {
@@ -441,4 +594,21 @@ def run_external_dataset(
             results.append(row)
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
+            if meta.get("agent_status") == "success":
+                dur_ms = meta.get("agent_duration_ms")
+                dur_s = f"{dur_ms / 1000:.1f}s" if isinstance(dur_ms, (int, float)) else "?"
+                print_agent_progress(arm, i, total, item_id, f"[{host}] 完成 ({dur_s})")
+            else:
+                err = str(meta.get("agent_error") or meta.get("agent_status") or "error")
+                print_agent_progress(arm, i, total, item_id, f"[{host}] 失败: {err[:100]}")
+                if i == 1 and meta.get("agent_error") and (
+                    "未登录" in str(meta["agent_error"])
+                    or "DevEco Code" in str(meta["agent_error"])
+                    or "DevEco 模型" in str(meta["agent_error"])
+                    or "Model not found" in str(meta["agent_error"])
+                ):
+                    auth_abort = str(meta["agent_error"])
+                    print(f"\n  ✗ {auth_abort} — 后续题目跳过", flush=True)
+    ok = sum(1 for r in results if r.get("agent_status") == "success")
+    print(f"  → [{host}] {_arm_short(arm)} 臂结束：{ok}/{total} 成功", flush=True)
     return results

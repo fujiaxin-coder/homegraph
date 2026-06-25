@@ -95,6 +95,7 @@ class MyAnswerAccuracy:
     client: AsyncOpenAI
     model: str
     retry: int = 5
+    extra_body: dict | None = None
 
     @classmethod
     def create(
@@ -104,17 +105,20 @@ class MyAnswerAccuracy:
         base_url: str,
         model: str,
         timeout_sec: float = 1800,
+        extra_body: dict | None = None,
     ) -> MyAnswerAccuracy:
         client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout_sec)
-        return cls(client=client, model=model)
+        return cls(client=client, model=model, extra_body=extra_body)
 
     async def _chat(self, prompt: str) -> str:
-        resp = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.10,
-            extra_body={"enable_thinking": False},
-        )
+        kwargs: dict = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.10,
+        }
+        if self.extra_body:
+            kwargs["extra_body"] = self.extra_body
+        resp = await self.client.chat.completions.create(**kwargs)
         return (resp.choices[0].message.content or "").strip()
 
     async def _rate(self, prompt: str) -> float:
