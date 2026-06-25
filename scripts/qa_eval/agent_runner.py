@@ -25,6 +25,27 @@ logger = logging.getLogger(__name__)
 TIME_FMT = "%Y-%m-%d %H:%M:%S.%f"
 
 
+def _arm_short(arm: str) -> str:
+    return "WITH" if arm == "with" else "WITHOUT"
+
+
+def print_agent_progress(
+    arm: str,
+    index: int,
+    total: int,
+    item_id: str,
+    message: str,
+    *,
+    indent: int = 0,
+) -> None:
+    prefix = "  " * indent
+    print(f"{prefix}[{_arm_short(arm)} {index}/{total}] {item_id} — {message}", flush=True)
+
+
+def print_agent_turn(task_id: int, turn: int, max_turns: int, message: str = "请求 LLM…") -> None:
+    print(f"      · 第 {turn}/{max_turns} 轮 {message}", flush=True)
+
+
 def _log_line(log_file: Path | None, msg: str) -> None:
     if log_file is None:
         return
@@ -310,6 +331,7 @@ def run_agent_on_query(
     task_id: int = 1,
     max_turns: int = 8,
     timeout_sec: int = 600,
+    extra_body: dict | None = None,
 ) -> dict[str, Any]:
     if OpenAI is None:
         raise RuntimeError("pip install openai")
@@ -341,13 +363,16 @@ def run_agent_on_query(
     with sample_memory() as mem_sampler:
         for turn in range(1, max_turns + 1):
             _log_line(log_file, f"the {turn} turn")
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                temperature=0.2,
-                extra_body={"enable_thinking": False},
-            )
+            print_agent_turn(task_id, turn, max_turns)
+            create_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "temperature": 0.2,
+            }
+            if extra_body:
+                create_kwargs["extra_body"] = extra_body
+            resp = client.chat.completions.create(**create_kwargs)
             if turn == 1:
                 _log_line(log_file, "first token")
             if resp.usage:
@@ -356,6 +381,8 @@ def run_agent_on_query(
 
             msg = resp.choices[0].message
             if msg.tool_calls:
+                names = ", ".join(tc.function.name for tc in msg.tool_calls)
+                print_agent_turn(task_id, turn, max_turns, f"工具: {names}")
                 messages.append(msg.model_dump())
                 for tc in msg.tool_calls:
                     fn = tc.function
@@ -380,7 +407,7 @@ def run_agent_on_query(
             trace_text = "\n\n".join(tool_trace)
             output = f"{trace_text}\n\n{answer}" if trace_text else answer
             usage = resp.usage
-            mem = mem_sampler.last_stats  # type: ignore[attr-defined]
+            mem = mem_sampler.last_stats
             _log_memory(log_file, mem)
             meta: dict[str, Any] = {
                 "output_answer": output,
@@ -403,7 +430,7 @@ def run_agent_on_query(
                 meta["agent_error"] = "empty final answer"
             return meta
 
-    mem = mem_sampler.last_stats  # type: ignore[attr-defined]
+    mem = mem_sampler.last_stats
     _log_memory(log_file, mem)
     return {
         "output_answer": "\n\n".join(tool_trace),
@@ -429,6 +456,7 @@ def run_agent_dataset(
     model: str,
     hg_bin: str,
     max_turns: int = 8,
+    extra_body: dict | None = None,
 ) -> list[dict[str, Any]]:
     if arm == "with":
         require_index(repo)
@@ -438,10 +466,15 @@ def run_agent_dataset(
         log_file.write_text("", encoding="utf-8")
 
     results: list[dict[str, Any]] = []
+    auth_failed = False
+    total = len(dataset)
+    print(f"  → {_arm_short(arm)} 臂：共 {total} 题", flush=True)
     with output.open("w", encoding="utf-8") as f:
         for i, item in enumerate(dataset, 1):
             q = str(item["query"])
-            logger.info("[%s] %s/%s %s", arm, i, len(dataset), item.get("id"))
+            item_id = str(item.get("id") or i)
+            print_agent_progress(arm, i, total, item_id, "开始…")
+            logger.info("[%s] %s/%s %s", arm, i, total, item_id)
             try:
                 agent_meta = run_agent_on_query(
                     repo,
@@ -454,17 +487,40 @@ def run_agent_dataset(
                     log_file=log_file,
                     task_id=i,
                     max_turns=max_turns,
+                    extra_body=extra_body,
                 )
             except Exception as e:
+                err = str(e)
                 logger.error("Agent failed %s: %s", item.get("id"), e)
+                if "401" in err or "invalid_api_key" in err or "Incorrect API key" in err:
+                    auth_failed = True
                 agent_meta = {
                     "output_answer": "",
                     "agent_status": "error",
-                    "agent_error": str(e),
+                    "agent_error": err,
                     "agent_backend": "agent-with-homegraph" if arm == "with" else "agent-grep-read",
                 }
             row = {**item, **agent_meta}
             results.append(row)
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
+            if agent_meta.get("agent_status") == "success":
+                turns = agent_meta.get("agent_turns", "?")
+                dur_ms = agent_meta.get("agent_duration_ms")
+                dur_s = f"{dur_ms / 1000:.1f}s" if isinstance(dur_ms, (int, float)) else "?"
+                print_agent_progress(arm, i, total, item_id, f"完成 ({turns} 轮, {dur_s})")
+            else:
+                err = str(agent_meta.get("agent_error") or agent_meta.get("agent_status") or "error")
+                print_agent_progress(arm, i, total, item_id, f"失败: {err[:100]}")
+            if auth_failed:
+                raise RuntimeError(
+                    "LLM API 鉴权失败 (401)。智谱 Key 请用:\n"
+                    "  export ZHIPU_API_KEY='your-id.your-secret'\n"
+                    "  python scripts/qa_eval/run_pipeline.py ab --provider zhipu\n"
+                    "DashScope Key 请用:\n"
+                    "  export DASHSCOPE_API_KEY='sk-...'\n"
+                    "  python scripts/qa_eval/run_pipeline.py ab --provider dashscope"
+                ) from None
+    ok = sum(1 for r in results if r.get("agent_status") == "success")
+    print(f"  → {_arm_short(arm)} 臂结束：{ok}/{total} 成功", flush=True)
     return results

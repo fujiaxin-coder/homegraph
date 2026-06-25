@@ -1,6 +1,4 @@
-result*.jsonl
-*-scored.jsonl
-agent-*.log
-eval_metrics.log
-eval.log
-report*.txt
+# test-set.jsonl tracked; reports + other artifacts stay local.
+*
+!.gitignore
+!test-set.jsonl

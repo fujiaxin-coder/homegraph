@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
+from contextlib import contextmanager
 from statistics import mean
+
+_PROC_AVAILABLE = sys.platform == "linux" and os.path.isdir("/proc")
+
+
+def memory_sampling_supported() -> bool:
+    """True when process-tree RSS sampling is available (Linux /proc)."""
+    return _PROC_AVAILABLE
 
 
 def _read_rss_kb(pid: int) -> int:
+    if not _PROC_AVAILABLE:
+        return 0
     try:
         with open(f"/proc/{pid}/status", encoding="utf-8") as f:
             for line in f:
@@ -21,7 +32,13 @@ def _read_rss_kb(pid: int) -> int:
 
 def _build_ppid_map() -> dict[int, list[int]]:
     children: dict[int, list[int]] = {}
-    for name in os.listdir("/proc"):
+    if not _PROC_AVAILABLE:
+        return children
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return children
+    for name in proc_entries:
         if not name.isdigit():
             continue
         pid = int(name)
@@ -70,18 +87,23 @@ class MemorySampler:
         self._root_pid = root_pid if root_pid is not None else os.getpid()
         self._samples_kb = []
         self._stop.clear()
+        if not _PROC_AVAILABLE:
+            self._thread = None
+            return
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            self._samples_kb.append(tree_rss_kb(self._root_pid))
+            try:
+                self._samples_kb.append(tree_rss_kb(self._root_pid))
+            except OSError:
+                break
             self._stop.wait(self.interval_sec)
 
-    def stop(self) -> dict[str, float | None]:
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=2.0)
+    @property
+    def last_stats(self) -> dict[str, float | None]:
+        """Peak/avg RSS so far (safe to read while sampling is active)."""
         if not self._samples_kb:
             return {"peak_rss_mb": None, "avg_rss_mb": None}
         peak_kb = max(self._samples_kb)
@@ -91,8 +113,11 @@ class MemorySampler:
             "avg_rss_mb": round(avg_kb / 1024, 2),
         }
 
-
-from contextlib import contextmanager
+    def stop(self) -> dict[str, float | None]:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+        return self.last_stats
 
 
 @contextmanager
@@ -104,4 +129,4 @@ def sample_memory(root_pid: int | None = None):
     try:
         yield sampler
     finally:
-        sampler.last_stats = sampler.stop()  # type: ignore[attr-defined]
+        sampler.stop()

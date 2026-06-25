@@ -4,9 +4,11 @@ QA Eval A/B 一条龙：Agent 跑题 → Judge 打分 → 完整对比报告。
 
 Usage:
   export DASHSCOPE_API_KEY=sk-...
-  python scripts/qa_eval/run_pipeline.py ab
+  # 或智谱: export ZHIPU_API_KEY='id.secret'
+  python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo
+  python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo --provider zhipu
 
-  # 只重打报告、不重跑 Agent/Judge：
+  # 只重打报告、不重跑 Agent/Judge（无需 --repo）：
   python scripts/qa_eval/run_pipeline.py ab --no-agent --no-judge
 """
 
@@ -25,39 +27,64 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = _SCRIPT_DIR / "data"
-DEFAULT_REPORT = DATA_DIR / "report.txt"
-DEFAULT_REPO = Path("/home/fujiaxin/code/benchmark")
-DEFAULT_DATASET = DATA_DIR / "test.jsonl"
+LOG_DIR = _SCRIPT_DIR / "log"
+DEFAULT_REPORT = DATA_DIR / "report-builtin.txt"
+DEFAULT_DATASET = DATA_DIR / "test-set.jsonl"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "qwen3-235b-a22b-instruct-2507"
-AGENT_HOST_BUILTIN = "builtin"
-ALL_AGENT_HOSTS = (AGENT_HOST_BUILTIN, HOST_CLAUDE, HOST_DEVECO)
-
-
-def host_tag(agent_host: str) -> str:
-    return "" if agent_host == AGENT_HOST_BUILTIN else f"-{agent_host}"
-
-
-def paths_for_host(data_dir: Path, agent_host: str) -> dict[str, Path]:
-    tag = host_tag(agent_host)
-    return {
-        "with_jsonl": data_dir / f"result-with{tag}.jsonl",
-        "without_jsonl": data_dir / f"result-without{tag}.jsonl",
-        "with_scored": data_dir / f"result-with{tag}-scored.jsonl",
-        "without_scored": data_dir / f"result-without{tag}-scored.jsonl",
-        "with_log": data_dir / f"agent-with{tag}.log",
-        "without_log": data_dir / f"agent-without{tag}.log",
-        "report": data_dir / f"report{tag}.txt",
-    }
 
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from agent_runner import run_agent_dataset  # noqa: E402
-from external_agent import HOST_CLAUDE, HOST_DEVECO, SUPPORTED_HOSTS, run_external_dataset  # noqa: E402
+from external_agent import HOST_CLAUDE, HOST_DEVECO, SUPPORTED_HOSTS, run_external_dataset, verify_claude_login  # noqa: E402
+from llm_config import PROVIDER_DASHSCOPE, PROVIDER_ZHIPU, provider_help, resolve_llm_config  # noqa: E402
 from my_answer_accuracy import extract_json_blocks_answerbyCOT, remove_tool_calls  # noqa: E402
 from stats_efficiency import parse_agent_log, summarize_jsonl_usage, summarize_tasks  # noqa: E402
 from stats_scores import compute_stats_from_rows, print_statistics  # noqa: E402
+
+AGENT_HOST_BUILTIN = "builtin"
+ALL_AGENT_HOSTS = (AGENT_HOST_BUILTIN, HOST_CLAUDE, HOST_DEVECO)
+
+# 各宿主产出文件后缀 → report-builtin.txt / report-claude.txt / report-deveco.txt
+HOST_FILE_SUFFIX: dict[str, str] = {
+    AGENT_HOST_BUILTIN: "builtin",
+    HOST_CLAUDE: "claude",
+    HOST_DEVECO: "deveco",
+}
+
+
+def require_repo_arg(repo: str | None, *, no_agent: bool) -> Path | None:
+    """Return resolved repo path; required unless --no-agent (report-only)."""
+    if no_agent:
+        return Path(repo).expanduser().resolve() if repo else None
+    if not repo:
+        print("错误: 请指定被测仓库路径 --repo / -r（跑 Agent 时必填）")
+        return None
+    path = Path(repo).expanduser().resolve()
+    if not path.is_dir():
+        print(f"错误: 仓库不存在: {path}")
+        return None
+    return path
+
+
+def host_tag(agent_host: str) -> str:
+    suffix = HOST_FILE_SUFFIX.get(agent_host, agent_host.replace("-code", ""))
+    return f"-{suffix}"
+
+
+def paths_for_host(agent_host: str, *, log_dir: Path = LOG_DIR, data_dir: Path = DATA_DIR) -> dict[str, Path]:
+    tag = host_tag(agent_host)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "with_jsonl": log_dir / f"result-with{tag}.jsonl",
+        "without_jsonl": log_dir / f"result-without{tag}.jsonl",
+        "with_scored": log_dir / f"result-with{tag}-scored.jsonl",
+        "without_scored": log_dir / f"result-without{tag}-scored.jsonl",
+        "with_log": log_dir / f"agent-with{tag}.log",
+        "without_log": log_dir / f"agent-without{tag}.log",
+        "report": data_dir / f"report{tag}.txt",
+    }
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -103,13 +130,18 @@ def row_tokens(row: dict) -> int | None:
 
 
 def resolve_api_key() -> str | None:
-    return os.environ.get("DASHSCOPE_API_KEY", "").strip() or os.environ.get("OPENAI_API_KEY", "").strip() or None
+    try:
+        return resolve_llm_config(provider=os.environ.get("QA_EVAL_PROVIDER")).api_key
+    except RuntimeError:
+        return None
 
 
-def run_judge(agent_jsonl: Path, scored_jsonl: Path, *, workers: int, model: str) -> int:
+def run_judge(agent_jsonl: Path, scored_jsonl: Path, *, workers: int, llm) -> int:
     if not agent_jsonl.is_file():
         print(f"错误: Agent 产出不存在，无法 Judge: {agent_jsonl}")
         return 1
+    n = sum(1 for line in agent_jsonl.open(encoding="utf-8") if line.strip())
+    print(f"\n>>> Judge ({llm.provider})：{agent_jsonl.name}，共 {n} 条", flush=True)
     cmd = [
         sys.executable,
         str(_SCRIPT_DIR / "eval_metrics.py"),
@@ -120,14 +152,18 @@ def run_judge(agent_jsonl: Path, scored_jsonl: Path, *, workers: int, model: str
         "-w",
         str(workers),
         "-m",
-        model,
+        llm.model,
+        "--base-url",
+        llm.base_url,
+        "--provider",
+        llm.provider,
     ]
     print(f"\n>>> {' '.join(cmd)}\n")
     return subprocess.call(cmd)
 
 
-def run_judge_if_needed(agent_jsonl: Path, scored_jsonl: Path, *, workers: int, model: str) -> int:
-    return run_judge(agent_jsonl, scored_jsonl, workers=workers, model=model)
+def run_judge_if_needed(agent_jsonl: Path, scored_jsonl: Path, *, workers: int, llm) -> int:
+    return run_judge(agent_jsonl, scored_jsonl, workers=workers, llm=llm)
 
 
 def print_category_table(rows_with: list[dict], rows_without: list[dict]) -> None:
@@ -357,12 +393,13 @@ def run_agent_stage(
     without_jsonl: Path,
     with_log: Path | None,
     without_log: Path | None,
-    api_key: str,
-    base_url: str,
-    model: str,
+    llm,
     hg_bin: str | None,
     max_turns: int,
+    deveco_model: str | None = None,
 ) -> None:
+    if agent_host == HOST_CLAUDE:
+        verify_claude_login()
     for arm, out, log in (
         ("with", with_jsonl, with_log),
         ("without", without_jsonl, without_log),
@@ -376,11 +413,12 @@ def run_agent_stage(
                 arm=arm,
                 output=out,
                 log_file=log,
-                api_key=api_key,
-                base_url=base_url,
-                model=model,
+                api_key=llm.api_key,
+                base_url=llm.base_url,
+                model=llm.model,
                 hg_bin=hg_bin,
                 max_turns=max_turns,
+                extra_body=llm.extra_body,
             )
         else:
             run_external_dataset(
@@ -391,7 +429,7 @@ def run_agent_stage(
                 output=out,
                 log_file=log,
                 hg_bin=hg_bin or "",
-                model=model if agent_host == HOST_DEVECO else None,
+                model=deveco_model if agent_host == HOST_DEVECO else None,
             )
 
 
@@ -400,7 +438,7 @@ def cmd_ab(args: argparse.Namespace) -> int:
         return cmd_hosts(args)
 
     agent_host = args.agent_host
-    paths = paths_for_host(DATA_DIR, agent_host)
+    paths = paths_for_host(agent_host)
     if args.with_scored:
         with_scored = Path(args.with_scored)
     else:
@@ -419,31 +457,36 @@ def cmd_ab(args: argparse.Namespace) -> int:
         without_jsonl = paths["without_jsonl"]
     with_log = Path(args.with_log) if args.with_log else paths["with_log"]
     without_log = Path(args.without_log) if args.without_log else paths["without_log"]
-    repo = Path(args.repo).expanduser().resolve()
+    repo = require_repo_arg(getattr(args, "repo", None), no_agent=args.no_agent)
+    if repo is None and not args.no_agent:
+        return 1
     dataset_path = Path(args.dataset).expanduser().resolve()
 
+    try:
+        llm = resolve_llm_config(
+            provider=getattr(args, "provider", None),
+            model=getattr(args, "model", None),
+            base_url=getattr(args, "base_url", None),
+        )
+    except RuntimeError as e:
+        print(f"错误: {e}")
+        return 1
+
     if not args.no_agent:
-        if agent_host == AGENT_HOST_BUILTIN:
-            api_key = resolve_api_key()
-            if not api_key:
-                print("错误: builtin Agent 需要 API Key\n  export DASHSCOPE_API_KEY=sk-...")
-                return 1
-        else:
-            api_key = resolve_api_key() or ""
         if not dataset_path.is_file():
             print(f"错误: 测试集不存在: {dataset_path}")
-            return 1
-        if not repo.is_dir():
-            print(f"错误: 仓库不存在: {repo}")
             return 1
 
         dataset = load_jsonl(dataset_path)
         print("=" * 60)
         print(f"Stage 1 — Agent 跑题 ({len(dataset)} 条)  host={agent_host}")
+        print(f"  LLM    : {llm.provider}")
         print(f"  仓库   : {repo}")
         print(f"  测试集 : {dataset_path}")
+        print(f"  报告   : {paths['report']}")
         print("=" * 60)
 
+        assert repo is not None
         run_agent_stage(
             agent_host=agent_host,
             repo=repo,
@@ -452,24 +495,19 @@ def cmd_ab(args: argparse.Namespace) -> int:
             without_jsonl=without_jsonl,
             with_log=with_log,
             without_log=without_log,
-            api_key=api_key or "",
-            base_url=args.base_url,
-            model=args.model,
+            llm=llm,
             hg_bin=args.homegraph_bin,
             max_turns=args.max_turns,
+            deveco_model=getattr(args, "deveco_model", None),
         )
 
     if not args.no_judge:
-        api_key = resolve_api_key()
-        if not api_key:
-            print("错误: Judge 需要 DASHSCOPE_API_KEY")
-            return 1
         print("\n" + "=" * 60)
-        print("Stage 2 — Judge 打分")
+        print(f"Stage 2 — Judge 打分 ({llm.provider})")
         print("=" * 60)
-        if run_judge(with_jsonl, with_scored, workers=args.workers, model=args.model) != 0:
+        if run_judge(with_jsonl, with_scored, workers=args.workers, llm=llm) != 0:
             return 1
-        if run_judge(without_jsonl, without_scored, workers=args.workers, model=args.model) != 0:
+        if run_judge(without_jsonl, without_scored, workers=args.workers, llm=llm) != 0:
             return 1
 
     if not with_scored.is_file() or not without_scored.is_file():
@@ -508,20 +546,21 @@ def cmd_ab(args: argparse.Namespace) -> int:
 def cmd_score(args: argparse.Namespace) -> int:
     input_jsonl = Path(args.input)
     scored = Path(args.scored) if args.scored else input_jsonl.with_name(input_jsonl.stem + "-scored.jsonl")
-    rc = subprocess.call(
-        [
-            sys.executable,
-            str(_SCRIPT_DIR / "eval_metrics.py"),
-            "-i",
-            str(input_jsonl),
-            "-o",
-            str(scored),
-            "-w",
-            str(args.workers),
-            "-m",
-            args.model,
-        ]
-    )
+    cmd = [
+        sys.executable,
+        str(_SCRIPT_DIR / "eval_metrics.py"),
+        "-i",
+        str(input_jsonl),
+        "-o",
+        str(scored),
+        "-w",
+        str(args.workers),
+    ]
+    if getattr(args, "provider", None):
+        cmd.extend(["--provider", args.provider])
+    if args.model:
+        cmd.extend(["-m", args.model])
+    rc = subprocess.call(cmd)
     if rc != 0:
         return rc
     rows = load_jsonl(scored)
@@ -533,6 +572,10 @@ def cmd_score(args: argparse.Namespace) -> int:
 
 def cmd_hosts(args: argparse.Namespace) -> int:
     """Run full A/B for each Agent host (builtin, claude-code, deveco-code)."""
+    repo = require_repo_arg(getattr(args, "repo", None), no_agent=args.no_agent)
+    if repo is None and not args.no_agent:
+        return 1
+
     hosts_raw = getattr(args, "agent_hosts", None) or ",".join(ALL_AGENT_HOSTS)
     hosts = [h.strip() for h in hosts_raw.split(",") if h.strip()]
     unknown = [h for h in hosts if h not in ALL_AGENT_HOSTS]
@@ -555,6 +598,7 @@ def cmd_hosts(args: argparse.Namespace) -> int:
             with_log=None,
             without_log=None,
             workers=args.workers,
+            provider=getattr(args, "provider", None),
             model=args.model,
             base_url=args.base_url,
             homegraph_bin=args.homegraph_bin,
@@ -563,9 +607,17 @@ def cmd_hosts(args: argparse.Namespace) -> int:
             no_judge=args.no_judge,
             report=None,
             agent_host=host,
+            deveco_model=getattr(args, "deveco_model", None),
         )
         if cmd_ab(host_args) != 0:
             rc = 1
+    if rc == 0:
+        print("\n" + "=" * 60)
+        print("全部宿主跑完，报告文件：")
+        for host in hosts:
+            p = paths_for_host(host)["report"]
+            print(f"  {host}: {p}")
+        print("=" * 60)
     return rc
 
 
@@ -574,7 +626,12 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_ab = sub.add_parser("ab", help="一条龙：Agent → Judge → 完整报告（默认会更新全部数据）")
-    p_ab.add_argument("--repo", "-r", default=str(DEFAULT_REPO))
+    p_ab.add_argument(
+        "--repo",
+        "-r",
+        default=None,
+        help="被测仓库绝对路径（跑 Agent 时必填；仅 --no-agent 重打报告时可省略）",
+    )
     p_ab.add_argument("--dataset", "-d", default=str(DEFAULT_DATASET))
     p_ab.add_argument(
         "--agent-host",
@@ -589,27 +646,45 @@ def main() -> int:
     p_ab.add_argument("--with-log", default=None)
     p_ab.add_argument("--without-log", default=None)
     p_ab.add_argument("--workers", "-w", type=int, default=1)
-    p_ab.add_argument("--model", "-m", default=DEFAULT_MODEL)
-    p_ab.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    p_ab.add_argument(
+        "--provider",
+        choices=[PROVIDER_DASHSCOPE, PROVIDER_ZHIPU],
+        default=None,
+        help=provider_help(),
+    )
+    p_ab.add_argument("--model", "-m", default=None, help="LLM 模型（默认随 provider）")
+    p_ab.add_argument("--base-url", default=None, help="OpenAI 兼容 API 端点（默认随 provider）")
     p_ab.add_argument("--homegraph-bin", default=None)
     p_ab.add_argument("--max-turns", type=int, default=8, help="Agent 最多工具轮次")
+    p_ab.add_argument(
+        "--deveco-model",
+        default=None,
+        help="DevEco Agent 模型（provider/model，如 zhipuai/glm-4.5-flash）；默认用 DevEco 自身配置，不用 --model",
+    )
     p_ab.add_argument("--no-agent", action="store_true", help="不跑 Agent，沿用已有 JSONL")
     p_ab.add_argument("--no-judge", action="store_true", help="不跑 Judge，沿用已有 scored")
     p_ab.add_argument(
         "--report",
         default=None,
-        help="A/B 完整报告输出路径（默认 data/report[-host].txt）",
+        help="A/B 完整报告输出路径（默认 data/report-{host}.txt，如 report-deveco.txt）",
     )
     p_ab.set_defaults(func=cmd_ab)
 
     p_hosts = sub.add_parser("hosts", help="依次跑 builtin + claude-code + deveco-code 的 A/B")
-    p_hosts.add_argument("--repo", "-r", default=str(DEFAULT_REPO))
+    p_hosts.add_argument(
+        "--repo",
+        "-r",
+        default=None,
+        help="被测仓库绝对路径（跑 Agent 时必填；仅 --no-agent 重打报告时可省略）",
+    )
     p_hosts.add_argument("--dataset", "-d", default=str(DEFAULT_DATASET))
     p_hosts.add_argument("--workers", "-w", type=int, default=1)
-    p_hosts.add_argument("--model", "-m", default=DEFAULT_MODEL)
-    p_hosts.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    p_hosts.add_argument("--provider", choices=[PROVIDER_DASHSCOPE, PROVIDER_ZHIPU], default=None)
+    p_hosts.add_argument("--model", "-m", default=None)
+    p_hosts.add_argument("--base-url", default=None)
     p_hosts.add_argument("--homegraph-bin", default=None)
     p_hosts.add_argument("--max-turns", type=int, default=8)
+    p_hosts.add_argument("--deveco-model", default=None)
     p_hosts.add_argument("--no-agent", action="store_true")
     p_hosts.add_argument("--no-judge", action="store_true")
     p_hosts.add_argument(
@@ -624,7 +699,8 @@ def main() -> int:
     p_score.add_argument("--scored", "-o", default=None)
     p_score.add_argument("--log", "-l", default=None)
     p_score.add_argument("--workers", "-w", type=int, default=1)
-    p_score.add_argument("--model", "-m", default="qwen3-235b-a22b-instruct-2507")
+    p_score.add_argument("--provider", choices=[PROVIDER_DASHSCOPE, PROVIDER_ZHIPU], default=None)
+    p_score.add_argument("--model", "-m", default=None)
     p_score.set_defaults(func=cmd_score)
 
     args = parser.parse_args()

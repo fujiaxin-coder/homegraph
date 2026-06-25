@@ -1679,3 +1679,113 @@ describe('Installer targets — opencode XDG config path (#535)', () => {
     expect(opencode.detect('global').alreadyConfigured).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// deveco global config path — XDG on every platform (same as opencode #535)
+// ---------------------------------------------------------------------------
+describe('Installer targets — deveco XDG config path', () => {
+  let tmpHome: string;
+  let tmpCwd: string;
+  let origCwd: string;
+  let homeRestore: { restore: () => void };
+  let appDataDir: string;
+
+  beforeEach(() => {
+    tmpHome = mkTmpDir('home');
+    tmpCwd = mkTmpDir('cwd');
+    origCwd = process.cwd();
+    process.chdir(tmpCwd);
+    homeRestore = setHome(tmpHome);
+    appDataDir = path.join(tmpHome, 'AppData', 'Roaming');
+    process.env.APPDATA = appDataDir;
+    delete process.env.XDG_CONFIG_HOME;
+  });
+
+  afterEach(() => {
+    homeRestore.restore();
+    process.chdir(origCwd);
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpCwd, { recursive: true, force: true });
+  });
+
+  const xdgConfigFile = () => path.join(tmpHome, '.config', 'deveco', 'deveco.jsonc');
+  const legacyDir = () => path.join(appDataDir, 'deveco');
+  const inLegacyDir = (p: string) => path.resolve(p).startsWith(path.resolve(legacyDir()) + path.sep);
+
+  it('global install writes to ~/.config/deveco, never %APPDATA%', () => {
+    const deveco = getTarget('deveco')!;
+    const result = deveco.install('global', { autoAllow: true });
+
+    const written = result.files.find((f) => f.path.endsWith('deveco.jsonc'))!;
+    expect(written.action).toBe('created');
+    expect(path.resolve(written.path)).toBe(path.resolve(xdgConfigFile()));
+    expect(fs.existsSync(xdgConfigFile())).toBe(true);
+    expect(fs.existsSync(legacyDir())).toBe(false);
+  });
+
+  it('greenfield: targets ~/.config/deveco even when the dir does not exist yet', () => {
+    expect(fs.existsSync(path.join(tmpHome, '.config', 'deveco'))).toBe(false);
+    const deveco = getTarget('deveco')!;
+    const result = deveco.install('global', { autoAllow: true });
+    expect(path.resolve(result.files[0]!.path)).toBe(path.resolve(xdgConfigFile()));
+    expect(fs.existsSync(xdgConfigFile())).toBe(true);
+    expect(fs.existsSync(legacyDir())).toBe(false);
+  });
+
+  it('honors XDG_CONFIG_HOME for the global path', () => {
+    const custom = path.join(tmpHome, 'xdg-custom');
+    process.env.XDG_CONFIG_HOME = custom;
+    const deveco = getTarget('deveco')!;
+    const result = deveco.install('global', { autoAllow: true });
+    expect(path.resolve(result.files[0]!.path))
+      .toBe(path.resolve(path.join(custom, 'deveco', 'deveco.jsonc')));
+  });
+
+  it('install self-heals a legacy %APPDATA% entry, preserving siblings and comments', () => {
+    fs.mkdirSync(legacyDir(), { recursive: true });
+    fs.writeFileSync(path.join(legacyDir(), 'deveco.jsonc'), [
+      '{',
+      '  // my servers',
+      '  "$schema": "https://opencode.ai/config.json",',
+      '  "mcp": {',
+      '    "homegraph": { "type": "local", "command": ["homegraph", "serve", "--mcp", "--path", "${workspaceFolder}"], "enabled": true },',
+      '    "other": { "type": "local", "command": ["other"], "enabled": true }',
+      '  }',
+      '}',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(legacyDir(), 'AGENTS.md'), LEGACY_BLOCK + '\n');
+
+    const deveco = getTarget('deveco')!;
+    const result = deveco.install('global', { autoAllow: true });
+
+    expect(fs.existsSync(xdgConfigFile())).toBe(true);
+    const legacyText = fs.readFileSync(path.join(legacyDir(), 'deveco.jsonc'), 'utf-8');
+    expect(legacyText).not.toContain('homegraph');
+    expect(legacyText).toContain('"other"');
+    expect(legacyText).toContain('// my servers');
+    expect(fs.existsSync(path.join(legacyDir(), 'AGENTS.md'))).toBe(false);
+    const removed = result.files.filter((f) => f.action === 'removed').map((f) => f.path);
+    expect(removed.some((p) => inLegacyDir(p) && p.endsWith('deveco.jsonc'))).toBe(true);
+    expect(removed.some((p) => inLegacyDir(p) && p.endsWith('AGENTS.md'))).toBe(true);
+  });
+
+  it('uninstall sweeps the legacy %APPDATA% entry too', () => {
+    fs.mkdirSync(legacyDir(), { recursive: true });
+    fs.writeFileSync(path.join(legacyDir(), 'deveco.json'),
+      '{\n  "mcp": {\n    "homegraph": { "type": "local", "command": ["homegraph", "serve", "--mcp", "--path", "${workspaceFolder}"], "enabled": true }\n  }\n}\n');
+
+    const deveco = getTarget('deveco')!;
+    const result = deveco.uninstall('global');
+
+    expect(fs.readFileSync(path.join(legacyDir(), 'deveco.json'), 'utf-8')).not.toContain('homegraph');
+    expect(result.files.some((f) => f.action === 'removed' && inLegacyDir(f.path))).toBe(true);
+  });
+
+  it('detects deveco as installed from a legacy-only %APPDATA% dir', () => {
+    fs.mkdirSync(legacyDir(), { recursive: true });
+    const deveco = getTarget('deveco')!;
+    expect(deveco.detect('global').installed).toBe(true);
+    expect(deveco.detect('global').alreadyConfigured).toBe(false);
+  });
+});
