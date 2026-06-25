@@ -18,11 +18,75 @@ from memory_monitor import sample_memory
 
 logger = logging.getLogger(__name__)
 
+_QA_EVAL_DIR = Path(__file__).resolve().parent
+
 TIME_FMT = "%Y-%m-%d %H:%M:%S.%f"
 
 HOST_CLAUDE = "claude-code"
 HOST_DEVECO = "deveco-code"
 SUPPORTED_HOSTS = (HOST_CLAUDE, HOST_DEVECO)
+
+# DevEco / opencode MCP tool names (server "homegraph" may prefix once or twice).
+_HOMEGRAPH_TOOL_RE = re.compile(r"homegraph(?:_homegraph)?_(?:explore|node|search|callers|callees)", re.I)
+
+
+def trace_tool_names(output_answer: str) -> list[str]:
+    return re.findall(r"---\n([^\n]+)\n", str(output_answer or ""))
+
+
+def is_homegraph_tool(name: str) -> bool:
+    n = str(name or "").strip()
+    if not n:
+        return False
+    if _HOMEGRAPH_TOOL_RE.search(n):
+        return True
+    return n.lower() in ("homegraph_explore", "homegraph_node")
+
+
+def output_used_homegraph(output_answer: str) -> bool:
+    return any(is_homegraph_tool(n) for n in trace_tool_names(output_answer))
+
+
+def _tools_from_session_export(raw: str) -> list[str]:
+    tools: list[str] = []
+    try:
+        data = json.loads(raw.strip())
+    except json.JSONDecodeError:
+        return tools
+    if not isinstance(data, dict):
+        return tools
+    for msg in data.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        for part in msg.get("parts") or []:
+            if not isinstance(part, dict) or part.get("type") != "tool":
+                continue
+            t = part.get("tool")
+            if t:
+                tools.append(str(t))
+    return tools
+
+
+def _deveco_with_query(query: str) -> str:
+    return (
+        "【homegraph 评测臂】请优先用 MCP 工具 homegraph_explore（query 用原问题里的符号名，"
+        "如 getColorString）；只回答题目问的那一个定义所在文件，不要列举其它同名函数。"
+        "若 homegraph 结果不足，再用 grep/read 补充。"
+        f"问题：{query}"
+    )
+
+
+_DEVECO_WITH_AGENT_PROMPT = (
+    "你是鸿蒙 ArkTS 代码仓库问答 Agent（homegraph 评测臂）。"
+    "回答代码定位/理解问题时，优先调用 MCP 工具 homegraph_explore；"
+    "仅当 homegraph 查不到或信息不够时，再用 grep/read/glob。"
+    "基于仓库事实作答，中文简洁准确。"
+)
+
+_DEVECO_WITHOUT_AGENT_PROMPT = (
+    "你是鸿蒙 ArkTS 代码仓库问答 Agent（baseline 臂，无 homegraph）。"
+    "用 grep、read 等内置工具探索仓库后作答，中文简洁准确。"
+)
 
 
 def _strip_ansi(text: str) -> str:
@@ -232,6 +296,22 @@ def parse_opencode_json_events(raw: str) -> dict[str, Any]:
     total_tokens = 0
     max_turn = 0
     duration_ms = 0
+    session_id = ""
+    stream_errors: list[str] = []
+
+    def note_session(ev: dict[str, Any], part: dict[str, Any]) -> None:
+        nonlocal session_id
+        sid = ev.get("sessionID") or ev.get("sessionId") or part.get("sessionID") or part.get("sessionId")
+        if sid:
+            session_id = str(sid)
+
+    def append_tool(name: str, inp: Any, outp: Any = "") -> None:
+        payload = json.dumps(inp, ensure_ascii=False)[:500] if inp else ""
+        block = f"---\n{name}\nargs: {payload}\n---"
+        if outp:
+            out_s = str(outp)
+            block = f"---\n{name}\nargs: {payload}\noutput: {out_s[:800]}\n---"
+        tool_trace.append(block)
 
     for line in raw.splitlines():
         line = line.strip()
@@ -243,7 +323,50 @@ def parse_opencode_json_events(raw: str) -> dict[str, Any]:
             continue
 
         ev_type = ev.get("type") or ev.get("event")
-        if ev_type in ("message", "assistant", "text"):
+        part = ev.get("part") if isinstance(ev.get("part"), dict) else {}
+        part_type = part.get("type") or ""
+        note_session(ev, part)
+
+        if ev_type == "error":
+            err = ev.get("error") or {}
+            data = err.get("data") or {}
+            msg = data.get("message") or err.get("message") or err.get("name")
+            if msg:
+                stream_errors.append(str(msg))
+
+        if ev_type == "text" and part.get("text"):
+            text = str(part["text"]).strip()
+            if text:
+                answer_parts.append(text)
+                max_turn += 1
+        elif ev_type == "text" and ev.get("text"):
+            text = str(ev["text"]).strip()
+            if text:
+                answer_parts.append(text)
+                max_turn += 1
+
+        if ev_type == "tool_use":
+            max_turn += 1
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            name = part.get("tool") or part.get("name") or "?"
+            append_tool(str(name), state.get("input") or part.get("input"), state.get("output"))
+        elif ev_type in ("tool", "tool_call") or part_type in (
+            "tool",
+            "tool-invocation",
+            "tool_use",
+            "tool-call",
+        ):
+            max_turn += 1
+            name = part.get("tool") or part.get("name") or ev.get("tool") or "?"
+            inp = part.get("input") or part.get("args") or part.get("state") or ev.get("input") or {}
+            if isinstance(inp, dict) and "input" in inp:
+                outp = inp.get("output")
+                inp = inp.get("input") or inp
+            else:
+                outp = ""
+            append_tool(str(name), inp, outp)
+
+        if ev_type in ("message", "assistant"):
             content = ev.get("content") or ev.get("text") or ev.get("message")
             if isinstance(content, str) and content.strip():
                 answer_parts.append(content.strip())
@@ -255,9 +378,9 @@ def parse_opencode_json_events(raw: str) -> dict[str, Any]:
                         if block.get("type") == "text" and block.get("text"):
                             answer_parts.append(str(block["text"]))
                         if block.get("type") == "tool_use":
-                            tool_trace.append(
-                                f"---\n{block.get('name', '?')}\n"
-                                f"args: {json.dumps(block.get('input') or {}, ensure_ascii=False)[:500]}\n---"
+                            append_tool(
+                                str(block.get("name", "?")),
+                                block.get("input") or {},
                             )
 
         usage = ev.get("usage") or ev.get("tokens")
@@ -266,28 +389,168 @@ def parse_opencode_json_events(raw: str) -> dict[str, Any]:
             if total:
                 total_tokens = max(total_tokens, int(total))
 
+        if ev_type == "step_finish":
+            tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+            step_total = tokens.get("total") or tokens.get("total_tokens")
+            if step_total:
+                total_tokens = max(total_tokens, int(step_total))
+
         if ev.get("duration_ms"):
             duration_ms = max(duration_ms, int(ev["duration_ms"]))
 
+        part_time = part.get("time") if isinstance(part.get("time"), dict) else {}
+        if part_time.get("start") and part_time.get("end"):
+            duration_ms = max(duration_ms, int(part_time["end"]) - int(part_time["start"]))
+
     answer = "\n".join(answer_parts).strip()
     output = "\n\n".join(tool_trace + ([answer] if answer else []))
-    auth_err = auth_failure_reason(answer) or auth_failure_reason(raw)
-    if auth_err:
-        return {
-            "output_answer": output,
-            "agent_status": "error",
-            "agent_error": auth_err,
-            "agent_turns": max_turn,
-            "agent_duration_ms": duration_ms,
-            "agent_usage": {"total_tokens": total_tokens} if total_tokens else {},
-        }
-    return {
+    base = {
         "output_answer": output,
-        "agent_status": "success" if answer else "error",
         "agent_turns": max_turn,
         "agent_duration_ms": duration_ms,
         "agent_usage": {"total_tokens": total_tokens} if total_tokens else {},
+        "deveco_session_id": session_id or None,
     }
+    auth_err = auth_failure_reason(answer) or auth_failure_reason(raw)
+    if auth_err:
+        return {
+            **base,
+            "agent_status": "error",
+            "agent_error": auth_err,
+        }
+    if stream_errors and not answer:
+        return {
+            **base,
+            "agent_status": "error",
+            "agent_error": "; ".join(stream_errors),
+        }
+    return {
+        **base,
+        "agent_status": "success" if answer else "error",
+        "agent_error": None if answer else "deveco 未返回可解析的文本回答",
+    }
+
+
+def _meaningful_text(text: str) -> bool:
+    return bool(str(text or "").strip())
+
+
+def _extract_text_from_export(raw: str) -> list[str]:
+    """Pull assistant answer text from `deveco export` (session JSON, JSONL, or array)."""
+    texts: list[str] = []
+
+    def collect_stream_event(ev: dict[str, Any]) -> None:
+        if ev.get("type") == "text":
+            t = ev.get("text")
+            if not t and isinstance(ev.get("part"), dict):
+                t = ev["part"].get("text")
+            if _meaningful_text(str(t or "")):
+                texts.append(str(t).strip())
+            return
+        part = ev.get("part") if isinstance(ev.get("part"), dict) else {}
+        if part.get("type") == "text" and _meaningful_text(str(part.get("text") or "")):
+            texts.append(str(part["text"]).strip())
+
+    def collect_session_export(data: dict[str, Any]) -> None:
+        for msg in data.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+            if info.get("role") != "assistant":
+                continue
+            for part in msg.get("parts") or []:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text" and _meaningful_text(str(part.get("text") or "")):
+                    texts.append(str(part["text"]).strip())
+
+    stripped = raw.strip()
+    if not stripped:
+        return texts
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                collect_stream_event(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return texts
+
+    if isinstance(data, dict) and isinstance(data.get("messages"), list):
+        collect_session_export(data)
+        return texts
+    if isinstance(data, list):
+        for ev in data:
+            if isinstance(ev, dict):
+                collect_stream_event(ev)
+    return texts
+
+
+def _final_answer_from_export(raw: str) -> str:
+    """Best-effort final assistant text from exported session."""
+    texts = _extract_text_from_export(raw)
+    return texts[-1] if texts else ""
+
+
+def export_deveco_session(
+    session_id: str,
+    dest: Path,
+    *,
+    cwd: str,
+    cli: str | None = None,
+    timeout_sec: int = 60,
+) -> bool:
+    """Save `deveco export <session_id>` to dest. Returns True if file written."""
+    if not session_id:
+        return False
+    exe = cli or find_deveco_cli()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [exe, "export", session_id],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+    )
+    body = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not body:
+        logger.warning(
+            "deveco export %s failed (rc=%s): %s",
+            session_id,
+            proc.returncode,
+            (proc.stderr or "")[:200],
+        )
+        return False
+    dest.write_text(body + "\n", encoding="utf-8")
+    return True
+
+
+def supplement_from_session_export(parsed: dict[str, Any], export_path: Path) -> dict[str, Any]:
+    """If stdout missed final text, recover from exported session file."""
+    if not export_path.is_file():
+        return parsed
+    raw = export_path.read_text(encoding="utf-8")
+    answer = _final_answer_from_export(raw)
+    if not answer:
+        return parsed
+    existing = str(parsed.get("output_answer") or "")
+    if answer not in existing:
+        parsed = {**parsed, "output_answer": (existing + "\n\n" + answer).strip() if existing else answer}
+    if parsed.get("agent_status") != "success":
+        parsed = {
+            **parsed,
+            "agent_status": "success",
+            "agent_error": None,
+            "agent_answer_source": "session_export",
+        }
+    return parsed
 
 
 def verify_claude_login() -> None:
@@ -396,10 +659,11 @@ def run_claude_query(
             _log_line(log_file, f"totalTokenCount = {tokens}")
         _log_memory(log_file, mem)
 
-        duration_ms = parsed.get("agent_duration_ms") or int((time.time() - t0) * 1000)
+        wall_ms = int((time.time() - t0) * 1000)
+        _log_line(log_file, f"completed ({wall_ms}ms)")
         return {
             **parsed,
-            "agent_duration_ms": duration_ms,
+            "agent_duration_ms": wall_ms,
             "agent_backend": backend,
             "agent_host": HOST_CLAUDE,
             "ab_arm": "with-homegraph" if arm == "with" else "without-homegraph",
@@ -413,26 +677,49 @@ def _deveco_project_config_dir(repo: Path) -> Path:
 
 
 def _write_deveco_project_mcp(repo: Path, *, arm: str, hg_bin: str) -> Path:
-    """Write repo/.deveco/deveco.jsonc for MCP only; credentials stay in ~/.config/deveco."""
+    """Write repo/.deveco/deveco.jsonc — MCP, permissions, and agent prompt for qa_eval A/B."""
     config_dir = _deveco_project_config_dir(repo)
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "deveco.jsonc"
+    body: dict[str, Any] = {"$schema": "https://opencode.ai/config.json"}
     if arm == "with":
+        if not hg_bin:
+            from agent_runner import find_homegraph_bin
+
+            hg_bin = find_homegraph_bin(None)
         cmd, base_args = _split_hg_bin(hg_bin)
-        body = {
-            "$schema": "https://opencode.ai/config.json",
-            "mcp": {
-                "homegraph": {
-                    "type": "local",
-                    "command": [cmd, *base_args, "--path", str(repo.resolve())],
-                    "enabled": True,
-                }
-            },
+        body["mcp"] = {
+            "homegraph": {
+                "type": "local",
+                "command": [cmd, *base_args, "--path", str(repo.resolve())],
+                "enabled": True,
+            }
+        }
+        body["agent"] = {
+            "build": {
+                "prompt": _DEVECO_WITH_AGENT_PROMPT,
+            }
         }
     else:
-        body = {"$schema": "https://opencode.ai/config.json", "mcp": {}}
+        body["mcp"] = {}
+        body["permission"] = {
+            "homegraph_*": "deny",
+            "homegraph_homegraph_*": "deny",
+        }
+        body["agent"] = {
+            "build": {
+                "prompt": _DEVECO_WITHOUT_AGENT_PROMPT,
+                "permission": {
+                    "homegraph_*": "deny",
+                    "homegraph_homegraph_*": "deny",
+                },
+            }
+        }
     config_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
     return config_path
+
+
+DEFAULT_DEVECO_MODEL = "zhipuai/glm-4.5-flash"
 
 
 def run_deveco_query(
@@ -443,26 +730,37 @@ def run_deveco_query(
     hg_bin: str,
     log_file: Path | None,
     task_id: int,
+    item_id: str | None = None,
+    trace_dir: Path | None = None,
     model: str | None = None,
     timeout_sec: int = 600,
+    deveco_attach: str | None = None,
 ) -> dict[str, Any]:
     cli = find_deveco_cli()
     backend = f"deveco-code-{'with' if arm == 'with' else 'without'}-homegraph"
-
-    _write_deveco_project_mcp(repo, arm=arm, hg_bin=hg_bin)
+    qid = item_id or str(task_id)
+    title = f"qa-eval-{arm}-{qid}"
+    prompt = _deveco_with_query(query) if arm == "with" else query
 
     run_cmd = [
         cli,
         "run",
-        query,
+        prompt,
         "--format",
         "json",
         "--dir",
         str(repo),
+        "--title",
+        title,
+        "--skip-agreement",
         "--dangerously-skip-permissions",
     ]
+    if deveco_attach:
+        run_cmd.extend(["--attach", deveco_attach])
     if model:
         run_cmd.extend(["--model", model])
+    else:
+        run_cmd.extend(["--model", DEFAULT_DEVECO_MODEL])
 
     _log_line(log_file, f"Evaluate {task_id}:")
     _log_line(log_file, "the 1 turn")
@@ -477,15 +775,18 @@ def run_deveco_query(
             stdout, stderr = proc.communicate()
             mem = sampler.last_stats
             _log_memory(log_file, mem)
+            wall_ms = int((time.time() - t0) * 1000)
             return {
                 "output_answer": "",
                 "agent_status": "error",
                 "agent_error": f"timeout after {timeout_sec}s",
                 "agent_backend": backend,
+                "agent_duration_ms": wall_ms,
                 "agent_memory_mb": mem,
             }
     mem = sampler.last_stats
     combined = f"{stdout or ''}\n{stderr or ''}"
+    wall_ms = int((time.time() - t0) * 1000)
 
     if proc.returncode != 0:
         auth_err = auth_failure_reason(combined)
@@ -498,27 +799,58 @@ def run_deveco_query(
             "agent_error": err_msg,
             "agent_backend": backend,
             "agent_host": HOST_DEVECO,
+            "agent_duration_ms": wall_ms,
             "agent_memory_mb": mem,
         }
 
-    _log_line(log_file, "first token")
     out = (stdout or "").strip()
     err = (stderr or "").strip()
     parsed = parse_opencode_json_events(out if out else err)
+    session_id = parsed.get("deveco_session_id")
+    trace_file: Path | None = None
+    tools_used: list[str] = trace_tool_names(str(parsed.get("output_answer") or ""))
+    if session_id and trace_dir is not None:
+        safe_sid = re.sub(r"[^\w.-]", "_", str(session_id))
+        trace_file = trace_dir / f"{qid}-{safe_sid}.json"
+        if export_deveco_session(str(session_id), trace_file, cwd=str(repo), cli=cli):
+            try:
+                rel = trace_file.relative_to(_QA_EVAL_DIR)
+            except ValueError:
+                rel = trace_file
+            parsed["agent_trace_file"] = str(rel).replace("\\", "/")
+            parsed = supplement_from_session_export(parsed, trace_file)
+            export_tools = _tools_from_session_export(trace_file.read_text(encoding="utf-8"))
+            for t in export_tools:
+                if t not in tools_used:
+                    tools_used.append(t)
+            _log_line(log_file, f"session export → {parsed.get('agent_trace_file')}")
+        else:
+            parsed["agent_trace_file"] = None
+    if session_id:
+        _log_line(log_file, f"sessionID = {session_id}")
+    if tools_used:
+        _log_line(log_file, f"tools = {', '.join(tools_used)}")
+    used_hg = any(is_homegraph_tool(t) for t in tools_used)
+    parsed["agent_tools_used"] = tools_used
+    parsed["agent_used_homegraph"] = used_hg
+
     tokens = (parsed.get("agent_usage") or {}).get("total_tokens") or 0
     if tokens:
         _log_line(log_file, f"totalTokenCount = {tokens}")
     _log_memory(log_file, mem)
+    _log_line(log_file, f"completed ({wall_ms}ms)")
 
-    duration_ms = parsed.get("agent_duration_ms") or int((time.time() - t0) * 1000)
-    return {
+    result = {
         **parsed,
-        "agent_duration_ms": duration_ms,
+        "agent_duration_ms": wall_ms,
         "agent_backend": backend,
         "agent_host": HOST_DEVECO,
         "ab_arm": "with-homegraph" if arm == "with" else "without-homegraph",
         "agent_memory_mb": mem,
     }
+    if result.get("agent_status") != "success" and not result.get("agent_error"):
+        result["agent_error"] = _extract_deveco_json_errors(combined) or "deveco 未返回可解析的文本回答"
+    return result
 
 
 def run_external_dataset(
@@ -531,6 +863,7 @@ def run_external_dataset(
     log_file: Path | None,
     hg_bin: str,
     model: str | None = None,
+    deveco_attach: str | None = None,
 ) -> list[dict[str, Any]]:
     if host not in SUPPORTED_HOSTS:
         raise ValueError(f"unknown agent host: {host}")
@@ -548,6 +881,21 @@ def run_external_dataset(
     results: list[dict[str, Any]] = []
     total = len(dataset)
     print(f"  → [{host}] {_arm_short(arm)} 臂：共 {total} 题", flush=True)
+    if host == HOST_DEVECO:
+        _write_deveco_project_mcp(repo, arm=arm, hg_bin=hg)
+        trace_root = output.parent / "traces" / f"{arm}-deveco"
+        if deveco_attach:
+            print(f"  → deveco attach: {deveco_attach}", flush=True)
+            print(
+                "  → 提示: 若 serve 启动报 ServeError，多为端口占用；"
+                "可 netstat -ano | findstr :4096 后 taskkill，或不加 --deveco-attach 直接跑",
+                flush=True,
+            )
+        print(f"  → 轨迹目录: {trace_root}", flush=True)
+        if arm == "with":
+            print("  → WITH 臂: 优先 homegraph_explore，不足时可 grep/read", flush=True)
+    else:
+        trace_root = None
 
     auth_abort: str | None = None
     with output.open("w", encoding="utf-8") as f:
@@ -580,7 +928,15 @@ def run_external_dataset(
                 if host == HOST_CLAUDE:
                     meta = run_claude_query(repo, q, **common)
                 else:
-                    meta = run_deveco_query(repo, q, model=model, **common)
+                    meta = run_deveco_query(
+                        repo,
+                        q,
+                        model=model,
+                        deveco_attach=deveco_attach,
+                        item_id=item_id,
+                        trace_dir=trace_root,
+                        **common,
+                    )
             except Exception as e:
                 logger.error("External agent failed %s: %s", item.get("id"), e)
                 meta = {
@@ -597,10 +953,16 @@ def run_external_dataset(
             if meta.get("agent_status") == "success":
                 dur_ms = meta.get("agent_duration_ms")
                 dur_s = f"{dur_ms / 1000:.1f}s" if isinstance(dur_ms, (int, float)) else "?"
-                print_agent_progress(arm, i, total, item_id, f"[{host}] 完成 ({dur_s})")
+                extra = ""
+                if host == HOST_DEVECO and arm == "with":
+                    extra = " ✓homegraph" if meta.get("agent_used_homegraph") else " ⚠未用homegraph"
+                print_agent_progress(arm, i, total, item_id, f"[{host}] 完成 ({dur_s}){extra}")
             else:
                 err = str(meta.get("agent_error") or meta.get("agent_status") or "error")
-                print_agent_progress(arm, i, total, item_id, f"[{host}] 失败: {err[:100]}")
+                extra = ""
+                if host == HOST_DEVECO and arm == "with" and meta.get("agent_tools_used"):
+                    extra = f" tools={','.join(meta['agent_tools_used'][:4])}"
+                print_agent_progress(arm, i, total, item_id, f"[{host}] 失败: {err[:100]}{extra}")
                 if i == 1 and meta.get("agent_error") and (
                     "未登录" in str(meta["agent_error"])
                     or "DevEco Code" in str(meta["agent_error"])

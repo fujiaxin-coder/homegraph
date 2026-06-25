@@ -80,14 +80,42 @@ class RAGEvaluator:
     async def evaluate_answer_accuracy_single(self, sample_data: dict) -> dict:
         return await self.scorer.evaluate_answer_accuracy_single(sample_data)
 
+    async def close(self) -> None:
+        await self.scorer.client.close()
 
-def process_single_item_sync(evaluator: RAGEvaluator, item: dict) -> dict:
+
+async def evaluate_all_async(evaluator: RAGEvaluator, items: list[dict]) -> list[dict]:
+    processed: list[dict] = []
+    try:
+        for item in items:
+            processed.append(await evaluator.evaluate_answer_accuracy_single(item))
+    finally:
+        await evaluator.close()
+    return processed
+
+
+def process_single_item_sync(
+    *,
+    llm_model: str,
+    api_key: str,
+    base_url: str,
+    extra_body: dict | None,
+    item: dict,
+) -> dict:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    evaluator = RAGEvaluator(
+        llm_model,
+        api_key=api_key,
+        base_url=base_url,
+        extra_body=extra_body,
+    )
     try:
         return loop.run_until_complete(evaluator.evaluate_answer_accuracy_single(item))
     finally:
+        loop.run_until_complete(evaluator.close())
         loop.close()
+        asyncio.set_event_loop(None)
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -180,30 +208,43 @@ def main() -> int:
     processed_items: list[dict] = []
     results_lock = threading.Lock()
 
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
-        futures = {
-            executor.submit(process_single_item_sync, evaluator, item): item
-            for item in all_items
-        }
-        for future in tqdm(as_completed(futures), total=len(all_items), desc="评估答案准确性"):
-            try:
-                processed_item = future.result()
-                with results_lock:
-                    processed_items.append(processed_item)
-                    if len(processed_items) % 5 == 0:
-                        with file_write_lock:
-                            with output_file.open("a", encoding="utf-8") as writer:
-                                for row in processed_items[-5:]:
-                                    writer.write(json.dumps(row, ensure_ascii=False) + "\n")
-            except Exception as e:
-                logger.error("样本处理任务异常: %s", e)
+    if args.workers <= 1:
+        processed_items = asyncio.run(evaluate_all_async(evaluator, all_items))
+        with output_file.open("w", encoding="utf-8") as writer:
+            for row in processed_items:
+                writer.write(json.dumps(row, ensure_ascii=False) + "\n")
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+            futures = {
+                executor.submit(
+                    process_single_item_sync,
+                    llm_model=llm.model,
+                    api_key=api_key,
+                    base_url=llm.base_url,
+                    extra_body=llm.extra_body,
+                    item=item,
+                ): item
+                for item in all_items
+            }
+            for future in tqdm(as_completed(futures), total=len(all_items), desc="评估答案准确性"):
+                try:
+                    processed_item = future.result()
+                    with results_lock:
+                        processed_items.append(processed_item)
+                        if len(processed_items) % 5 == 0:
+                            with file_write_lock:
+                                with output_file.open("a", encoding="utf-8") as writer:
+                                    for row in processed_items[-5:]:
+                                        writer.write(json.dumps(row, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    logger.error("样本处理任务异常: %s", e)
 
-    remaining = len(processed_items) % 5
-    if remaining:
-        with file_write_lock:
-            with output_file.open("a", encoding="utf-8") as writer:
-                for row in processed_items[-remaining:]:
-                    writer.write(json.dumps(row, ensure_ascii=False) + "\n")
+        remaining = len(processed_items) % 5
+        if remaining:
+            with file_write_lock:
+                with output_file.open("a", encoding="utf-8") as writer:
+                    for row in processed_items[-remaining:]:
+                        writer.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     if processed_items:
         successful = [x for x in processed_items if x.get("evaluation_status") == "success"]
