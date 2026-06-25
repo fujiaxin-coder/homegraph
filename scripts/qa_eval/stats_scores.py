@@ -3,7 +3,7 @@
 Stage 3 — Answer Accuracy Score 统计。
 
 Usage:
-  python scripts/qa_eval/stats_scores.py -i scripts/qa_eval/data/result-with-scored.jsonl
+  python scripts/qa_eval/stats_scores.py -i scripts/qa_eval/log/result-with-builtin-scored.jsonl
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_INPUT = _SCRIPT_DIR / "data" / "result-with-scored.jsonl"
+DEFAULT_INPUT = _SCRIPT_DIR / "log" / "result-with-builtin-scored.jsonl"
 
 
 def calculate_answer_accuracy_statistics(file_path: Path) -> dict | None:

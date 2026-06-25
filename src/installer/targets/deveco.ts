@@ -11,12 +11,17 @@
  *
  * Config file resolution (per DevEco Code docs):
  *   - local:  `.deveco/deveco.jsonc` → `deveco.jsonc` (defaults to `.deveco/`)
- *   - global: `~/.config/deveco/deveco.jsonc` (XDG-style;
- *             `%APPDATA%/deveco/deveco.jsonc` on Windows)
+ *   - global: `~/.config/deveco/deveco.jsonc` (XDG-style on EVERY platform,
+ *             Windows included — DevEco uses the same `xdg-basedir` resolution
+ *             as opencode, not `%APPDATA%`)
  *
  * Like Cursor, DevEco Code may launch MCP servers with a cwd that
  * isn't the workspace root, so we inject `--path` into the command
  * array.
+ *
+ * Early homegraph installs wrote the global entry to `%APPDATA%/deveco` on
+ * Windows; DevEco never reads it. install/uninstall sweep stale entries
+ * from that legacy location.
  */
 
 import * as fs from 'fs';
@@ -41,14 +46,22 @@ import {
 } from '../instructions-template';
 
 function globalConfigDir(): string {
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'deveco');
-  }
   const xdg = process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim().length > 0
     ? process.env.XDG_CONFIG_HOME
     : path.join(os.homedir(), '.config');
   return path.join(xdg, 'deveco');
+}
+
+/**
+ * Early installs wrote the global entry to `%APPDATA%/deveco` on Windows — a
+ * dir DevEco never reads. Returns that legacy dir when it could hold stale
+ * state (APPDATA set and resolving somewhere other than the real config dir).
+ */
+function legacyWindowsConfigDir(): string | null {
+  const appData = process.env.APPDATA;
+  if (!appData || !appData.trim()) return null;
+  const legacy = path.join(appData, 'deveco');
+  return path.resolve(legacy) === path.resolve(globalConfigDir()) ? null : legacy;
 }
 
 function configBaseDir(loc: Location): string {
@@ -109,8 +122,9 @@ class DevecoTarget implements AgentTarget {
     const file = configPath(loc);
     const config = parseConfig(readConfigText(file));
     const alreadyConfigured = !!config.mcp?.homegraph;
+    const legacy = legacyWindowsConfigDir();
     const installed = loc === 'global'
-      ? fs.existsSync(globalConfigDir())
+      ? fs.existsSync(globalConfigDir()) || (!!legacy && fs.existsSync(legacy))
       : fs.existsSync(path.join(process.cwd(), '.deveco'))
         || fs.existsSync(path.join(process.cwd(), 'deveco.jsonc'));
     return { installed, alreadyConfigured, configPath: file };
@@ -123,6 +137,8 @@ class DevecoTarget implements AgentTarget {
     const instrCleanup = removeInstructionsEntry(loc);
     if (instrCleanup.action === 'removed') files.push(instrCleanup);
 
+    if (loc === 'global') files.push(...cleanupLegacyWindowsState());
+
     return {
       files,
       notes: ['Restart DevEco Code for MCP changes to take effect.'],
@@ -131,35 +147,9 @@ class DevecoTarget implements AgentTarget {
 
   uninstall(loc: Location): WriteResult {
     const files: WriteResult['files'] = [];
-    const file = configPath(loc);
-
-    if (!fs.existsSync(file)) {
-      files.push({ path: file, action: 'not-found' });
-    } else {
-      const text = readConfigText(file);
-      const config = parseConfig(text);
-      if (!config.mcp?.homegraph) {
-        files.push({ path: file, action: 'not-found' });
-      } else {
-        let edits = modify(text, ['mcp', 'homegraph'], undefined, {
-          formattingOptions: FORMATTING,
-        });
-        let updated = applyEdits(text, edits);
-
-        const afterParsed = parseConfig(updated);
-        if (afterParsed.mcp && typeof afterParsed.mcp === 'object' &&
-            Object.keys(afterParsed.mcp).length === 0) {
-          edits = modify(updated, ['mcp'], undefined, { formattingOptions: FORMATTING });
-          updated = applyEdits(updated, edits);
-        }
-
-        atomicWriteFileSync(file, updated);
-        files.push({ path: file, action: 'removed' });
-      }
-    }
-
+    files.push(removeMcpEntryAt(configPath(loc)));
     files.push(removeInstructionsEntry(loc));
-
+    if (loc === 'global') files.push(...cleanupLegacyWindowsState());
     return { files };
   }
 
@@ -208,6 +198,42 @@ function writeMcpEntry(loc: Location): WriteResult['files'][number] {
   atomicWriteFileSync(file, updated);
 
   return { path: file, action: existed ? 'updated' : 'created' };
+}
+
+function removeMcpEntryAt(file: string): WriteResult['files'][number] {
+  if (!fs.existsSync(file)) return { path: file, action: 'not-found' };
+  const text = readConfigText(file);
+  const config = parseConfig(text);
+  if (!config.mcp?.homegraph) return { path: file, action: 'not-found' };
+
+  let edits = modify(text, ['mcp', 'homegraph'], undefined, {
+    formattingOptions: FORMATTING,
+  });
+  let updated = applyEdits(text, edits);
+
+  const afterParsed = parseConfig(updated);
+  if (afterParsed.mcp && typeof afterParsed.mcp === 'object' &&
+      Object.keys(afterParsed.mcp).length === 0) {
+    edits = modify(updated, ['mcp'], undefined, { formattingOptions: FORMATTING });
+    updated = applyEdits(updated, edits);
+  }
+
+  atomicWriteFileSync(file, updated);
+  return { path: file, action: 'removed' };
+}
+
+function cleanupLegacyWindowsState(): WriteResult['files'] {
+  const dir = legacyWindowsConfigDir();
+  if (!dir || !fs.existsSync(dir)) return [];
+  const out: WriteResult['files'] = [];
+  for (const name of ['deveco.jsonc', 'deveco.json']) {
+    const res = removeMcpEntryAt(path.join(dir, name));
+    if (res.action === 'removed') out.push(res);
+  }
+  const agents = path.join(dir, 'AGENTS.md');
+  const action = removeMarkedSection(agents, HOMEGRAPH_SECTION_START, HOMEGRAPH_SECTION_END);
+  if (action === 'removed') out.push({ path: agents, action });
+  return out;
 }
 
 function removeInstructionsEntry(loc: Location): WriteResult['files'][number] {

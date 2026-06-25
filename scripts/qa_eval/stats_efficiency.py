@@ -11,7 +11,7 @@ Stage 4 — 从 Agent 日志统计效率指标（首响应、轮次、总耗时�
   - totalTokenCount = N
 
 Usage:
-  python scripts/qa_eval/stats_efficiency.py -l scripts/qa_eval/data/agent-with.log
+  python scripts/qa_eval/stats_efficiency.py -l scripts/qa_eval/log/agent-with-builtin.log
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 from statistics import mean
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_LOG = _SCRIPT_DIR / "data" / "agent-with.log"
+DEFAULT_LOG = _SCRIPT_DIR / "log" / "agent-with-builtin.log"
 
 TIME_FMT = "%Y-%m-%d %H:%M:%S.%f"
 

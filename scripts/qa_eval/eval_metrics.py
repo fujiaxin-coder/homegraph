@@ -8,8 +8,8 @@ strips tool-call blocks, scores 0–1 via MyAnswerAccuracy.
 Usage:
   export DASHSCOPE_API_KEY="sk-..."
   python scripts/qa_eval/eval_metrics.py \\
-    -i scripts/qa_eval/data/result-with.jsonl \\
-    -o scripts/qa_eval/data/result-with-scored.jsonl \\
+    -i scripts/qa_eval/log/result-with-builtin.jsonl \\
+    -o scripts/qa_eval/log/result-with-builtin-scored.jsonl \\
     -w 2
 """
 
@@ -29,10 +29,14 @@ from pathlib import Path
 from tqdm import tqdm
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
+LOG_DIR = _SCRIPT_DIR / "log"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from my_answer_accuracy import MyAnswerAccuracy  # noqa: E402
+from llm_config import PROVIDER_DASHSCOPE, PROVIDER_ZHIPU, provider_help, resolve_llm_config  # noqa: E402
 
 os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1")
 
@@ -40,7 +44,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(_SCRIPT_DIR / "eval_metrics.log"),
+        logging.FileHandler(LOG_DIR / "eval_metrics.log"),
         logging.StreamHandler(),
     ],
 )
@@ -48,8 +52,8 @@ logger = logging.getLogger(__name__)
 
 file_write_lock = threading.Lock()
 
-DEFAULT_INPUT = _SCRIPT_DIR / "data" / "result-with.jsonl"
-DEFAULT_OUTPUT = _SCRIPT_DIR / "data" / "result-with-scored.jsonl"
+DEFAULT_INPUT = LOG_DIR / "result-with-builtin.jsonl"
+DEFAULT_OUTPUT = LOG_DIR / "result-with-builtin-scored.jsonl"
 DEFAULT_MODEL = "qwen3-235b-a22b-instruct-2507"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_API_KEY_ENV = "DASHSCOPE_API_KEY"
@@ -58,24 +62,60 @@ DEFAULT_API_KEY_ENV = "DASHSCOPE_API_KEY"
 class RAGEvaluator:
     """Answer accuracy judge with concurrent processing."""
 
-    def __init__(self, llm_model: str, *, api_key: str, base_url: str) -> None:
+    def __init__(
+        self,
+        llm_model: str,
+        *,
+        api_key: str,
+        base_url: str,
+        extra_body: dict | None = None,
+    ) -> None:
         self.scorer = MyAnswerAccuracy.create(
             api_key=api_key,
             base_url=base_url,
             model=llm_model,
+            extra_body=extra_body,
         )
 
     async def evaluate_answer_accuracy_single(self, sample_data: dict) -> dict:
         return await self.scorer.evaluate_answer_accuracy_single(sample_data)
 
+    async def close(self) -> None:
+        await self.scorer.client.close()
 
-def process_single_item_sync(evaluator: RAGEvaluator, item: dict) -> dict:
+
+async def evaluate_all_async(evaluator: RAGEvaluator, items: list[dict]) -> list[dict]:
+    processed: list[dict] = []
+    try:
+        for item in items:
+            processed.append(await evaluator.evaluate_answer_accuracy_single(item))
+    finally:
+        await evaluator.close()
+    return processed
+
+
+def process_single_item_sync(
+    *,
+    llm_model: str,
+    api_key: str,
+    base_url: str,
+    extra_body: dict | None,
+    item: dict,
+) -> dict:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    evaluator = RAGEvaluator(
+        llm_model,
+        api_key=api_key,
+        base_url=base_url,
+        extra_body=extra_body,
+    )
     try:
         return loop.run_until_complete(evaluator.evaluate_answer_accuracy_single(item))
     finally:
+        loop.run_until_complete(evaluator.close())
         loop.close()
+        asyncio.set_event_loop(None)
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -105,31 +145,36 @@ def main() -> int:
     parser.add_argument("--input", "-i", type=str, default=str(DEFAULT_INPUT), help="Agent 产出的 JSONL")
     parser.add_argument("--output", "-o", type=str, default=str(DEFAULT_OUTPUT), help="打分后的 JSONL")
     parser.add_argument("--workers", "-w", type=int, default=1, help="并发线程数")
-    parser.add_argument("--model", "-m", type=str, default=DEFAULT_MODEL, help="Judge 模型（DashScope Qwen）")
-    parser.add_argument("--base-url", type=str, default=DEFAULT_BASE_URL, help="OpenAI 兼容 API 端点")
-    parser.add_argument("--api-key-env", type=str, default=DEFAULT_API_KEY_ENV, help="API Key 环境变量名")
+    parser.add_argument(
+        "--provider",
+        choices=[PROVIDER_DASHSCOPE, PROVIDER_ZHIPU],
+        default=None,
+        help=provider_help(),
+    )
+    parser.add_argument("--model", "-m", type=str, default=None, help="Judge 模型（默认随 provider）")
+    parser.add_argument("--base-url", type=str, default=None, help="OpenAI 兼容 API 端点（默认随 provider）")
     args = parser.parse_args()
 
     input_file = Path(args.input)
     output_file = Path(args.output)
 
+    try:
+        llm = resolve_llm_config(provider=args.provider, model=args.model, base_url=args.base_url)
+    except RuntimeError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+
     print(f"输入文件: {input_file}")
     print(f"输出文件: {output_file}")
     print(f"并发线程数: {args.workers}")
-    print(f"评估模型: {args.model}")
+    print(f"LLM provider: {llm.provider}")
+    print(f"评估模型: {llm.model}")
 
     if not input_file.is_file():
         print(f"错误: 输入文件 {input_file} 不存在")
         return 1
 
-    api_key = resolve_api_key(args.api_key_env)
-    if not api_key:
-        print(
-            f"错误: 未设置 API Key。请 export {args.api_key_env}=\"sk-...\"\n"
-            "获取: https://help.aliyun.com/zh/model-studio/get-api-key",
-            file=sys.stderr,
-        )
-        return 1
+    api_key = llm.api_key
 
     all_items = load_jsonl(input_file)
     total_items = len(all_items)
@@ -152,36 +197,54 @@ def main() -> int:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text("", encoding="utf-8")
 
-    evaluator = RAGEvaluator(args.model, api_key=api_key, base_url=args.base_url)
+    evaluator = RAGEvaluator(
+        llm.model,
+        api_key=api_key,
+        base_url=llm.base_url,
+        extra_body=llm.extra_body,
+    )
     print("初始化 Judge 完成")
 
     processed_items: list[dict] = []
     results_lock = threading.Lock()
 
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
-        futures = {
-            executor.submit(process_single_item_sync, evaluator, item): item
-            for item in all_items
-        }
-        for future in tqdm(as_completed(futures), total=len(all_items), desc="评估答案准确性"):
-            try:
-                processed_item = future.result()
-                with results_lock:
-                    processed_items.append(processed_item)
-                    if len(processed_items) % 5 == 0:
-                        with file_write_lock:
-                            with output_file.open("a", encoding="utf-8") as writer:
-                                for row in processed_items[-5:]:
-                                    writer.write(json.dumps(row, ensure_ascii=False) + "\n")
-            except Exception as e:
-                logger.error("样本处理任务异常: %s", e)
+    if args.workers <= 1:
+        processed_items = asyncio.run(evaluate_all_async(evaluator, all_items))
+        with output_file.open("w", encoding="utf-8") as writer:
+            for row in processed_items:
+                writer.write(json.dumps(row, ensure_ascii=False) + "\n")
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+            futures = {
+                executor.submit(
+                    process_single_item_sync,
+                    llm_model=llm.model,
+                    api_key=api_key,
+                    base_url=llm.base_url,
+                    extra_body=llm.extra_body,
+                    item=item,
+                ): item
+                for item in all_items
+            }
+            for future in tqdm(as_completed(futures), total=len(all_items), desc="评估答案准确性"):
+                try:
+                    processed_item = future.result()
+                    with results_lock:
+                        processed_items.append(processed_item)
+                        if len(processed_items) % 5 == 0:
+                            with file_write_lock:
+                                with output_file.open("a", encoding="utf-8") as writer:
+                                    for row in processed_items[-5:]:
+                                        writer.write(json.dumps(row, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    logger.error("样本处理任务异常: %s", e)
 
-    remaining = len(processed_items) % 5
-    if remaining:
-        with file_write_lock:
-            with output_file.open("a", encoding="utf-8") as writer:
-                for row in processed_items[-remaining:]:
-                    writer.write(json.dumps(row, ensure_ascii=False) + "\n")
+        remaining = len(processed_items) % 5
+        if remaining:
+            with file_write_lock:
+                with output_file.open("a", encoding="utf-8") as writer:
+                    for row in processed_items[-remaining:]:
+                        writer.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     if processed_items:
         successful = [x for x in processed_items if x.get("evaluation_status") == "success"]
