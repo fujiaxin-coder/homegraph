@@ -41,6 +41,7 @@ import {
 import type { QueryBuilder } from '../../db/queries';
 import { generateNodeId } from '../tree-sitter-helpers';
 import { getExtractionProjectRoot, getExtractionQueries } from '../context';
+import { indexViewTreeForClass } from './arkts-viewtree';
 
 const ARK_PROVENANCE = 'heuristic';
 /** Virtual file path for ArkAnalyzer's in-scene dummy entry (not on disk). */
@@ -642,8 +643,11 @@ function sceneHasArkUiEntries(scene: Scene): boolean {
 class ArkTSAdapter {
   private readonly rootDir: string;
   private readonly scanned: Set<string>;
+  private scene: Scene | null = null;
   private readonly methodToId = new Map<ArkMethod, string>();
   private readonly classToId = new Map<ArkClass, string>();
+  private readonly componentToId = new Map<ArkClass, string>();
+  private readonly fieldToId = new Map<ArkField, string>();
   private readonly nodeIds = new Set<string>();
   private readonly fileResults = new Map<string, ExtractionResult>();
   private readonly crossFileEdges: Edge[] = [];
@@ -654,6 +658,7 @@ class ArkTSAdapter {
   }
 
   build(scene: Scene): ArkTSBatchIndex {
+    this.scene = scene;
     const { entryPoints, dummyMain } = resolveRtaEntryPoints(scene);
 
     for (const arkFile of scene.getFiles()) {
@@ -661,6 +666,16 @@ class ArkTSAdapter {
       if (!this.scanned.has(relativePath)) continue;
       if (!relativePath.endsWith('.ets')) continue;
       this.indexFile(arkFile);
+    }
+
+    for (const cls of scene.getClasses()) {
+      if (!cls.hasViewTree()) continue;
+      const arkFile = cls.getDeclaringArkFile();
+      const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+      if (!this.scanned.has(relativePath) || !relativePath.endsWith('.ets')) continue;
+      const result = this.fileResults.get(relativePath);
+      if (!result) continue;
+      indexViewTreeForClass(this.viewTreeContext(), cls, result, relativePath);
     }
 
     if (dummyMain) {
@@ -974,6 +989,7 @@ class ArkTSAdapter {
         { ...modelModifiersToNodeExtras(cls) }
       );
       this.addNode(result, componentNode);
+      this.componentToId.set(cls, componentNode.id);
       result.edges.push(arkEdge(classNode.id, componentNode.id, 'contains'));
     }
 
@@ -1080,8 +1096,87 @@ class ArkTSAdapter {
       ...modelModifiersToNodeExtras(field),
     });
     this.addNode(result, fieldNode);
+    this.fieldToId.set(field, fieldNode.id);
     result.edges.push(arkEdge(parentId, fieldNode.id, 'contains'));
     this.indexDecorators(result, fieldNode.id, field, relativePath, language, line);
+  }
+
+  private viewTreeContext() {
+    if (!this.scene) {
+      throw new Error('ArkTSAdapter scene not initialized');
+    }
+    return {
+      rootDir: this.rootDir,
+      scene: this.scene,
+      language: 'arkts' as Language,
+      methodToId: this.methodToId,
+      classToId: this.classToId,
+      fieldToId: this.fieldToId,
+      nodeIds: this.nodeIds,
+      addEdge: (
+        result: ExtractionResult,
+        source: string,
+        target: string,
+        kind: Edge['kind'],
+        callerFile: string,
+        via: string,
+        line: number
+      ) => this.addViewTreeEdge(result, source, target, kind, callerFile, via, line),
+      ensureMethodNode: (
+        method: ArkMethod,
+        relativePath: string,
+        result: ExtractionResult,
+        parentId: string
+      ) => this.ensureMethodNode(method, relativePath, result, parentId),
+      resolveClassNodeId: (cls: ArkClass) => this.resolveClassNodeId(cls),
+    };
+  }
+
+  private resolveClassNodeId(cls: ArkClass): string | null {
+    return this.componentToId.get(cls) ?? this.classToId.get(cls) ?? null;
+  }
+
+  private addViewTreeEdge(
+    result: ExtractionResult,
+    source: string,
+    target: string,
+    kind: Edge['kind'],
+    callerFile: string,
+    via: string,
+    line: number
+  ): void {
+    const edge = arkEdge(source, target, kind, {
+      metadata: {
+        synthesizedBy: 'viewtree',
+        via,
+        registeredAt: `${callerFile}:${line}`,
+      },
+    });
+    if (this.nodeInFile(target, callerFile)) {
+      result.edges.push(edge);
+    } else {
+      this.crossFileEdges.push(edge);
+    }
+  }
+
+  private ensureMethodNode(
+    method: ArkMethod,
+    relativePath: string,
+    result: ExtractionResult,
+    parentId: string
+  ): string | null {
+    const existing = this.methodToId.get(method);
+    if (existing) return existing;
+
+    if (method.isAnonymousMethod?.() || method.getName().startsWith(ANONYMOUS_METHOD_PREFIX)) {
+      const line = method.getImplOriginFullPosition()?.getFirstLine() ?? 1;
+      this.indexMethod(relativePath, 'arkts', result, method, parentId, 'method', `@callback:${line}`);
+      return this.methodToId.get(method) ?? null;
+    }
+
+    if (shouldSkipArkMethod(method)) return null;
+    this.indexMethod(relativePath, 'arkts', result, method, parentId);
+    return this.methodToId.get(method) ?? null;
   }
 
   private indexMethod(
@@ -1090,9 +1185,10 @@ class ArkTSAdapter {
     result: ExtractionResult,
     method: ArkMethod,
     parentId: string,
-    forcedKind?: NodeKind
+    forcedKind?: NodeKind,
+    forcedDisplayName?: string
   ): void {
-    const displayName = resolveMethodDisplayName(method);
+    const displayName = forcedDisplayName ?? resolveMethodDisplayName(method);
     if (!displayName) return;
 
     const cls = method.getDeclaringArkClass();
