@@ -10,6 +10,7 @@
 
 import { SpecConfig } from '../config';
 import { discoverSpecs } from '../utils';
+import { logDebug } from '../../errors';
 
 // ---------------------------------------------------------------------------
 // extractScope
@@ -24,7 +25,15 @@ import { discoverSpecs } from '../utils';
  */
 export function extractScope(message: string, scopeRegex: string): string | null {
   const firstLine = message.split('\n', 1)[0] ?? '';
-  const regex = new RegExp(scopeRegex);
+  let regex: RegExp;
+  try {
+    regex = new RegExp(scopeRegex);
+  } catch {
+    logDebug('extractScope: invalid regex from config, returning null', {
+      scopeRegex,
+    });
+    return null;
+  }
   const match = regex.exec(firstLine);
 
   if (match && match[1] !== undefined) {

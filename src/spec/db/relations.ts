@@ -145,6 +145,26 @@ export function transferSpecSpecRelations(
 ): void {
   // No transaction wrapper — callers (e.g. applyUpdate) manage
   // their own explicit BEGIN/COMMIT boundaries.
+
+  // Delete rows at `toSpecId` that would collide with the rows being
+  // transferred, so the UPDATE below cannot trigger a PRIMARY KEY conflict.
+  db.prepare(`
+    DELETE FROM spec_spec_relations
+    WHERE source_id = @toSpecId
+      AND (target_id, relation_type) IN (
+        SELECT target_id, relation_type FROM spec_spec_relations
+        WHERE source_id = @fromSpecId
+      )
+  `).run({ fromSpecId, toSpecId });
+  db.prepare(`
+    DELETE FROM spec_spec_relations
+    WHERE target_id = @toSpecId
+      AND (source_id, relation_type) IN (
+        SELECT source_id, relation_type FROM spec_spec_relations
+        WHERE target_id = @fromSpecId
+      )
+  `).run({ fromSpecId, toSpecId });
+
   db.prepare(`
     UPDATE spec_spec_relations SET source_id = @toSpecId WHERE source_id = @fromSpecId
   `).run({ fromSpecId, toSpecId });

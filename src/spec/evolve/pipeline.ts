@@ -245,9 +245,45 @@ export async function runEvolvePipeline(
   }
 
   // ------------------------------------------------------------------
-  // 6. Persist (atomic via explicit BEGIN/COMMIT/ROLLBACK)
-  //    Uses explicit transaction management because the current
-  //    db.transaction() wrapper is synchronous while evaluateSpec is async.
+  // 6. Evaluate all specs BEFORE opening the transaction.  This keeps
+  //    async LLM calls (which may take seconds) outside the SQLite
+  //    write-lock window, avoiding SQLITE_BUSY for concurrent writers.
+  // ------------------------------------------------------------------
+
+  interface PendingDecision {
+    specId: string;
+    decision: EvolveDecision;
+    version: number;
+    filePath: string;
+  }
+
+  const pendingDecisions: PendingDecision[] = [];
+
+  for (let idx = 0; idx < pathBSpecIds.length; idx++) {
+    const specId = pathBSpecIds[idx]!;
+    const scheduleNextSpecs = pathBSpecIds.slice(idx + 1);
+    const { version, filePath } = getSpecPathInfo(
+      db,
+      meta.specStoragePath,
+      specId,
+    );
+
+    const decision: EvolveDecision = await evaluateSpec(
+      specId,
+      meta.specStoragePath,
+      filePath,
+      commitInfo.message,
+      diff,
+      scheduleNextSpecs,
+      client,
+    );
+
+    pendingDecisions.push({ specId, decision, version, filePath });
+  }
+
+  // ------------------------------------------------------------------
+  // 7. Persist (atomic via explicit BEGIN/COMMIT/ROLLBACK)
+  //    All LLM evaluation is complete; only fast DB writes remain.
   // ------------------------------------------------------------------
 
   const evolveResult: EvolveResult = {
@@ -294,33 +330,16 @@ export async function runEvolvePipeline(
       evolveResult.generateRelationCreated = true;
       evolveResult.relationsCreated++;
     } else if (pathASpecId) {
-      logDebug('Path A: specId resolved but no metadata extracted, skipping insert', {
+      logWarn('Path A: specId resolved but no metadata extracted, skipping insert', {
         specId: pathASpecId,
       });
     }
 
-    // ---- Path B: Evaluate each spec and apply decisions ----
+    // ---- Path B: Apply pre-evaluated decisions ----
     const evolvedSpecs: EvolvedSpec[] = [];
 
-    for (let idx = 0; idx < pathBSpecIds.length; idx++) {
-      const specId = pathBSpecIds[idx]!;
-      const scheduleNextSpecs = pathBSpecIds.slice(idx + 1);
-      const { version, filePath } = getSpecPathInfo(
-        db,
-        meta.specStoragePath,
-        specId,
-      );
-
-      // Evaluate spec against the commit
-      const decision: EvolveDecision = await evaluateSpec(
-        specId,
-        meta.specStoragePath,
-        filePath,
-        commitInfo.message,
-        diff,
-        scheduleNextSpecs,
-        client,
-      );
+    for (const pending of pendingDecisions) {
+      const { specId, decision, version, filePath } = pending;
 
       if (decision.action === 'UPDATE') {
         const updateResult = applyUpdate(

@@ -28,29 +28,29 @@ export interface ChatResult {
 
 export class LLMClient {
   private config: LLMConfig;
-  private mockResponses: Map<string, string>;
+  private mockResponses: string[];
 
   constructor(config: LLMConfig) {
     this.config = config;
-    this.mockResponses = new Map();
+    this.mockResponses = [];
   }
 
   /**
-   * Set a mock response for a specific user prompt key.
+   * Append a mock response to the FIFO queue.
    *
-   * When provider is `"mock"`, `chat()` checks the mockResponses Map before
-   * falling back to pattern-based defaults. Responses are consumed FIFO —
-   * each call to `chat()` removes and returns the first stored response.
+   * When provider is `"mock"`, `chat()` dequeues the first response.
+   * Responses are consumed in insertion order; each call to `chat()` removes
+   * and returns the front element.
    */
-  setMockResponse(key: string, response: string): void {
-    this.mockResponses.set(key, response);
+  setMockResponse(_key: string, response: string): void {
+    this.mockResponses.push(response);
   }
 
   /**
    * Clear all mock responses.
    */
   clearMockResponses(): void {
-    this.mockResponses.clear();
+    this.mockResponses = [];
   }
 
   // ===========================================================================
@@ -74,13 +74,8 @@ export class LLMClient {
   async chat(systemPrompt: string, userPrompt: string): Promise<string> {
     // --- Mock mode -------------------------------------------------------
     if (this.config.provider === 'mock') {
-      if (this.mockResponses.size > 0) {
-        const key = this.mockResponses.keys().next().value;
-        if (key !== undefined) {
-          const response = this.mockResponses.get(key)!;
-          this.mockResponses.delete(key);
-          return response;
-        }
+      if (this.mockResponses.length > 0) {
+        return this.mockResponses.shift()!;
       }
 
       const lower = userPrompt.toLowerCase();
