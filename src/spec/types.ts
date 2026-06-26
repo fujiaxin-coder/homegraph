@@ -200,16 +200,3 @@ export interface SpecStats {
   activeSpecCount: number;
   deprecatedSpecCount: number;
 }
-
-// =============================================================================
-// Meta Types
-// =============================================================================
-
-/**
- * Contents of `.commit4spec/meta.json` — records the repo and spec
- * storage paths so the self-evolve pipeline knows where to look.
- */
-export interface SpecMeta {
-  repoPath: string;
-  specStoragePath: string;
-}
