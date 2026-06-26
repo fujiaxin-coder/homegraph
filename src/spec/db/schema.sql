@@ -103,5 +103,5 @@ CREATE TABLE IF NOT EXISTS spec_schema_versions (
     description TEXT
 );
 
-INSERT INTO spec_schema_versions (version, applied_at, description)
+INSERT OR IGNORE INTO spec_schema_versions (version, applied_at, description)
 VALUES (1, strftime('%s', 'now') * 1000, 'Initial Commit4Spec schema');

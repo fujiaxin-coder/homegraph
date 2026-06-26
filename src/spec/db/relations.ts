@@ -143,14 +143,14 @@ export function transferSpecSpecRelations(
   fromSpecId: string,
   toSpecId: string
 ): void {
-  db.transaction(() => {
-    db.prepare(`
-      UPDATE spec_spec_relations SET source_id = @toSpecId WHERE source_id = @fromSpecId
-    `).run({ fromSpecId, toSpecId });
-    db.prepare(`
-      UPDATE spec_spec_relations SET target_id = @toSpecId WHERE target_id = @fromSpecId
-    `).run({ fromSpecId, toSpecId });
-  })();
+  // No transaction wrapper — callers (e.g. applyUpdate) manage
+  // their own explicit BEGIN/COMMIT boundaries.
+  db.prepare(`
+    UPDATE spec_spec_relations SET source_id = @toSpecId WHERE source_id = @fromSpecId
+  `).run({ fromSpecId, toSpecId });
+  db.prepare(`
+    UPDATE spec_spec_relations SET target_id = @toSpecId WHERE target_id = @fromSpecId
+  `).run({ fromSpecId, toSpecId });
 }
 
 // ===========================================================================
