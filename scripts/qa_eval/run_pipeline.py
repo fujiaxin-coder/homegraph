@@ -18,6 +18,8 @@ import argparse
 import io
 import json
 import os
+import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -73,6 +75,29 @@ def host_tag(agent_host: str) -> str:
     return f"-{suffix}"
 
 
+def clear_log_dir(log_dir: Path) -> tuple[int, list[str]]:
+    """Remove files/subdirs under qa_eval log/ before a fresh run.
+
+    Skips paths locked by another process (common on Windows when a file is open
+    in the editor) instead of aborting the pipeline.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    skipped: list[str] = []
+    for child in sorted(log_dir.iterdir(), key=lambda p: (p.is_dir(), p.name.lower())):
+        try:
+            if child.is_file():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+            else:
+                continue
+            removed += 1
+        except OSError as e:
+            skipped.append(f"{child.name} ({e})")
+    return removed, skipped
+
+
 def paths_for_host(agent_host: str, *, log_dir: Path = LOG_DIR, data_dir: Path = DATA_DIR) -> dict[str, Path]:
     tag = host_tag(agent_host)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -121,6 +146,45 @@ def clip(text: str, n: int = 56) -> str:
 
 def clean_answer(raw: str) -> str:
     return remove_tool_calls(extract_json_blocks_answerbyCOT(str(raw or "")))
+
+
+def tool_chain_summary(raw: str, *, used_homegraph: bool | None = None) -> str:
+    tools = re.findall(r"---\n([^\n]+)\n", str(raw or ""))
+    chain = " → ".join(tools) if tools else "-"
+    if used_homegraph is True:
+        return f"{chain} [homegraph]"
+    if used_homegraph is False:
+        return f"{chain} [无homegraph]"
+    return chain
+
+
+def print_trajectory_section(rows_with: list[dict], rows_without: list[dict]) -> None:
+    rows = [( "with", r) for r in rows_with] + [("without", r) for r in rows_without]
+    if not any(r.get("deveco_session_id") or r.get("agent_trace_file") for _, r in rows):
+        return
+    print("\n" + "=" * 120)
+    print("【Agent 轨迹 / DevEco Session】")
+    print("跑完后查看完整轨迹：")
+    print("  1) JSON 文件：scripts/qa_eval/log/traces/<with|without>-deveco/<ID>-ses_*.json")
+    print("  2) CLI：deveco export <session_id>   或  deveco session list  找标题 qa-eval-*")
+    print("-" * 120)
+    print(f"{'ID':<6}{'臂':<8}{'HG':<4}{'状态':<8}{'工具链':<28}{'session_id':<28}{'轨迹文件'}")
+    print("-" * 120)
+    for arm, r in rows:
+        rid = str(r.get("id", ""))
+        status = str(r.get("agent_status", ""))[:7]
+        hg = "Y" if r.get("agent_used_homegraph") else ("N" if arm == "with" else "-")
+        chain = clip(
+            tool_chain_summary(
+                str(r.get("output_answer", "")),
+                used_homegraph=r.get("agent_used_homegraph") if arm == "with" else None,
+            ),
+            26,
+        )
+        sid = str(r.get("deveco_session_id") or "-")
+        trace = str(r.get("agent_trace_file") or "-")
+        print(f"{rid:<6}{arm:<8}{hg:<4}{status:<8}{chain:<28}{sid:<28}{trace}")
+    print("=" * 120)
 
 
 def row_tokens(row: dict) -> int | None:
@@ -304,6 +368,7 @@ def print_full_ab_report(
 
     print_category_table(rows_with, rows_without)
     print_per_item_table(rows_with, rows_without)
+    print_trajectory_section(rows_with, rows_without)
 
     w = 22
     print("\n" + "=" * 88)
@@ -397,6 +462,7 @@ def run_agent_stage(
     hg_bin: str | None,
     max_turns: int,
     deveco_model: str | None = None,
+    deveco_attach: str | None = None,
 ) -> None:
     if agent_host == HOST_CLAUDE:
         verify_claude_login()
@@ -430,6 +496,7 @@ def run_agent_stage(
                 log_file=log,
                 hg_bin=hg_bin or "",
                 model=deveco_model if agent_host == HOST_DEVECO else None,
+                deveco_attach=deveco_attach if agent_host == HOST_DEVECO else None,
             )
 
 
@@ -478,6 +545,13 @@ def cmd_ab(args: argparse.Namespace) -> int:
             return 1
 
         dataset = load_jsonl(dataset_path)
+        if not getattr(args, "keep_log", False):
+            removed, skipped = clear_log_dir(LOG_DIR)
+            print(f"已清空 log 目录: {LOG_DIR} ({removed} 项)", flush=True)
+            if skipped:
+                print("⚠ 以下项被占用，未删除（关闭占用进程后可手动删）:", flush=True)
+                for item in skipped:
+                    print(f"  - {item}", flush=True)
         print("=" * 60)
         print(f"Stage 1 — Agent 跑题 ({len(dataset)} 条)  host={agent_host}")
         print(f"  LLM    : {llm.provider}")
@@ -499,6 +573,7 @@ def cmd_ab(args: argparse.Namespace) -> int:
             hg_bin=args.homegraph_bin,
             max_turns=args.max_turns,
             deveco_model=getattr(args, "deveco_model", None),
+            deveco_attach=getattr(args, "deveco_attach", None),
         )
 
     if not args.no_judge:
@@ -605,9 +680,11 @@ def cmd_hosts(args: argparse.Namespace) -> int:
             max_turns=args.max_turns,
             no_agent=args.no_agent,
             no_judge=args.no_judge,
+            keep_log=getattr(args, "keep_log", False),
             report=None,
             agent_host=host,
             deveco_model=getattr(args, "deveco_model", None),
+            deveco_attach=getattr(args, "deveco_attach", None),
         )
         if cmd_ab(host_args) != 0:
             rc = 1
@@ -661,8 +738,18 @@ def main() -> int:
         default=None,
         help="DevEco Agent 模型（provider/model，如 zhipuai/glm-4.5-flash）；默认用 DevEco 自身配置，不用 --model",
     )
+    p_ab.add_argument(
+        "--deveco-attach",
+        default=os.environ.get("QA_EVAL_DEVECO_ATTACH"),
+        help="已运行的 deveco serve 地址（如 http://127.0.0.1:4096），复用进程避免每题冷启动",
+    )
     p_ab.add_argument("--no-agent", action="store_true", help="不跑 Agent，沿用已有 JSONL")
     p_ab.add_argument("--no-judge", action="store_true", help="不跑 Judge，沿用已有 scored")
+    p_ab.add_argument(
+        "--keep-log",
+        action="store_true",
+        help="保留 scripts/qa_eval/log 下旧文件（默认每次跑 Agent 前清空）",
+    )
     p_ab.add_argument(
         "--report",
         default=None,
@@ -685,8 +772,14 @@ def main() -> int:
     p_hosts.add_argument("--homegraph-bin", default=None)
     p_hosts.add_argument("--max-turns", type=int, default=8)
     p_hosts.add_argument("--deveco-model", default=None)
+    p_hosts.add_argument(
+        "--deveco-attach",
+        default=os.environ.get("QA_EVAL_DEVECO_ATTACH"),
+        help="deveco serve 地址，见 ab --deveco-attach",
+    )
     p_hosts.add_argument("--no-agent", action="store_true")
     p_hosts.add_argument("--no-judge", action="store_true")
+    p_hosts.add_argument("--keep-log", action="store_true")
     p_hosts.add_argument(
         "--agent-hosts",
         default=",".join(ALL_AGENT_HOSTS),
