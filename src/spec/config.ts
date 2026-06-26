@@ -1,7 +1,7 @@
 /**
  * Spec configuration module — replaces `commit4spec/utils/config.py`.
  *
- * Loads spec mining/evolve configuration from `.commit4spec/config/spec.json`
+ * Loads spec mining/evolve configuration from `${SPEC_DATA_DIR}/config/spec.json`
  * within a repository, falling back to code defaults for every key. All failure
  * modes degrade gracefully: a missing file, bad JSON, or a malformed value
  * never throws — the caller always receives a complete, usable config.
@@ -28,6 +28,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { logWarn } from '../errors';
+import { SPEC_DATA_DIR } from './utils';
 
 // ---------------------------------------------------------------------------
 // Interfaces
@@ -100,7 +101,7 @@ export const DEFAULT_CONFIG: SpecConfig = Object.freeze({
 }) as SpecConfig;
 
 /** Config subdirectory relative to the repo root. */
-const CONFIG_DIR = '.commit4spec/config';
+const CONFIG_DIR = `${SPEC_DATA_DIR}/config`;
 const CONFIG_FILENAME = 'spec.json';
 
 // ---------------------------------------------------------------------------
@@ -134,7 +135,7 @@ function deepMerge(target: any, source: any): any {
 // ---------------------------------------------------------------------------
 
 /**
- * Load spec config from `.commit4spec/config/spec.json` in the given repo path.
+ * Load spec config from `${SPEC_DATA_DIR}/config/spec.json` in the given repo path.
  *
  * - Missing file → defaults (no warning; it's the zero-config case).
  * - Unparseable JSON → defaults with a warning.

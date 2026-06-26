@@ -36,6 +36,7 @@ import {
   truncateCodeDiff,
   truncateSubtitles,
   discoverSpecs,
+  SPEC_DATA_DIR,
 } from '../src/spec/utils';
 import type { SpecMeta, SpecEntry, BudgetProfile } from '../src/spec/utils';
 import { loadSpecConfig } from '../src/spec/config';
@@ -259,7 +260,7 @@ describe('readMeta', () => {
   });
 
   it('should read a valid meta.json and return SpecMeta', () => {
-    const metaDir = path.join(tmpDir, '.commit4spec');
+    const metaDir = path.join(tmpDir, SPEC_DATA_DIR);
     fs.mkdirSync(metaDir, { recursive: true });
     const meta: SpecMeta = {
       repoPath: '/some/repo',
@@ -284,12 +285,12 @@ describe('readMeta', () => {
     expect(readMeta(tmpDir)).toBeNull();
   });
 
-  it('should return null when .commit4spec directory does not exist', () => {
+  it(`should return null when ${SPEC_DATA_DIR} directory does not exist`, () => {
     expect(readMeta(path.join(tmpDir, 'nonexistent'))).toBeNull();
   });
 
   it('should return createdAt as undefined when it is missing', () => {
-    const metaDir = path.join(tmpDir, '.commit4spec');
+    const metaDir = path.join(tmpDir, SPEC_DATA_DIR);
     fs.mkdirSync(metaDir, { recursive: true });
     const meta = {
       repoPath: '/some/repo',
@@ -322,9 +323,9 @@ describe('writeMeta', () => {
     cleanupTempDir(tmpDir);
   });
 
-  it('should write meta.json and create the .commit4spec directory', () => {
+  it(`should write meta.json and create the ${SPEC_DATA_DIR} directory`, () => {
     const result = writeMeta(tmpDir, '/some/repo/specs');
-    const metaPath = path.join(tmpDir, '.commit4spec', 'meta.json');
+    const metaPath = path.join(tmpDir, SPEC_DATA_DIR, 'meta.json');
     expect(fs.existsSync(metaPath)).toBe(true);
     expect(result.repoPath).toBe(tmpDir);
     expect(result.specStoragePath).toBe('/some/repo/specs');
@@ -391,23 +392,23 @@ describe('resolveDbPath', () => {
     expect(result).toBe('/explicit/db.sqlite');
   });
 
-  it('should return <repoPath>/.commit4spec/commit4spec.db when repoPath given', () => {
+  it(`should return <repoPath>/${SPEC_DATA_DIR}/commit4spec.db when repoPath given`, () => {
     const result = resolveDbPath(tmpDir);
-    expect(result).toBe(path.join(tmpDir, '.commit4spec', 'commit4spec.db'));
+    expect(result).toBe(path.join(tmpDir, SPEC_DATA_DIR, 'commit4spec.db'));
     // Verify the directory was created
-    expect(fs.existsSync(path.join(tmpDir, '.commit4spec'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, SPEC_DATA_DIR))).toBe(true);
   });
 
-  it('should create .commit4spec/.gitignore with "*" content', () => {
+  it(`should create ${SPEC_DATA_DIR}/.gitignore with "*" content`, () => {
     resolveDbPath(tmpDir);
-    const gitignorePath = path.join(tmpDir, '.commit4spec', '.gitignore');
+    const gitignorePath = path.join(tmpDir, SPEC_DATA_DIR, '.gitignore');
     expect(fs.existsSync(gitignorePath)).toBe(true);
     expect(fs.readFileSync(gitignorePath, 'utf-8')).toBe('*\n');
   });
 
   it('should be idempotent — .gitignore not overwritten on second call', () => {
     resolveDbPath(tmpDir);
-    const gitignorePath = path.join(tmpDir, '.commit4spec', '.gitignore');
+    const gitignorePath = path.join(tmpDir, SPEC_DATA_DIR, '.gitignore');
     // Modify the .gitignore
     fs.writeFileSync(gitignorePath, 'custom content\n', 'utf-8');
     // Second call should not overwrite
@@ -768,7 +769,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should return defaults when config file contains invalid JSON', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(path.join(configDir, 'spec.json'), 'not valid json {{{', 'utf-8');
 
@@ -779,7 +780,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should return defaults when top-level value is not an object', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(path.join(configDir, 'spec.json'), '"just a string"', 'utf-8');
 
@@ -788,7 +789,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should return defaults when top-level value is an array', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(path.join(configDir, 'spec.json'), '[1, 2, 3]', 'utf-8');
 
@@ -797,7 +798,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should deep merge valid config over defaults', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     const userConfig = {
       llm: {
@@ -827,7 +828,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should resolve apiKey from process.env when apiKeyEnv is set', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     const userConfig = {
       llm: {
@@ -847,7 +848,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should leave apiKey as default when apiKeyEnv points to unset env var', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     const userConfig = {
       llm: {
@@ -866,7 +867,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should preserve apiKey from config file when apiKeyEnv is not set', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     const userConfig = {
       llm: {
@@ -885,7 +886,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should normalize baseUrl when provided', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     const userConfig = {
       llm: {
@@ -904,7 +905,7 @@ describe('loadSpecConfig', () => {
   });
 
   it('should normalize maxTokens as integer', () => {
-    const configDir = path.join(tmpDir, '.commit4spec', 'config');
+    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
     fs.mkdirSync(configDir, { recursive: true });
     const userConfig = {
       llm: {

@@ -661,7 +661,7 @@ export const tools: ToolDefinition[] = [
     description:
       'Match a new spec/feature description against the Commit4Spec knowledge graph using FTS5 full-text search. ' +
       'Returns the most similar historical specs with their associated commits and code fragments. ' +
-      'The database defaults to .commit4spec/commit4spec.db under the repo path.',
+      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4013,7 +4013,7 @@ export class ToolHandler {
    *
    * Uses FTS5 full-text search to find the most similar historical specs,
    * returning each with its linked commits and optional code fragments.
-   * The database lives at `.commit4spec/commit4spec.db` by default and is
+   * The database lives at `.homegraph/commit4spec/commit4spec.db` by default and is
    * separate from the HomeGraph code-symbol index — this tool works whether
    * or not the code index is present.
    */

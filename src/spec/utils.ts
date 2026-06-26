@@ -40,6 +40,9 @@ export interface BudgetProfile {
 // Constants
 // =============================================================================
 
+/** Root directory for spec data, relative to the repository root. */
+export const SPEC_DATA_DIR = '.homegraph/commit4spec';
+
 const TRUNCATION_SUFFIX = '  …(truncated)';
 const TRUNCATION_SUFFIX_LENGTH = TRUNCATION_SUFFIX.length;
 
@@ -186,8 +189,8 @@ export function discoverSpecs(specStoragePath: string): SpecEntry[] {
  *
  * Priority:
  * 1. If `explicitDbPath` is given, return it as-is (no side effects).
- * 2. If `repoPath` is given, default to `{repoPath}/.commit4spec/commit4spec.db`
- *    and ensure `.commit4spec/.gitignore` exists containing `"*"`.
+ * 2. If `repoPath` is given, default to `{repoPath}/${SPEC_DATA_DIR}/commit4spec.db`
+ *    and ensure `${SPEC_DATA_DIR}/.gitignore` exists containing `"*"`.
  * 3. If neither is given, return `"./commit4spec.db"`.
  */
 export function resolveDbPath(repoPath?: string, explicitDbPath?: string): string {
@@ -196,11 +199,11 @@ export function resolveDbPath(repoPath?: string, explicitDbPath?: string): strin
   }
 
   if (repoPath) {
-    const commit4specDir = path.join(repoPath, '.commit4spec');
+    const commit4specDir = path.join(repoPath, SPEC_DATA_DIR);
     const gitignorePath = path.join(commit4specDir, '.gitignore');
     const dbPath = path.join(commit4specDir, 'commit4spec.db');
 
-    // Ensure .commit4spec directory exists
+    // Ensure ${SPEC_DATA_DIR} directory exists
     try {
       fs.mkdirSync(commit4specDir, { recursive: true });
     } catch {
@@ -212,7 +215,7 @@ export function resolveDbPath(repoPath?: string, explicitDbPath?: string): strin
       try {
         fs.writeFileSync(gitignorePath, '*\n', 'utf-8');
       } catch (err) {
-        logWarn('Failed to write .commit4spec/.gitignore', {
+        logWarn(`Failed to write ${SPEC_DATA_DIR}/.gitignore`, {
           path: gitignorePath,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -230,13 +233,13 @@ export function resolveDbPath(repoPath?: string, explicitDbPath?: string): strin
 // =============================================================================
 
 /**
- * Read `.commit4spec/meta.json` from `repoPath`.
+ * Read `${SPEC_DATA_DIR}/meta.json` from `repoPath`.
  *
  * Returns `null` when the file is missing, unreadable, or contains invalid
  * JSON or a JSON value that is not a plain object.
  */
 export function readMeta(repoPath: string): SpecMeta | null {
-  const metaPath = path.join(repoPath, '.commit4spec', 'meta.json');
+  const metaPath = path.join(repoPath, SPEC_DATA_DIR, 'meta.json');
 
   let raw: string;
   try {
@@ -249,7 +252,7 @@ export function readMeta(repoPath: string): SpecMeta | null {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    logWarn('Ignoring .commit4spec/meta.json: not valid JSON', {
+    logWarn(`Ignoring ${SPEC_DATA_DIR}/meta.json: not valid JSON`, {
       path: metaPath,
     });
     return null;
@@ -257,7 +260,7 @@ export function readMeta(repoPath: string): SpecMeta | null {
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     logWarn(
-      'Ignoring .commit4spec/meta.json: top-level value must be a JSON object',
+      `Ignoring ${SPEC_DATA_DIR}/meta.json: top-level value must be a JSON object`,
       { path: metaPath },
     );
     return null;
@@ -268,7 +271,7 @@ export function readMeta(repoPath: string): SpecMeta | null {
   // Validate required string fields
   if (typeof obj.repoPath !== 'string' || typeof obj.specStoragePath !== 'string') {
     logWarn(
-      'Ignoring .commit4spec/meta.json: repoPath and specStoragePath must be strings',
+      `Ignoring ${SPEC_DATA_DIR}/meta.json: repoPath and specStoragePath must be strings`,
       { path: metaPath },
     );
     return null;
@@ -283,16 +286,16 @@ export function readMeta(repoPath: string): SpecMeta | null {
 }
 
 /**
- * Write `.commit4spec/meta.json` to `repoPath`.
+ * Write `${SPEC_DATA_DIR}/meta.json` to `repoPath`.
  *
  * If existing meta has a `createdAt` field it is preserved; otherwise a new
  * ISO-8601 timestamp is generated. `updatedAt` is always set to the current
- * time. The `.commit4spec` directory is created if it does not exist.
+ * time. The `${SPEC_DATA_DIR}` directory is created if it does not exist.
  *
  * Returns the full `SpecMeta` that was written.
  */
 export function writeMeta(repoPath: string, specStoragePath: string): SpecMeta {
-  const metaDir = path.join(repoPath, '.commit4spec');
+  const metaDir = path.join(repoPath, SPEC_DATA_DIR);
   const metaPath = path.join(metaDir, 'meta.json');
 
   const now = new Date().toISOString();
