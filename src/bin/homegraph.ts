@@ -26,6 +26,7 @@
 import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
+import { SPEC_DATA_DIR } from '../spec/utils';
 import { getHomeGraphDir, isInitialized, unsafeIndexRootReason, findNearestHomeGraphRoot, planFrontload } from '../directory';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
@@ -225,7 +226,7 @@ function resolveProjectPath(pathArg?: string): string {
 
 /**
  * Resolve the project root for spec operations by walking up from a path
- * looking for `.commit4spec/meta.json` or `.commit4spec/commit4spec.db`.
+ * looking for `${SPEC_DATA_DIR}/meta.json` or `${SPEC_DATA_DIR}/commit4spec.db`.
  * Falls back to the starting path when neither marker is found (callers
  * handle the not-found case).
  */
@@ -233,7 +234,10 @@ function resolveSpecProjectPath(pathArg?: string): string {
   const startPath = path.resolve(pathArg || process.cwd());
 
   // Direct hit
-  const checkDirs = ['.commit4spec/meta.json', '.commit4spec/commit4spec.db'];
+  const checkDirs = [
+    `${SPEC_DATA_DIR}/meta.json`,
+    `${SPEC_DATA_DIR}/commit4spec.db`,
+  ];
   for (const check of checkDirs) {
     if (fs.existsSync(path.join(startPath, check))) return startPath;
   }
@@ -2238,8 +2242,8 @@ evolveCommand
         }
       }
 
-      // Ensure .commit4spec/logs directory
-      fs.mkdirSync(path.join(repoPath, '.commit4spec', 'logs'), { recursive: true });
+      // Ensure logs directory
+      fs.mkdirSync(path.join(repoPath, SPEC_DATA_DIR, 'logs'), { recursive: true });
 
       // Marker constants matching the git-hooks pattern
       const MARKER_BEGIN = '# >>> homegraph spec evolve hook >>>';
@@ -2249,9 +2253,9 @@ evolveCommand
         MARKER_BEGIN,
         '# Triggers spec self-evolution after each commit. Runs in background.',
         '# Installed by: homegraph spec evolve install',
-        '# Logs: .commit4spec/logs/evolve-hook.log',
+        `# Logs: ${SPEC_DATA_DIR}/logs/evolve-hook.log`,
         `"${homegraphBin}" spec evolve process --path "$(pwd)" --json \\`,
-        '    >> .commit4spec/logs/evolve-hook.log 2>&1 &',
+        `    >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
         MARKER_END,
       ].join('\n');
 
@@ -2281,7 +2285,7 @@ evolveCommand
       fs.chmodSync(hookPath, 0o755);
 
       success(`Post-commit hook installed at ${hookPath}`);
-      info(`Logs written to .commit4spec/logs/evolve-hook.log`);
+      info(`Logs written to ${SPEC_DATA_DIR}/logs/evolve-hook.log`);
     } catch (err) {
       error(`Hook install failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

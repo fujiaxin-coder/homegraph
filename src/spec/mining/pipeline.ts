@@ -4,7 +4,7 @@
  *
  * Replaces `commit4spec/reverse_engineer/pipeline.py`.  Discovers spec↔commit
  * pairs via `scan()`, persists them into the SQLite knowledge graph, and
- * writes a `.commit4spec/meta.json` anchor so the self-evolve pipeline can
+ * writes a `.homegraph/commit4spec/meta.json` anchor so the self-evolve pipeline can
  * pick up where mining left off.
  *
  * @module spec/mining/pipeline
@@ -58,7 +58,7 @@ export interface MiningResult {
  *    - Insert a SUMMARIZED_FROM relation.
  *    - Parse the commit diff into code fragments and persist them.
  * 6. Build a list of specs discovered on disk but never matched to a commit.
- * 7. Write `.commit4spec/meta.json`.
+ * 7. Write `.homegraph/commit4spec/meta.json`.
  * 8. Return the `MiningResult` with all counts.
  *
  * Edge cases:
