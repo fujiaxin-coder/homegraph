@@ -21,7 +21,7 @@ import {
   insertSpecCommitRelation,
   insertCommitFragmentRelation,
 } from '../db/relations';
-import { scan } from './git-scanner';
+import { scan, getCommitDiff } from './git-scanner';
 import { analyzeCommitDiff } from './diff-parser';
 import { logDebug, logWarn } from '../../errors';
 
@@ -88,10 +88,9 @@ export function runMiningPipeline(
   // ---- Step 3: scan for pairs ----
   const pairs = scan(repoPath, specStoragePath, resolvedConfig);
 
-  // ---- Step 4: sort by commit timestamp ascending ----
-  // CRITICAL: when the same spec appears in multiple pairs, the last one
-  // written (i.e. the pair with the most-recent commit) wins for the
-  // SpecNode timestamp because `insertSpecNode` uses INSERT OR REPLACE.
+  // ---- Step 4: sort by commit timestamp ascending (oldest first) ----
+  // INSERT OR REPLACE is used for SpecNode — when the same spec appears
+  // in multiple pairs, the LAST write (most-recent commit) naturally wins.
   pairs.sort((a, b) => {
     const aTs = a.commitMetadata?.timestamp ?? 0;
     const bTs = b.commitMetadata?.timestamp ?? 0;
@@ -99,7 +98,7 @@ export function runMiningPipeline(
   });
 
   // ---- Step 5: process pairs ----
-  const seenSpecIds = new Set<string>();
+  const writtenSpecIds = new Set<string>();
   const seenCommitHashes = new Set<string>();
   let specsFound = 0;
   let commitsFound = 0;
@@ -115,8 +114,11 @@ export function runMiningPipeline(
 
     const sm = pair.specMetadata;
 
-    // Insert SpecNode if spec metadata is present and not yet seen.
-    if (sm && !seenSpecIds.has(pair.specId)) {
+    // Insert SpecNode if spec metadata is present.
+    // INSERT OR REPLACE lets the most-recent commit (last in ascending
+    // order) overwrite the timestamp. We still track writtenSpecIds to
+    // correctly count distinct specs (not overwrites).
+    if (sm) {
       logDebug('Processing pair: inserting SpecNode', {
         specId: sm.specId,
         title: sm.title,
@@ -131,8 +133,10 @@ export function runMiningPipeline(
         filePath: sm.filePath,
         timestamp: cm.timestamp,
       });
-      seenSpecIds.add(pair.specId);
-      specsFound++;
+      if (!writtenSpecIds.has(pair.specId)) {
+        writtenSpecIds.add(pair.specId);
+        specsFound++;
+      }
     }
 
     // Insert CommitNode if not yet seen.
@@ -154,7 +158,8 @@ export function runMiningPipeline(
     }
 
     // ---- Analyze diff and insert fragments ----
-    const fragments = analyzeCommitDiff(repoPath, cm.hash);
+    const preFetchedDiff = getCommitDiff(repoPath, cm.hash);
+    const fragments = analyzeCommitDiff(repoPath, cm.hash, preFetchedDiff);
     for (const frag of fragments) {
       // insertCodeFragment auto-generates an id when the `id` field is empty.
       const inserted = insertCodeFragment(db, {
@@ -173,7 +178,7 @@ export function runMiningPipeline(
 
   // ---- Step 6: build skipped entries ----
   const skippedEntries = allEntries
-    .filter((e) => !seenSpecIds.has(e.specId))
+    .filter((e) => !writtenSpecIds.has(e.specId))
     .map((e) => ({ specId: e.specId, reason: 'No matching commits found' }));
 
   for (const skipped of skippedEntries) {

@@ -17,7 +17,7 @@
  * @module spec/mining/git-scanner
  */
 
-import { execFileSync } from 'child_process';
+import { execFileSync, type StdioOptions } from 'child_process';
 import { SpecConfig } from '../config';
 import { discoverSpecs } from '../utils';
 import { resolveScopeToSpec } from './scope-resolver';
@@ -52,10 +52,11 @@ export interface SpecCommitPair {
 
 /** Shared options for all `execFileSync` Git calls. */
 function gitExecOptions(repoPath: string) {
+  const stdio: StdioOptions = ['ignore', 'pipe', 'ignore'];
   return {
     cwd: repoPath,
     encoding: 'utf8' as const,
-    stdio: ['ignore', 'pipe', 'ignore'] as const,
+    stdio,
     windowsHide: true,
   };
 }

@@ -347,7 +347,7 @@ export function truncateCodeDiff(diff: string, maxChars: number = 3800): string 
   const suffix = TRUNCATION_SUFFIX;
   const effectiveMax = maxChars - TRUNCATION_SUFFIX_LENGTH;
   if (effectiveMax <= 0) {
-    return diff.slice(0, maxChars);
+    return diff.slice(0, Math.max(0, maxChars - 1)) + suffix;
   }
 
   // Step 2: find last "@@" hunk header in trailing 50%
@@ -407,7 +407,7 @@ export function truncateText(text: string, maxChars: number): string {
   const suffix = TRUNCATION_SUFFIX;
   const effectiveMax = maxChars - TRUNCATION_SUFFIX_LENGTH;
   if (effectiveMax <= 0) {
-    return text.slice(0, maxChars);
+    return text.slice(0, Math.max(0, maxChars - 1)) + suffix;
   }
 
   // Try to find the last newline within the budget

@@ -159,36 +159,31 @@ export function applyUpdate(
   decision: EvolveDecision,
   commitHash: string,
 ): { newSpecId: string; newVersion: number } {
-  // ---- Step 1: Backup old plan.md ----
-  const bakPath = oldFilePath + '.bak';
-  try {
-    fs.renameSync(oldFilePath, bakPath);
-  } catch {
-    logDebug('applyUpdate: backup rename failed (file may be missing), continuing', {
-      oldFilePath,
-      bakPath,
-    });
-    // Best-effort backup — continue even if rename fails.
-  }
+  // ---- Step 1: Write new plan content to temp file ----
+  // We write to a temp file first so the original is preserved until every
+  // DB operation succeeds.  If the caller's transaction rolls back, the
+  // temp file is harmless garbage — the original plan.md is untouched.
+  const tmpPath = oldFilePath + '.new';
+  writeFileContent(tmpPath, decision.plan_content || '');
 
-  // ---- Step 2: Write new plan.md content ----
-  writeFileContent(oldFilePath, decision.plan_content || '');
-
-  // ---- Step 3: Extract new metadata from the just-written file ----
+  // ---- Step 2: Extract new metadata from the temp file ----
   const metadata = extractSpecMetadata(specStoragePath, oldSpecId);
   const metadataTitle = metadata?.title;
   const metadataSubtitles = metadata?.subtitles;
 
-  // ---- Step 4: Read old spec data ----
+  // ---- Step 3: Read old spec data ----
   const oldSpec = findSpecById(db, oldSpecId);
   if (!oldSpec) {
     logDebug('applyUpdate: old spec not found in DB, returning early', {
       oldSpecId,
     });
+    // Clean up the temp file — no DB changes were made.
+    try { fs.unlinkSync(tmpPath); } catch { /* best-effort */ }
     return { newSpecId: oldSpecId, newVersion: oldVersion + 1 };
   }
 
-  // ---- Step 5: Insert deprecated record ----
+  // ---- Step 4: Insert deprecated record ----
+  const bakPath = oldFilePath + '.bak';
   const deprecatedId = `${oldSpecId}_v${oldVersion}`;
   insertSpecNode(db, {
     id: deprecatedId,
@@ -200,14 +195,14 @@ export function applyUpdate(
     timestamp: Date.now(),
   });
 
-  // ---- Step 6: Transfer relations from old active to deprecated ----
+  // ---- Step 5: Transfer relations from old active to deprecated ----
   transferSpecCommitRelations(db, oldSpecId, deprecatedId);
   transferSpecSpecRelations(db, oldSpecId, deprecatedId);
 
-  // ---- Step 7: Delete old active spec ----
+  // ---- Step 6: Delete old active spec ----
   deleteSpec(db, oldSpecId);
 
-  // ---- Step 8: Insert new active spec ----
+  // ---- Step 7: Insert new active spec ----
   const newVersion = oldVersion + 1;
   insertSpecNode(db, {
     id: oldSpecId,
@@ -219,11 +214,31 @@ export function applyUpdate(
     timestamp: Date.now(),
   });
 
-  // ---- Step 9: Create EVOLVED_FROM relation ----
+  // ---- Step 8: Create EVOLVED_FROM relation ----
   insertSpecSpecRelation(db, oldSpecId, deprecatedId, 'EVOLVED_FROM');
 
-  // ---- Step 10: Create GENERATE relation ----
+  // ---- Step 9: Create GENERATE relation ----
   insertSpecCommitRelation(db, oldSpecId, commitHash, 'GENERATE');
+
+  // ---- Step 10: File system finalisation ----
+  // Only now — after all DB ops succeeded — do we touch the original disk
+  // files.  rename() is atomic on the same filesystem.
+  try {
+    fs.renameSync(oldFilePath, bakPath);
+  } catch {
+    logDebug('applyUpdate: backup rename failed (file may be missing), continuing', {
+      oldFilePath,
+      bakPath,
+    });
+  }
+  try {
+    fs.renameSync(tmpPath, oldFilePath);
+  } catch {
+    logDebug('applyUpdate: temp rename failed, leaving .new in place', {
+      tmpPath,
+      oldFilePath,
+    });
+  }
 
   return { newSpecId: oldSpecId, newVersion };
 }
