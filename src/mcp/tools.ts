@@ -30,6 +30,10 @@ import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, C
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 
+// Spec knowledge-graph tooling — loaded lazily so the MCP startup path
+// doesn't pull in SQLite / spec-graph layers before the daemon binds.
+import type { SqliteDatabase } from '../db/sqlite-adapter';
+
 /**
  * An expected, recoverable "homegraph can't serve this" condition — most
  * importantly a project with no index. The dispatch catch converts these to
@@ -652,6 +656,41 @@ export const tools: ToolDefinition[] = [
       },
     },
   },
+  {
+    name: 'homegraph_spec_match',
+    description:
+      'Match a new spec/feature description against the Commit4Spec knowledge graph using FTS5 full-text search. ' +
+      'Returns the most similar historical specs with their associated commits and code fragments. ' +
+      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Spec text (title + description) to match against historical specs.',
+        },
+        repoPath: {
+          type: 'string',
+          description: 'Path to the repository root. Defaults to the current working directory.',
+        },
+        topK: {
+          type: 'number',
+          description: 'Maximum number of similar specs to return (default: 5).',
+          default: 5,
+        },
+        includeFragments: {
+          type: 'boolean',
+          description: 'Whether to include full code diffs per commit (default: true).',
+          default: true,
+        },
+        dbPath: {
+          type: 'string',
+          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
+        },
+      },
+      required: ['query'],
+    },
+  },
 ];
 
 /**
@@ -680,7 +719,7 @@ export function getStaticTools(): ToolDefinition[] {
  * status) remain fully functional — handlers stay, the library API and CLI are
  * untouched, and `HOMEGRAPH_MCP_TOOLS=explore,node,...` re-enables any of them.
  */
-const DEFAULT_MCP_TOOLS = new Set(['explore']);
+const DEFAULT_MCP_TOOLS = new Set(['explore', 'spec_match']);
 
 /**
  * Tool handler that executes tools against a HomeGraph instance
@@ -1271,6 +1310,8 @@ export class ToolHandler {
           return await this.handleStatus(args);
         case 'homegraph_files':
           result = await this.handleFiles(args); break;
+        case 'homegraph_spec_match':
+          result = await this.handleSpecMatch(args); break;
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
@@ -3961,6 +4002,148 @@ export class ToolHandler {
     renderNode(root, '', true, 0);
 
     return lines.join('\n');
+  }
+
+  // =========================================================================
+  // handleSpecMatch — Commit4Spec knowledge-graph search
+  // =========================================================================
+
+  /**
+   * Match a spec/feature description against the Commit4Spec knowledge graph.
+   *
+   * Uses FTS5 full-text search to find the most similar historical specs,
+   * returning each with its linked commits and optional code fragments.
+   * The database lives at `.homegraph/commit4spec/commit4spec.db` by default and is
+   * separate from the HomeGraph code-symbol index — this tool works whether
+   * or not the code index is present.
+   */
+  private async handleSpecMatch(args: Record<string, unknown>): Promise<ToolResult> {
+    const query = this.validateString(args.query, 'query');
+    if (typeof query !== 'string') return query;
+
+    const repoPath = args.repoPath as string | undefined;
+    const explicitDbPath = args.dbPath as string | undefined;
+    const topK = Math.max(1, Math.min(Number(args.topK) || 5, 50));
+    const includeFragments = args.includeFragments !== false;
+
+    // Lazily require spec modules so the MCP startup path stays lean.
+    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
+    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
+    const { initSpecSchema } = require('../spec/db/schema') as typeof import('../spec/db/schema');
+    const { searchAndGetContext } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
+    const {
+      truncateCodeDiff,
+      truncateSubtitles,
+      computeBudgetProfile,
+    } = require('../spec/utils') as typeof import('../spec/utils');
+
+    // Resolve the database path.
+    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+
+    // Open the database.
+    let db: SqliteDatabase;
+    try {
+      db = createDatabase(dbPath).db;
+    } catch (err) {
+      return this.errorResult(
+        `Failed to open Commit4Spec database at "${dbPath}": ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    try {
+      // Ensure the schema exists (idempotent).
+      initSpecSchema(db);
+
+      // Search and traverse.
+      const contexts = searchAndGetContext(db, query, topK, includeFragments);
+
+      if (contexts.length === 0) {
+        return this.textResult(
+          JSON.stringify({
+            query: query.slice(0, 200),
+            matched_count: 0,
+            results: [],
+          }, null, 2)
+        );
+      }
+
+      // Build budget profile for truncation.
+      const profile = computeBudgetProfile(contexts.length);
+
+      // Serialize to JSON (matching Python's spec_contexts_to_results format).
+      const results = contexts.map((ctx) => {
+        const subtitles = profile.tier === 'vlarge'
+          ? [] // vlarge disables subtitles entirely
+          : truncateSubtitles(ctx.spec.subtitles, 200, profile.maxContents);
+
+        const commits = ctx.commits.slice(0, profile.maxContents || 5).map((c) => {
+          const cd: Record<string, unknown> = {
+            hash: c.commit.hash,
+            message: c.commit.message,
+            relation_type: c.relationType,
+          };
+
+          if (includeFragments) {
+            const maxFrags = profile.maxFragments || 3;
+            cd.fragments = c.fragments.slice(0, maxFrags).map((f) => ({
+              file_path: f.filePath,
+              change_type: f.changeType,
+              start_line: f.startLine,
+              end_line: f.endLine,
+              code_diff: truncateCodeDiff(f.codeDiff),
+            }));
+          }
+
+          return cd;
+        });
+
+        return {
+          spec_id: ctx.spec.id,
+          title: ctx.spec.title,
+          subtitles,
+          file_path: ctx.spec.filePath,
+          commits,
+        };
+      });
+
+      const response = {
+        query: query.slice(0, 200),
+        matched_count: results.length,
+        results,
+      };
+
+      const json = JSON.stringify(response, null, 2);
+
+      // Hard cap to MAX_OUTPUT_LENGTH to prevent context bloat.
+      if (json.length <= MAX_OUTPUT_LENGTH) {
+        return this.textResult(json);
+      }
+
+      // When the full payload exceeds the cap, drop fragments first,
+      // then trim commits, then trim the whole thing.
+      if (includeFragments) {
+        const slimResults = results.map((r) => ({
+          ...r,
+          commits: r.commits.map((c: Record<string, unknown>) => {
+            const { fragments: _, ...rest } = c;
+            return rest;
+          }),
+        }));
+        const slim = JSON.stringify({ ...response, results: slimResults }, null, 2);
+        if (slim.length <= MAX_OUTPUT_LENGTH) {
+          return this.textResult(
+            `(Fragments elided — output exceeded ${MAX_OUTPUT_LENGTH} chars)\n\n` + slim
+          );
+        }
+      }
+
+      // Fallback: hard-truncate the JSON.
+      const truncated = json.slice(0, MAX_OUTPUT_LENGTH - 3) + '...';
+      return this.textResult(truncated);
+    } finally {
+      db.close();
+    }
   }
 
   // =========================================================================

@@ -26,6 +26,7 @@
 import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
+import { SPEC_DATA_DIR } from '../spec/utils';
 import { getHomeGraphDir, isInitialized, unsafeIndexRootReason, findNearestHomeGraphRoot, planFrontload } from '../directory';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
@@ -221,6 +222,39 @@ function resolveProjectPath(pathArg?: string): string {
 
   // Not found - return original path (will fail later with helpful error)
   return absolutePath;
+}
+
+/**
+ * Resolve the project root for spec operations by walking up from a path
+ * looking for `${SPEC_DATA_DIR}/meta.json` or `${SPEC_DATA_DIR}/commit4spec.db`.
+ * Falls back to the starting path when neither marker is found (callers
+ * handle the not-found case).
+ */
+function resolveSpecProjectPath(pathArg?: string): string {
+  const startPath = path.resolve(pathArg || process.cwd());
+
+  // Direct hit
+  const checkDirs = [
+    `${SPEC_DATA_DIR}/meta.json`,
+    `${SPEC_DATA_DIR}/commit4spec.db`,
+  ];
+  for (const check of checkDirs) {
+    if (fs.existsSync(path.join(startPath, check))) return startPath;
+  }
+
+  // Walk up
+  let current = startPath;
+  const root = path.parse(current).root;
+  while (current !== root) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+    for (const check of checkDirs) {
+      if (fs.existsSync(path.join(current, check))) return current;
+    }
+  }
+
+  return startPath; // fallback — callers handle not-found
 }
 
 /**
@@ -1955,6 +1989,384 @@ program
     } catch (err) {
       error(`Affected analysis failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
+    }
+  });
+
+// =============================================================================
+// Spec commands (Commit4Spec knowledge graph)
+// =============================================================================
+
+const specCommand = program
+  .command('spec')
+  .description('Manage spec knowledge graph (reverse-mining, search, self-evolve)');
+
+/**
+ * homegraph spec mine
+ */
+specCommand
+  .command('mine')
+  .description('Reverse-mine spec knowledge from Git history')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--spec-storage-path <path>', 'Path to the .spec directory')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: {
+    path?: string;
+    specStoragePath?: string;
+    dbPath?: string;
+    verbose?: boolean;
+    json?: boolean;
+  }) => {
+    try {
+      const repoPath = path.resolve(options.path || process.cwd());
+      const specStoragePath = options.specStoragePath ?? path.join(repoPath, '.spec');
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { runMiningPipeline } = await import('../spec/mining/pipeline');
+      const { isGitRepo } = await import('../spec/mining/git-scanner');
+      const { resolveDbPath } = await import('../spec/utils');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      if (!isGitRepo(repoPath)) {
+        error(`Not a git repository: ${repoPath}`);
+        process.exit(1);
+      }
+
+      if (options.verbose) {
+        info(`Repository: ${repoPath}`);
+        info(`Spec storage: ${specStoragePath}`);
+        info(`Database: ${dbPath}`);
+      }
+
+      const { db } = createDatabase(dbPath);
+      const result = runMiningPipeline(repoPath, specStoragePath, db);
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        info(`Specs found: ${result.specsFound}`);
+        info(`Commits found: ${result.commitsFound}`);
+        info(`Fragments: ${result.fragmentsFound}`);
+        info(`Relations: ${result.relationsCreated}`);
+        info(`Total entries: ${result.totalEntries}`);
+        info(`Skipped: ${result.skippedEntries.length}`);
+
+        if (result.skippedEntries.length > 0) {
+          for (const entry of result.skippedEntries) {
+            warn(`${entry.specId}: ${entry.reason}`);
+          }
+        }
+      }
+    } catch (err) {
+      error(`Mining failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * homegraph spec match <text>
+ */
+specCommand
+  .command('match <text>')
+  .description('Search the spec knowledge graph for a term or phrase')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('--top-k <number>', 'Number of results to return', '5')
+  .option('--no-fragments', 'Exclude code fragments from results')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (text: string, options: {
+    path?: string;
+    dbPath?: string;
+    topK?: string;
+    fragments?: boolean;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath, computeBudgetProfile } = await import('../spec/utils');
+      const { initSpecSchema } = await import('../spec/db/schema');
+      const { searchAndGetContext } = await import('../spec/graph/queries');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      if (!fs.existsSync(dbPath)) {
+        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        process.exit(1);
+      }
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+      initSpecSchema(db);
+
+      const topK = Math.max(1, Math.min(parseInt(options.topK || '5', 10) || 5, 50));
+      const includeFragments = options.fragments !== false;
+
+      const contexts = searchAndGetContext(db, text, topK, includeFragments);
+
+      if (contexts.length === 0) {
+        info('No specs matched your query.');
+        return;
+      }
+
+      const profile = computeBudgetProfile(contexts.length);
+      const results = contexts.map((ctx) => ({
+        spec_id: ctx.spec.id,
+        title: ctx.spec.title,
+        subtitles: ctx.spec.subtitles,
+        file_path: ctx.spec.filePath,
+        commits: ctx.commits.map((c) => ({
+          hash: c.commit.hash,
+          message: c.commit.message,
+          relation_type: c.relationType,
+          fragments: c.fragments.map((f) => ({
+            file_path: f.filePath,
+            change_type: f.changeType,
+            start_line: f.startLine,
+            end_line: f.endLine,
+            code_diff: f.codeDiff,
+          })),
+        })),
+      }));
+
+      if (options.json) {
+        console.log(JSON.stringify({
+          query: text.slice(0, 200),
+          matched_count: contexts.length,
+          results,
+        }, null, 2));
+      } else {
+        console.log(chalk.bold(`\n${contexts.length} spec${contexts.length !== 1 ? 's' : ''} matched:\n`));
+        for (const r of results) {
+          console.log(chalk.bold(r.title));
+          for (const commit of r.commits) {
+            console.log(`  ${chalk.yellow(commit.hash.slice(0, 7))} ${commit.message}`);
+            if (includeFragments && commit.fragments && commit.fragments.length > 0) {
+              for (const fragment of commit.fragments.slice(0, profile.maxFragments || 3)) {
+                console.log(chalk.dim(`    ${fragment.file_path}:${fragment.start_line}-${fragment.end_line} [${fragment.change_type}]`));
+              }
+            }
+          }
+          console.log();
+        }
+      }
+    } catch (err) {
+      error(`Match failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
+      try { db?.close(); } catch { /* best effort */ }
+    }
+  });
+
+/**
+ * homegraph spec evolve
+ */
+const evolveCommand = specCommand
+  .command('evolve')
+  .description('Self-evolve specs after code changes');
+
+/**
+ * homegraph spec evolve install
+ */
+evolveCommand
+  .command('install')
+  .description('Install a git post-commit hook that triggers spec evolution')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('-f, --force', 'Overwrite existing hook without prompting')
+  .action(async (options: { path?: string; force?: boolean }) => {
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { isGitRepo } = await import('../spec/mining/git-scanner');
+
+      if (!isGitRepo(repoPath)) {
+        error(`Not a git repository: ${repoPath}`);
+        process.exit(1);
+      }
+
+      const { execFileSync } = await import('child_process');
+
+      // Resolve the absolute path to homegraph so the hook works
+      // regardless of PATH (matching Python's shutil.which("c4s")).
+      let homegraphBin: string;
+      try {
+        homegraphBin = execFileSync('command', ['-v', 'homegraph'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+      } catch {
+        homegraphBin = '';
+      }
+
+      if (!homegraphBin) {
+        error(
+          'homegraph command not found in PATH.\n' +
+            '  Make sure homegraph is installed globally: npm install -g homegraph'
+        );
+        process.exit(1);
+      }
+
+      const hooksDir = execFileSync('git', ['rev-parse', '--git-path', 'hooks'], {
+        cwd: repoPath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      }).trim();
+
+      const resolvedHooksDir = path.isAbsolute(hooksDir)
+        ? hooksDir
+        : path.resolve(repoPath, hooksDir);
+
+      fs.mkdirSync(resolvedHooksDir, { recursive: true });
+
+      const hookPath = path.join(resolvedHooksDir, 'post-commit');
+
+      if (fs.existsSync(hookPath) && !options.force) {
+        const readline = await import('readline');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(
+            chalk.yellow('A post-commit hook already exists. Overwrite? (y/N) '),
+            resolve
+          );
+        });
+        rl.close();
+
+        if (answer.toLowerCase() !== 'y') {
+          info('Cancelled');
+          return;
+        }
+      }
+
+      // Ensure logs directory
+      fs.mkdirSync(path.join(repoPath, SPEC_DATA_DIR, 'logs'), { recursive: true });
+
+      // Marker constants matching the git-hooks pattern
+      const MARKER_BEGIN = '# >>> homegraph spec evolve hook >>>';
+      const MARKER_END = '# <<< homegraph spec evolve hook <<<';
+
+      const hookBlock = [
+        MARKER_BEGIN,
+        '# Triggers spec self-evolution after each commit. Runs in background.',
+        '# Installed by: homegraph spec evolve install',
+        `# Logs: ${SPEC_DATA_DIR}/logs/evolve-hook.log`,
+        `"${homegraphBin}" spec evolve process --path "$(pwd)" --json \\`,
+        `    >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
+        MARKER_END,
+      ].join('\n');
+
+      let content: string;
+
+      if (fs.existsSync(hookPath)) {
+        // Strip any prior marker block, then re-append the current one
+        const existing = fs.readFileSync(hookPath, 'utf8');
+        const lines = existing.split('\n');
+        const kept: string[] = [];
+        let inBlock = false;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed === MARKER_BEGIN) { inBlock = true; continue; }
+          if (trimmed === MARKER_END) { inBlock = false; continue; }
+          if (!inBlock) kept.push(line);
+        }
+        const base = kept.join('\n').replace(/\s*$/, '');
+        content = base.length > 0
+          ? `${base}\n\n${hookBlock}\n`
+          : `#!/bin/sh\n${hookBlock}\n`;
+      } else {
+        content = `#!/bin/sh\n${hookBlock}\n`;
+      }
+
+      fs.writeFileSync(hookPath, content);
+      fs.chmodSync(hookPath, 0o755);
+
+      success(`Post-commit hook installed at ${hookPath}`);
+      info(`Logs written to ${SPEC_DATA_DIR}/logs/evolve-hook.log`);
+    } catch (err) {
+      error(`Hook install failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * homegraph spec evolve process
+ */
+evolveCommand
+  .command('process')
+  .description('Process a commit through the spec self-evolve pipeline')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('--commit-hash <hash>', 'Commit hash to process (default: HEAD)', 'HEAD')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: {
+    path?: string;
+    dbPath?: string;
+    commitHash?: string;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+      const { initSpecSchema } = await import('../spec/db/schema');
+      const { loadSpecConfig } = await import('../spec/config');
+      const { runEvolvePipeline } = await import('../spec/evolve/pipeline');
+      const { isGitRepo } = await import('../spec/mining/git-scanner');
+
+      if (!isGitRepo(repoPath)) {
+        error(`Not a git repository: ${repoPath}`);
+        process.exit(1);
+      }
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+      initSpecSchema(db);
+
+      const config = loadSpecConfig(repoPath);
+      const llmConfig = config.llm;
+
+      const commitHash = options.commitHash || 'HEAD';
+
+      const result = await runEvolvePipeline(repoPath, db, commitHash, llmConfig);
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(chalk.bold(`Processing commit ${result.commitHash.slice(0, 7)}`));
+        console.log(`Is logic change: ${result.isLogicChange ? chalk.green('✅ yes') : chalk.red('❌ no')}`);
+        console.log(`Reason: ${result.logicCheckReason}`);
+
+        if (result.generateSpecId) {
+          console.log(chalk.cyan(`Link Path A - GENERATE ${result.generateSpecId}`));
+        }
+
+        if (result.evolvedSpecs.length > 0) {
+          console.log(chalk.cyan(`Cycle Path B - Self-evolve (${result.affectedSpecCount} affected)`));
+          for (const evolved of result.evolvedSpecs) {
+            console.log(`  ${evolved.specId}: ${evolved.action}`);
+          }
+        }
+
+        console.log(`Summary: fragments=${result.fragmentsCount}, relations=${result.relationsCreated}`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('No meta.json found')) {
+        error("No meta.json found. Run 'homegraph spec mine' first.");
+      } else {
+        error(`Evolve failed: ${message}`);
+      }
+      process.exit(1);
+    } finally {
+      try { db?.close(); } catch { /* best effort */ }
     }
   });
 
