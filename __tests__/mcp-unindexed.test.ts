@@ -180,8 +180,7 @@ describe('No-root-index session policy', () => {
 
     const list = await request(child, { id: 1, method: 'tools/list' });
     const tools = (list.result as { tools: Array<{ name: string }> }).tools;
-    // The default surface is pared to explore alone (see DEFAULT_MCP_TOOLS) — the
-    // contract under test is "indexed → tools are PRESENT", in contrast to the
+    // Contract under test: "indexed → tools are PRESENT", in contrast to the
     // unindexed empty list above.
     expect(tools.length).toBeGreaterThanOrEqual(1);
     expect(tools.map((t) => t.name)).toContain('homegraph_explore');
