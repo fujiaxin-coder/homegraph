@@ -17,13 +17,12 @@ describe('HOMEGRAPH_MCP_TOOLS allowlist', () => {
 
   const listed = () => new ToolHandler(null).getTools().map(t => t.name).sort();
 
-  it('exposes ONLY homegraph_explore by default when unset', () => {
+  it('exposes the default MCP surface when unset', () => {
     delete process.env[ENV];
-    // The default set (see DEFAULT_MCP_TOOLS) is pared to explore alone — the one
-    // tool that earns its place (verbatim source grouped by file).
+    // The default set (see DEFAULT_MCP_TOOLS) lists explore plus spec_match.
     // node/search/callers/callees/impact/files/status stay defined and executable
     // but unlisted; HOMEGRAPH_MCP_TOOLS re-enables them.
-    expect(listed()).toEqual(['homegraph_explore']);
+    expect(listed()).toEqual(['homegraph_explore', 'homegraph_spec_match']);
   });
 
   it('re-enables an unlisted tool via the allowlist (impact)', () => {
@@ -43,7 +42,7 @@ describe('HOMEGRAPH_MCP_TOOLS allowlist', () => {
 
   it('treats an empty/whitespace value as unset (default surface)', () => {
     process.env[ENV] = '   ';
-    expect(listed()).toEqual(['homegraph_explore']);
+    expect(listed()).toEqual(['homegraph_explore', 'homegraph_spec_match']);
   });
 
   it('rejects a disabled tool on execute (defense in depth)', async () => {

@@ -13,7 +13,7 @@
  * library) is covered.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -21,6 +21,16 @@ import * as os from 'os';
 import { HomeGraph } from '../src';
 
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
+const DIST_SCHEMA = path.resolve(__dirname, '../dist/db/schema.sql');
+const SRC_SCHEMA = path.resolve(__dirname, '../src/db/schema.sql');
+
+/** CLI init reads schema.sql from dist/ — tsc-only builds omit copy-assets. */
+beforeAll(() => {
+  if (!fs.existsSync(DIST_SCHEMA)) {
+    fs.mkdirSync(path.dirname(DIST_SCHEMA), { recursive: true });
+    fs.copyFileSync(SRC_SCHEMA, DIST_SCHEMA);
+  }
+});
 
 function runCodegraph(args: string[], cwd: string): string {
   return execFileSync(process.execPath, [BIN, ...args], {
