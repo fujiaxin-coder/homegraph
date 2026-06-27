@@ -33,12 +33,11 @@ export function getMcpServerConfig(): { type: string; command: string; args: str
  * Permissions list for Claude `settings.json`. Other targets that
  * have a permissions concept can compose this list directly.
  *
- * One server-scoped wildcard rather than a per-tool list. By default only
- * `homegraph_explore` is even LISTED to the agent (see DEFAULT_MCP_TOOLS in
- * mcp/tools.ts), so in practice explore is the only tool this auto-approves —
- * but the wildcard means that if a user re-enables another tool via
- * HOMEGRAPH_MCP_TOOLS, it's already pre-approved (no permission prompt, no
- * hand-editing settings.json), and future tools are covered too. Claude only
+ * One server-scoped wildcard rather than a per-tool list. All homegraph tools
+ * are listed by default, and the wildcard pre-approves every current and
+ * future tool (no permission prompt, no hand-editing settings.json). Users who
+ * trim the surface via HOMEGRAPH_MCP_TOOLS still get pre-approval for whatever
+ * remains listed. Claude only
  * honors globs after a literal `mcp__<server>__` prefix, so this exact string
  * is the way to allow-all for one server; a bare `mcp__homegraph` or `*` is
  * ignored. The allowlist gates PROMPTING, not visibility, so a superset here

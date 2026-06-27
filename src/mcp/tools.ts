@@ -711,24 +711,11 @@ export const tools: ToolDefinition[] = [
 export function getStaticTools(): ToolDefinition[] {
   const raw = process.env.HOMEGRAPH_MCP_TOOLS ?? process.env.HOMEGRAPH_MCP_TOOLS;
   if (!raw || !raw.trim()) {
-    return tools.filter(t => DEFAULT_MCP_TOOLS.has(t.name.replace(/^homegraph_/, '')));
+    return tools;
   }
   const allow = new Set(raw.split(',').map(s => s.trim().replace(/^homegraph_/, '').replace(/^homegraph_/, '')).filter(Boolean));
   return allow.size ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, ''))) : tools;
 }
-
-/**
- * The MCP tools served by DEFAULT (short names). Pared to ONLY `homegraph_explore`
- * — the single tool that reliably earns its place: one capped call returns the
- * verbatim source of the relevant symbols grouped by file. Every other tool is a
- * narrower slice of what explore already does, and presence itself steers
- * mis-picks, so they are no longer LISTED to agents.
- *
- * The other defined tools (`node`, `search`, `callers`, plus callees/impact/files/
- * status) remain fully functional — handlers stay, the library API and CLI are
- * untouched, and `HOMEGRAPH_MCP_TOOLS=explore,node,...` re-enables any of them.
- */
-const DEFAULT_MCP_TOOLS = new Set(['explore', 'spec_match']);
 
 /**
  * Tool handler that executes tools against a HomeGraph instance
@@ -833,10 +820,11 @@ export class ToolHandler {
 
   /**
    * Optional allowlist of exposed tools, parsed from the HOMEGRAPH_MCP_TOOLS
-   * env var (comma-separated short names, e.g. "trace,search,node,context").
-   * Unset/empty → every tool is exposed. Lets an operator (or an A/B harness)
-   * trim the tool surface without rebuilding the client config; the ablated
-   * tool is then truly absent from ListTools rather than merely denied on call.
+   * env var (comma-separated short names, e.g. "explore,search,node").
+   * Unset/empty → every tool is exposed. Set → only the listed tools are
+   * exposed. Lets an operator (or an A/B harness) trim the tool surface
+   * without rebuilding the client config; the ablated tool is then truly
+   * absent from ListTools rather than merely denied on call.
    * Matching is on the short form, so "node" and "homegraph_node" both work.
    */
   private toolAllowlist(): Set<string> | null {
@@ -861,12 +849,11 @@ export class ToolHandler {
    */
   getTools(): ToolDefinition[] {
     const allow = this.toolAllowlist();
-    // No explicit allowlist → the default 4-tool surface (see
-    // DEFAULT_MCP_TOOLS for the evidence). An allowlist replaces the
-    // default entirely, so any defined tool can be re-enabled.
+    // No explicit allowlist → expose every defined tool. An allowlist trims
+    // the surface to only the listed short names.
     let visible = allow
       ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, '')))
-      : tools.filter(t => DEFAULT_MCP_TOOLS.has(t.name.replace(/^homegraph_/, '')));
+      : tools;
     if (!this.cg) return visible;
 
     try {
