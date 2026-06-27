@@ -30,6 +30,15 @@ import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, C
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 
+/** ViewTree structural `references` vias — not UI event bindings. */
+const VIEWTREE_STRUCTURE_VIAS = new Set([
+  'child-component',
+  'state-binding',
+  'prop-transfer',
+  'builder',
+  'builder-param',
+]);
+
 // Spec knowledge-graph tooling — loaded lazily so the MCP startup path
 // doesn't pull in SQLite / spec-graph layers before the daemon binds.
 import type { SqliteDatabase } from '../db/sqlite-adapter';
@@ -1622,6 +1631,16 @@ export class ToolHandler {
     return this.textResult(this.truncateOutput(sections.join('\n') + filterNote));
   }
 
+  /** Whether a graph edge may be traversed by homegraph_explore's main Flow BFS. */
+  private isExploreFlowEdge(edge: Edge): boolean {
+    if (edge.kind === 'calls') return true;
+    if (edge.kind !== 'references' || edge.provenance !== 'heuristic') return false;
+    const m = edge.metadata as Record<string, unknown> | undefined;
+    if (m?.synthesizedBy !== 'viewtree') return false;
+    const via = typeof m.via === 'string' ? m.via : '';
+    return via.length > 0 && !VIEWTREE_STRUCTURE_VIAS.has(via);
+  }
+
   /**
    * Describe a synthesized (dynamic-dispatch) edge for human output: how the
    * callback was wired up — the bridge static parsing can't see. Returns null
@@ -1672,6 +1691,16 @@ export class ToolHandler {
         compact: `dynamic: Vue ${ev} handler`,
         registeredAt,
       };
+    }
+    if (m?.synthesizedBy === 'viewtree') {
+      const via = typeof m.via === 'string' ? m.via : '';
+      if (via && !VIEWTREE_STRUCTURE_VIAS.has(via)) {
+        return {
+          label: `ArkUI event \`.${via}\` — bound handler (dynamic dispatch)`,
+          compact: `dynamic: ArkUI .${via}${at}`,
+          registeredAt,
+        };
+      }
     }
     if (m?.synthesizedBy === 'interface-impl') {
       return {
@@ -1867,7 +1896,7 @@ export class ToolHandler {
           if (id !== seed.id && named.has(id) && depth > deepDepth) { deep = id; deepDepth = depth; }
           if (depth >= MAX_HOPS - 1) continue;
           for (const c of cg.getCallees(id)) {
-            if (c.edge.kind !== 'calls' || parent.has(c.node.id)) continue;
+            if (!this.isExploreFlowEdge(c.edge) || parent.has(c.node.id)) continue;
             const newStreak = named.has(c.node.id) ? 0 : streak + 1;
             if (newStreak > MAX_BRIDGE) continue;
             parent.set(c.node.id, { prev: id, edge: c.edge, node: c.node });
