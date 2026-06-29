@@ -429,6 +429,18 @@ function printIndexResult(clack: typeof import('@clack/prompts'), result: IndexR
       fs.unlinkSync(logPath);
     }
   }
+
+  const arktsDegraded = result.errors.filter((e) => e.code === 'arkts_degraded');
+  if (arktsDegraded.length > 0) {
+    clack.log.warn('ArkTS index quality notice — see details below.');
+    clack.note(
+      `${arktsDegraded[0]!.message}\n\n` +
+        'Large ArkTS repos on Windows use an isolated indexer with enableMethodBodyBuild=true.\n' +
+        'If indexing failed, set HOMEGRAPH_ARKTS_STACK_SIZES_KB=65536,131072,262144 and retry:\n' +
+        '  node --stack-size=65536 dist/bin/homegraph.js index <path>',
+      'ArkTS quality notice'
+    );
+  }
 }
 
 /**

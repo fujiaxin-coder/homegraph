@@ -8,6 +8,7 @@ Usage:
     python run_all.py --agent deveco --arm baseline
     python run_all.py 1-1 1-2 1-3
     python run_all.py --repo-path /path/to/photos
+    python run_all.py --both-arms --agent deveco --repo-path /path/to/photos --skip-index
 """
 
 import argparse
@@ -24,19 +25,24 @@ import run_session
 import analyze
 from _utils import (DATA_DIR, EVAL_ROOT, LOG_DIR, OUTPUT_DIR, GREEN, NC, append_run_log,
                     current_time_ms, create_output_dirs, error, get_agent, header,
-                    info, load_config, log, verify_agent_binary, warn)
+                    info, load_config, log, subprocess_no_window_kwargs, verify_agent_binary, warn)
+from deveco_arm import (ensure_homegraph_index, git_clean_repo,
+                        write_deveco_project_config)
 
 DEFAULT_EXPERIMENTS = ["1-1", "1-2", "1-3"]
 SHARED_CLONE_DIR = DATA_DIR / "clone"
+
+
+_NW = subprocess_no_window_kwargs()
 
 
 def clone_repo(url: str, branch: str, clone_dir: Path) -> bool:
     clone_dir = Path(clone_dir)
     if (clone_dir / ".git").is_dir():
         log(f"Clone exists, updating: {clone_dir}")
-        subprocess.run(["git", "fetch", "origin", branch], cwd=clone_dir, capture_output=True, text=True)
-        subprocess.run(["git", "checkout", branch], cwd=clone_dir, capture_output=True, text=True)
-        subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=clone_dir, capture_output=True, text=True)
+        subprocess.run(["git", "fetch", "origin", branch], cwd=clone_dir, capture_output=True, text=True, **_NW)
+        subprocess.run(["git", "checkout", branch], cwd=clone_dir, capture_output=True, text=True, **_NW)
+        subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=clone_dir, capture_output=True, text=True, **_NW)
         return True
     log(f"Cloning {url} (branch: {branch})...")
     if clone_dir.exists():
@@ -45,48 +51,34 @@ def clone_repo(url: str, branch: str, clone_dir: Path) -> bool:
     r = subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", branch, url, str(clone_dir)],
         capture_output=True, text=True,
+        **_NW,
     )
     if r.returncode != 0:
         error(f"Clone failed: {r.stderr}")
         return False
-    r2 = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=clone_dir)
+    r2 = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=clone_dir, **_NW)
     log(f"Clone complete: {r2.stdout.strip()}")
     return True
 
 
-def reset_clone(clone_dir: Path, branch: str):
-    subprocess.run(["git", "checkout", branch], cwd=clone_dir, capture_output=True, text=True)
-    subprocess.run(["git", "checkout", "."], cwd=clone_dir, capture_output=True, text=True)
-    subprocess.run(["git", "clean", "-fd"], cwd=clone_dir, capture_output=True, text=True)
+def reset_clone(clone_dir: Path, branch: str, arm: str = "baseline"):
+    subprocess.run(["git", "checkout", branch], cwd=clone_dir, capture_output=True, text=True, **_NW)
+    subprocess.run(["git", "checkout", "."], cwd=clone_dir, capture_output=True, text=True, **_NW)
+    git_clean_repo(clone_dir, arm)
 
 
-def reset_local(work_dir: Path):
-    subprocess.run(["git", "checkout", "."], cwd=work_dir, capture_output=True, text=True)
-    subprocess.run(["git", "clean", "-fd"], cwd=work_dir, capture_output=True, text=True)
+def reset_local(work_dir: Path, arm: str = "baseline"):
+    subprocess.run(["git", "checkout", "."], cwd=work_dir, capture_output=True, text=True, **_NW)
+    git_clean_repo(work_dir, arm)
 
 
-def ensure_homegraph_index(repo_root: Path, arm: str) -> dict:
-    """Index repo when running the homegraph arm. Returns timing metadata."""
+def ensure_homegraph_index_for_arm(
+    repo_root: Path, arm: str, *, skip_index: bool = False,
+) -> dict:
+    """Index repo when running the homegraph arm."""
     if arm != "homegraph":
         return {"homegraph_index_ms": 0, "homegraph_index_success": None}
-    hg_root = EVAL_ROOT.parents[1]
-    hg_bin = hg_root / "dist" / "bin" / "homegraph.js"
-    if not hg_bin.exists():
-        warn(f"homegraph binary not found at {hg_bin}; run npm run build first")
-        return {"homegraph_index_ms": 0, "homegraph_index_success": False}
-    log(f"Indexing {repo_root} for homegraph arm...")
-    start_ms = current_time_ms()
-    r = subprocess.run(
-        ["node", str(hg_bin), "init", "-i", "--path", str(repo_root)],
-        capture_output=True, text=True,
-    )
-    index_ms = current_time_ms() - start_ms
-    success = r.returncode == 0
-    if not success:
-        warn(f"homegraph init failed: {r.stderr or r.stdout}")
-    else:
-        log(f"homegraph index ready ({index_ms / 1000:.1f}s)")
-    return {"homegraph_index_ms": index_ms, "homegraph_index_success": success}
+    return ensure_homegraph_index(repo_root, skip=skip_index)
 
 
 def write_run_manifest(state_dir: Path, results_dir: Path, meta: dict):
@@ -133,7 +125,9 @@ def resolve_work_dir(args, state_dir: Path) -> Tuple[Path, Optional[Path], bool]
     return clone_dir, clone_dir, True
 
 
-def run_suite(args, arm: str) -> dict:
+def run_suite(
+    args, arm: str, *, prebuilt_index_meta: Optional[dict] = None,
+) -> dict:
     """Run one arm (baseline or homegraph). Returns summary dict."""
     agent = get_agent(args.agent)
     skip_perms = not args.no_skip_permissions
@@ -145,7 +139,35 @@ def run_suite(args, arm: str) -> dict:
     results_dir, state_dir = create_output_dirs(args.agent or "default", arm)
     work_dir, ephemeral_clone, owns_clone = resolve_work_dir(args, state_dir)
 
-    index_meta = ensure_homegraph_index(work_dir, arm)
+    if arm == "baseline":
+        hg_dir = work_dir / ".homegraph"
+        if hg_dir.exists():
+            log("Baseline: 保留 .homegraph（A/B 共用仓库；baseline 通过 deveco.jsonc deny homegraph_* 隔离）")
+
+    if prebuilt_index_meta is not None:
+        index_meta = prebuilt_index_meta
+    else:
+        index_meta = ensure_homegraph_index_for_arm(
+            work_dir, arm, skip_index=getattr(args, "skip_index", False),
+        )
+
+    if arm == "homegraph" and not index_meta.get("homegraph_index_success"):
+        error("HomeGraph 索引失败，homegraph 组无法评测。")
+        err = index_meta.get("homegraph_index_error", "")
+        if err:
+            error(f"  原因: {err}")
+        error("  请先在 homegraph 仓库执行 npm run build，再重试 run_all.py --arm homegraph")
+        append_run_log(state_dir, f"ABORT: homegraph index failed: {err}")
+        write_run_manifest(state_dir, results_dir, {
+            "arm": arm, "agent": agent["name"], "agent_key": args.agent,
+            "branch": args.branch, "repo_url": args.repo_url,
+            "repo_root": str(work_dir), "experiments": experiments,
+            "aborted": True, **index_meta,
+        })
+        sys.exit(1)
+
+    if agent.get("binary") == "deveco":
+        write_deveco_project_config(work_dir, arm)
 
     write_run_manifest(state_dir, results_dir, {
         "arm": arm,
@@ -179,10 +201,10 @@ def run_suite(args, arm: str) -> dict:
 
         if ephemeral_clone:
             log("重置 clone 到干净状态...")
-            reset_clone(ephemeral_clone, args.branch)
+            reset_clone(ephemeral_clone, args.branch, arm)
         else:
             log("重置本地仓库...")
-            reset_local(work_dir)
+            reset_local(work_dir, arm)
 
         if exp_id == "5":
             ok = run_session.run_session("5", skip_perms, args.agent,
@@ -238,12 +260,14 @@ def _generate_reports(summaries: list, agent_key: str):
     compare_path = None
     if len(summaries) == 2 and len(reports) == 2:
         try:
+            baseline_s = next(s for s in summaries if s["arm"] == "baseline")
+            homegraph_s = next(s for s in summaries if s["arm"] == "homegraph")
             compare_path = analyze.compare_runs(
-                summaries[0]["results_dir"],
-                summaries[1]["results_dir"],
+                baseline_s["results_dir"],
+                homegraph_s["results_dir"],
                 agent=agent_key,
-                baseline_wall_s=summaries[0]["duration_s"],
-                homegraph_wall_s=summaries[1]["duration_s"],
+                baseline_wall_s=baseline_s["duration_s"],
+                homegraph_wall_s=homegraph_s["duration_s"],
                 verbose=True,
             )
         except ValueError as e:
@@ -262,6 +286,27 @@ def _generate_reports(summaries: list, agent_key: str):
     return reports, compare_path
 
 
+def _blocking_homegraph_index(work_dir: Path, *, skip_index: bool = False) -> dict:
+    """Run full ``homegraph index`` and block until complete (or validate existing index)."""
+    if skip_index:
+        header("HomeGraph 索引检查（--skip-index，不执行 index）")
+    else:
+        header("HomeGraph 全量 index（阻塞，Photos 约 15–30 分钟）")
+    log(f"仓库: {work_dir}")
+    if skip_index:
+        log("模式: 仅校验已有 .homegraph/（可从同 commit 的其他机器复制整个目录）")
+    else:
+        log("命令: node --stack-size=8192 … homegraph index（见 deveco_arm.HOMEGRAPH_NODE_STACK_SIZE_KB）")
+    meta = ensure_homegraph_index(work_dir, skip=skip_index)
+    if not meta.get("homegraph_index_success"):
+        error("HomeGraph index 失败，中止。")
+        err = meta.get("homegraph_index_error", "")
+        if err:
+            error(f"  原因: {err}")
+        sys.exit(1)
+    return meta
+
+
 def main():
     analyze._configure_stdout()
     cfg = load_config()
@@ -278,6 +323,11 @@ def main():
     parser.add_argument("--repo-path", default=os.environ.get("REPO_PATH", ""),
                         help="使用已有本地 clone，跳过 git clone")
     parser.add_argument("--keep-clone", action="store_true")
+    parser.add_argument(
+        "--skip-index",
+        action="store_true",
+        help="不跑 homegraph init/index；要求仓库根目录已有健康的 .homegraph/（可复制自同 commit 的其他 checkout）",
+    )
     parser.add_argument("--no-skip-permissions", action="store_true")
     parser.add_argument("--branch", default=os.environ.get("BRANCH", meta.get("default_branch", "weekly_20260601")))
     parser.add_argument("--repo-url", default=os.environ.get("REPO_URL", meta.get("repo_url", "")))
@@ -298,10 +348,18 @@ def main():
         warn("--both-arms 已指定，忽略 --arm")
 
     if args.both_arms:
+        _rd, _sd = create_output_dirs(args.agent or "default", "baseline")
+        work_dir, _, _ = resolve_work_dir(args, _sd)
+
+        # Index FIRST so the user sees it immediately (15–30 min); baseline does not use MCP.
+        index_meta = _blocking_homegraph_index(work_dir, skip_index=args.skip_index)
+
         summaries = []
-        for arm in ("baseline", "homegraph"):
-            print(f"\n{'=' * 60}\n  开始 {arm} 组\n{'=' * 60}\n")
-            summaries.append(run_suite(args, arm))
+        print(f"\n{'=' * 60}\n  开始 homegraph 组（先看 HomeGraph 是否生效）\n{'=' * 60}\n")
+        summaries.append(run_suite(args, "homegraph", prebuilt_index_meta=index_meta))
+
+        print(f"\n{'=' * 60}\n  开始 baseline 组（无 HomeGraph）\n{'=' * 60}\n")
+        summaries.append(run_suite(args, "baseline"))
 
         header("A/B 全部完成")
         for s in summaries:

@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from _utils import (OUTPUT_DIR, GREEN, NC, header, parse_output, parse_stream_json,
-                    read_run_manifest, resolve_deveco_model)
+from _utils import (OUTPUT_DIR, GREEN, NC, header, is_homegraph_tool, parse_output,
+                    parse_stream_json, read_run_manifest, resolve_deveco_model)
 
 RESULTS_DIR = OUTPUT_DIR  # default when no path argument given
 
@@ -176,12 +176,25 @@ def collect_summary(results_dir: Path) -> List[dict]:
                     input_tokens = stats.total_input_tokens
                 if not fe and stats.files_edited:
                     fe = len(set(stats.files_edited))
+            tool_names = d.get("tool_names", [])
+            if stats and stats.tool_names:
+                tool_names = stats.tool_names
+            hg_tools = _homegraph_tool_counts(tool_names)
+            hg_tc = d.get("homegraph_tool_calls", sum(hg_tools.values()))
+            if stats and stats.homegraph_tool_calls:
+                hg_tc = stats.homegraph_tool_calls
             rows.append(dict(id=exp_id, title=d.get("title", "?"), type="oneshot",
                 duration_s=d.get("duration_s", "?"), tool_calls=tool_calls,
                 files_read=files_read, files_edited=fe,
                 input_tokens=input_tokens, max_turns_hit=d.get("max_turns_hit", False),
                 exit_code=d.get("exit_code", "?"), model=_normalize_model(d, exp_dir, agent),
-                tool_names=d.get("tool_names", []), errors=d.get("errors", []),
+                tool_names=tool_names, errors=d.get("errors", []),
+                homegraph_tool_calls=hg_tc,
+                homegraph_tools=hg_tools,
+                homegraph_effective_calls=d.get("homegraph_effective_calls", 0),
+                homegraph_failed_calls=d.get("homegraph_failed_calls", 0),
+                used_homegraph=d.get("used_homegraph",
+                    stats.used_homegraph if stats else bool(hg_tc)),
                 agent=agent, memory=_memory_from_result(d)))
         elif sj.exists():
             d = json.loads(sj.read_text(encoding="utf-8"))
@@ -392,6 +405,7 @@ def collect_memory_curve(results_dir: Path) -> dict:
 
 def collect_aggregated(results_dir: Path) -> dict:
     total_dur = 0; total_tc = 0; total_read = 0; total_in = 0; count = 0; hits = 0
+    total_hg_tc = 0; total_hg_effective = 0; total_hg_failed = 0
     peak_agent_mb = 0.0; peak_hg_mb = 0.0; peak_combined_mb = 0.0
     for exp_dir in sorted(results_dir.iterdir()):
         if not exp_dir.is_dir(): continue
@@ -403,6 +417,9 @@ def collect_aggregated(results_dir: Path) -> dict:
             tool_calls = d.get("tool_calls", 0)
             files_read = len(d.get("files_read", []))
             input_tokens = d.get("input_tokens", 0)
+            hg_tc = d.get("homegraph_tool_calls", 0)
+            total_hg_effective += d.get("homegraph_effective_calls", 0)
+            total_hg_failed += d.get("homegraph_failed_calls", 0)
             mem = _memory_from_result(d)
             peak_agent_mb = max(peak_agent_mb, mem["peak_rss_mb"])
             peak_hg_mb = max(peak_hg_mb, mem["peak_homegraph_rss_mb"])
@@ -415,7 +432,10 @@ def collect_aggregated(results_dir: Path) -> dict:
                     files_read = len(set(stats.files_read))
                 if stats.total_input_tokens:
                     input_tokens = stats.total_input_tokens
+                if stats.homegraph_tool_calls:
+                    hg_tc = stats.homegraph_tool_calls
             total_tc += tool_calls
+            total_hg_tc += hg_tc
             total_read += files_read
             total_in += input_tokens
             if d.get("max_turns_hit"): hits += 1
@@ -440,11 +460,18 @@ def collect_aggregated(results_dir: Path) -> dict:
     manifest = read_run_manifest(results_dir)
     return dict(
         experiment_count=count, total_dur_ms=total_dur, total_tool_calls=total_tc,
+        total_homegraph_tool_calls=total_hg_tc,
+        total_homegraph_effective_calls=total_hg_effective,
+        total_homegraph_failed_calls=total_hg_failed,
         total_files_read=total_read, total_input_tokens=total_in, max_turns_hit_count=hits,
         peak_rss_mb=round(peak_agent_mb, 1), peak_homegraph_rss_mb=round(peak_hg_mb, 1),
         peak_combined_rss_mb=round(peak_combined_mb, 1),
         homegraph_index_ms=manifest.get("homegraph_index_ms", 0),
         homegraph_index_success=manifest.get("homegraph_index_success"),
+        homegraph_index_error=manifest.get("homegraph_index_error", ""),
+        homegraph_index_command=manifest.get("homegraph_index_command", ""),
+        homegraph_file_count=manifest.get("homegraph_file_count", 0),
+        homegraph_arkts_nodes=manifest.get("homegraph_arkts_nodes", 0),
     )
 
 
@@ -977,62 +1004,97 @@ def _overhead_s(wall_s: int, agent_ms: int, index_ms: int = 0) -> str:
     return f"≈{max(overhead, 0):.0f}s"
 
 
-def _build_duration_explanation(b_sum: dict, h_sum: dict, b_ag: dict, h_ag: dict,
-                                baseline_wall_s: int, homegraph_wall_s: int) -> str:
-    lines = []
-    index_ms = h_ag.get("homegraph_index_ms", 0)
-    if index_ms:
-        lines.append(
-            f"1. **HomeGraph 索引初始化**约 **{index_ms / 1000:.1f}s**（`homegraph init -i`），"
-            "只在 homegraph 组开头执行一次，计入墙钟但**不计入**各实验 `duration_s`。"
-        )
+def _overhead_s(wall_s: int, agent_ms: int, index_ms: int = 0) -> str:
+    if not wall_s:
+        return "—"
+    overhead = wall_s - agent_ms / 1000 - index_ms / 1000
+    return f"≈{max(overhead, 0):.0f}s"
+
+
+def _homegraph_tool_counts(tool_names: list) -> dict:
+    counts = {}
+    for name in tool_names or []:
+        if is_homegraph_tool(name):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _format_hg_tool_detail(hg_tools: dict) -> str:
+    if not hg_tools:
+        return "—"
+    return ", ".join(f"`{name}` ×{n}" for name, n in sorted(hg_tools.items()))
+
+
+def _build_ab_validity_section(b_sum: dict, h_sum: dict, exp_ids: list,
+                               h_ag: dict) -> str:
+    b_total = sum(r.get("homegraph_tool_calls", 0) for r in b_sum.values())
+    h_total = sum(r.get("homegraph_tool_calls", 0) for r in h_sum.values())
+    h_effective = sum(r.get("homegraph_effective_calls", 0) for r in h_sum.values())
+    h_failed = sum(r.get("homegraph_failed_calls", 0) for r in h_sum.values())
+    index_cmd = h_ag.get("homegraph_index_command", "index")
+    index_ok = h_ag.get("homegraph_index_success")
+    if index_ok is True:
+        index_label = f"成功（`{index_cmd}`"
+        if h_ag.get("homegraph_index_ms"):
+            index_label += f", {h_ag['homegraph_index_ms'] / 1000:.1f}s"
+        fc = h_ag.get("homegraph_file_count")
+        if fc:
+            index_label += f", {fc} files"
+        index_label += "）"
+    elif index_ok is False:
+        index_label = f"失败（`{index_cmd}`）"
+        err = h_ag.get("homegraph_index_error", "")
+        if err:
+            index_label += f"：{err[:100]}"
     else:
-        lines.append(
-            "1. **HomeGraph 索引初始化**：当前结果未记录该耗时（请用新版脚本重跑以分离 index 时间）。"
-            "通常 Photos 仓库 index 需数十秒到数分钟，是墙钟变长的因素之一。"
-        )
+        index_label = "—"
+    md = f"""## A/B 有效性
 
-    slower_exps = []
-    faster_exps = []
-    for eid in sorted(set(b_sum) | set(h_sum)):
+**Baseline** HomeGraph 工具调用合计：**{b_total}**
+
+**HomeGraph** HomeGraph 工具调用合计：**{h_total}**（有效 **{h_effective}** / 失败 **{h_failed}**）
+
+**HomeGraph 索引**：**{index_label}**
+
+| 实验 | Baseline HG | HomeGraph HG | HomeGraph 有效 | HomeGraph 失败 | HomeGraph 各工具（次数） |
+|------|------------|--------------|----------------|----------------|-------------------------|
+"""
+    for eid in exp_ids:
         br, hr = b_sum.get(eid, {}), h_sum.get(eid, {})
-        b_sec = _parse_duration_s(br.get("duration_s", 0))
-        h_sec = _parse_duration_s(hr.get("duration_s", 0))
-        if b_sec and h_sec:
-            if h_sec > b_sec * 1.2:
-                slower_exps.append(f"{eid}（{b_sec:.0f}s → {h_sec:.0f}s）")
-            elif h_sec < b_sec * 0.8:
-                faster_exps.append(f"{eid}（{b_sec:.0f}s → {h_sec:.0f}s）")
+        b_n = br.get("homegraph_tool_calls", 0)
+        h_n = hr.get("homegraph_tool_calls", 0)
+        h_eff = hr.get("homegraph_effective_calls", 0)
+        h_fail = hr.get("homegraph_failed_calls", 0)
+        h_detail = _format_hg_tool_detail(hr.get("homegraph_tools", {}))
+        md += f"| {eid} | {b_n} | {h_n} | {h_eff} | {h_fail} | {h_detail} |\n"
+    return md
 
-    if slower_exps:
-        lines.append(
-            "2. **单实验 Agent 耗时增加**（" + "、".join(slower_exps) + "）："
-            "各实验 `duration_s` 从 `deveco run` 开始到结束，**包含** DevEco 连接 MCP、"
-            "调用 `homegraph_explore` 的往返延迟，以及模型思考时间。"
-            "简单任务（如 1-1 改常量）用 HomeGraph 可能反而比直接 `read` 慢。"
-        )
-    if faster_exps:
-        lines.append(
-            "3. **部分实验 HomeGraph 更快**（" + "、".join(faster_exps) + "）："
-            "说明并非只有初始化开销；工具选择、Token 消耗与耗时无严格线性关系。"
-        )
 
-    agent_delta = h_ag["total_dur_ms"] - b_ag["total_dur_ms"]
-    if agent_delta > 0:
-        lines.append(
-            f"4. **Agent 累计耗时 HomeGraph 多 {agent_delta / 1000:.0f}s**，"
-            "主因是 MCP 调用链路与模型行为，不是重复 index（index 只跑一次）。"
-        )
+_FIXED_EXPERIMENT_EXPECTATIONS = """## 附录：实验预期（普适分析）
 
-    if h_ag["total_input_tokens"] < b_ag["total_input_tokens"]:
-        lines.append(
-            f"5. **Token 下降 {_pct_change(b_ag['total_input_tokens'], h_ag['total_input_tokens'])}** "
-            "说明 HomeGraph 减少了上下文体积，但单次 MCP 往返 + 冷启动仍可能让墙钟变长。"
-        )
+> 本节为**固定参考**，与上方实测数据无关，用于解读档位切换实验的设计意图。
 
-    if not lines:
-        lines.append("两组耗时接近；请结合逐实验表格与 `stream_output.jsonl` 查看工具调用差异。")
-    return "\n\n".join(f"- {line}" for line in lines)
+### Exp 1-1 — 零缺口任务（改常量）
+
+- **任务特征**：Prompt 已给出完整文件路径，只需定位一行常量并修改。
+- **耗时预期**：Baseline 通常更快 — 一次 `read` + 一次 `edit` 即可，HomeGraph 的 MCP 往返是额外开销。
+- **Token 预期**：两组接近；Baseline 上下文更小，HomeGraph 组可能因 explore 返回结构化源码而略高或略低。
+- **工具预期**：Baseline 2–4 次工具调用；HomeGraph 组若仍调用 explore，工具数可能相当或略多。
+
+### Exp 1-2 — 弱缺口任务（跨模块定位）
+
+- **任务特征**：需找到 `ThirdSelectAlbumGridBase`，文件在 `feature/thirdselect` 而非 `common`（命名陷阱）。
+- **耗时预期**：不确定 — Baseline 可能多次 grep 试错；HomeGraph explore 若一次命中可更快，若 query 不准则相当。
+- **Token 预期**：HomeGraph 组有望更低 — 减少逐文件 read 的上下文累积。
+- **工具预期**：Baseline 工具调用可能较多（glob/grep/read 组合）；HomeGraph 组 explore 成功时可显著减少 read 次数。
+
+### Exp 1-3 — 强缺口任务（跨文件分析）
+
+- **任务特征**：梳理图片加载失败的处理逻辑，涉及多个组件与错误状态，纯分析不改代码。
+- **耗时预期**：HomeGraph 组通常更有优势 — 一次 explore 可串联调用链，减少盲目 grep/read。
+- **Token 预期**：HomeGraph 组应明显更低 — 避免大量文件全文进入上下文。
+- **工具预期**：Baseline 可能需要 10+ 次 read/grep；HomeGraph 组 1–3 次 explore + 少量补充 read 即可覆盖。
+"""
 
 
 def build_compare_md(baseline_dir: Path, homegraph_dir: Path, baseline_data: dict,
@@ -1063,6 +1125,7 @@ def build_compare_md(baseline_dir: Path, homegraph_dir: Path, baseline_data: dic
 | 整组墙钟耗时 | {_format_wall_duration(baseline_wall_s) if baseline_wall_s else '—'} | {_format_wall_duration(homegraph_wall_s) if homegraph_wall_s else '—'} | {_delta_str(baseline_wall_s, homegraph_wall_s, 'min') if baseline_wall_s and homegraph_wall_s else '—'} | {_pct_change(baseline_wall_s, homegraph_wall_s) if baseline_wall_s and homegraph_wall_s else '—'} |
 | Agent 累计耗时 | {b_ag['total_dur_ms'] / 1000:.1f}s | {h_ag['total_dur_ms'] / 1000:.1f}s | {_delta_str(b_ag['total_dur_ms'] / 1000, h_ag['total_dur_ms'] / 1000, 's')} | {_pct_change(b_ag['total_dur_ms'] / 1000, h_ag['total_dur_ms'] / 1000)} |
 | 总工具调用 | {b_ag['total_tool_calls']} | {h_ag['total_tool_calls']} | {_delta_str(b_ag['total_tool_calls'], h_ag['total_tool_calls'])} | {_pct_change(b_ag['total_tool_calls'], h_ag['total_tool_calls'])} |
+| HomeGraph 工具调用 | {b_ag.get('total_homegraph_tool_calls', 0)} | {h_ag.get('total_homegraph_tool_calls', 0)} | {_delta_str(b_ag.get('total_homegraph_tool_calls', 0), h_ag.get('total_homegraph_tool_calls', 0))} | — |
 | 总读取文件数 | {b_ag['total_files_read']} | {h_ag['total_files_read']} | {_delta_str(b_ag['total_files_read'], h_ag['total_files_read'])} | {_pct_change(b_ag['total_files_read'], h_ag['total_files_read'])} |
 | 总 Input Token | {b_ag['total_input_tokens']:,} | {h_ag['total_input_tokens']:,} | {_delta_str(b_ag['total_input_tokens'], h_ag['total_input_tokens'])} | {_pct_change(b_ag['total_input_tokens'], h_ag['total_input_tokens'])} |
 | Max turns 命中 | {b_ag['max_turns_hit_count']} | {h_ag['max_turns_hit_count']} | {_delta_str(b_ag['max_turns_hit_count'], h_ag['max_turns_hit_count'])} | — |
@@ -1070,7 +1133,11 @@ def build_compare_md(baseline_dir: Path, homegraph_dir: Path, baseline_data: dic
 | HomeGraph 进程峰值内存 | {_format_mb(b_ag.get('peak_homegraph_rss_mb'))} | {_format_mb(h_ag.get('peak_homegraph_rss_mb'))} | — | — |
 | 合计峰值内存 | {_format_mb(b_ag.get('peak_combined_rss_mb'))} | {_format_mb(h_ag.get('peak_combined_rss_mb'))} | — | — |
 
-> **说明**: 墙钟耗时 = `run_all.py` 整组实验起止时间；Agent 累计耗时 = 各实验 `deveco run` 进程时间之和（**含** MCP 调用等待，**不含** 下面的 index 初始化）。内存为各实验轮询采样得到的 Working Set 峰值（Agent 子进程树 + 命令行含 `homegraph` 的 node 进程）。
+> **说明**: 墙钟耗时 = `run_all.py` 整组实验起止时间；Agent 累计耗时 = 各实验 `deveco run` 进程时间之和；HomeGraph 索引在 homegraph 组开头执行一次，计入墙钟但不计入各实验 `duration_s`。内存为各实验轮询采样得到的 Working Set 峰值。
+
+---
+
+{_build_ab_validity_section(b_sum, h_sum, exp_ids, h_ag)}
 
 ---
 
@@ -1078,21 +1145,17 @@ def build_compare_md(baseline_dir: Path, homegraph_dir: Path, baseline_data: dic
 
 | 阶段 | Baseline | HomeGraph | 说明 |
 |------|----------|-----------|------|
-| HomeGraph 索引 (`init -i`) | — | {_format_index_ms(h_ag.get('homegraph_index_ms', 0))} | 仅 homegraph 组开头执行 **一次**，不计入各实验 `duration_s` |
+| HomeGraph 索引 (`index`) | — | {_format_index_ms(h_ag.get('homegraph_index_ms', 0))} | 仅 homegraph 组开头执行一次 |
 | Agent 累计耗时 | {b_ag['total_dur_ms'] / 1000:.1f}s | {h_ag['total_dur_ms'] / 1000:.1f}s | 各实验 `duration_ms` 之和 |
 | 整组墙钟耗时 | {_format_wall_duration(baseline_wall_s) if baseline_wall_s else '—'} | {_format_wall_duration(homegraph_wall_s) if homegraph_wall_s else '—'} | 含 git 重置、setup、index、实验间隔 |
-| 墙钟 − Agent 累计 | {_overhead_s(baseline_wall_s, b_ag['total_dur_ms'])} | {_overhead_s(homegraph_wall_s, h_ag['total_dur_ms'], h_ag.get('homegraph_index_ms', 0))} | 近似 overhead（重置仓库 / 初始化 / 间隔） |
-
-### 为什么 HomeGraph 组耗时更长？
-
-{_build_duration_explanation(b_sum, h_sum, b_ag, h_ag, baseline_wall_s, homegraph_wall_s)}
+| 墙钟 − Agent 累计 | {_overhead_s(baseline_wall_s, b_ag['total_dur_ms'])} | {_overhead_s(homegraph_wall_s, h_ag['total_dur_ms'], h_ag.get('homegraph_index_ms', 0))} | 近似 overhead |
 
 ---
 
 ## 逐实验对比
 
-| Exp | Baseline 耗时 | HomeGraph 耗时 | Baseline 工具 | HomeGraph 工具 | Baseline 内存 | HomeGraph 内存 | Baseline Token | HomeGraph Token |
-|-----|--------------|----------------|---------------|----------------|---------------|----------------|----------------|-----------------|
+| Exp | Baseline 耗时 | HomeGraph 耗时 | Baseline 工具 | HomeGraph 工具 | Baseline HG | HomeGraph HG | Baseline Token | HomeGraph Token |
+|-----|--------------|----------------|---------------|----------------|-------------|--------------|----------------|-----------------|
 """
     for eid in exp_ids:
         br, hr = b_sum.get(eid, {}), h_sum.get(eid, {})
@@ -1100,14 +1163,14 @@ def build_compare_md(baseline_dir: Path, homegraph_dir: Path, baseline_data: dic
         h_dur = hr.get("duration_s", "—")
         b_tc = br.get("tool_calls", "—")
         h_tc = hr.get("tool_calls", "—")
-        b_mem = _format_mb((br.get("memory") or {}).get("peak_combined_rss_mb"))
-        h_mem = _format_mb((hr.get("memory") or {}).get("peak_combined_rss_mb"))
+        b_hg = br.get("homegraph_tool_calls", 0)
+        h_hg = hr.get("homegraph_tool_calls", 0)
         b_tok = br.get("input_tokens", 0)
         h_tok = hr.get("input_tokens", 0)
         b_tok_s = f"{b_tok // 1000}k" if isinstance(b_tok, int) else str(b_tok)
         h_tok_s = f"{h_tok // 1000}k" if isinstance(h_tok, int) else str(h_tok)
-        title = br.get("title", hr.get("title", ""))[:20]
-        md += f"| {eid} {title} | {b_dur} | {h_dur} | {b_tc} | {h_tc} | {b_mem} | {h_mem} | {b_tok_s} | {h_tok_s} |\n"
+        title = br.get("title", hr.get("title", ""))[:16]
+        md += f"| {eid} {title} | {b_dur} | {h_dur} | {b_tc} | {h_tc} | {b_hg} | {h_hg} | {b_tok_s} | {h_tok_s} |\n"
 
     # Gear switching comparison if 1-1/1-2/1-3 present
     b_gs = baseline_data.get("gear_analysis", {})
@@ -1144,11 +1207,7 @@ def build_compare_md(baseline_dir: Path, homegraph_dir: Path, baseline_data: dic
     md += f"""
 ---
 
-## 结论提示
-
-- **HomeGraph 更快**（墙钟或 Token 下降）通常表示探索路径更短、重复 Read/Grep 更少。
-- **工具调用下降但耗时上升**可能表示单次 homegraph 调用延迟或 Agent 等待 MCP 就绪。
-- 准确度（是否命中目标文件、是否踩命名陷阱）需对照各实验 `raw_output.txt` 人工核对，本报告仅对比量化指标。
+{_FIXED_EXPERIMENT_EXPECTATIONS}
 
 *报告由 `analyze.py compare_runs` 自动生成*
 """

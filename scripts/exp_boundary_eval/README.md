@@ -9,10 +9,13 @@
 ## 快速开始
 
 ```powershell
-cd D:\code\homegraph\scripts\exp_boundary_eval
+cd D:\code\homegraph
+npm run build
 
-# 一条命令：baseline + homegraph 两组 A/B，跑完自动出报告
-python run_all.py --both-arms --agent deveco
+cd D:\code\homegraph\scripts\exp_boundary_eval
+# 一条命令：先 index/校验 → homegraph 组 → baseline 组 → 自动出报告
+# 不要另开终端同时跑 node … index，会与 index 抢 .homegraph 锁
+python run_all.py --both-arms --agent deveco --repo-path D:\code\homegraph\scripts\exp_boundary_eval\data\clone
 ```
 
 **前置条件**
@@ -196,8 +199,49 @@ npm run build
 
 ---
 
+## A/B 机制（真实对照）
+
+两组差异由 `deveco_arm.py` 写入测试仓库的 `.deveco/deveco.jsonc`：
+
+| 组别 | MCP | Agent Prompt | homegraph 工具 |
+|------|-----|--------------|----------------|
+| **baseline** | 无 | 仅用 grep/read | `deny` |
+| **homegraph** | `homegraph serve --mcp --path <repo>` | 优先 `homegraph_explore` | 启用 |
+
+- 每次实验前 `setup.py` 会重置仓库并**重新写入**上述配置；`deveco run --dir <repo>` 读取项目级配置。
+- homegraph 组的 `git clean` 保留 `.homegraph/` 索引，避免重复 `init -i`。
+- 对比报告 **A/B 有效性** 一节检查：baseline 的 HomeGraph 工具调用应为 0，homegraph 组应 > 0。
+
+---
+
 ## 与 HomeGraph 主仓库的关系
 
-- `run_all.py --arm homegraph` 会对测试仓库执行 `node dist/bin/homegraph.js init -i`
-- homegraph 根目录通过 `_utils.EVAL_ROOT` 定位（不依赖运行时 cwd）
-- 本目录是独立评测脚本，不参与 `npm test`
+- **homegraph 组**索引策略（`deveco_arm.ensure_homegraph_index`）：
+  - 无 `.homegraph/` → `homegraph init <repo>`（若仍不健康则继续 `homegraph index`）
+  - 已初始化 → **`homegraph index` 全量重建**（不用 `sync`）
+  - **`--both-arms`**：**一启动就先** index/校验 `.homegraph/`，再跑 **homegraph → baseline**（先看到 HG 是否生效）
+  - 单独 `--arm homegraph`：组开头同样阻塞 index
+  - 每个实验前的 `setup.py` **不再**重复 index
+  - **不要**在跑 `run_all.py` 的同时另开终端 `node … index`（会并发写 `.homegraph`）
+
+### 复用已有 `.homegraph/`（跳过 index）
+
+**可以**：把整个 `.homegraph/` 目录复制到目标仓库根目录，只要：
+
+1. **相同代码** — 同一 git commit（DB 里存的是相对路径 + 文件 content hash，不绑定绝对路径）
+2. **索引完整** — 尤其 Photos 级仓库需含 ArkTS Scene（`homegraph status -j` 里 `struct`/`component` > 0、`languages` 含 `arkts`）
+3. **HomeGraph 版本** — 最好用**同一套** `dist/bin/homegraph.js` 构建；若 extraction 版本落后，`status` 会标 `reindexRecommended`，脚本会拒绝 `--skip-index`
+
+复制示例（Windows）：
+
+```powershell
+# 源：已在 Linux/Mac 上 index 成功的 checkout
+Copy-Item -Recurse D:\backup\applications_photos\.homegraph D:\code\applications_photos\.homegraph
+
+# 跑评测，不再 index
+python run_all.py --both-arms --agent deveco --repo-path D:\code\applications_photos --skip-index
+```
+
+单独 homegraph 组同样支持：`python run_all.py --arm homegraph --skip-index --repo-path …`
+
+若仓库相对索引有文件变更，脚本会 **warn** 但仍继续（MCP 可能对改过的文件不准）；严重不完整则 **abort** 并提示去掉 `--skip-index` 或 `homegraph sync`。

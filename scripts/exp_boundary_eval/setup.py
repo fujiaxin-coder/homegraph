@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 from _utils import (append_run_log, error, generate_session_id,
                     get_agent, get_agent_version, git_output, git_ok, log,
                     shell_ok, verify_agent_binary, write_json)
+from deveco_arm import git_clean_repo, write_deveco_project_config
 
 
 def prepare_environment(exp_id: str, clean_mode: str = "full",
@@ -46,20 +47,24 @@ def prepare_environment(exp_id: str, clean_mode: str = "full",
     binary = agent["binary"]
 
     # Step 1: Clean repo
+    arm = os.environ.get("EVAL_ARM", "baseline")
     if clean_mode == "full":
         log("Restoring repo to clean state...")
         branch = os.environ.get("BRANCH", "weekly_20260601")
         shell_ok(f"git checkout {branch}")
         git_ok(["checkout", "."], cwd=repo_root)
-        if is_clone:
-            git_ok(["clean", "-fd"], cwd=repo_root)
-        else:
-            git_ok(["clean", "-fd"], cwd=repo_root)
+        git_clean_repo(repo_root, arm)
 
         current_branch = git_output(["branch", "--show-current"], cwd=repo_root)
         commit = git_output(["rev-parse", "--short", "HEAD"], cwd=repo_root)
         log(f"Branch: {current_branch} | Commit: {commit}")
 
+    # Step 1b: DevEco A/B project config (.deveco/deveco.jsonc)
+    if agent.get("binary") == "deveco":
+        write_deveco_project_config(repo_root, arm)
+
+    # Step 1c: Index rebuilt once at homegraph suite start (run_all / prebuild).
+    # Per-experiment git reset restores the same commit — no second index here.
     # Step 2: Clear CLAUDE.md
     claude_md = repo_root / "CLAUDE.md"
     if claude_md.exists() and claude_md.stat().st_size > 0:

@@ -38,11 +38,11 @@
     "fast-wrap-ansi": "^0.2.0",
     "ignore": "^7.0.5",
     "jsonc-parser": "^3.3.1",
+    "openai": "^4.104.0",
     "picomatch": "^4.0.3",
     "sisteransi": "^1.0.5",
     "tree-sitter-wasms": "^0.1.11",
-    "web-tree-sitter": "^0.25.3",
-    "openai": "^4.0.0"
+    "web-tree-sitter": "^0.25.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

@@ -39,6 +39,7 @@ import {
   initGrammars,
 } from './extraction';
 import { bindExtractionContext } from './extraction/context';
+import { resetArkTSBatch } from './extraction/languages/arkts';
 import {
   ReferenceResolver,
   createResolver,
@@ -1177,6 +1178,7 @@ export class HomeGraph {
    */
   clear(): void {
     this.queries.clear();
+    resetArkTSBatch();
   }
 
   /**

@@ -26,6 +26,8 @@ import { validatePathWithinRoot, normalizePath } from '../utils';
 import ignore, { Ignore } from 'ignore';
 import { detectFrameworks } from '../resolution/frameworks';
 import type { ResolutionContext } from '../resolution/types';
+import { setArkTSBatchProgressCallback, isArktsBatchRunning } from './context';
+import { isArkTSBatchPersisted, primeArkTSBatch, resetArkTSBatch, drainArkTSIndexNotices } from './languages/arkts';
 
 /**
  * Number of files to read in parallel during indexing.
@@ -67,10 +69,12 @@ const WORKER_RECYCLE_INTERVAL = 250;
  * Progress callback for indexing operations
  */
 export interface IndexProgress {
-  phase: 'scanning' | 'parsing' | 'storing' | 'resolving';
+  phase: 'scanning' | 'parsing' | 'arkts-batch' | 'storing' | 'resolving';
   current: number;
   total: number;
   currentFile?: string;
+  /** ArkTS batch sub-step (scene build vs per-file persist). */
+  subphase?: 'scene' | 'persist';
 }
 
 /**
@@ -1078,6 +1082,19 @@ export class ExtractionOrchestrator {
     this.detectedFrameworkNames = null;
     const frameworkNames = this.ensureDetectedFrameworks(files);
 
+    resetArkTSBatch();
+    setArkTSBatchProgressCallback((batchProgress) => {
+      onProgress?.({
+        phase: 'arkts-batch',
+        current: batchProgress.current,
+        total: batchProgress.total,
+        currentFile: batchProgress.currentFile,
+        subphase: batchProgress.subphase,
+      });
+    });
+
+    try {
+
     if (signal?.aborted) {
       return {
         success: false,
@@ -1264,6 +1281,16 @@ export class ExtractionOrchestrator {
       });
     }
 
+    if (WorkerClass) {
+      await ensureWorker();
+    }
+
+    const firstEtsFile = files.find((f) => detectLanguage(f, undefined, overrides) === 'arkts');
+    if (firstEtsFile) {
+      await primeArkTSBatch(this.rootDir, this.queries, firstEtsFile);
+      errors.push(...drainArkTSIndexNotices());
+    }
+
     for (let i = 0; i < files.length; i += FILE_IO_BATCH_SIZE) {
       if (signal?.aborted) {
         if (parseWorker) (parseWorker as import('worker_threads').Worker).terminate().catch(() => {});
@@ -1284,6 +1311,15 @@ export class ExtractionOrchestrator {
       // Read files in parallel (with path validation before any I/O)
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
+          if (detectLanguage(fp, undefined, overrides) === 'arkts' && isArkTSBatchPersisted(fp)) {
+            return {
+              filePath: fp,
+              content: null as string | null,
+              stats: null as fs.Stats | null,
+              error: null as Error | null,
+              arktsBatchSkipped: true as const,
+            };
+          }
           try {
             // Indexing read: follow in-root symlinks the directory walk already
             // descended into (the `../` guard still applies) so files reached
@@ -1303,7 +1339,12 @@ export class ExtractionOrchestrator {
       );
 
       // Send to worker for parsing, store results on main thread
-      for (const { filePath, content, stats, error } of fileContents) {
+      for (const fileEntry of fileContents) {
+        const { filePath, content, stats, error } = fileEntry;
+        const arktsBatchSkipped = 'arktsBatchSkipped' in fileEntry && fileEntry.arktsBatchSkipped;
+        const lang = detectLanguage(filePath, undefined, overrides);
+        const alreadyArktsPersisted = lang === 'arkts' && isArkTSBatchPersisted(filePath);
+
         if (signal?.aborted) {
           if (parseWorker) (parseWorker as import('worker_threads').Worker).terminate().catch(() => {});
           return {
@@ -1318,13 +1359,21 @@ export class ExtractionOrchestrator {
           };
         }
 
-        // Report progress before parsing (show current file being worked on)
-        onProgress?.({
-          phase: 'parsing',
-          current: processed,
-          total,
-          currentFile: filePath,
-        });
+        if (alreadyArktsPersisted || arktsBatchSkipped) {
+          processed++;
+          filesIndexed++;
+          onProgress?.({ phase: 'parsing', current: processed, total, currentFile: filePath });
+          continue;
+        }
+
+        if (!isArktsBatchRunning()) {
+          onProgress?.({
+            phase: 'parsing',
+            current: processed,
+            total,
+            currentFile: filePath,
+          });
+        }
 
         if (error || content === null || stats === null) {
           processed++;
@@ -1541,6 +1590,9 @@ export class ExtractionOrchestrator {
       errors,
       durationMs: Date.now() - startTime,
     };
+    } finally {
+      setArkTSBatchProgressCallback(null);
+    }
   }
 
   /**
@@ -1675,6 +1727,15 @@ export class ExtractionOrchestrator {
 
     // Detect language (honoring the project's homegraph.json extension overrides)
     const language = detectLanguage(relativePath, content, loadExtensionOverrides(this.rootDir));
+    if (language === 'arkts' && isArkTSBatchPersisted(relativePath)) {
+      return {
+        nodes: [],
+        edges: [],
+        unresolvedReferences: [],
+        errors: [],
+        durationMs: 0,
+      };
+    }
     if (!isLanguageSupported(language)) {
       return {
         nodes: [],
@@ -1940,17 +2001,49 @@ export class ExtractionOrchestrator {
 
     // Index changed files
     const total = filesToIndex.length;
-    for (let i = 0; i < filesToIndex.length; i++) {
-      const filePath = filesToIndex[i]!;
-      onProgress?.({
-        phase: 'parsing',
-        current: i + 1,
-        total,
-        currentFile: filePath,
+    const overrides = loadExtensionOverrides(this.rootDir);
+    const needsArkTS = filesToIndex.some((f) => detectLanguage(f, undefined, overrides) === 'arkts');
+    if (needsArkTS) {
+      setArkTSBatchProgressCallback((batchProgress) => {
+        onProgress?.({
+          phase: 'arkts-batch',
+          current: batchProgress.current,
+          total: batchProgress.total,
+          currentFile: batchProgress.currentFile,
+          subphase: batchProgress.subphase,
+        });
       });
+      const firstEts = filesToIndex.find(
+        (f) => detectLanguage(f, undefined, overrides) === 'arkts'
+      )!;
+      await primeArkTSBatch(this.rootDir, this.queries, firstEts);
+    }
+    try {
+      for (let i = 0; i < filesToIndex.length; i++) {
+        const filePath = filesToIndex[i]!;
+        if (detectLanguage(filePath, undefined, overrides) === 'arkts' && isArkTSBatchPersisted(filePath)) {
+          onProgress?.({
+            phase: 'parsing',
+            current: i + 1,
+            total,
+            currentFile: filePath,
+          });
+          continue;
+        }
+        onProgress?.({
+          phase: 'parsing',
+          current: i + 1,
+          total,
+          currentFile: filePath,
+        });
 
-      const result = await this.indexFile(filePath);
-      nodesUpdated += result.nodes.length;
+        const result = await this.indexFile(filePath);
+        nodesUpdated += result.nodes.length;
+      }
+    } finally {
+      if (needsArkTS) {
+        setArkTSBatchProgressCallback(null);
+      }
     }
 
     return {

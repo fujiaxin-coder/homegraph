@@ -11,7 +11,8 @@ import setup as setup_mod
 from _utils import (OUTPUT_DIR, append_run_log, build_agent_cmd, current_time_ms,
                     error, find_experiment, get_agent, info, header,
                     parse_output, resolve_agent_model, run_monitored_subprocess,
-                    warn, write_json)
+                    subprocess_no_window_kwargs, warn, write_json)
+from deveco_arm import analyze_homegraph_stream
 
 
 def run_experiment(exp_id: str, skip_permissions: bool = True,
@@ -58,7 +59,8 @@ def run_experiment(exp_id: str, skip_permissions: bool = True,
     os.chdir(repo_root)
 
     cmd = build_agent_cmd(agent, session_id, max_turns, prompt,
-                          resume=False, skip_permissions=skip_permissions)
+                          resume=False, skip_permissions=skip_permissions,
+                          repo_root=repo_root)
 
     stream_path = result_dir / "stream_output.jsonl"
     text_path = result_dir / "raw_output.txt"
@@ -95,8 +97,13 @@ def run_experiment(exp_id: str, skip_permissions: bool = True,
     text_path.write_text(text_content or "(no text output)", encoding="utf-8")
 
     # Modified files
-    r2 = subprocess.run(["git", "diff", "--name-only"], capture_output=True, text=True, cwd=repo_root)
+    r2 = subprocess.run(
+        ["git", "diff", "--name-only"], capture_output=True, text=True, cwd=repo_root,
+        **subprocess_no_window_kwargs(),
+    )
     mod_files = len([l for l in r2.stdout.strip().split("\n") if l])
+
+    hg_stream = analyze_homegraph_stream(stream_path)
 
     results = {
         "experiment_id": exp_id, "title": title, "agent": agent["name"],
@@ -106,6 +113,10 @@ def run_experiment(exp_id: str, skip_permissions: bool = True,
         "exit_code": exit_code, "max_turns": max_turns,
         "skip_permissions": skip_permissions,
         "tool_calls": stats.tool_calls, "tool_names": stats.tool_names,
+        "homegraph_tool_calls": stats.homegraph_tool_calls,
+        "used_homegraph": stats.used_homegraph,
+        **hg_stream,
+        "eval_arm": os.environ.get("EVAL_ARM", ""),
         "files_read": list(set(stats.files_read)),
         "files_edited": list(set(stats.files_edited)),
         "model": resolve_agent_model(agent, stats),
@@ -124,6 +135,7 @@ def run_experiment(exp_id: str, skip_permissions: bool = True,
         append_run_log(state_dir, f"Exp {exp_id} finished in {dur_s}s, tools={stats.tool_calls}, exit={exit_code}")
     info(f"Results saved: {result_dir}/")
     print(f"  Duration: {dur_s}s | Tool calls: {stats.tool_calls} | "
+          f"HG tools: {stats.homegraph_tool_calls} | "
           f"Files read: {len(set(stats.files_read))} | Edited: {mod_files} | "
           f"Peak mem: {mem.peak_combined_rss_mb:.0f} MB")
     if stats.max_turns_hit:
