@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { bindExtractionContext, resetExtractionContext } from '../../../src/extraction/context';
-import { ArkTSExtractor, resetArkTSBatch } from '../../../src/extraction/languages/arkts';
+import { ArkTSExtractor, isArkTSBatchPersisted, resetArkTSBatch } from '../../../src/extraction/languages/arkts';
 import { detectLanguage, isArkModuleJson5, isSourceFile } from '../../../src/extraction/grammars';
 import { cleanupArktsProjects, makeArktsProject, mockArktsQueries } from './helpers';
 
@@ -58,6 +58,7 @@ export function main(): void {
 
     const calls = fileResult.edges.filter((e) => e.kind === 'calls');
     expect(calls.length).toBeGreaterThan(0);
+    expect(isArkTSBatchPersisted('sample.ets')).toBe(true);
   });
 
   it('returns empty when the project has no .ets files', () => {

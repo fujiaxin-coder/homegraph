@@ -12,7 +12,7 @@ import setup as setup_mod
 from _utils import (OUTPUT_DIR, append_run_log, build_agent_cmd,
                     current_time_ms, find_experiment, get_agent, info, header,
                     log, parse_output, resolve_agent_model, run_monitored_subprocess,
-                    write_json, warn)
+                    subprocess_no_window_kwargs, write_json, warn)
 
 
 def run_session(exp_id: str = "5", skip_permissions: bool = True,
@@ -65,7 +65,8 @@ def run_session(exp_id: str = "5", skip_permissions: bool = True,
         is_resume = round_num > 1
 
         cmd = build_agent_cmd(agent, session_id, max_turns, ri["prompt"],
-                              resume=is_resume, skip_permissions=skip_permissions)
+                              resume=is_resume, skip_permissions=skip_permissions,
+                              repo_root=repo_root)
 
         stream_path = round_dir / "stream_output.jsonl"
         text_path = round_dir / "raw_output.txt"
@@ -92,7 +93,10 @@ def run_session(exp_id: str = "5", skip_permissions: bool = True,
         text_content = "\n".join(stats.text_lines)
         text_path.write_text(text_content or "(no text output)", encoding="utf-8")
 
-        r2 = subprocess.run(["git", "diff", "--name-only"], capture_output=True, text=True, cwd=repo_root)
+        r2 = subprocess.run(
+            ["git", "diff", "--name-only"], capture_output=True, text=True, cwd=repo_root,
+            **subprocess_no_window_kwargs(),
+        )
         mod_files = len([l for l in r2.stdout.strip().split("\n") if l])
 
         rr = {"round": round_num, "title": ri["title"], "duration_ms": dur_ms,

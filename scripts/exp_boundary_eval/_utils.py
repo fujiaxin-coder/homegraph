@@ -25,6 +25,50 @@ AGENTS_FILE = DATA_DIR / "agents.json"
 RESULTS_DIR = OUTPUT_DIR
 STATE_DIR = LOG_DIR
 
+_HOMEGRAPH_TOOL_RE = re.compile(
+    r"homegraph(?:_homegraph)?_(?:explore|node|search|callers|callees)", re.I,
+)
+
+# Windows: stop PowerShell/node subprocesses from flashing console windows.
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
+def subprocess_no_window_kwargs() -> dict:
+    """Extra kwargs for subprocess.run/Popen on Windows (no-op elsewhere)."""
+    if sys.platform == "win32":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        return {"creationflags": _CREATE_NO_WINDOW, "startupinfo": si}
+    return {}
+
+
+def merge_subprocess_kwargs(kwargs: dict) -> dict:
+    """Merge caller kwargs with subprocess_no_window_kwargs (OR creationflags)."""
+    merged = dict(kwargs)
+    extra = subprocess_no_window_kwargs()
+    if "creationflags" in extra:
+        merged["creationflags"] = merged.get("creationflags", 0) | extra["creationflags"]
+    if sys.platform == "win32" and "startupinfo" not in merged:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        merged["startupinfo"] = si
+    return merged
+
+
+def is_homegraph_tool(name: str) -> bool:
+    n = str(name or "").strip()
+    if not n:
+        return False
+    if _HOMEGRAPH_TOOL_RE.search(n):
+        return True
+    return n.lower() in ("homegraph_explore", "homegraph_node")
+
+
+def count_homegraph_tools(tool_names: list) -> int:
+    return sum(1 for t in tool_names if is_homegraph_tool(t))
+
 
 def create_output_dirs(agent_name: str = "", arm: str = "baseline") -> Tuple[Path, Path]:
     """Create timestamped run directories.
@@ -84,12 +128,18 @@ def current_time_ms() -> int:
 
 
 def run_cmd_ok(cmd: list, cwd: Optional[Path] = None) -> bool:
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd) if cwd else None)
+    r = subprocess.run(
+        cmd, capture_output=True, text=True, cwd=str(cwd) if cwd else None,
+        **subprocess_no_window_kwargs(),
+    )
     return r.returncode == 0
 
 
 def git_output(cmd: list, cwd: Path) -> str:
-    r = subprocess.run(["git"] + cmd, capture_output=True, text=True, cwd=cwd)
+    r = subprocess.run(
+        ["git"] + cmd, capture_output=True, text=True, cwd=cwd,
+        **subprocess_no_window_kwargs(),
+    )
     return r.stdout.strip()
 
 
@@ -98,8 +148,11 @@ def git_ok(cmd: list, cwd: Path) -> bool:
 
 
 def shell_ok(cmd: str, cwd: Optional[Path] = None) -> bool:
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                       cwd=str(cwd) if cwd else None)
+    r = subprocess.run(
+        cmd, shell=True, capture_output=True, text=True,
+        cwd=str(cwd) if cwd else None,
+        **subprocess_no_window_kwargs(),
+    )
     return r.returncode == 0
 
 
@@ -198,6 +251,7 @@ def _tree_rss_powershell(root_pid: int) -> float:
     r = subprocess.run(
         ["powershell", "-NoProfile", "-Command", script],
         capture_output=True, text=True, timeout=5,
+        **subprocess_no_window_kwargs(),
     )
     if r.returncode != 0:
         return 0.0
@@ -219,6 +273,7 @@ def _homegraph_rss_powershell() -> float:
     r = subprocess.run(
         ["powershell", "-NoProfile", "-Command", script],
         capture_output=True, text=True, timeout=5,
+        **subprocess_no_window_kwargs(),
     )
     if r.returncode != 0:
         return 0.0
@@ -232,12 +287,11 @@ def _homegraph_rss_powershell() -> float:
 
 
 def _sample_rss(root_pid: int, track_homegraph: bool) -> Tuple[float, float]:
-    if _HAS_PSUTIL:
-        agent = _tree_rss_psutil(root_pid)
-        hg = _homegraph_rss_psutil() if track_homegraph else 0.0
-    else:
-        agent = _tree_rss_powershell(root_pid)
-        hg = _homegraph_rss_powershell() if track_homegraph else 0.0
+    if not _HAS_PSUTIL:
+        # Without psutil, do not spawn PowerShell every 0.5s (console flash on Windows).
+        return 0.0, 0.0
+    agent = _tree_rss_psutil(root_pid)
+    hg = _homegraph_rss_psutil() if track_homegraph else 0.0
     return agent, hg
 
 
@@ -247,7 +301,7 @@ def run_monitored_subprocess(cmd: list, poll_interval: float = 0.5,
                              **popen_kwargs):
     """Run subprocess and poll peak RSS of agent tree (+ optional HomeGraph sidecar)."""
     stats = MemoryStats()
-    proc = subprocess.Popen(cmd, **popen_kwargs)
+    proc = subprocess.Popen(cmd, **merge_subprocess_kwargs(popen_kwargs))
     last_hg_poll = 0.0
     cached_hg_b = 0.0
 
@@ -352,7 +406,7 @@ def verify_agent_binary(agent: dict) -> Tuple[bool, str, str]:
             f"找不到 {label} 的 CLI：`{configured}` 不在 PATH 中。{env_hint}"
         )
 
-    r = subprocess.run([binary, "--version"], capture_output=True, text=True)
+    r = subprocess.run([binary, "--version"], capture_output=True, text=True, **subprocess_no_window_kwargs())
     if r.returncode != 0:
         detail = (r.stdout + r.stderr).strip().replace("\n", " ")[:300]
         extra = ""
@@ -387,12 +441,13 @@ def get_agent(agent_name: str = "") -> dict:
 def get_agent_version(agent: dict) -> str:
     """Try to get agent version string."""
     binary = agent.get("_binary") or resolve_agent_binary(agent)
-    r = subprocess.run([binary, "--version"], capture_output=True, text=True)
+    r = subprocess.run([binary, "--version"], capture_output=True, text=True, **subprocess_no_window_kwargs())
     return (r.stdout + r.stderr).strip().split("\n")[0] or "unknown"
 
 
 def build_agent_cmd(agent: dict, session_id: str, max_turns: int, prompt: str,
-                    resume: bool = False, skip_permissions: bool = True) -> list:
+                    resume: bool = False, skip_permissions: bool = True,
+                    repo_root: Optional[Path] = None) -> list:
     """Build CLI command for any registered agent.
 
     Handles agents with missing flags gracefully:
@@ -457,6 +512,10 @@ def build_agent_cmd(agent: dict, session_id: str, max_turns: int, prompt: str,
             info(f"Agent '{agent['name']}' does not support skip-permissions; prompts may appear")
             warned.add(key)
 
+    # DevEco reads project MCP from --dir (repo/.deveco/deveco.jsonc)
+    if repo_root and agent.get("binary") == "deveco":
+        cmd.extend(["--dir", str(repo_root)])
+
     cmd.append(prompt)
     return cmd
 
@@ -468,6 +527,8 @@ def build_agent_cmd(agent: dict, session_id: str, max_turns: int, prompt: str,
 @dataclass
 class StreamStats:
     tool_calls: int = 0
+    homegraph_tool_calls: int = 0
+    used_homegraph: bool = False
     tool_names: list = field(default_factory=list)
     files_read: list = field(default_factory=list)
     files_edited: list = field(default_factory=list)
@@ -513,6 +574,7 @@ def resolve_deveco_model(deveco_session_id: str) -> str:
         result = subprocess.run(
             ["deveco", "export", deveco_session_id],
             capture_output=True, text=True, timeout=15,
+            **subprocess_no_window_kwargs(),
         )
         if result.returncode != 0:
             cache[deveco_session_id] = ""
@@ -911,6 +973,9 @@ def _parse_deveco_json(filepath: Path) -> StreamStats:
                 continue
             stats.tool_calls += 1
             stats.tool_names.append(tool)
+            if is_homegraph_tool(tool):
+                stats.homegraph_tool_calls += 1
+                stats.used_homegraph = True
 
             state = part.get("state", {})
             inp = state.get("input", {}) if isinstance(state.get("input"), dict) else {}

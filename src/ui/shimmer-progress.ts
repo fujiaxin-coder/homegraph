@@ -4,6 +4,7 @@ import * as path from 'path';
 const PHASE_NAMES: Record<string, string> = {
   scanning: 'Scanning files',
   parsing: 'Parsing code',
+  'arkts-batch': 'Parsing ArkTS',
   storing: 'Storing data',
   resolving: 'Resolving refs',
 };
@@ -12,6 +13,21 @@ export interface IndexProgress {
   phase: string;
   current: number;
   total: number;
+  currentFile?: string;
+  subphase?: 'scene' | 'persist';
+}
+
+function formatArkTSBatchMessage(progress: IndexProgress): string {
+  const total = progress.total;
+  if (progress.subphase === 'scene') {
+    return total > 0 ? `Building ArkTS scene (${total} files)` : 'Building ArkTS scene';
+  }
+  const base =
+    total > 0 ? `Storing ArkTS ${progress.current}/${total}` : 'Storing ArkTS';
+  if (progress.currentFile) {
+    return `${base} ${path.basename(progress.currentFile)}`;
+  }
+  return base;
 }
 
 export interface ShimmerProgress {
@@ -29,7 +45,10 @@ export function createShimmerProgress(): ShimmerProgress {
 
   return {
     onProgress(progress: IndexProgress) {
-      const phaseName = PHASE_NAMES[progress.phase] || progress.phase;
+      const phaseName =
+        progress.phase === 'arkts-batch'
+          ? formatArkTSBatchMessage(progress)
+          : PHASE_NAMES[progress.phase] || progress.phase;
 
       if (progress.phase !== lastPhase && lastPhase) {
         worker.postMessage({ type: 'finish-phase' });
@@ -38,7 +57,9 @@ export function createShimmerProgress(): ShimmerProgress {
 
       let percent = -1;
       let count = 0;
-      if (progress.total > 0) {
+      if (progress.phase === 'arkts-batch' && progress.subphase === 'scene') {
+        percent = -1;
+      } else if (progress.total > 0) {
         percent = Math.round((progress.current / progress.total) * 100);
       } else if (progress.current > 0) {
         count = progress.current;

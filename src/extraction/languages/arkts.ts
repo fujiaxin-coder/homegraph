@@ -10,7 +10,9 @@
 
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
+import { spawnSync } from 'child_process';
 import {
   Scene,
   buildSceneConfigFromProject,
@@ -39,13 +41,61 @@ import {
   NodeKind,
 } from '../../types';
 import type { QueryBuilder } from '../../db/queries';
+import { DatabaseConnection } from '../../db';
+import { QueryBuilder as QueryBuilderClass } from '../../db/queries';
+import { bindExtractionContext, getExtractionProjectRoot, getExtractionQueries, reportArkTSBatchProgress, setArktsBatchRunning } from '../context';
 import { generateNodeId } from '../tree-sitter-helpers';
-import { getExtractionProjectRoot, getExtractionQueries } from '../context';
+import { buildRelaunchArgv } from '../wasm-runtime-flags';
 import { indexViewTreeForClass } from './arkts-viewtree';
+
+/** Parallel read chunk size during ArkTS batch persist (writes stay sequential for SQLite). */
+function resolveArkTSPersistParallel(etsFileCount: number): number {
+  const raw = process.env.HOMEGRAPH_ARKTS_PERSIST_PARALLEL?.trim();
+  if (raw !== undefined && raw !== '') {
+    const n = parseInt(raw, 10);
+    if (!Number.isNaN(n) && n >= 1) return n;
+  }
+  // Large repos: serial reads — slower but stable on Windows / huge trees.
+  if (etsFileCount >= 500) return 1;
+  return 8;
+}
+
+/** Stack sizes (KB) for isolated ArkTS worker retries (Windows native stack overflow). */
+function resolveArkTSWorkerStackSizesKb(): number[] {
+  const raw = process.env.HOMEGRAPH_ARKTS_STACK_SIZES_KB?.trim();
+  if (raw) {
+    const parsed = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => n > 0);
+    if (parsed.length > 0) return parsed;
+  }
+  return [32768, 65536, 131072, 262144];
+}
+
+/** Windows STATUS_STACK_OVERFLOW — process killed during deep native/JS recursion. */
+function isStackOverflowExitCode(code: number | null): boolean {
+  if (code === null) return false;
+  return code === 3221225725 || code === -1073741571;
+}
+
+function shouldUseIsolatedArkTSBuild(etsCount: number): boolean {
+  const mode = process.env.HOMEGRAPH_ARKTS_ISOLATED?.trim();
+  if (mode === '1' || mode === 'true') return true;
+  if (mode === '0' || mode === 'false') return false;
+  // Photos-scale repos on Windows: build Scene in a child with a larger stack.
+  if (process.platform === 'win32' && etsCount >= 500) return true;
+  return false;
+}
+
+function homegraphDbPath(rootDir: string): string {
+  return path.join(rootDir, '.homegraph', 'homegraph.db');
+}
 
 const ARK_PROVENANCE = 'heuristic';
 /** Virtual file path for ArkAnalyzer's in-scene dummy entry (not on disk). */
 const ARKANALYZER_DUMMY_FILE = '@dummyFile.ets';
+
+function normIndexPath(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
 
 /** Member calls through a native `.so` binding: `sdk.Asset_setCropRect(`. */
 const NAPI_MEMBER_CALL_RE = /\.\s*([A-Z][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+)+)\s*\(/g;
@@ -64,11 +114,14 @@ interface ArkTSBatchIndex {
 interface PersistedBatch extends ArkTSBatchIndex {
   rootDir: string;
   batchKey: string;
+  etsFiles: string[];
 }
 
 let persistedBatch: PersistedBatch | null = null;
 /** File that triggered the most recent batch persist (for indexAll edge stats). */
 let batchTriggerFile: string | null = null;
+/** Paths written by the current in-memory batch (fast skip for later .ets hits). */
+let batchPersistedPaths: Set<string> = new Set();
 
 function hashContent(content: string): string {
   return crypto.createHash('sha256').update(content).digest('hex');
@@ -109,14 +162,26 @@ function scanEtsFiles(rootDir: string): string[] {
 }
 
 function computeBatchKey(rootDir: string, etsFiles: string[]): string {
+  // mtime + size only — full content hashes happen per-file at persist time.
   return etsFiles
     .map((rel) => {
       const full = path.join(rootDir, rel);
       const stat = fs.statSync(full);
-      const content = fs.readFileSync(full, 'utf-8');
-      return `${rel}:${stat.mtimeMs}:${hashContent(content)}`;
+      return `${rel}:${stat.mtimeMs}:${stat.size}`;
     })
     .join('\0');
+}
+
+/** True when a full ArkTS batch has been committed for this index run. */
+let batchBuildCommitted = false;
+
+function reportBatchProgress(
+  subphase: 'scene' | 'persist',
+  current: number,
+  total: number,
+  currentFile?: string
+): void {
+  reportArkTSBatchProgress({ subphase, current, total, currentFile });
 }
 
 function persistFileResult(
@@ -177,36 +242,56 @@ function persistFileResult(
   queries.upsertFile(fileRecord);
 }
 
-/** Build Scene, run RTA, and write every `.ets` file + cross-file edges to the DB. */
-function runArkTSBatch(rootDir: string, queries: QueryBuilder, triggerFile: string): PersistedBatch {
-  const etsFiles = scanEtsFiles(rootDir);
-  const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
-  if (
-    persistedBatch &&
-    persistedBatch.rootDir === rootDir &&
-    persistedBatch.batchKey === batchKey
-  ) {
-    return persistedBatch;
+async function persistBatchResultsAsync(
+  rootDir: string,
+  queries: QueryBuilder,
+  index: ArkTSBatchIndex
+): Promise<void> {
+  const entries = [...index.fileResults.entries()];
+  const persistTotal = entries.length;
+  const parallel = resolveArkTSPersistParallel(persistTotal);
+
+  for (let start = 0; start < entries.length; start += parallel) {
+    const chunk = entries.slice(start, start + parallel);
+    const prepared = await Promise.all(
+      chunk.map(async ([filePath, fileResult]) => {
+        const isVirtual = filePath.startsWith('@');
+        if (isVirtual) {
+          return {
+            filePath,
+            fileResult,
+            content: '',
+            stats: { size: 0, mtimeMs: Date.now() } as fs.Stats,
+          };
+        }
+        const full = path.join(rootDir, filePath);
+        const [content, stats] = await Promise.all([
+          fsp.readFile(full, 'utf-8'),
+          fsp.stat(full),
+        ]);
+        return { filePath, fileResult, content, stats };
+      })
+    );
+
+    for (let i = 0; i < prepared.length; i++) {
+      const persistIndex = start + i + 1;
+      const item = prepared[i]!;
+      reportBatchProgress('persist', persistIndex, persistTotal, item.filePath);
+      persistFileResult(queries, item.filePath, item.content, item.stats, item.fileResult);
+    }
   }
+}
 
-  batchTriggerFile = null;
-
-  if (etsFiles.length === 0) {
-    persistedBatch = null;
-    return {
-      fileResults: new Map(),
-      crossFileEdges: [],
-      nodeIds: new Set(),
-      errors: [],
-      rootDir,
-      batchKey: '',
-    };
-  }
-
-  const index = buildArkTSIndex(rootDir, etsFiles);
-  queries.deleteArkTSCrossFileCallEdges();
-
+function persistBatchResultsSync(
+  rootDir: string,
+  queries: QueryBuilder,
+  index: ArkTSBatchIndex
+): void {
+  const persistTotal = index.fileResults.size;
+  let persistIndex = 0;
   for (const [filePath, fileResult] of index.fileResults) {
+    persistIndex++;
+    reportBatchProgress('persist', persistIndex, persistTotal, filePath);
     const isVirtual = filePath.startsWith('@');
     const full = path.join(rootDir, filePath);
     const content = isVirtual ? '' : fs.readFileSync(full, 'utf-8');
@@ -215,25 +300,301 @@ function runArkTSBatch(rootDir: string, queries: QueryBuilder, triggerFile: stri
       : fs.statSync(full);
     persistFileResult(queries, filePath, content, stats, fileResult);
   }
+}
 
-  if (index.crossFileEdges.length > 0) {
-    const valid = index.crossFileEdges.filter(
-      (e) => index.nodeIds.has(e.source) && index.nodeIds.has(e.target)
-    );
-    if (valid.length > 0) {
-      queries.insertEdges(valid);
-    }
+function commitArkTSBatch(
+  rootDir: string,
+  batchKey: string,
+  etsFiles: string[],
+  index: ArkTSBatchIndex,
+  triggerFile: string
+): PersistedBatch {
+  batchPersistedPaths = new Set(
+    [...index.fileResults.keys()].map(normIndexPath)
+  );
+  persistedBatch = { ...index, rootDir, batchKey, etsFiles };
+  batchTriggerFile = normIndexPath(triggerFile);
+  if (index.fileResults.size > 0) {
+    batchBuildCommitted = true;
   }
-
-  persistedBatch = { ...index, rootDir, batchKey };
-  batchTriggerFile = triggerFile;
   return persistedBatch;
 }
 
-/** Clear cached batch state (tests). */
+function tryReturnCachedBatch(
+  rootDir: string,
+  triggerFile: string,
+  etsFiles: string[]
+): PersistedBatch | null {
+  const normalizedTrigger = normIndexPath(triggerFile);
+
+  if (
+    persistedBatch &&
+    persistedBatch.rootDir === rootDir &&
+    batchPersistedPaths.has(normalizedTrigger)
+  ) {
+    return persistedBatch;
+  }
+
+  const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
+
+  if (
+    persistedBatch &&
+    persistedBatch.rootDir === rootDir &&
+    persistedBatch.batchKey === batchKey &&
+    persistedBatch.fileResults.size > 0
+  ) {
+    batchPersistedPaths = new Set(
+      [...persistedBatch.fileResults.keys()].map(normIndexPath)
+    );
+    return persistedBatch;
+  }
+
+  if (
+    batchBuildCommitted &&
+    persistedBatch &&
+    persistedBatch.rootDir === rootDir &&
+    persistedBatch.fileResults.size > 0 &&
+    persistedBatch.batchKey === batchKey
+  ) {
+    return persistedBatch;
+  }
+
+  return null;
+}
+
+function markBatchCommittedAfterWorker(
+  rootDir: string,
+  triggerFile: string,
+  etsFiles: string[],
+  batchKey: string
+): PersistedBatch {
+  batchTriggerFile = normIndexPath(triggerFile);
+  batchPersistedPaths = new Set(etsFiles.map(normIndexPath));
+  batchBuildCommitted = true;
+  persistedBatch = {
+    fileResults: new Map(),
+    crossFileEdges: [],
+    nodeIds: new Set(),
+    errors: [],
+    rootDir,
+    batchKey,
+    etsFiles,
+  };
+  return persistedBatch;
+}
+
+function spawnIsolatedArkTSBatchWorker(
+  rootDir: string,
+  dbPath: string,
+  triggerFile: string
+): { ok: boolean; lastCode: number | null } {
+  const workerPath = path.join(__dirname, '..', 'arkts-batch-worker.js');
+  let lastCode: number | null = null;
+
+  for (const stackKb of resolveArkTSWorkerStackSizesKb()) {
+    process.stderr.write(
+      `\n\x1b[33m    ArkTS: full Scene build in isolated process (--stack-size=${stackKb} KB, enableMethodBodyBuild=true)...\x1b[0m\n`
+    );
+    const argv = buildRelaunchArgv(
+      workerPath,
+      [rootDir, dbPath, triggerFile],
+      [`--stack-size=${stackKb}`]
+    );
+    const result = spawnSync(process.execPath, argv, {
+      stdio: 'inherit',
+      env: process.env,
+      timeout: 60 * 60 * 1000,
+      windowsHide: true,
+    });
+    lastCode = result.status;
+    if (result.status === 0) {
+      return { ok: true, lastCode };
+    }
+    if (!isStackOverflowExitCode(result.status)) {
+      break;
+    }
+  }
+  return { ok: false, lastCode };
+}
+
+function runArkTSBatchFullCore(
+  rootDir: string,
+  queries: QueryBuilder,
+  triggerFile: string,
+  etsFiles: string[],
+  batchKey: string
+): PersistedBatch {
+  batchTriggerFile = null;
+  batchPersistedPaths = new Set();
+
+  if (etsFiles.length === 0) {
+    persistedBatch = null;
+    batchBuildCommitted = false;
+    return {
+      fileResults: new Map(),
+      crossFileEdges: [],
+      nodeIds: new Set(),
+      errors: [],
+      rootDir,
+      batchKey: '',
+      etsFiles: [],
+    };
+  }
+
+  setArktsBatchRunning(true);
+  try {
+    reportBatchProgress('scene', 0, etsFiles.length);
+    const index = buildArkTSIndex(rootDir, etsFiles);
+    if (index.fileResults.size === 0) {
+      const fatal = index.errors.find((e) => e.severity === 'error');
+      throw new Error(fatal?.message ?? 'ArkTS batch produced no indexed files');
+    }
+    queries.deleteArkTSCrossFileCallEdges();
+    persistBatchResultsSync(rootDir, queries, index);
+
+    if (index.crossFileEdges.length > 0) {
+      const valid = index.crossFileEdges.filter(
+        (e) => index.nodeIds.has(e.source) && index.nodeIds.has(e.target)
+      );
+      if (valid.length > 0) {
+        queries.insertEdges(valid);
+      }
+    }
+
+    return commitArkTSBatch(rootDir, batchKey, etsFiles, index, triggerFile);
+  } finally {
+    setArktsBatchRunning(false);
+  }
+}
+
+function runArkTSBatchFull(
+  rootDir: string,
+  queries: QueryBuilder,
+  triggerFile: string,
+  etsFiles: string[],
+  batchKey: string
+): PersistedBatch {
+  if (shouldUseIsolatedArkTSBuild(etsFiles.length)) {
+    const dbPath = homegraphDbPath(rootDir);
+    if (!fs.existsSync(dbPath)) {
+      throw new Error(`ArkTS isolated build requires ${dbPath}`);
+    }
+    setArktsBatchRunning(true);
+    try {
+      reportBatchProgress('scene', 0, etsFiles.length);
+      const spawned = spawnIsolatedArkTSBatchWorker(rootDir, dbPath, triggerFile);
+      if (!spawned.ok) {
+        throw new Error(
+          `ArkTS isolated Scene build failed (exit ${spawned.lastCode ?? 'unknown'}). ` +
+            'Try HOMEGRAPH_ARKTS_STACK_SIZES_KB=65536,131072,262144'
+        );
+      }
+      return markBatchCommittedAfterWorker(rootDir, triggerFile, etsFiles, batchKey);
+    } finally {
+      setArktsBatchRunning(false);
+    }
+  }
+  return runArkTSBatchFullCore(rootDir, queries, triggerFile, etsFiles, batchKey);
+}
+
+/** Worker entry — full batch in an isolated process (no nested spawn). */
+export function runIsolatedArkTSBatchEntry(
+  rootDir: string,
+  dbPath: string,
+  triggerFile: string
+): void {
+  const db = DatabaseConnection.open(dbPath);
+  try {
+    const queries = new QueryBuilderClass(db.getDb());
+    bindExtractionContext(rootDir, queries);
+    const etsFiles = scanEtsFiles(rootDir);
+    const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
+    runArkTSBatchFullCore(rootDir, queries, normIndexPath(triggerFile), etsFiles, batchKey);
+  } finally {
+    db.close();
+  }
+}
+
+/** Build Scene, run RTA, and write every `.ets` file + cross-file edges to the DB. */
+function runArkTSBatch(rootDir: string, queries: QueryBuilder, triggerFile: string): PersistedBatch {
+  const normalizedTrigger = normIndexPath(triggerFile);
+  const etsFiles = scanEtsFiles(rootDir);
+  const cached = tryReturnCachedBatch(rootDir, normalizedTrigger, etsFiles);
+  if (cached) {
+    return cached;
+  }
+
+  const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
+  return runArkTSBatchFull(rootDir, queries, normalizedTrigger, etsFiles, batchKey);
+}
+
+/** Async batch build with parallel file reads during persist (used by indexAll). */
+export async function primeArkTSBatch(
+  rootDir: string,
+  queries: QueryBuilder,
+  triggerFile: string
+): Promise<void> {
+  const normalizedTrigger = normIndexPath(triggerFile);
+  const etsFiles = scanEtsFiles(rootDir);
+  const cached = tryReturnCachedBatch(rootDir, normalizedTrigger, etsFiles);
+  if (cached) {
+    return;
+  }
+
+  const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
+
+  batchTriggerFile = null;
+  batchPersistedPaths = new Set();
+
+  if (etsFiles.length === 0) {
+    persistedBatch = null;
+    batchBuildCommitted = false;
+    return;
+  }
+
+  if (shouldUseIsolatedArkTSBuild(etsFiles.length)) {
+    runArkTSBatchFull(rootDir, queries, normalizedTrigger, etsFiles, batchKey);
+    return;
+  }
+
+  setArktsBatchRunning(true);
+  try {
+    reportBatchProgress('scene', 0, etsFiles.length);
+    const index = buildArkTSIndex(rootDir, etsFiles);
+    if (index.fileResults.size === 0) {
+      const fatal = index.errors.find((e) => e.severity === 'error');
+      throw new Error(fatal?.message ?? 'ArkTS batch produced no indexed files');
+    }
+    queries.deleteArkTSCrossFileCallEdges();
+    await persistBatchResultsAsync(rootDir, queries, index);
+
+    if (index.crossFileEdges.length > 0) {
+      const valid = index.crossFileEdges.filter(
+        (e) => index.nodeIds.has(e.source) && index.nodeIds.has(e.target)
+      );
+      if (valid.length > 0) {
+        queries.insertEdges(valid);
+      }
+    }
+
+    commitArkTSBatch(rootDir, batchKey, etsFiles, index, normalizedTrigger);
+  } finally {
+    setArktsBatchRunning(false);
+  }
+}
+
+/** True when this `.ets` file was already written by the in-memory ArkTS batch. */
+export function isArkTSBatchPersisted(filePath: string): boolean {
+  return batchPersistedPaths.has(normIndexPath(filePath));
+}
+
+/** Clear cached batch state (tests and full re-index). */
 export function resetArkTSBatch(): void {
   persistedBatch = null;
   batchTriggerFile = null;
+  batchPersistedPaths = new Set();
+  batchBuildCommitted = false;
+  arktsIndexNotices = [];
 }
 
 export class ArkTSExtractor {
@@ -254,7 +615,7 @@ export class ArkTSExtractor {
       };
     }
 
-    const batch = runArkTSBatch(rootDir, queries, this.filePath);
+    const batch = runArkTSBatch(rootDir, queries, normIndexPath(this.filePath));
     if (batch.fileResults.size === 0) {
       return {
         ...emptyResult(this.filePath, 'No .ets files in project', 'warning'),
@@ -262,7 +623,7 @@ export class ArkTSExtractor {
       };
     }
 
-    const cached = batch.fileResults.get(this.filePath);
+    const cached = batch.fileResults.get(normIndexPath(this.filePath));
     if (!cached) {
       return {
         ...emptyResult(this.filePath, 'File not present in ArkTS index', 'warning'),
@@ -271,7 +632,7 @@ export class ArkTSExtractor {
     }
 
     const edges =
-      this.filePath === batchTriggerFile
+      normIndexPath(this.filePath) === batchTriggerFile
         ? [...cached.edges, ...batch.crossFileEdges]
         : cached.edges;
 
@@ -675,7 +1036,16 @@ class ArkTSAdapter {
       if (!this.scanned.has(relativePath) || !relativePath.endsWith('.ets')) continue;
       const result = this.fileResults.get(relativePath);
       if (!result) continue;
-      indexViewTreeForClass(this.viewTreeContext(), cls, result, relativePath);
+      try {
+        indexViewTreeForClass(this.viewTreeContext(), cls, result, relativePath);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        result.errors.push({
+          message: `ViewTree indexing skipped for ${cls.getName()}: ${message}`,
+          filePath: relativePath,
+          severity: 'warning',
+        });
+      }
     }
 
     if (dummyMain) {
@@ -1296,30 +1666,60 @@ class ArkTSAdapter {
   }
 }
 
-function buildArkTSIndex(rootDir: string, scannedFiles: Iterable<string>): ArkTSBatchIndex {
-  const errors: ExtractionError[] = [];
-  const config = buildSceneConfigFromProject(rootDir, process.env.OHOS_SDK_HOME, {
+/** User-visible notices from the most recent ArkTS batch (surfaced in CLI / IndexResult). */
+let arktsIndexNotices: ExtractionError[] = [];
+
+/** Drain notices for merging into IndexResult.errors (clears the buffer). */
+export function drainArkTSIndexNotices(): ExtractionError[] {
+  const out = arktsIndexNotices;
+  arktsIndexNotices = [];
+  return out;
+}
+
+function buildSceneConfig(rootDir: string) {
+  return buildSceneConfigFromProject(rootDir, process.env.OHOS_SDK_HOME, {
     supportFileExts: ['.ets'],
     enableMethodBodyBuild: true,
   });
+}
 
+function tryBuildArkScene(rootDir: string): { scene: Scene | null; errors: ExtractionError[] } {
+  const errors: ExtractionError[] = [];
   const scene = new Scene();
   try {
-    scene.buildSceneFromProjectDir(config);
+    scene.buildSceneFromProjectDir(buildSceneConfig(rootDir));
     scene.inferTypes();
+    return { scene, errors };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     errors.push({ message: `ArkTS Scene build failed: ${message}`, severity: 'error' });
-    return {
-      fileResults: new Map(),
-      crossFileEdges: [],
-      nodeIds: new Set(),
-      errors,
-    };
+    return { scene: null, errors };
+  }
+}
+
+function emptyArkTSBatchIndex(errors: ExtractionError[]): ArkTSBatchIndex {
+  return {
+    fileResults: new Map(),
+    crossFileEdges: [],
+    nodeIds: new Set(),
+    errors,
+  };
+}
+
+function buildArkTSIndex(rootDir: string, scannedFiles: Iterable<string>): ArkTSBatchIndex {
+  const { scene, errors } = tryBuildArkScene(rootDir);
+  if (!scene) {
+    return emptyArkTSBatchIndex(errors);
   }
 
-  const adapter = new ArkTSAdapter(rootDir, scannedFiles);
-  const index = adapter.build(scene);
-  index.errors.push(...errors);
-  return index;
+  try {
+    const adapter = new ArkTSAdapter(rootDir, scannedFiles);
+    const index = adapter.build(scene);
+    index.errors.push(...errors);
+    return index;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    errors.push({ message: `ArkTS adapter failed: ${message}`, severity: 'error' });
+    return emptyArkTSBatchIndex(errors);
+  }
 }
