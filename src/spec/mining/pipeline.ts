@@ -21,6 +21,7 @@ import {
   insertSpecCommitRelation,
   insertCommitFragmentRelation,
 } from '../db/relations';
+import { execFileSync } from 'child_process';
 import { scan, getCommitDiff } from './git-scanner';
 import { analyzeCommitDiff } from './diff-parser';
 import { logDebug, logWarn } from '../../errors';
@@ -188,7 +189,18 @@ export function runMiningPipeline(
   }
 
   // ---- Step 7: write meta ----
-  writeMeta(repoPath, specStoragePath);
+  let headHash: string | undefined;
+  try {
+    headHash = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }).trim();
+  } catch {
+    headHash = undefined;
+  }
+  writeMeta(repoPath, specStoragePath, headHash);
 
   // ---- Step 8: return result ----
   return {
