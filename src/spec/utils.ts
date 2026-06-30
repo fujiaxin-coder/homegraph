@@ -25,6 +25,7 @@ export interface SpecEntry {
 export interface SpecMeta {
   repoPath: string;
   specStoragePath: string;
+  currentCommitID?: string; // HEAD commit hash at mining time
   createdAt?: string; // ISO-8601 string
   updatedAt: string;  // ISO-8601 string (always set on write)
 }
@@ -280,6 +281,7 @@ export function readMeta(repoPath: string): SpecMeta | null {
   return {
     repoPath: obj.repoPath,
     specStoragePath: obj.specStoragePath,
+    currentCommitID: typeof obj.currentCommitID === 'string' ? obj.currentCommitID : undefined,
     createdAt: typeof obj.createdAt === 'string' ? obj.createdAt : undefined,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : new Date().toISOString(),
   };
@@ -294,7 +296,11 @@ export function readMeta(repoPath: string): SpecMeta | null {
  *
  * Returns the full `SpecMeta` that was written.
  */
-export function writeMeta(repoPath: string, specStoragePath: string): SpecMeta {
+export function writeMeta(
+  repoPath: string,
+  specStoragePath: string,
+  currentCommitID?: string,
+): SpecMeta {
   const metaDir = path.join(repoPath, SPEC_DATA_DIR);
   const metaPath = path.join(metaDir, 'meta.json');
 
@@ -310,6 +316,7 @@ export function writeMeta(repoPath: string, specStoragePath: string): SpecMeta {
   const meta: SpecMeta = {
     repoPath,
     specStoragePath,
+    currentCommitID,
     createdAt,
     updatedAt: now,
   };
