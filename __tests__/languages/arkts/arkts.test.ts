@@ -61,12 +61,36 @@ export function main(): void {
     expect(isArkTSBatchPersisted('sample.ets')).toBe(true);
   });
 
-  it('returns empty when the project has no .ets files', () => {
+  it('indexes co-located .ts files via Scene batch', () => {
     const root = makeArktsProject({
+      'anchor.ets': 'export {}',
       'index.ts': 'export function util() {}',
     });
     bindExtractionContext(root, mockArktsQueries() as never);
     const result = new ArkTSExtractor('index.ts', '').extract();
+    expect(result.errors.filter((e) => e.severity === 'error')).toHaveLength(0);
+    expect(result.nodes.some((n) => n.name === 'util' && n.kind === 'function')).toBe(true);
+    expect(isArkTSBatchPersisted('index.ts')).toBe(true);
+  });
+
+  it('indexes .d.ts declaration files via Scene batch', () => {
+    const root = makeArktsProject({
+      'anchor.ets': 'export {}',
+      'sdk.d.ts': 'export declare function sdkFn(): void;',
+    });
+    bindExtractionContext(root, mockArktsQueries() as never);
+    const result = new ArkTSExtractor('sdk.d.ts', '').extract();
+    expect(result.errors.filter((e) => e.severity === 'error')).toHaveLength(0);
+    expect(result.nodes.some((n) => n.name === 'sdkFn' && n.kind === 'function')).toBe(true);
+    expect(isArkTSBatchPersisted('sdk.d.ts')).toBe(true);
+  });
+
+  it('returns empty when the project has no ArkAnalyzer sources', () => {
+    const root = makeArktsProject({
+      'index.js': 'export function util() {}',
+    });
+    bindExtractionContext(root, mockArktsQueries() as never);
+    const result = new ArkTSExtractor('index.js', '').extract();
     expect(result.nodes).toHaveLength(0);
   });
 

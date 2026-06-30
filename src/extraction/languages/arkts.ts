@@ -93,6 +93,49 @@ const ARK_PROVENANCE = 'heuristic';
 /** Virtual file path for ArkAnalyzer's in-scene dummy entry (not on disk). */
 const ARKANALYZER_DUMMY_FILE = '@dummyFile.ets';
 
+/** HarmonyOS sources indexed via ArkAnalyzer Scene batch (`.ets`, `.ts`, `.d.ts`). */
+export function isArkAnalyzerSourcePath(filePath: string): boolean {
+  const base = path.basename(filePath);
+  // `.d.ts` ends with `.ts` (Node extname) — one `.ts` suffix covers both.
+  return base.endsWith('.ets') || base.endsWith('.ts');
+}
+
+function isEtsFileName(name: string): boolean {
+  return name.endsWith('.ets');
+}
+
+function isCoLocatedArkTsFileName(name: string): boolean {
+  return isArkAnalyzerSourcePath(name) && !isEtsFileName(name);
+}
+
+/** True when the tree looks like a HarmonyOS / ArkTS project (not a generic TS repo). */
+function hasHarmonyProjectMarkers(rootDir: string): boolean {
+  const found: string[] = [];
+  function walk(dir: string): void {
+    if (found.length > 0) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') {
+          continue;
+        }
+        walk(full);
+      } else if (entry.isFile() && (isEtsFileName(entry.name) || entry.name === 'module.json5')) {
+        found.push(full);
+        return;
+      }
+    }
+  }
+  walk(rootDir);
+  return found.length > 0;
+}
+
 function normIndexPath(filePath: string): string {
   return filePath.replace(/\\/g, '/');
 }
@@ -138,7 +181,8 @@ function emptyResult(filePath: string, message: string, severity: ExtractionErro
 }
 
 function scanEtsFiles(rootDir: string): string[] {
-  const found: string[] = [];
+  const etsFiles: string[] = [];
+  const coLocated: string[] = [];
   function walk(dir: string): void {
     let entries: fs.Dirent[];
     try {
@@ -151,12 +195,21 @@ function scanEtsFiles(rootDir: string): string[] {
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') continue;
         walk(full);
-      } else if (entry.isFile() && entry.name.endsWith('.ets')) {
-        found.push(path.relative(rootDir, full).replace(/\\/g, '/'));
+      } else if (entry.isFile()) {
+        const rel = path.relative(rootDir, full).replace(/\\/g, '/');
+        if (isEtsFileName(entry.name)) {
+          etsFiles.push(rel);
+        } else if (isCoLocatedArkTsFileName(entry.name)) {
+          coLocated.push(rel);
+        }
       }
     }
   }
   walk(rootDir);
+  if (etsFiles.length === 0 && !hasHarmonyProjectMarkers(rootDir)) {
+    return [];
+  }
+  const found = etsFiles.length > 0 ? [...etsFiles, ...coLocated] : coLocated;
   found.sort();
   return found;
 }
@@ -1025,7 +1078,7 @@ class ArkTSAdapter {
     for (const arkFile of scene.getFiles()) {
       const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
       if (!this.scanned.has(relativePath)) continue;
-      if (!relativePath.endsWith('.ets')) continue;
+      if (!isArkAnalyzerSourcePath(relativePath)) continue;
       this.indexFile(arkFile);
     }
 
@@ -1033,7 +1086,7 @@ class ArkTSAdapter {
       if (!cls.hasViewTree()) continue;
       const arkFile = cls.getDeclaringArkFile();
       const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
-      if (!this.scanned.has(relativePath) || !relativePath.endsWith('.ets')) continue;
+      if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) continue;
       const result = this.fileResults.get(relativePath);
       if (!result) continue;
       try {
@@ -1678,7 +1731,7 @@ export function drainArkTSIndexNotices(): ExtractionError[] {
 
 function buildSceneConfig(rootDir: string) {
   return buildSceneConfigFromProject(rootDir, process.env.OHOS_SDK_HOME, {
-    supportFileExts: ['.ets'],
+    supportFileExts: ['.ets', '.ts', '.d.ts'],
     enableMethodBodyBuild: true,
   });
 }
