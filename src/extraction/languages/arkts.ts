@@ -780,15 +780,27 @@ function classDisplayName(cls: ArkClass): string {
   return cls.isAnonymousClass() ? anonymousClassDisplayName(cls) : cls.getName();
 }
 
+function isAnonymousArkMethod(method: ArkMethod): boolean {
+  return method.isAnonymousMethod?.() === true || method.getName().startsWith(ANONYMOUS_METHOD_PREFIX);
+}
+
 function shouldSkipArkMethod(method: ArkMethod): boolean {
   if (method.isDefaultArkMethod()) return true;
-  if (method.isAnonymousMethod()) return true;
+  if (isAnonymousArkMethod(method)) return true;
   const name = method.getName();
   if (name === DEFAULT_ARK_METHOD_NAME) return true;
   if (name === INSTANCE_INIT_METHOD_NAME || name === STATIC_INIT_METHOD_NAME) return true;
   if (name.startsWith(STATIC_BLOCK_METHOD_NAME_PREFIX)) return true;
   if (resolveMethodDisplayName(method) === null) return true;
   return false;
+}
+
+/** User-facing or ArkAnalyzer-stable name for graph nodes (includes `%AMn` for anonymous). */
+function arkMethodDisplayName(method: ArkMethod): string | null {
+  const resolved = resolveMethodDisplayName(method);
+  if (resolved) return resolved;
+  if (isAnonymousArkMethod(method)) return method.getName();
+  return null;
 }
 
 /** Decode ArkAnalyzer nested-method encoding (`%inner$outer`) to the user-visible name. */
@@ -837,10 +849,10 @@ function buildMethodQualifiedName(method: ArkMethod, displayName?: string): stri
   }
   const outer = method.getOuterMethod();
   if (outer) {
-    const outerName = resolveMethodDisplayName(outer);
+    const outerName = arkMethodDisplayName(outer);
     if (outerName) parts.push(outerName);
   }
-  parts.push(displayName ?? resolveMethodDisplayName(method) ?? method.getName());
+  parts.push(displayName ?? arkMethodDisplayName(method) ?? method.getName());
   return buildQualifiedName(parts);
 }
 
@@ -1120,14 +1132,15 @@ class ArkTSAdapter {
         if (!caller || !callee) continue;
         if (
           shouldSkipArkMethod(caller) &&
+          !isAnonymousArkMethod(caller) &&
           !caller.getDeclaringArkClass().isDefaultArkClass() &&
           !caller.isGenerated()
         ) {
           continue;
         }
 
-        const callerId = this.methodToId.get(caller);
-        const calleeId = this.methodToId.get(callee);
+        const callerId = this.resolveMethodNodeId(caller);
+        const calleeId = this.resolveMethodNodeId(callee);
         if (!callerId || !calleeId) continue;
 
         const callerFile = relPathForArkFile(this.rootDir, caller.getDeclaringArkFile());
@@ -1559,6 +1572,50 @@ class ArkTSAdapter {
     return this.componentToId.get(cls) ?? this.classToId.get(cls) ?? null;
   }
 
+  /** Parent node id for a method: owning class/component, or file for default-class methods. */
+  private resolveMethodParentId(method: ArkMethod, relativePath: string, result: ExtractionResult): string {
+    const cls = method.getDeclaringArkClass();
+    if (cls.isDefaultArkClass()) {
+      return `file:${relativePath}`;
+    }
+    const classId = this.resolveClassNodeId(cls);
+    if (classId) return classId;
+    const fileId = `file:${relativePath}`;
+    this.indexClass(relativePath, 'arkts', result, cls, fileId);
+    return this.resolveClassNodeId(cls) ?? fileId;
+  }
+
+  /**
+   * Resolve a method to a graph node id, lazily indexing anonymous ArkMethods
+   * that RTA / ViewTree reference but the main file walk skipped.
+   */
+  private resolveMethodNodeId(method: ArkMethod): string | null {
+    const existing = this.methodToId.get(method);
+    if (existing) return existing;
+
+    if (shouldSkipArkMethod(method) && !isAnonymousArkMethod(method)) return null;
+
+    const displayName = arkMethodDisplayName(method);
+    if (!displayName) return null;
+
+    const arkFile = method.getDeclaringArkFile();
+    const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+    if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) return null;
+
+    let lineCount = 1;
+    try {
+      lineCount = arkFile.getCode()?.split('\n').length ?? 1;
+    } catch {
+      // use default
+    }
+    const result = this.fileResults.get(relativePath) ?? this.ensureFileResult(relativePath, lineCount);
+    const parentId = this.resolveMethodParentId(method, relativePath, result);
+    const cls = method.getDeclaringArkClass();
+    const kind: NodeKind = cls.isDefaultArkClass() ? 'function' : 'method';
+    this.indexMethod(relativePath, 'arkts', result, method, parentId, kind, displayName);
+    return this.methodToId.get(method) ?? null;
+  }
+
   private addViewTreeEdge(
     result: ExtractionResult,
     source: string,
@@ -1591,14 +1648,14 @@ class ArkTSAdapter {
     const existing = this.methodToId.get(method);
     if (existing) return existing;
 
-    if (method.isAnonymousMethod?.() || method.getName().startsWith(ANONYMOUS_METHOD_PREFIX)) {
-      const line = method.getImplOriginFullPosition()?.getFirstLine() ?? 1;
-      this.indexMethod(relativePath, 'arkts', result, method, parentId, 'method', `@callback:${line}`);
-      return this.methodToId.get(method) ?? null;
-    }
+    if (shouldSkipArkMethod(method) && !isAnonymousArkMethod(method)) return null;
 
-    if (shouldSkipArkMethod(method)) return null;
-    this.indexMethod(relativePath, 'arkts', result, method, parentId);
+    const displayName = arkMethodDisplayName(method);
+    if (!displayName) return null;
+
+    const cls = method.getDeclaringArkClass();
+    const kind: NodeKind = cls.isDefaultArkClass() ? 'function' : 'method';
+    this.indexMethod(relativePath, 'arkts', result, method, parentId, kind, displayName);
     return this.methodToId.get(method) ?? null;
   }
 
