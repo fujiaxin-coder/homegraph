@@ -23,7 +23,11 @@ import {
   deleteSimilarToRelations,
 } from '../db/relations';
 import { extractSpecMetadata } from '../mining/spec-extractor';
-import { LLMClient } from './llm-client';
+import { LlmClient } from '../llm/client';
+import {
+  SPEC_EVALUATION_SYSTEM_PROMPT,
+  buildSpecEvaluationUserPrompt,
+} from '../llm/prompts';
 import { logDebug, logWarn } from '../../errors';
 
 // =============================================================================
@@ -60,7 +64,7 @@ export async function evaluateSpec(
   commitMessage: string,
   commitDiff: string,
   scheduleNextSpecs: string[],
-  client?: LLMClient,
+  client?: LlmClient,
 ): Promise<EvolveDecision> {
   // 1. Read plan content
   const planContent = readFileContent(specFilePath);
@@ -75,46 +79,23 @@ export async function evaluateSpec(
   // 2. Truncate commitDiff to 6000 chars
   const truncatedDiff = truncateText(commitDiff, 6000);
 
-  // 3. Build system prompt (EXACT from spec_rewriter.py:238-245)
-  const systemPrompt = `You are a technical documentation maintainer. Your task is to evaluate whether a git commit requires updating a software design specification (plan.md).
+  // 3. Build user prompt
+  const userPrompt = buildSpecEvaluationUserPrompt(
+    planContent,
+    commitMessage,
+    truncatedDiff,
+    scheduleNextSpecs,
+  );
 
-Given the current plan content, the commit message, and the code diff, determine:
-1. Whether the plan needs to be updated (UPDATE), deprecated (DEPRECATE), or left unchanged (UNCHANGED).
-2. If UPDATE: provide the new title, subtitles (as an array of heading-preview strings), and full rewritten plan_content.
-3. If DEPRECATE: provide a brief explanation in the plan_content field.
-
-Response format (JSON):
-{
-  "action": "UPDATE" | "DEPRECATE" | "UNCHANGED",
-  "title": "New spec title (for UPDATE)",
-  "subtitles": ["heading1 → heading2 - preview", ...],
-  "plan_content": "Full rewritten markdown content (for UPDATE) or deprecation reason (for DEPRECATE)"
-}`;
-
-  // 4. Build user prompt (EXACT from spec_rewriter.py:247-280)
-  const scheduleStr =
-    scheduleNextSpecs.length > 0 ? scheduleNextSpecs.join(', ') : 'none';
-
-  const userPrompt = `Current Plan Content:
-${planContent}
-
-Commit Message:
-${commitMessage}
-
-Code Diff:
-${truncatedDiff}
-
-Scheduled specs to be processed next (for context): ${scheduleStr}`;
-
-  // 5. Call LLM
+  // 4. Call LLM
   if (!client) {
     logDebug('evaluateSpec: no LLM client, returning UNCHANGED', { specId });
     return { action: 'UNCHANGED' };
   }
 
-  const result = await client.chatJson(systemPrompt, userPrompt);
+  const result = await client.chatJson(SPEC_EVALUATION_SYSTEM_PROMPT, userPrompt);
 
-  // 6. Validate action
+  // 5. Validate action
   const rawAction = result.action;
   let action: EvolveDecision['action'] = 'UNCHANGED';
   if (rawAction === 'UPDATE' || rawAction === 'DEPRECATE' || rawAction === 'UNCHANGED') {
@@ -126,7 +107,7 @@ Scheduled specs to be processed next (for context): ${scheduleStr}`;
     });
   }
 
-  // 7. Return EvolveDecision
+  // 6. Return EvolveDecision
   return {
     action,
     title: typeof result.title === 'string' ? result.title : undefined,
