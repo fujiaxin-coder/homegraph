@@ -2312,12 +2312,10 @@ evolveCommand
   .description('Process a commit through the spec self-evolve pipeline')
   .option('-p, --path <path>', 'Path to the repository')
   .option('--db-path <path>', 'Path to the SQLite database file')
-  .option('--commit-hash <hash>', 'Commit hash to process (default: HEAD)', 'HEAD')
   .option('-j, --json', 'Output as JSON')
   .action(async (options: {
     path?: string;
     dbPath?: string;
-    commitHash?: string;
     json?: boolean;
   }) => {
     let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
@@ -2328,7 +2326,7 @@ evolveCommand
       const { resolveDbPath } = await import('../spec/utils');
       const { initSpecSchema } = await import('../spec/db/schema');
       const { loadSpecConfig } = await import('../spec/config');
-      const { runEvolvePipeline } = await import('../spec/evolve/pipeline');
+      const { runBatchEvolvePipeline } = await import('../spec/evolve/pipeline');
       const { isGitRepo } = await import('../spec/mining/git-scanner');
 
       if (!isGitRepo(repoPath)) {
@@ -2358,29 +2356,44 @@ evolveCommand
         process.exit(1);
       }
 
-      const commitHash = options.commitHash || 'HEAD';
-
-      const result = await runEvolvePipeline(repoPath, db, commitHash, llmConfig);
+      const result = await runBatchEvolvePipeline(repoPath, db, llmConfig);
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
-        console.log(chalk.bold(`Processing commit ${result.commitHash.slice(0, 7)}`));
-        console.log(`Is logic change: ${result.isLogicChange ? chalk.green('✅ yes') : chalk.red('❌ no')}`);
-        console.log(`Reason: ${result.logicCheckReason}`);
-
-        if (result.generateSpecId) {
-          console.log(chalk.cyan(`Link Path A - GENERATE ${result.generateSpecId}`));
-        }
-
-        if (result.evolvedSpecs.length > 0) {
-          console.log(chalk.cyan(`Cycle Path B - Self-evolve (${result.affectedSpecCount} affected)`));
-          for (const evolved of result.evolvedSpecs) {
-            console.log(`  ${evolved.specId}: ${evolved.action}`);
+        if (result.commitsProcessed === 0) {
+          console.log(chalk.green('No new commits to evolve.'));
+          console.log(`Last evolved commit: ${result.fromCommit ? result.fromCommit.slice(0, 7) : 'none'}`);
+          console.log(`Current HEAD: ${result.toCommit.slice(0, 7)}`);
+        } else {
+          console.log(chalk.bold(`Evolve complete: ${result.commitsProcessed} commit(s) processed`));
+          console.log(`Range: ${result.fromCommit ? result.fromCommit.slice(0, 7) : 'none'} → ${result.toCommit.slice(0, 7)}`);
+          if (result.metaUpdated) {
+            console.log(chalk.green(`meta.json updated (currentCommitID = ${result.toCommit.slice(0, 7)})`));
+          } else {
+            console.log(chalk.yellow('⚠ meta.json NOT updated — some commits failed'));
           }
-        }
 
-        console.log(`Summary: fragments=${result.fragmentsCount}, relations=${result.relationsCreated}`);
+          // Show per-commit summary
+          for (const r of result.perCommitResults) {
+            const prefix = r.persisted ? chalk.green('  ✓') : chalk.red('  ✗');
+            console.log(`${prefix} ${r.commitHash.slice(0, 7)}`);
+            if (r.isLogicChange) {
+              console.log(`    logic change: ${r.logicCheckReason}`);
+            }
+            if (r.generateSpecId) {
+              console.log(`    Path A - GENERATE ${r.generateSpecId}`);
+            }
+            for (const ev of r.evolvedSpecs) {
+              console.log(`    ${ev.specId}: ${ev.action}`);
+            }
+          }
+
+          // Aggregate summary
+          const totalFragments = result.perCommitResults.reduce((s, r) => s + r.fragmentsCount, 0);
+          const totalRelations = result.perCommitResults.reduce((s, r) => s + r.relationsCreated, 0);
+          console.log(`Summary: fragments=${totalFragments}, relations=${totalRelations}`);
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
