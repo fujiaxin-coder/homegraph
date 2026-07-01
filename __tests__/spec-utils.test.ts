@@ -758,51 +758,67 @@ describe('loadSpecConfig', () => {
     delete process.env.TEST_SPEC_API_KEY;
   });
 
-  it('should return defaults when config file is missing', () => {
+  // --- config file missing or invalid → llm is null (no defaults) ---
+
+  it('should return null for llm when config file is missing', () => {
     const config = loadSpecConfig(tmpDir);
     expect(config).toBeDefined();
     expect(config.discovery).toBeDefined();
     expect(config.discovery.primaryDocCandidates).toBeInstanceOf(Array);
-    expect(config.llm.provider).toBe('mock');
-    expect(config.llm.apiKey).toBe('');
-    expect(config.llm.model).toBe('gpt-4o');
+    expect(config.llm).toBeNull();
   });
 
-  it('should return defaults when config file contains invalid JSON', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(path.join(configDir, 'spec.json'), 'not valid json {{{', 'utf-8');
+  it('should return null for llm when config file contains invalid JSON', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(configFile, 'not valid json {{{', 'utf-8');
 
     const config = loadSpecConfig(tmpDir);
-    // Should fall back to defaults
-    expect(config.llm.provider).toBe('mock');
-    expect(config.llm.model).toBe('gpt-4o');
+    expect(config.llm).toBeNull();
   });
 
-  it('should return defaults when top-level value is not an object', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(path.join(configDir, 'spec.json'), '"just a string"', 'utf-8');
+  it('should return null for llm when top-level value is not an object', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(configFile, '"just a string"', 'utf-8');
 
     const config = loadSpecConfig(tmpDir);
-    expect(config.llm.provider).toBe('mock');
+    expect(config.llm).toBeNull();
   });
 
-  it('should return defaults when top-level value is an array', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(path.join(configDir, 'spec.json'), '[1, 2, 3]', 'utf-8');
+  it('should return null for llm when top-level value is an array', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(configFile, '[1, 2, 3]', 'utf-8');
 
     const config = loadSpecConfig(tmpDir);
+    expect(config.llm).toBeNull();
     expect(config.discovery.primaryDocCandidates).toBeInstanceOf(Array);
   });
 
+  it('should return null for llm when config file has no llm section', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({ discovery: { primaryDocCandidates: ['custom.md'] } }),
+      'utf-8',
+    );
+
+    const config = loadSpecConfig(tmpDir);
+    expect(config.discovery.primaryDocCandidates).toEqual(['custom.md']);
+    expect(config.llm).toBeNull();
+  });
+
+  // --- valid llm config ---
+
   it('should deep merge valid config over defaults', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const userConfig = {
       llm: {
         provider: 'openai',
+        apiKey: 'sk-test-deep-merge',
         model: 'gpt-3.5-turbo',
         temperature: 0.5,
       },
@@ -811,114 +827,189 @@ describe('loadSpecConfig', () => {
       },
     };
     fs.writeFileSync(
-      path.join(configDir, 'spec.json'),
+      configFile,
       JSON.stringify(userConfig),
       'utf-8',
     );
 
     const config = loadSpecConfig(tmpDir);
     // Merged user values
-    expect(config.llm.provider).toBe('openai');
-    expect(config.llm.model).toBe('gpt-3.5-turbo');
-    expect(config.llm.temperature).toBe(0.5);
+    expect(config.llm!.provider).toBe('openai');
+    expect(config.llm!.model).toBe('gpt-3.5-turbo');
+    expect(config.llm!.temperature).toBe(0.5);
     expect(config.discovery.primaryDocCandidates).toEqual(['custom.md']);
     // Default values still present for keys not overridden
-    expect(config.llm.maxTokens).toBe(4096);
+    expect(config.llm!.maxTokens).toBe(4096);
     expect(config.discovery.supplementaryGlobs).toBeInstanceOf(Array);
   });
 
   it('should resolve apiKey from process.env when apiKeyEnv is set', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const userConfig = {
       llm: {
         provider: 'openai',
+        model: 'gpt-4o',
         apiKeyEnv: 'TEST_SPEC_API_KEY',
       },
     };
     fs.writeFileSync(
-      path.join(configDir, 'spec.json'),
+      configFile,
       JSON.stringify(userConfig),
       'utf-8',
     );
 
     process.env.TEST_SPEC_API_KEY = 'sk-env-resolved-key';
     const config = loadSpecConfig(tmpDir);
-    expect(config.llm.apiKey).toBe('sk-env-resolved-key');
+    expect(config.llm!.apiKey).toBe('sk-env-resolved-key');
   });
 
-  it('should leave apiKey as default when apiKeyEnv points to unset env var', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
+  it('should leave apiKey empty when apiKeyEnv points to unset env var', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const userConfig = {
       llm: {
         provider: 'openai',
+        model: 'gpt-4o',
         apiKeyEnv: 'NONEXISTENT_ENV_VAR_XYZ',
       },
     };
     fs.writeFileSync(
-      path.join(configDir, 'spec.json'),
+      configFile,
       JSON.stringify(userConfig),
       'utf-8',
     );
 
     const config = loadSpecConfig(tmpDir);
-    expect(config.llm.apiKey).toBe('');
+    expect(config.llm!.apiKey).toBe('');
   });
 
   it('should preserve apiKey from config file when apiKeyEnv is not set', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const userConfig = {
       llm: {
         provider: 'openai',
+        model: 'gpt-4o',
         apiKey: 'sk-direct-key',
       },
     };
     fs.writeFileSync(
-      path.join(configDir, 'spec.json'),
+      configFile,
       JSON.stringify(userConfig),
       'utf-8',
     );
 
     const config = loadSpecConfig(tmpDir);
-    expect(config.llm.apiKey).toBe('sk-direct-key');
+    expect(config.llm!.apiKey).toBe('sk-direct-key');
   });
 
   it('should normalize baseUrl when provided', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const userConfig = {
       llm: {
         provider: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'sk-test',
         baseUrl: 'https://custom.api.example.com/v1',
       },
     };
     fs.writeFileSync(
-      path.join(configDir, 'spec.json'),
+      configFile,
       JSON.stringify(userConfig),
       'utf-8',
     );
 
     const config = loadSpecConfig(tmpDir);
-    expect(config.llm.baseUrl).toBe('https://custom.api.example.com/v1');
+    expect(config.llm!.baseUrl).toBe('https://custom.api.example.com/v1');
   });
 
   it('should normalize maxTokens as integer', () => {
-    const configDir = path.join(tmpDir, SPEC_DATA_DIR, 'config');
-    fs.mkdirSync(configDir, { recursive: true });
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
     const userConfig = {
       llm: {
+        provider: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'sk-test',
         maxTokens: 8192,
       },
     };
     fs.writeFileSync(
-      path.join(configDir, 'spec.json'),
+      configFile,
       JSON.stringify(userConfig),
       'utf-8',
     );
 
     const config = loadSpecConfig(tmpDir);
-    expect(config.llm.maxTokens).toBe(8192);
+    expect(config.llm!.maxTokens).toBe(8192);
+  });
+
+  it('should use default temperature when not provided', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({ llm: { provider: 'openai', model: 'gpt-4o', apiKey: 'sk-test' } }),
+      'utf-8',
+    );
+
+    const config = loadSpecConfig(tmpDir);
+    expect(config.llm!.temperature).toBe(0.2);
+  });
+
+  // --- llm validation errors ---
+
+  it('should throw when llm.provider is invalid', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({ llm: { provider: 'invalid', model: 'gpt-4o', apiKey: 'sk-test' } }),
+      'utf-8',
+    );
+
+    expect(() => loadSpecConfig(tmpDir)).toThrow('llm.provider');
+  });
+
+  it('should throw when llm.model is missing', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({ llm: { provider: 'openai', apiKey: 'sk-test' } }),
+      'utf-8',
+    );
+
+    expect(() => loadSpecConfig(tmpDir)).toThrow('llm.model');
+  });
+
+  it('should throw when llm.apiKey and apiKeyEnv are both missing', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({ llm: { provider: 'openai', model: 'gpt-4o' } }),
+      'utf-8',
+    );
+
+    expect(() => loadSpecConfig(tmpDir)).toThrow('llm.apiKey');
+  });
+
+  it('should support anthropic provider', () => {
+    const configFile = path.join(tmpDir, SPEC_DATA_DIR, 'configs.json');
+    fs.mkdirSync(path.dirname(configFile), { recursive: true });
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({
+        llm: { provider: 'anthropic', model: 'claude-3-opus', apiKey: 'sk-ant' },
+      }),
+      'utf-8',
+    );
+
+    const config = loadSpecConfig(tmpDir);
+    expect(config.llm!.provider).toBe('anthropic');
+    expect(config.llm!.model).toBe('claude-3-opus');
   });
 });

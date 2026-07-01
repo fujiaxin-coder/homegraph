@@ -23,7 +23,7 @@ import { getCommitInfo, getCommitDiff } from '../mining/git-scanner';
 import { resolveScopeToSpec } from '../mining/scope-resolver';
 import { extractSpecMetadata, SpecMetadata } from '../mining/spec-extractor';
 import { analyzeCommitDiff } from '../mining/diff-parser';
-import { LLMClient } from './llm-client';
+import { LlmClient, OpenAiLlmClient } from '../llm/client';
 import { isLogicChange } from './logic-checker';
 import { locateAffectedSpecs } from './impact-locator';
 import {
@@ -152,7 +152,19 @@ export async function runEvolvePipeline(
   // Load spec config and create LLM client
   const specConfig = loadSpecConfig(repoPath);
   const resolvedLLMConfig = llmConfig || specConfig.llm;
-  const client = new LLMClient(resolvedLLMConfig);
+  if (!resolvedLLMConfig) {
+    throw new Error(
+      'LLM not configured. Create .homegraph/commit4spec/configs.json with an "llm" section:\n' +
+      '{\n' +
+      '  "llm": {\n' +
+      '    "provider": "openai",\n' +
+      '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
+      '    "model": "gpt-4o"\n' +
+      '  }\n' +
+      '}',
+    );
+  }
+  const client: LlmClient = new OpenAiLlmClient(resolvedLLMConfig);
 
   // ------------------------------------------------------------------
   // 2. Path A (GENERATE) — commit message scope resolution

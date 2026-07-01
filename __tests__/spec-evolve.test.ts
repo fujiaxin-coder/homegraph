@@ -30,7 +30,7 @@ import {
 } from '../src/spec/db';
 
 // Modules under test
-import { LLMClient } from '../src/spec/evolve/llm-client';
+import { LlmClient } from '../src/spec/llm/client';
 import { isLogicChange, LogicCheckResult } from '../src/spec/evolve/logic-checker';
 import { locateAffectedSpecs } from '../src/spec/evolve/impact-locator';
 import {
@@ -48,15 +48,15 @@ setLogger(silentLogger);
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createMockLLMClient(): LLMClient {
-  const config: LLMConfig = {
-    provider: 'mock',
-    apiKey: '',
-    model: 'mock-model',
-    temperature: 0,
-    maxTokens: 100,
+function createMockLlmClient(
+  chatJsonImpl?: (systemPrompt: string, userPrompt: string) => Promise<Record<string, unknown>>,
+): LlmClient {
+  return {
+    chat: vi.fn().mockResolvedValue('{}'),
+    chatJson: chatJsonImpl
+      ? vi.fn().mockImplementation(chatJsonImpl)
+      : vi.fn().mockResolvedValue({}),
   };
-  return new LLMClient(config);
 }
 
 /** Create a temp git repo. */
@@ -129,8 +129,7 @@ describe('logic-checker — isLogicChange', () => {
   });
 
   it('LLM mock says true when mock response includes is_logic_change: true', async () => {
-    const client = createMockLLMClient();
-    client.setMockResponse('logic', JSON.stringify({
+    const client = createMockLlmClient(async () => ({
       is_logic_change: true,
       reason: 'This changes business logic',
     }));
@@ -141,8 +140,7 @@ describe('logic-checker — isLogicChange', () => {
   });
 
   it('LLM mock says false', async () => {
-    const client = createMockLLMClient();
-    client.setMockResponse('logic-false', JSON.stringify({
+    const client = createMockLlmClient(async () => ({
       is_logic_change: false,
       reason: 'Only formatting changes',
     }));
@@ -153,8 +151,7 @@ describe('logic-checker — isLogicChange', () => {
   });
 
   it('invalid JSON defaults to isLogic=false', async () => {
-    const client = createMockLLMClient();
-    client.setMockResponse('bad-json', 'not valid json at all');
+    const client = createMockLlmClient(async () => 'not valid json at all' as unknown as Record<string, unknown>);
 
     const result = await isLogicChange('feat: test', 'some diff', client);
     // chatJson returns {} for invalid JSON, so is_logic_change would be undefined
@@ -163,8 +160,7 @@ describe('logic-checker — isLogicChange', () => {
   });
 
   it('long diff truncated does not crash', async () => {
-    const client = createMockLLMClient();
-    client.setMockResponse('long-diff', JSON.stringify({ is_logic_change: false, reason: 'ok' }));
+    const client = createMockLlmClient(async () => ({ is_logic_change: false, reason: 'ok' }));
 
     const longDiff = 'x'.repeat(10000);
     const result = await isLogicChange('feat: big change', longDiff, client);
@@ -174,10 +170,9 @@ describe('logic-checker — isLogicChange', () => {
   });
 
   it('mock fallback when no explicit mock set returns false', async () => {
-    const client = createMockLLMClient();
-    // No setMockResponse calls — falls through to pattern matching
+    const client = createMockLlmClient();
+    // chatJson returns {} by default
     const result = await isLogicChange('feat: some change', '+code', client);
-    // Mock default for "logic change" pattern is is_logic_change: false
     expect(result.isLogic).toBe(false);
   });
 });
@@ -383,15 +378,14 @@ describe('spec-rewriter — evaluateSpec', () => {
     const nonExistentPlan = path.join(specStorage, 'spec02', 'plan.md');
     const result = await evaluateSpec(
       'spec02', specStorage, nonExistentPlan,
-      'feat: change', '+code', [], createMockLLMClient(),
+      'feat: change', '+code', [], createMockLlmClient(),
     );
     expect(result.action).toBe('UNCHANGED');
   });
 
   it('LLM returns UPDATE action', async () => {
     const planPath = createSpecOnDisk(specStorage, 'spec03', '# Spec 03\nOld content.\n');
-    const client = createMockLLMClient();
-    client.setMockResponse('update', JSON.stringify({
+    const client = createMockLlmClient(async () => ({
       action: 'UPDATE',
       title: 'Updated Spec 03',
       subtitles: ['Updated → Spec 03 - new preview'],
@@ -409,8 +403,7 @@ describe('spec-rewriter — evaluateSpec', () => {
 
   it('LLM returns DEPRECATE action', async () => {
     const planPath = createSpecOnDisk(specStorage, 'spec04', '# Spec 04\nOld.\n');
-    const client = createMockLLMClient();
-    client.setMockResponse('deprecate', JSON.stringify({
+    const client = createMockLlmClient(async () => ({
       action: 'DEPRECATE',
       plan_content: 'This spec is no longer relevant.',
     }));
@@ -424,8 +417,7 @@ describe('spec-rewriter — evaluateSpec', () => {
 
   it('invalid action defaults to UNCHANGED', async () => {
     const planPath = createSpecOnDisk(specStorage, 'spec05', '# Spec 05\nContent.\n');
-    const client = createMockLLMClient();
-    client.setMockResponse('bad-action', JSON.stringify({
+    const client = createMockLlmClient(async () => ({
       action: 'INVALID_ACTION',
       title: 'Should not use',
     }));
@@ -439,8 +431,7 @@ describe('spec-rewriter — evaluateSpec', () => {
 
   it('LLM returns UNCHANGED explicitly', async () => {
     const planPath = createSpecOnDisk(specStorage, 'spec06', '# Spec 06\nSame.\n');
-    const client = createMockLLMClient();
-    client.setMockResponse('unchanged', JSON.stringify({
+    const client = createMockLlmClient(async () => ({
       action: 'UNCHANGED',
     }));
 
@@ -453,8 +444,7 @@ describe('spec-rewriter — evaluateSpec', () => {
 
   it('scheduleNextSpecs context is passed through', async () => {
     const planPath = createSpecOnDisk(specStorage, 'spec07', '# Spec 07\nContent.\n');
-    const client = createMockLLMClient();
-    client.setMockResponse('sched', JSON.stringify({ action: 'UNCHANGED' }));
+    const client = createMockLlmClient(async () => ({ action: 'UNCHANGED' }));
 
     // Should not crash with next specs listed
     const result = await evaluateSpec(
@@ -657,7 +647,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
 
     // Set up mock LLM client (via config override)
     const llmConfig: LLMConfig = {
-      provider: 'mock',
+      provider: 'openai',
       apiKey: '',
       model: 'mock-model',
       temperature: 0,
@@ -712,7 +702,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
 
     // Set up mock LLM: logic change = true, evaluate = UPDATE
     const llmConfig: LLMConfig = {
-      provider: 'mock',
+      provider: 'openai',
       apiKey: '',
       model: 'mock-model',
       temperature: 0,
@@ -783,7 +773,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     ).mockResolvedValue({ isLogic: true, reason: 'Logic change' });
 
     const llmConfig: LLMConfig = {
-      provider: 'mock',
+      provider: 'openai',
       apiKey: '',
       model: 'mock-model',
       temperature: 0,
@@ -810,7 +800,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     ).mockResolvedValue({ isLogic: false, reason: 'No logic change' });
 
     const llmConfig: LLMConfig = {
-      provider: 'mock',
+      provider: 'openai',
       apiKey: '',
       model: 'mock-model',
       temperature: 0,
@@ -837,7 +827,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     ).mockResolvedValue({ isLogic: false, reason: 'Not logic' });
 
     const llmConfig: LLMConfig = {
-      provider: 'mock', apiKey: '', model: 'mock', temperature: 0, maxTokens: 100,
+      provider: 'openai', apiKey: '', model: 'mock', temperature: 0, maxTokens: 100,
     };
 
     const result = await runEvolvePipeline(repo, db, hash, llmConfig);

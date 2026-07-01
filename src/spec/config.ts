@@ -1,10 +1,10 @@
 /**
  * Spec configuration module — replaces `commit4spec/utils/config.py`.
  *
- * Loads spec mining/evolve configuration from `${SPEC_DATA_DIR}/config/spec.json`
- * within a repository, falling back to code defaults for every key. All failure
- * modes degrade gracefully: a missing file, bad JSON, or a malformed value
- * never throws — the caller always receives a complete, usable config.
+ * Loads spec mining/evolve configuration from `${SPEC_DATA_DIR}/configs.json`
+ * within a repository. Discovery and commitScope sections fall back to code
+ * defaults; the `llm` section must be explicitly configured by the user —
+ * there are no hard-coded LLM defaults.
  *
  * The config file is JSON, e.g.:
  *
@@ -50,7 +50,7 @@ export interface CommitScopeConfig {
 }
 
 export interface LLMConfig {
-  provider: 'openai' | 'anthropic' | 'mock';
+  provider: 'openai' | 'anthropic';
   apiKey: string;
   apiKeyEnv?: string;
   model: string;
@@ -62,7 +62,7 @@ export interface LLMConfig {
 export interface SpecConfig {
   discovery: SpecDiscoveryConfig;
   commitScope: CommitScopeConfig;
-  llm: LLMConfig;
+  llm: LLMConfig | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,18 +91,11 @@ export const DEFAULT_CONFIG: SpecConfig = Object.freeze({
       padSpecNumber: true,
     }),
   }),
-  llm: Object.freeze({
-    provider: 'mock' as const,
-    apiKey: '',
-    model: 'gpt-4o',
-    temperature: 0.2,
-    maxTokens: 4096,
-  }),
+  llm: null,
 }) as SpecConfig;
 
-/** Config subdirectory relative to the repo root. */
-const CONFIG_DIR = `${SPEC_DATA_DIR}/config`;
-const CONFIG_FILENAME = 'spec.json';
+/** Config file path relative to the repo root. */
+const CONFIG_FILE = `${SPEC_DATA_DIR}/configs.json`;
 
 // ---------------------------------------------------------------------------
 // Deep merge
@@ -135,26 +128,22 @@ function deepMerge(target: any, source: any): any {
 // ---------------------------------------------------------------------------
 
 /**
- * Load spec config from `${SPEC_DATA_DIR}/config/spec.json` in the given repo path.
+ * Load spec config from `${SPEC_DATA_DIR}/configs.json` in the given repo path.
  *
- * - Missing file → defaults (no warning; it's the zero-config case).
- * - Unparseable JSON → defaults with a warning.
- * - Top-level value that is not an object → defaults with a warning.
- * - Individual sub-objects that are not plain objects → warn-and-skip that
- *   section (the rest of the config still merges).
+ * Discovery and commitScope sections fall back to code defaults when the config
+ * file is missing or invalid. The `llm` section has NO defaults — it is `null`
+ * unless the user explicitly provides a valid `llm` block in the config file.
  *
- * After merging user values over defaults, if `llm.apiKeyEnv` is set the
- * function resolves `llm.apiKey` from `process.env[apiKeyEnv]`. An unset env
- * var leaves `apiKey` as whatever the file provided (or the default `""`).
+ * When `llm.apiKeyEnv` is set, `llm.apiKey` is resolved from `process.env`.
  */
 export function loadSpecConfig(repoPath: string): SpecConfig {
-  const file = path.join(repoPath, CONFIG_DIR, CONFIG_FILENAME);
+  const file = path.join(repoPath, CONFIG_FILE);
 
   let raw: string;
   try {
     raw = fs.readFileSync(file, 'utf-8');
   } catch {
-    // No config file — zero-config default, no warning.
+    // No config file — return defaults for discovery/commitScope, null for llm.
     return cloneDefaults();
   }
 
@@ -162,7 +151,7 @@ export function loadSpecConfig(repoPath: string): SpecConfig {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    logWarn(`Ignoring ${CONFIG_DIR}/${CONFIG_FILENAME}: not valid JSON`, {
+    logWarn(`Ignoring ${CONFIG_FILE}: not valid JSON`, {
       file,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -171,22 +160,25 @@ export function loadSpecConfig(repoPath: string): SpecConfig {
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     logWarn(
-      `Ignoring ${CONFIG_DIR}/${CONFIG_FILENAME}: top-level value must be a JSON object`,
+      `Ignoring ${CONFIG_FILE}: top-level value must be a JSON object`,
       { file },
     );
     return cloneDefaults();
   }
 
-  // Deep merge user config over defaults
+  // Deep merge user config over defaults (discovery and commitScope have defaults;
+  // llm is null in the default — it must come from the user file.)
   const merged = deepMerge(DEFAULT_CONFIG, parsed) as SpecConfig;
 
-  // Normalize sub-objects that fail the type guard (e.g. user set "discovery": "nope")
+  // Normalize sub-objects that fail the type guard
   merged.discovery = normalizeDiscovery(merged.discovery, file);
   merged.commitScope = normalizeCommitScope(merged.commitScope, file);
-  merged.llm = normalizeLLM(merged.llm, file);
+
+  // Validate LLM section. No defaults — user must provide provider, model, apiKey.
+  merged.llm = validateLLM(parsed.llm, file);
 
   // Resolve apiKey from env if apiKeyEnv is set
-  if (merged.llm.apiKeyEnv) {
+  if (merged.llm?.apiKeyEnv) {
     const envKey = process.env[merged.llm.apiKeyEnv];
     if (envKey !== undefined) {
       merged.llm.apiKey = envKey;
@@ -197,7 +189,7 @@ export function loadSpecConfig(repoPath: string): SpecConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Normalizers — ensure sub-configs are well-formed after merge
+// Normalizers / Validators — ensure sub-configs are well-formed after merge
 // ---------------------------------------------------------------------------
 
 function normalizeDiscovery(
@@ -206,7 +198,7 @@ function normalizeDiscovery(
 ): SpecDiscoveryConfig {
   if (!val || typeof val !== 'object' || Array.isArray(val)) {
     logWarn(
-      `Ignoring "discovery" in ${CONFIG_DIR}/${CONFIG_FILENAME}: must be an object`,
+      `Ignoring "discovery" in ${CONFIG_FILE}: must be an object`,
       { file },
     );
     return { ...DEFAULT_CONFIG.discovery };
@@ -241,7 +233,7 @@ function normalizeCommitScope(
 ): CommitScopeConfig {
   if (!val || typeof val !== 'object' || Array.isArray(val)) {
     logWarn(
-      `Ignoring "commitScope" in ${CONFIG_DIR}/${CONFIG_FILENAME}: must be an object`,
+      `Ignoring "commitScope" in ${CONFIG_FILE}: must be an object`,
       { file },
     );
     return { ...DEFAULT_CONFIG.commitScope, normalize: { ...DEFAULT_CONFIG.commitScope.normalize } };
@@ -277,37 +269,79 @@ function normalizeCommitScope(
   };
 }
 
-function normalizeLLM(val: any, file: string): LLMConfig {
+const LLM_CONFIG_EXAMPLE = [
+  '',
+  'Example minimal llm config:',
+  '{',
+  '  "llm": {',
+  '    "provider": "openai",',
+  '    "apiKeyEnv": "OPENAI_API_KEY",',
+  '    "model": "gpt-4o"',
+  '  }',
+  '}',
+].join('\n');
+
+/**
+ * Validate an `llm` section from the user config file.
+ *
+ * Required fields (no defaults — user must provide them):
+ * - `provider`: must be `"openai"` or `"anthropic"`
+ * - `model`: non-empty string
+ * - `apiKey` or `apiKeyEnv`: at least one must be set (env var is resolved later)
+ *
+ * Optional fields with defaults:
+ * - `temperature`: defaults to 0.2
+ * - `maxTokens`: defaults to 4096
+ *
+ * Returns a valid LLMConfig, or `null` if the user did not provide an `llm`
+ * section at all (no error in that case — callers decide how to handle it).
+ */
+function validateLLM(val: any, file: string): LLMConfig | null {
   if (!val || typeof val !== 'object' || Array.isArray(val)) {
-    logWarn(
-      `Ignoring "llm" in ${CONFIG_DIR}/${CONFIG_FILENAME}: must be an object`,
-      { file },
-    );
-    return { ...DEFAULT_CONFIG.llm };
+    // No llm section provided — null, not an error.
+    return null;
   }
 
-  const def = DEFAULT_CONFIG.llm;
-
+  // --- provider ---
   const provider = val.provider;
-  const validProvider =
-    provider === 'openai' || provider === 'anthropic' || provider === 'mock'
-      ? (provider as LLMConfig['provider'])
-      : def.provider;
+  if (provider !== 'openai' && provider !== 'anthropic') {
+    throw new Error(
+      `Invalid llm.provider in ${file}: must be "openai" or "anthropic", ` +
+      `got ${JSON.stringify(provider)}.${LLM_CONFIG_EXAMPLE}`,
+    );
+  }
+
+  // --- model ---
+  if (typeof val.model !== 'string' || val.model.length === 0) {
+    throw new Error(
+      `Missing llm.model in ${file}. Specify a model name, e.g. "gpt-4o".${LLM_CONFIG_EXAMPLE}`,
+    );
+  }
+
+  // --- apiKey / apiKeyEnv ---
+  const directKey = typeof val.apiKey === 'string' ? val.apiKey : '';
+  const apiKeyEnv = typeof val.apiKeyEnv === 'string' ? val.apiKeyEnv : undefined;
+  if (!directKey && !apiKeyEnv) {
+    throw new Error(
+      `Missing llm.apiKey or llm.apiKeyEnv in ${file}. ` +
+      `Set "apiKey" directly or use "apiKeyEnv" to reference an environment variable.${LLM_CONFIG_EXAMPLE}`,
+    );
+  }
 
   return {
-    provider: validProvider,
-    apiKey: typeof val.apiKey === 'string' ? val.apiKey : def.apiKey,
-    apiKeyEnv: typeof val.apiKeyEnv === 'string' ? val.apiKeyEnv : undefined,
-    model: typeof val.model === 'string' && val.model.length > 0 ? val.model : def.model,
+    provider: provider as LLMConfig['provider'],
+    apiKey: directKey,
+    apiKeyEnv,
+    model: val.model,
     baseUrl: typeof val.baseUrl === 'string' ? val.baseUrl : undefined,
     temperature:
       typeof val.temperature === 'number' && !isNaN(val.temperature)
         ? val.temperature
-        : def.temperature,
+        : 0.2,
     maxTokens:
       typeof val.maxTokens === 'number' && Number.isInteger(val.maxTokens) && val.maxTokens > 0
         ? val.maxTokens
-        : def.maxTokens,
+        : 4096,
   };
 }
 
@@ -334,7 +368,7 @@ function normalizeStringArray(
       out.push(entry);
     } else {
       logWarn(
-        `Ignoring "${label}" entry in ${CONFIG_DIR}/${CONFIG_FILENAME}: each value must be a non-empty string`,
+        `Ignoring "${label}" entry in ${CONFIG_FILE}: each value must be a non-empty string`,
         { file, entry: String(entry) },
       );
     }

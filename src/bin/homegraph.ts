@@ -2344,6 +2344,19 @@ evolveCommand
 
       const config = loadSpecConfig(repoPath);
       const llmConfig = config.llm;
+      if (!llmConfig) {
+        error(
+          'LLM not configured. Create .homegraph/commit4spec/configs.json with an "llm" section:\n' +
+          '{\n' +
+          '  "llm": {\n' +
+          '    "provider": "openai",\n' +
+          '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
+          '    "model": "gpt-4o"\n' +
+          '  }\n' +
+          '}',
+        );
+        process.exit(1);
+      }
 
       const commitHash = options.commitHash || 'HEAD';
 
