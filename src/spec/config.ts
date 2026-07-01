@@ -175,7 +175,7 @@ export function loadSpecConfig(repoPath: string): SpecConfig {
   merged.commitScope = normalizeCommitScope(merged.commitScope, file);
 
   // Validate LLM section. No defaults — user must provide provider, model, apiKey.
-  merged.llm = validateLLM(parsed.llm, file);
+  merged.llm = validateLLM((parsed as Record<string, unknown>).llm, file);
 
   // Resolve apiKey from env if apiKeyEnv is set
   if (merged.llm?.apiKeyEnv) {
