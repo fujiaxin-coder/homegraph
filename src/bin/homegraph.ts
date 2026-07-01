@@ -2101,7 +2101,6 @@ specCommand
 
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { resolveDbPath, computeBudgetProfile } = await import('../spec/utils');
-      const { initSpecSchema } = await import('../spec/db/schema');
       const { searchAndGetContext } = await import('../spec/graph/queries');
 
       const dbPath = resolveDbPath(repoPath, options.dbPath);
@@ -2113,7 +2112,6 @@ specCommand
 
       const created = createDatabase(dbPath);
       db = created.db;
-      initSpecSchema(db);
 
       const topK = Math.max(1, Math.min(parseInt(options.topK || '5', 10) || 5, 50));
       const includeFragments = options.fragments !== false;
@@ -2168,6 +2166,128 @@ specCommand
       }
     } catch (err) {
       error(`Match failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
+      try { db?.close(); } catch { /* best effort */ }
+    }
+  });
+
+/**
+ * homegraph spec find <filePath>
+ */
+specCommand
+  .command('find <filePath>')
+  .description('Find specs related to the given file path via code-fragment matching')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (filePath: string, options: {
+    path?: string;
+    dbPath?: string;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+      const { findSpecsByFilePath } = await import('../spec/graph/queries');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      if (!fs.existsSync(dbPath)) {
+        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        process.exit(1);
+      }
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+
+      const result = findSpecsByFilePath(db, filePath);
+
+      if (options.json) {
+        console.log(JSON.stringify({
+          filePath,
+          matched_count: result.matched_count,
+          truncated: result.truncated,
+          results: result.results,
+        }, null, 2));
+      } else {
+        console.log(chalk.bold(`\n${result.matched_count} spec${result.matched_count !== 1 ? 's' : ''} matched for ${filePath}:\n`));
+        for (const r of result.results) {
+          console.log(
+            `  ${chalk.cyan(r.id.padEnd(16))} ${r.title.padEnd(32)} ${chalk.green(r.status.padEnd(12))} v${r.version}  ${chalk.dim(r.filePath)}`,
+          );
+        }
+        console.log();
+        if (result.truncated) {
+          console.log(chalk.yellow(`  ... and more (showing first ${result.matched_count} of >${result.matched_count} results)`));
+          console.log();
+        }
+        if (result.matched_count === 0) {
+          info(`No specs found for file path "${filePath}". Try a partial path (e.g. "src/auth" instead of "src/auth/login.ts").`);
+        }
+      }
+    } catch (err) {
+      error(`Find failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
+      try { db?.close(); } catch { /* best effort */ }
+    }
+  });
+
+/**
+ * homegraph spec stats
+ */
+specCommand
+  .command('stats')
+  .description('Show statistics about the spec knowledge graph')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: {
+    path?: string;
+    dbPath?: string;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+      const { getSpecStats } = await import('../spec/graph/queries');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      if (!fs.existsSync(dbPath)) {
+        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        process.exit(1);
+      }
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+
+      const stats = getSpecStats(db);
+
+      if (options.json) {
+        console.log(JSON.stringify(stats, null, 2));
+      } else {
+        console.log(chalk.bold('\nSpec Knowledge Graph Stats\n'));
+        console.log(`  Specs:       ${chalk.cyan(String(stats.specCount))}`);
+        console.log(`    Active:     ${chalk.green(String(stats.activeSpecCount))}`);
+        console.log(`    Deprecated: ${chalk.yellow(String(stats.deprecatedSpecCount))}`);
+        console.log(`  Commits:     ${stats.commitCount}`);
+        console.log(`  Fragments:   ${stats.fragmentCount}`);
+        console.log(`  Relations:   ${stats.relationCount}`);
+        console.log();
+        if (stats.specCount === 0) {
+          info("No specs yet. Run 'homegraph spec mine' to build the knowledge graph.");
+        }
+      }
+    } catch (err) {
+      error(`Stats failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     } finally {
       try { db?.close(); } catch { /* best effort */ }

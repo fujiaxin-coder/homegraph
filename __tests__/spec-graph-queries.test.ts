@@ -24,6 +24,8 @@ import {
   searchAndGetContext,
   getSpecStats,
   findSpecsByFragmentPath,
+  findSpecsByFilePath,
+  FindSpecsByFilePathResult,
 } from '../src/spec/graph/queries';
 import { SpecNode, CommitNode, CodeFragmentNode, SpecContext, SpecStats } from '../src/spec/types';
 
@@ -693,5 +695,155 @@ describe('findSpecsByFragmentPath', () => {
     const specIds = findSpecsByFragmentPath(db, 'nested');
     expect(specIds).toHaveLength(1);
     expect(specIds[0]).toBe('s-like');
+  });
+});
+
+// ===========================================================================
+// 5. findSpecsByFilePath
+// ===========================================================================
+
+describe('findSpecsByFilePath', () => {
+  let db: SqliteDatabase;
+
+  beforeEach(() => {
+    const result = createDatabase(':memory:');
+    db = result.db;
+    initSpecSchema(db);
+  });
+
+  function setupSpecAndFragment(
+    specId: string,
+    specTitle: string,
+    filePath: string,
+    commitHash?: string,
+  ): void {
+    const hash = commitHash || `commit-${specId}`;
+    insertSpecNode(db, {
+      id: specId,
+      title: specTitle,
+      subtitles: [],
+      status: 'active',
+      version: 1,
+      filePath: `/specs/${specId}/plan.md`,
+      timestamp: Date.now(),
+    });
+    insertCommitNode(db, {
+      hash,
+      message: `feat: add ${specId}`,
+      author: 'tester',
+      timestamp: Date.now(),
+    });
+    const frag = insertCodeFragment(db, {
+      id: '',
+      changeType: 'MODIFY',
+      filePath,
+      startLine: 1,
+      endLine: 10,
+      codeDiff: '...',
+    });
+    insertCommitFragmentRelation(db, hash, frag.id);
+    insertSpecCommitRelation(db, specId, hash, 'SUMMARIZED_FROM');
+  }
+
+  it('finds a single spec by exact file path', () => {
+    setupSpecAndFragment('spec01', 'Auth Module', 'src/auth/login.ts');
+
+    const result = findSpecsByFilePath(db, 'src/auth/login.ts');
+    expect(result.matched_count).toBe(1);
+    expect(result.truncated).toBe(false);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]!.id).toBe('spec01');
+    expect(result.results[0]!.title).toBe('Auth Module');
+    expect(result.results[0]!.status).toBe('active');
+    expect(result.results[0]!.version).toBe(1);
+    expect(result.results[0]!.filePath).toBe('/specs/spec01/plan.md');
+  });
+
+  it('finds multiple specs matching the same file path substring', () => {
+    setupSpecAndFragment('spec01', 'Auth Module', 'src/auth/login.ts');
+    setupSpecAndFragment('spec02', 'Auth Middleware', 'src/auth/middleware.ts', 'commit-mw');
+
+    const result = findSpecsByFilePath(db, 'src/auth');
+    expect(result.matched_count).toBe(2);
+    expect(result.results).toHaveLength(2);
+    expect(result.results.map((r) => r.id).sort()).toEqual(['spec01', 'spec02']);
+    expect(result.results.map((r) => r.title).sort()).toEqual(['Auth Middleware', 'Auth Module']);
+  });
+
+  it('returns empty array when no match', () => {
+    const result = findSpecsByFilePath(db, 'nonexistent/file.ts');
+    expect(result.matched_count).toBe(0);
+    expect(result.results).toEqual([]);
+  });
+
+  it('returns distinct specs (no duplicates for same spec with multiple fragments)', () => {
+    setupSpecAndFragment('spec01', 'Auth Module', 'src/auth/login.ts');
+
+    // Add a second fragment for the same spec+commit (same file)
+    const frag2 = insertCodeFragment(db, {
+      id: '',
+      changeType: 'MODIFY',
+      filePath: 'src/auth/login.ts',
+      startLine: 11,
+      endLine: 20,
+      codeDiff: '...',
+    });
+    insertCommitFragmentRelation(db, 'commit-spec01', frag2.id);
+
+    const result = findSpecsByFilePath(db, 'src/auth/login.ts');
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]!.id).toBe('spec01');
+  });
+
+  it('throws on empty filePath', () => {
+    expect(() => findSpecsByFilePath(db, '')).toThrow('Empty file path is not allowed');
+    expect(() => findSpecsByFilePath(db, '   ')).toThrow('Empty file path is not allowed');
+  });
+
+  it('truncated flag is set when results exceed maxResults', () => {
+    // Insert 3 specs all matching 'src/'
+    setupSpecAndFragment('spec01', 'Auth Module', 'src/auth/login.ts');
+    setupSpecAndFragment('spec02', 'Auth Middleware', 'src/auth/middleware.ts', 'commit-mw');
+    setupSpecAndFragment('spec03', 'Auth Utils', 'src/auth/utils.ts', 'commit-utils');
+
+    // maxResults = 2, should be truncated
+    const result = findSpecsByFilePath(db, 'src/auth', 2);
+    expect(result.matched_count).toBe(2);
+    expect(result.truncated).toBe(true);
+    expect(result.results).toHaveLength(2);
+  });
+
+  it('truncated flag is false when results within limit', () => {
+    setupSpecAndFragment('spec01', 'Auth Module', 'src/auth/login.ts');
+
+    // maxResults = 100 (default), only 1 result -> not truncated
+    const result = findSpecsByFilePath(db, 'src/auth');
+    expect(result.matched_count).toBe(1);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('escapes LIKE metacharacters in filePath', () => {
+    // Spec with a fragment path containing %
+    setupSpecAndFragment('spec-pct', 'Percent Spec', 'src/100%/file.ts');
+
+    // Searching for literal '100%' should match the spec with '100%' in path
+    const result = findSpecsByFilePath(db, '100%');
+    expect(result.matched_count).toBe(1);
+    expect(result.results[0]!.id).toBe('spec-pct');
+
+    // Searching for '100_' should NOT match '100%' (underscore is escaped)
+    setupSpecAndFragment('spec-underscore', 'Underscore Spec', 'src/100_file.ts', 'commit-us');
+    const result2 = findSpecsByFilePath(db, '100_');
+    expect(result2.matched_count).toBe(1);
+    expect(result2.results[0]!.id).toBe('spec-underscore');
+  });
+
+  it('backslash in path is handled correctly', () => {
+    // Windows-style paths
+    setupSpecAndFragment('spec-win', 'Windows Spec', 'src\\auth\\login.ts');
+
+    const result = findSpecsByFilePath(db, 'src\\auth');
+    expect(result.matched_count).toBe(1);
+    expect(result.results[0]!.id).toBe('spec-win');
   });
 });
