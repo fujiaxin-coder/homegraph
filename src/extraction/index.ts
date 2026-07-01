@@ -27,7 +27,12 @@ import ignore, { Ignore } from 'ignore';
 import { detectFrameworks } from '../resolution/frameworks';
 import type { ResolutionContext } from '../resolution/types';
 import { setArkTSBatchProgressCallback, isArktsBatchRunning } from './context';
-import { isArkTSBatchPersisted, primeArkTSBatch, resetArkTSBatch, drainArkTSIndexNotices } from './languages/arkts';
+import {
+  isArkTSBatchPersisted,
+  primeArkTSBatch,
+  resetArkTSBatch,
+  drainArkTSIndexNotices,
+} from './languages/arkts';
 
 /**
  * Number of files to read in parallel during indexing.
@@ -1311,7 +1316,7 @@ export class ExtractionOrchestrator {
       // Read files in parallel (with path validation before any I/O)
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
-          if (detectLanguage(fp, undefined, overrides) === 'arkts' && isArkTSBatchPersisted(fp)) {
+          if (isArkTSBatchPersisted(fp)) {
             return {
               filePath: fp,
               content: null as string | null,
@@ -1342,8 +1347,7 @@ export class ExtractionOrchestrator {
       for (const fileEntry of fileContents) {
         const { filePath, content, stats, error } = fileEntry;
         const arktsBatchSkipped = 'arktsBatchSkipped' in fileEntry && fileEntry.arktsBatchSkipped;
-        const lang = detectLanguage(filePath, undefined, overrides);
-        const alreadyArktsPersisted = lang === 'arkts' && isArkTSBatchPersisted(filePath);
+        const alreadyArktsPersisted = isArkTSBatchPersisted(filePath);
 
         if (signal?.aborted) {
           if (parseWorker) (parseWorker as import('worker_threads').Worker).terminate().catch(() => {});
@@ -1727,7 +1731,7 @@ export class ExtractionOrchestrator {
 
     // Detect language (honoring the project's homegraph.json extension overrides)
     const language = detectLanguage(relativePath, content, loadExtensionOverrides(this.rootDir));
-    if (language === 'arkts' && isArkTSBatchPersisted(relativePath)) {
+    if (isArkTSBatchPersisted(relativePath)) {
       return {
         nodes: [],
         edges: [],
@@ -2021,7 +2025,7 @@ export class ExtractionOrchestrator {
     try {
       for (let i = 0; i < filesToIndex.length; i++) {
         const filePath = filesToIndex[i]!;
-        if (detectLanguage(filePath, undefined, overrides) === 'arkts' && isArkTSBatchPersisted(filePath)) {
+        if (isArkTSBatchPersisted(filePath)) {
           onProgress?.({
             phase: 'parsing',
             current: i + 1,

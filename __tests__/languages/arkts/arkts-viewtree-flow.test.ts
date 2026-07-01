@@ -117,7 +117,8 @@ describe('languages/arkts viewtree flow', () => {
     expect(onClickEdges.length).toBeGreaterThan(0);
     const handlerNode = result.nodes.find((n) => n.id === onClickEdges[0]!.target);
     expect(handlerNode?.kind).toBe('method');
-    expect(handlerNode?.name.startsWith('@callback:')).toBe(true);
+    expect(handlerNode?.name.startsWith('%AM')).toBe(true);
+    expect(handlerNode?.qualifiedName).toContain('ParentPage');
   });
 
   it('allows ViewTree onClick references but not structural ViewTree references in Flow BFS', async () => {
@@ -180,7 +181,8 @@ describe('languages/arkts viewtree flow', () => {
     expect(synthNote(handler, onClickEdge!)).toMatch(/dynamic: ArkUI \.onClick/);
 
     const callback = [...cg!.getNodesByKind('method')].find((n) => n.id === onClickEdge!.target);
-    expect(callback?.name.startsWith('@callback:')).toBe(true);
+    expect(callback?.name.startsWith('%AM')).toBe(true);
+    expect(onClickEdge!.metadata?.via).toBe('onClick');
   });
 
   it('does not treat ViewTree child-component references as Flow hops', async () => {

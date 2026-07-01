@@ -93,6 +93,49 @@ const ARK_PROVENANCE = 'heuristic';
 /** Virtual file path for ArkAnalyzer's in-scene dummy entry (not on disk). */
 const ARKANALYZER_DUMMY_FILE = '@dummyFile.ets';
 
+/** HarmonyOS sources indexed via ArkAnalyzer Scene batch (`.ets`, `.ts`, `.d.ts`). */
+export function isArkAnalyzerSourcePath(filePath: string): boolean {
+  const base = path.basename(filePath);
+  // `.d.ts` ends with `.ts` (Node extname) — one `.ts` suffix covers both.
+  return base.endsWith('.ets') || base.endsWith('.ts');
+}
+
+function isEtsFileName(name: string): boolean {
+  return name.endsWith('.ets');
+}
+
+function isCoLocatedArkTsFileName(name: string): boolean {
+  return isArkAnalyzerSourcePath(name) && !isEtsFileName(name);
+}
+
+/** True when the tree looks like a HarmonyOS / ArkTS project (not a generic TS repo). */
+function hasHarmonyProjectMarkers(rootDir: string): boolean {
+  const found: string[] = [];
+  function walk(dir: string): void {
+    if (found.length > 0) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') {
+          continue;
+        }
+        walk(full);
+      } else if (entry.isFile() && (isEtsFileName(entry.name) || entry.name === 'module.json5')) {
+        found.push(full);
+        return;
+      }
+    }
+  }
+  walk(rootDir);
+  return found.length > 0;
+}
+
 function normIndexPath(filePath: string): string {
   return filePath.replace(/\\/g, '/');
 }
@@ -138,7 +181,8 @@ function emptyResult(filePath: string, message: string, severity: ExtractionErro
 }
 
 function scanEtsFiles(rootDir: string): string[] {
-  const found: string[] = [];
+  const etsFiles: string[] = [];
+  const coLocated: string[] = [];
   function walk(dir: string): void {
     let entries: fs.Dirent[];
     try {
@@ -151,12 +195,21 @@ function scanEtsFiles(rootDir: string): string[] {
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') continue;
         walk(full);
-      } else if (entry.isFile() && entry.name.endsWith('.ets')) {
-        found.push(path.relative(rootDir, full).replace(/\\/g, '/'));
+      } else if (entry.isFile()) {
+        const rel = path.relative(rootDir, full).replace(/\\/g, '/');
+        if (isEtsFileName(entry.name)) {
+          etsFiles.push(rel);
+        } else if (isCoLocatedArkTsFileName(entry.name)) {
+          coLocated.push(rel);
+        }
       }
     }
   }
   walk(rootDir);
+  if (etsFiles.length === 0 && !hasHarmonyProjectMarkers(rootDir)) {
+    return [];
+  }
+  const found = etsFiles.length > 0 ? [...etsFiles, ...coLocated] : coLocated;
   found.sort();
   return found;
 }
@@ -727,15 +780,27 @@ function classDisplayName(cls: ArkClass): string {
   return cls.isAnonymousClass() ? anonymousClassDisplayName(cls) : cls.getName();
 }
 
+function isAnonymousArkMethod(method: ArkMethod): boolean {
+  return method.isAnonymousMethod?.() === true || method.getName().startsWith(ANONYMOUS_METHOD_PREFIX);
+}
+
 function shouldSkipArkMethod(method: ArkMethod): boolean {
   if (method.isDefaultArkMethod()) return true;
-  if (method.isAnonymousMethod()) return true;
+  if (isAnonymousArkMethod(method)) return true;
   const name = method.getName();
   if (name === DEFAULT_ARK_METHOD_NAME) return true;
   if (name === INSTANCE_INIT_METHOD_NAME || name === STATIC_INIT_METHOD_NAME) return true;
   if (name.startsWith(STATIC_BLOCK_METHOD_NAME_PREFIX)) return true;
   if (resolveMethodDisplayName(method) === null) return true;
   return false;
+}
+
+/** User-facing or ArkAnalyzer-stable name for graph nodes (includes `%AMn` for anonymous). */
+function arkMethodDisplayName(method: ArkMethod): string | null {
+  const resolved = resolveMethodDisplayName(method);
+  if (resolved) return resolved;
+  if (isAnonymousArkMethod(method)) return method.getName();
+  return null;
 }
 
 /** Decode ArkAnalyzer nested-method encoding (`%inner$outer`) to the user-visible name. */
@@ -784,10 +849,10 @@ function buildMethodQualifiedName(method: ArkMethod, displayName?: string): stri
   }
   const outer = method.getOuterMethod();
   if (outer) {
-    const outerName = resolveMethodDisplayName(outer);
+    const outerName = arkMethodDisplayName(outer);
     if (outerName) parts.push(outerName);
   }
-  parts.push(displayName ?? resolveMethodDisplayName(method) ?? method.getName());
+  parts.push(displayName ?? arkMethodDisplayName(method) ?? method.getName());
   return buildQualifiedName(parts);
 }
 
@@ -1025,7 +1090,7 @@ class ArkTSAdapter {
     for (const arkFile of scene.getFiles()) {
       const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
       if (!this.scanned.has(relativePath)) continue;
-      if (!relativePath.endsWith('.ets')) continue;
+      if (!isArkAnalyzerSourcePath(relativePath)) continue;
       this.indexFile(arkFile);
     }
 
@@ -1033,7 +1098,7 @@ class ArkTSAdapter {
       if (!cls.hasViewTree()) continue;
       const arkFile = cls.getDeclaringArkFile();
       const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
-      if (!this.scanned.has(relativePath) || !relativePath.endsWith('.ets')) continue;
+      if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) continue;
       const result = this.fileResults.get(relativePath);
       if (!result) continue;
       try {
@@ -1067,14 +1132,15 @@ class ArkTSAdapter {
         if (!caller || !callee) continue;
         if (
           shouldSkipArkMethod(caller) &&
+          !isAnonymousArkMethod(caller) &&
           !caller.getDeclaringArkClass().isDefaultArkClass() &&
           !caller.isGenerated()
         ) {
           continue;
         }
 
-        const callerId = this.methodToId.get(caller);
-        const calleeId = this.methodToId.get(callee);
+        const callerId = this.resolveMethodNodeId(caller);
+        const calleeId = this.resolveMethodNodeId(callee);
         if (!callerId || !calleeId) continue;
 
         const callerFile = relPathForArkFile(this.rootDir, caller.getDeclaringArkFile());
@@ -1506,6 +1572,50 @@ class ArkTSAdapter {
     return this.componentToId.get(cls) ?? this.classToId.get(cls) ?? null;
   }
 
+  /** Parent node id for a method: owning class/component, or file for default-class methods. */
+  private resolveMethodParentId(method: ArkMethod, relativePath: string, result: ExtractionResult): string {
+    const cls = method.getDeclaringArkClass();
+    if (cls.isDefaultArkClass()) {
+      return `file:${relativePath}`;
+    }
+    const classId = this.resolveClassNodeId(cls);
+    if (classId) return classId;
+    const fileId = `file:${relativePath}`;
+    this.indexClass(relativePath, 'arkts', result, cls, fileId);
+    return this.resolveClassNodeId(cls) ?? fileId;
+  }
+
+  /**
+   * Resolve a method to a graph node id, lazily indexing anonymous ArkMethods
+   * that RTA / ViewTree reference but the main file walk skipped.
+   */
+  private resolveMethodNodeId(method: ArkMethod): string | null {
+    const existing = this.methodToId.get(method);
+    if (existing) return existing;
+
+    if (shouldSkipArkMethod(method) && !isAnonymousArkMethod(method)) return null;
+
+    const displayName = arkMethodDisplayName(method);
+    if (!displayName) return null;
+
+    const arkFile = method.getDeclaringArkFile();
+    const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+    if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) return null;
+
+    let lineCount = 1;
+    try {
+      lineCount = arkFile.getCode()?.split('\n').length ?? 1;
+    } catch {
+      // use default
+    }
+    const result = this.fileResults.get(relativePath) ?? this.ensureFileResult(relativePath, lineCount);
+    const parentId = this.resolveMethodParentId(method, relativePath, result);
+    const cls = method.getDeclaringArkClass();
+    const kind: NodeKind = cls.isDefaultArkClass() ? 'function' : 'method';
+    this.indexMethod(relativePath, 'arkts', result, method, parentId, kind, displayName);
+    return this.methodToId.get(method) ?? null;
+  }
+
   private addViewTreeEdge(
     result: ExtractionResult,
     source: string,
@@ -1538,14 +1648,14 @@ class ArkTSAdapter {
     const existing = this.methodToId.get(method);
     if (existing) return existing;
 
-    if (method.isAnonymousMethod?.() || method.getName().startsWith(ANONYMOUS_METHOD_PREFIX)) {
-      const line = method.getImplOriginFullPosition()?.getFirstLine() ?? 1;
-      this.indexMethod(relativePath, 'arkts', result, method, parentId, 'method', `@callback:${line}`);
-      return this.methodToId.get(method) ?? null;
-    }
+    if (shouldSkipArkMethod(method) && !isAnonymousArkMethod(method)) return null;
 
-    if (shouldSkipArkMethod(method)) return null;
-    this.indexMethod(relativePath, 'arkts', result, method, parentId);
+    const displayName = arkMethodDisplayName(method);
+    if (!displayName) return null;
+
+    const cls = method.getDeclaringArkClass();
+    const kind: NodeKind = cls.isDefaultArkClass() ? 'function' : 'method';
+    this.indexMethod(relativePath, 'arkts', result, method, parentId, kind, displayName);
     return this.methodToId.get(method) ?? null;
   }
 
@@ -1678,7 +1788,7 @@ export function drainArkTSIndexNotices(): ExtractionError[] {
 
 function buildSceneConfig(rootDir: string) {
   return buildSceneConfigFromProject(rootDir, process.env.OHOS_SDK_HOME, {
-    supportFileExts: ['.ets'],
+    supportFileExts: ['.ets', '.ts', '.d.ts'],
     enableMethodBodyBuild: true,
   });
 }
