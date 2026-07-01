@@ -2553,7 +2553,7 @@ evolveCommand
           '}');
       }
 
-      const result = await runBatchEvolvePipeline(repoPath, db, llmConfig);
+      const result = await runBatchEvolvePipeline(repoPath, db, llmConfig ?? undefined);
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
