@@ -202,6 +202,105 @@ export function findSpecsByFragmentPath(
   return rows.map((r) => r.spec_id);
 }
 
+// ===========================================================================
+// findSpecsByFilePath
+// ===========================================================================
+
+/** Default max results returned by findSpecsByFilePath. */
+const DEFAULT_MAX_SPEC_FIND_RESULTS = 100;
+
+/** Result container returned by findSpecsByFilePath. */
+export interface FindSpecsByFilePathResult {
+  /** Matching spec entries (capped at maxResults). */
+  results: Array<{
+    id: string;
+    title: string;
+    status: string;
+    version: number;
+    filePath: string;
+  }>;
+  /** Number of results actually returned (<= maxResults). */
+  matched_count: number;
+  /** True when more results exist beyond the cap. */
+  truncated: boolean;
+}
+
+/**
+ * Find specs whose code fragments reference the given file path.
+ *
+ * Traverses: filePath -> code_fragment_nodes -> commit_fragment_relations
+ * -> commit_nodes -> spec_commit_relations -> spec_nodes.
+ *
+ * Uses LIKE matching against code_fragment_nodes.file_path, so partial
+ * paths work (e.g. `src/auth.ts` matches `src/auth/login.ts` and
+ * `app/src/auth.ts`).  LIKE metacharacters (`%`, `_`, `\`) in the
+ * filePath are automatically escaped.
+ *
+ * An empty or whitespace-only filePath is rejected with an error
+ * (it would match every spec in the graph).
+ *
+ * @param db         Active SQLite database handle.
+ * @param filePath   File path to search for (substring LIKE match).
+ * @param maxResults Maximum number of results to return (default 100).
+ * @returns FindSpecsByFilePathResult with .results, .matched_count, and .truncated.
+ */
+export function findSpecsByFilePath(
+  db: SqliteDatabase,
+  filePath: string,
+  maxResults: number = DEFAULT_MAX_SPEC_FIND_RESULTS,
+): FindSpecsByFilePathResult {
+  // Guard against empty input that would match every spec
+  if (!filePath || filePath.trim().length === 0) {
+    throw new Error(
+      'Empty file path is not allowed -- it would match every spec in the knowledge graph. ' +
+      'Provide a concrete file path (e.g. "src/auth.ts") or a partial path (e.g. "src/auth").',
+    );
+  }
+
+  // Escape LIKE metacharacters (SQLite ESCAPE '\' is used in the query)
+  const escaped = filePath
+    .replace(/\\/g, '\\\\') // literal backslash
+    .replace(/%/g, '\\%')   // percent wildcard
+    .replace(/_/g, '\\_');  // underscore wildcard
+
+  const pattern = `%${escaped}%`;
+
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT s.id, s.title, s.status, s.version, s.file_path
+       FROM spec_nodes s
+       JOIN spec_commit_relations scr ON scr.spec_id = s.id
+       JOIN commit_fragment_relations cfr ON cfr.commit_hash = scr.commit_hash
+       JOIN code_fragment_nodes cf ON cf.id = cfr.fragment_id
+       WHERE cf.file_path LIKE ? ESCAPE '\\'
+       ORDER BY s.id
+       LIMIT ?`,
+    )
+    .all(pattern, maxResults + 1) as Array<{
+      id: string;
+      title: string;
+      status: string;
+      version: number;
+      file_path: string;
+    }>;
+
+  const truncated = rows.length > maxResults;
+  const slice = truncated ? rows.slice(0, maxResults) : rows;
+
+  return {
+    results: slice.map((r) => ({
+      id: r.id,
+      title: r.title,
+      status: r.status,
+      version: r.version,
+      filePath: r.file_path,
+    })),
+    matched_count: slice.length,
+    truncated,
+  };
+}
+
+
 /**
  * Compute statistics about the Spec knowledge graph.
  *

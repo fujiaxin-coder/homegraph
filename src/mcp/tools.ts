@@ -700,6 +700,32 @@ export const tools: ToolDefinition[] = [
       required: ['query'],
     },
   },
+  {
+    name: 'homegraph_spec_find',
+    description:
+      'Find which specs are related to the given file path by matching against code-fragment file paths ' +
+      'in the Commit4Spec knowledge graph. Traverses code_fragment_nodes → commit_fragment_relations ' +
+      '→ spec_commit_relations → spec_nodes. Useful for answering "which specs does this file affect?" ' +
+      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filePath: {
+          type: 'string',
+          description: 'File path to look up (substring LIKE match). E.g. "src/auth.ts" or "src/auth".',
+        },
+        repoPath: {
+          type: 'string',
+          description: 'Path to the repository root. Defaults to the current working directory.',
+        },
+        dbPath: {
+          type: 'string',
+          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
+        },
+      },
+      required: ['filePath'],
+    },
+  },
 ];
 
 /**
@@ -1308,6 +1334,8 @@ export class ToolHandler {
           result = await this.handleFiles(args); break;
         case 'homegraph_spec_match':
           result = await this.handleSpecMatch(args); break;
+        case 'homegraph_spec_find':
+          result = await this.handleSpecFind(args); break;
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
@@ -4045,7 +4073,6 @@ export class ToolHandler {
     // Lazily require spec modules so the MCP startup path stays lean.
     const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
     const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
-    const { initSpecSchema } = require('../spec/db/schema') as typeof import('../spec/db/schema');
     const { searchAndGetContext } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
     const {
       truncateCodeDiff,
@@ -4068,9 +4095,6 @@ export class ToolHandler {
     }
 
     try {
-      // Ensure the schema exists (idempotent).
-      initSpecSchema(db);
-
       // Search and traverse.
       const contexts = searchAndGetContext(db, query, topK, includeFragments);
 
@@ -4157,6 +4181,59 @@ export class ToolHandler {
       // Fallback: hard-truncate the JSON.
       const truncated = json.slice(0, MAX_OUTPUT_LENGTH - 3) + '...';
       return this.textResult(truncated);
+    } finally {
+      db.close();
+    }
+  }
+
+  // =========================================================================
+  // handleSpecFind — file-path based spec lookup
+  // =========================================================================
+
+  /**
+   * Find which specs are related to the given file path by matching against
+   * code-fragment file paths in the Commit4Spec knowledge graph.
+   *
+   * Traverses: filePath → code_fragment_nodes → commit_fragment_relations
+   * → spec_commit_relations → spec_nodes.
+   */
+  private async handleSpecFind(args: Record<string, unknown>): Promise<ToolResult> {
+    const filePath = this.validateString(args.filePath, 'filePath');
+    if (typeof filePath !== 'string') return filePath;
+
+    const repoPath = args.repoPath as string | undefined;
+    const explicitDbPath = args.dbPath as string | undefined;
+
+    // Lazily require spec modules so the MCP startup path stays lean.
+    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
+    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
+    const { findSpecsByFilePath } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
+
+    // Resolve the database path.
+    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+
+    // Open the database.
+    let db: SqliteDatabase;
+    try {
+      db = createDatabase(dbPath).db;
+    } catch (err) {
+      return this.errorResult(
+        `Failed to open Commit4Spec database at "${dbPath}": ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    try {
+      const result = findSpecsByFilePath(db, filePath);
+
+      const response = {
+        filePath,
+        matched_count: result.matched_count,
+        truncated: result.truncated,
+        results: result.results,
+      };
+
+      return this.textResult(JSON.stringify(response, null, 2));
     } finally {
       db.close();
     }
