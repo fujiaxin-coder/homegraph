@@ -857,12 +857,16 @@ describe('evolve pipeline — runBatchEvolvePipeline', () => {
     expect(result).toHaveProperty('commitsProcessed');
     expect(result).toHaveProperty('perCommitResults');
     expect(result).toHaveProperty('metaUpdated');
+    expect(result).toHaveProperty('skippedCommits');
+    expect(result).toHaveProperty('failures');
 
     expect(result.fromCommit === null || typeof result.fromCommit === 'string').toBe(true);
     expect(typeof result.toCommit).toBe('string');
     expect(typeof result.commitsProcessed).toBe('number');
     expect(Array.isArray(result.perCommitResults)).toBe(true);
     expect(typeof result.metaUpdated).toBe('boolean');
+    expect(typeof result.skippedCommits).toBe('number');
+    expect(typeof result.failures).toBe('number');
 
     // Verify per-commit results have EvolveResult shape
     if (result.perCommitResults.length > 0) {
@@ -952,6 +956,189 @@ describe('evolve pipeline — runBatchEvolvePipeline', () => {
     expect(r.persisted).toBe(false);
     // All "succeeded" (no error thrown), so meta updated
     expect(result.metaUpdated).toBe(true);
+
+    vi.restoreAllMocks();
+  });
+
+  // ------------------------------------------------------------------
+  // Path A without LLM
+  // ------------------------------------------------------------------
+
+  it('Path A works without LLM configured', async () => {
+    // Setup: create a commit with spec scope in message
+    const baselineHash = commitFile(repo, 'README.md', '# base\n', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // Create spec on disk
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\nPath A content.\n');
+
+    // Commit with spec(spec03) in message
+    commitFile(
+      repo,
+      'src/feature.ts',
+      'console.log("new feature");\n',
+      'feat(spec03): add feature',
+    );
+
+    // No LLM mock — testing that Path A works without it
+    const result = await runBatchEvolvePipeline(repo, db, undefined);
+
+    expect(result.commitsProcessed).toBe(1);
+    const r = result.perCommitResults[0]!;
+    expect(r.skipped).toBe(false);
+    expect(r.generateSpecId).toBe('spec03');
+    expect(r.generateRelationCreated).toBe(true);
+    expect(r.persisted).toBe(true);
+    // meta should be updated (Path A succeeded)
+    expect(result.metaUpdated).toBe(true);
+    expect(result.skippedCommits).toBe(0);
+  });
+
+  it('non-Path-A commit without LLM → skipped', async () => {
+    const baselineHash = commitFile(repo, 'README.md', '# base\n', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // Commit WITHOUT spec scope in message
+    commitFile(
+      repo,
+      'src/utils.ts',
+      'export const x = 1;\n',
+      'chore: update utils',
+    );
+
+    const result = await runBatchEvolvePipeline(repo, db, undefined);
+
+    expect(result.commitsProcessed).toBe(1);
+    const r = result.perCommitResults[0]!;
+    expect(r.skipped).toBe(true);
+    expect(r.skipReason).toContain('LLM not configured');
+    expect(r.persisted).toBe(false);
+    expect(r.generateRelationCreated).toBe(false);
+    // meta should NOT be updated (all commits were skipped)
+    expect(result.metaUpdated).toBe(false);
+    expect(result.skippedCommits).toBe(1);
+  });
+
+  it('mix: Path A succeeds + non-Path-A skipped, meta updated', async () => {
+    const baselineHash = commitFile(repo, 'README.md', '# base\n', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // Commit 1: Path A with spec scope
+    createSpecOnDisk(specStorage, 'spec04', '# Spec 04\nContent.\n');
+    commitFile(
+      repo,
+      'src/a.ts',
+      'const a = 1;\n',
+      'feat(spec04): add a',
+    );
+
+    // Commit 2: No spec scope, no LLM → should be skipped
+    commitFile(
+      repo,
+      'src/b.ts',
+      'const b = 2;\n',
+      'chore: cleanup',
+    );
+
+    // Commit 3: Another Path A
+    createSpecOnDisk(specStorage, 'spec05', '# Spec 05\nContent.\n');
+    commitFile(
+      repo,
+      'src/c.ts',
+      'const c = 3;\n',
+      'feat(spec05): add c',
+    );
+
+    const result = await runBatchEvolvePipeline(repo, db, undefined);
+
+    expect(result.commitsProcessed).toBe(3);
+    expect(result.skippedCommits).toBe(1);
+
+    // Commit 1: Path A → processed
+    const r1 = result.perCommitResults[0]!;
+    expect(r1.skipped).toBe(false);
+    expect(r1.generateSpecId).toBe('spec04');
+    expect(r1.persisted).toBe(true);
+
+    // Commit 2: no Path A, no LLM → skipped
+    const r2 = result.perCommitResults[1]!;
+    expect(r2.skipped).toBe(true);
+    expect(r2.persisted).toBe(false);
+
+    // Commit 3: Path A → processed
+    const r3 = result.perCommitResults[2]!;
+    expect(r3.skipped).toBe(false);
+    expect(r3.generateSpecId).toBe('spec05');
+    expect(r3.persisted).toBe(true);
+
+    // meta.json should be updated (2 commits processed, 0 failures)
+    // Note: meta advances past skipped commits to HEAD
+    expect(result.metaUpdated).toBe(true);
+  });
+
+  it('partial failure: 1 commit succeeds + 1 commit fails → meta updated', async () => {
+    const baselineHash = commitFile(repo, 'README.md', '# base\n', 'chore: init');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // Create spec on disk for Path B lookup
+    createSpecOnDisk(specStorage, 'spec06', '# Spec 06\nOriginal.\n');
+
+    // Commit 1 and 2 (no spec scope → Path B, needs isLogicChange + affected spec)
+    const hash1 = commitFile(repo, 'src/succeed.ts', 'const a = 1;\n', 'feat: first');
+    const hash2 = commitFile(repo, 'src/fail.ts', 'const b = 2;\n', 'feat: second');
+
+    // Pre-populate DB so locateAffectedSpecs finds spec06 for both commits
+    insertSpecNode(db, {
+      id: 'spec06', title: 'Spec 06', subtitles: ['Spec 06 - Original.'],
+      status: 'active', version: 1,
+      filePath: path.join(specStorage, 'spec06', 'plan.md'), timestamp: Date.now(),
+    });
+
+    insertCommitNode(db, {
+      hash: hash1, message: 'feat: first', author: 'tester', timestamp: Date.now(),
+    });
+    const frag1 = insertCodeFragment(db, {
+      id: '', changeType: 'MODIFY', filePath: 'src/succeed.ts',
+      startLine: 1, endLine: 1, codeDiff: '+const a = 1;',
+    });
+    insertCommitFragmentRelation(db, hash1, frag1.id);
+    insertSpecCommitRelation(db, 'spec06', hash1, 'SUMMARIZED_FROM');
+
+    insertCommitNode(db, {
+      hash: hash2, message: 'feat: second', author: 'tester', timestamp: Date.now(),
+    });
+    const frag2 = insertCodeFragment(db, {
+      id: '', changeType: 'MODIFY', filePath: 'src/fail.ts',
+      startLine: 1, endLine: 1, codeDiff: '+const b = 2;',
+    });
+    insertCommitFragmentRelation(db, hash2, frag2.id);
+    insertSpecCommitRelation(db, 'spec06', hash2, 'SUMMARIZED_FROM');
+
+    // isLogicChange: true for both
+    vi.spyOn(
+      await import('../src/spec/evolve/logic-checker'),
+      'isLogicChange',
+    ).mockResolvedValue({ isLogic: true, reason: 'Logic change' });
+
+    // evaluateSpec: commit 1 succeeds (UNCHANGED), commit 2 throws
+    vi.spyOn(
+      await import('../src/spec/evolve/spec-rewriter'),
+      'evaluateSpec',
+    )
+      .mockResolvedValueOnce({ action: 'UNCHANGED' as const })
+      .mockRejectedValueOnce(new Error('LLM timeout'));
+
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
+
+    expect(result.commitsProcessed).toBe(2);
+    expect(result.failures).toBe(1);
+    expect(result.skippedCommits).toBe(0);
+    // KEY assertion: meta updated because 1 commit succeeded
+    expect(result.metaUpdated).toBe(true);
+
+    // Verify meta.json advanced to HEAD (past the failed commit)
+    const meta = readMeta(repo);
+    expect(meta!.currentCommitID).toBe(hash2);
 
     vi.restoreAllMocks();
   });

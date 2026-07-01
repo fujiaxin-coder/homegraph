@@ -2421,17 +2421,16 @@ evolveCommand
       const config = loadSpecConfig(repoPath);
       const llmConfig = config.llm;
       if (!llmConfig) {
-        error(
-          'LLM not configured. Create .homegraph/commit4spec/configs.json with an "llm" section:\n' +
+        warn('LLM not configured — Path B (LLM-based spec evolution) will be skipped.');
+        warn('Only Path A (commit message scope → GENERATE) will be processed.');
+        warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
           '{\n' +
           '  "llm": {\n' +
           '    "provider": "openai",\n' +
           '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
           '    "model": "gpt-4o"\n' +
           '  }\n' +
-          '}',
-        );
-        process.exit(1);
+          '}');
       }
 
       const result = await runBatchEvolvePipeline(repoPath, db, llmConfig);
@@ -2448,14 +2447,26 @@ evolveCommand
           console.log(`Range: ${result.fromCommit ? result.fromCommit.slice(0, 7) : 'none'} → ${result.toCommit.slice(0, 7)}`);
           if (result.metaUpdated) {
             console.log(chalk.green(`meta.json updated (currentCommitID = ${result.toCommit.slice(0, 7)})`));
+          } else if (result.failures > 0) {
+            console.log(chalk.yellow(`⚠ meta.json NOT updated — ${result.failures} commit(s) failed`));
+          } else if (result.skippedCommits > 0) {
+            console.log(chalk.yellow('⚠ meta.json NOT updated — all commits were skipped (no Path A match, no LLM)'));
           } else {
-            console.log(chalk.yellow('⚠ meta.json NOT updated — some commits failed'));
+            console.log(chalk.yellow('⚠ meta.json NOT updated'));
           }
 
           // Show per-commit summary
           for (const r of result.perCommitResults) {
-            const prefix = r.persisted ? chalk.green('  ✓') : chalk.red('  ✗');
+            let prefix: string;
+            if (r.skipped) {
+              prefix = chalk.yellow('  ⚠');
+            } else {
+              prefix = r.persisted ? chalk.green('  ✓') : chalk.red('  ✗');
+            }
             console.log(`${prefix} ${r.commitHash.slice(0, 7)}`);
+            if (r.skipped) {
+              console.log(`    skipped: ${r.skipReason}`);
+            }
             if (r.isLogicChange) {
               console.log(`    logic change: ${r.logicCheckReason}`);
             }
@@ -2470,6 +2481,20 @@ evolveCommand
           // Aggregate summary
           const totalFragments = result.perCommitResults.reduce((s, r) => s + r.fragmentsCount, 0);
           const totalRelations = result.perCommitResults.reduce((s, r) => s + r.relationsCreated, 0);
+          if (result.skippedCommits > 0) {
+            console.log(
+              chalk.yellow(
+                `${result.skippedCommits} commit(s) skipped — no LLM configured, did not match Path A`,
+              ),
+            );
+          }
+          if (result.failures > 0) {
+            console.log(
+              chalk.red(
+                `${result.failures} commit(s) failed — see details above`,
+              ),
+            );
+          }
           console.log(`Summary: fragments=${totalFragments}, relations=${totalRelations}`);
         }
       }

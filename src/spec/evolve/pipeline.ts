@@ -57,6 +57,10 @@ export interface EvolveResult {
   fragmentsCount: number;
   relationsCreated: number;
   persisted: boolean;
+  /** True when the commit was skipped because LLM is not available. */
+  skipped: boolean;
+  /** Human-readable reason for skipping, if skipped is true. */
+  skipReason?: string;
 }
 
 // =============================================================================
@@ -149,22 +153,13 @@ async function runEvolvePipeline(
   // Parse diff into fragments once — reused for file paths and persistence.
   const diffFragments = analyzeCommitDiff(repoPath, resolvedHash, diff);
 
-  // Load spec config and create LLM client
+  // Load spec config and optionally create LLM client.
+  // When LLM is not available we still run Path A (scope-based GENERATE).
   const specConfig = loadSpecConfig(repoPath);
   const resolvedLLMConfig = llmConfig || specConfig.llm;
-  if (!resolvedLLMConfig) {
-    throw new Error(
-      'LLM not configured. Create .homegraph/commit4spec/configs.json with an "llm" section:\n' +
-      '{\n' +
-      '  "llm": {\n' +
-      '    "provider": "openai",\n' +
-      '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
-      '    "model": "gpt-4o"\n' +
-      '  }\n' +
-      '}',
-    );
-  }
-  const client: LlmClient = new OpenAiLlmClient(resolvedLLMConfig);
+  const client: LlmClient | undefined = resolvedLLMConfig
+    ? new OpenAiLlmClient(resolvedLLMConfig)
+    : undefined;
 
   // ------------------------------------------------------------------
   // 2. Path A (GENERATE) — commit message scope resolution
@@ -185,17 +180,44 @@ async function runEvolvePipeline(
   }
 
   // ------------------------------------------------------------------
+  // 2.5 Early skip: Path A didn't match and no LLM client is available.
+  //     Non-Path-A commits cannot be processed without LLM for logic
+  //     checking and spec evaluation.
+  // ------------------------------------------------------------------
+  if (!pathASpecId && !client) {
+    logWarn('Skipping commit — no LLM configured and commit does not match Path A', {
+      commitHash: resolvedHash.slice(0, 7),
+    });
+    return {
+      commitHash: resolvedHash,
+      generateRelationCreated: false,
+      isLogicChange: false,
+      logicCheckReason: '',
+      affectedSpecCount: 0,
+      evolvedSpecs: [],
+      fragmentsCount: 0,
+      relationsCreated: 0,
+      persisted: false,
+      skipped: true,
+      skipReason:
+        'LLM not configured — commit message does not contain a spec scope (Path A)',
+    };
+  }
+
+  // ------------------------------------------------------------------
   // 3. LLM logic check
   // ------------------------------------------------------------------
 
   let logicResult = { isLogic: false, reason: '' };
-  try {
-    logicResult = await isLogicChange(commitInfo.message, diff, client);
-  } catch {
-    logWarn('LLM logic check failed, treating as non-logic change', {
-      commitHash: resolvedHash.slice(0, 7),
-    });
-    logicResult = { isLogic: false, reason: 'LLM call failed' };
+  if (client) {
+    try {
+      logicResult = await isLogicChange(commitInfo.message, diff, client);
+    } catch {
+      logWarn('LLM logic check failed, treating as non-logic change', {
+        commitHash: resolvedHash.slice(0, 7),
+      });
+      logicResult = { isLogic: false, reason: 'LLM call failed' };
+    }
   }
 
   // ------------------------------------------------------------------
@@ -253,6 +275,7 @@ async function runEvolvePipeline(
       fragmentsCount: 0,
       relationsCreated: 0,
       persisted: false,
+      skipped: false,
     };
   }
 
@@ -309,6 +332,7 @@ async function runEvolvePipeline(
     fragmentsCount: 0,
     relationsCreated: 0,
     persisted: true,
+    skipped: false,
   };
 
   db.exec('BEGIN');
@@ -422,12 +446,16 @@ export interface BatchEvolveResult {
   fromCommit: string | null;
   /** The commit hash that was just evolved up to (usually HEAD). */
   toCommit: string;
-  /** Number of commits actually processed. */
+  /** Number of commits in the range (including skipped). */
   commitsProcessed: number;
-  /** Per-commit results (only for commits that were processed). */
+  /** Per-commit results. */
   perCommitResults: EvolveResult[];
   /** Whether meta.json was updated at the end. */
   metaUpdated: boolean;
+  /** Number of commits skipped (no LLM, did not match Path A). */
+  skippedCommits: number;
+  /** Number of commits that threw an error during evolve. */
+  failures: number;
 }
 
 // =============================================================================
@@ -502,6 +530,8 @@ export async function runBatchEvolvePipeline(
       commitsProcessed: 0,
       perCommitResults: [],
       metaUpdated: false,
+      skippedCommits: 0,
+      failures: 0,
     };
   }
 
@@ -550,15 +580,20 @@ async function runBatchEvolvePipelineImpl(
 
     const result = await runEvolvePipeline(repoPath, db, meta.specStoragePath, headHash, llmConfig);
 
-    // Refresh meta.json with HEAD
-    writeMeta(repoPath, meta.specStoragePath, headHash);
+    // Only refresh meta.json when the commit was actually processed (not skipped).
+    const metaUpdated = !result.skipped;
+    if (metaUpdated) {
+      writeMeta(repoPath, meta.specStoragePath, headHash);
+    }
 
     return {
       fromCommit: null,
       toCommit: headHash,
       commitsProcessed: 1,
       perCommitResults: [result],
-      metaUpdated: true,
+      metaUpdated,
+      skippedCommits: result.skipped ? 1 : 0,
+      failures: 0,
     };
   }
 
@@ -574,6 +609,8 @@ async function runBatchEvolvePipelineImpl(
       commitsProcessed: 0,
       perCommitResults: [],
       metaUpdated: false,
+      skippedCommits: 0,
+      failures: 0,
     };
   }
 
@@ -607,6 +644,8 @@ async function runBatchEvolvePipelineImpl(
       commitsProcessed: 0,
       perCommitResults: [],
       metaUpdated: false,
+      skippedCommits: 0,
+      failures: 0,
     };
   }
 
@@ -619,11 +658,15 @@ async function runBatchEvolvePipelineImpl(
   // Process each commit independently
   const perCommitResults: EvolveResult[] = [];
   let failures = 0;
+  let skippedCount = 0;
 
   for (const commit of commits) {
     try {
-      const result = await runEvolvePipeline(repoPath, db, meta.specStoragePath, commit.hash, llmConfig);
+      const result = await runEvolvePipeline(
+        repoPath, db, meta.specStoragePath, commit.hash, llmConfig,
+      );
       perCommitResults.push(result);
+      if (result.skipped) skippedCount++;
     } catch (err) {
       failures++;
       logWarn('runBatchEvolvePipeline: commit evolve failed, continuing', {
@@ -640,12 +683,15 @@ async function runBatchEvolvePipelineImpl(
         fragmentsCount: 0,
         relationsCreated: 0,
         persisted: false,
+        skipped: false,
       });
     }
   }
 
-  // Only refresh meta.json when ALL commits succeeded
-  const metaUpdated = failures === 0;
+  // Refresh meta.json as long as at least one commit was actually
+  // processed (neither skipped nor failed).
+  const processedCount = commits.length - failures - skippedCount;
+  const metaUpdated = processedCount > 0;
   if (metaUpdated) {
     writeMeta(repoPath, meta.specStoragePath, headHash);
   }
@@ -656,5 +702,7 @@ async function runBatchEvolvePipelineImpl(
     commitsProcessed: commits.length,
     perCommitResults,
     metaUpdated,
+    skippedCommits: skippedCount,
+    failures,
   };
 }
