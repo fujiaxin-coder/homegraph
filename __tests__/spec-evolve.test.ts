@@ -19,7 +19,7 @@ import * as os from 'os';
 import { createDatabase, SqliteDatabase } from '../src/db/sqlite-adapter';
 import { silentLogger, setLogger } from '../src/errors';
 import { DEFAULT_CONFIG, LLMConfig, SpecConfig } from '../src/spec/config';
-import { writeMeta } from '../src/spec/utils';
+import { writeMeta, readMeta } from '../src/spec/utils';
 import { initSpecSchema, insertSpecNode, findSpecById } from '../src/spec/db';
 import {
   insertCommitNode,
@@ -39,7 +39,8 @@ import {
   applyDeprecate,
   EvolveDecision,
 } from '../src/spec/evolve/spec-rewriter';
-import { runEvolvePipeline, EvolveResult, EvolvedSpec } from '../src/spec/evolve/pipeline';
+import { EvolveResult, EvolvedSpec } from '../src/spec/evolve/pipeline';
+import { runBatchEvolvePipeline, BatchEvolveResult } from '../src/spec/evolve/pipeline';
 
 // Silence logger during tests
 setLogger(silentLogger);
@@ -611,20 +612,27 @@ describe('spec-rewriter — applyDeprecate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// D. pipeline.ts — runEvolvePipeline
+// E. pipeline.ts — runBatchEvolvePipeline
 // ---------------------------------------------------------------------------
 
-describe('evolve pipeline — runEvolvePipeline', () => {
+describe('evolve pipeline — runBatchEvolvePipeline', () => {
   let repo: string;
   let specStorage: string;
   let db: SqliteDatabase;
 
+  const llmConfig: LLMConfig = {
+    provider: 'openai',
+    apiKey: '',
+    model: 'mock-model',
+    temperature: 0,
+    maxTokens: 100,
+  };
+
   beforeEach(() => {
     repo = initTempGitRepo();
-    specStorage = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-evolvepipe-'));
-    writeMeta(repo, specStorage);
+    specStorage = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-batchevolve-'));
 
-    const dbPath = path.join(os.tmpdir(), `homegraph-evolve-test-${Date.now()}.db`);
+    const dbPath = path.join(os.tmpdir(), `homegraph-batchevolve-${Date.now()}.db`);
     const result = createDatabase(dbPath);
     db = result.db;
     initSpecSchema(db);
@@ -636,103 +644,263 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     if (db && db.open) {
       try { db.close(); } catch { /* ignore */ }
     }
+    vi.restoreAllMocks();
   });
 
-  it('Path A: scope in commit message → GENERATE relation created', async () => {
+  it('no meta.json → throws', async () => {
+    await expect(
+      runBatchEvolvePipeline(repo, db, llmConfig),
+    ).rejects.toThrow(/No meta.json found/);
+  });
+
+  it('no currentCommitID in meta → processes HEAD and updates meta', async () => {
+    // Simulate old meta without currentCommitID
+    writeMeta(repo, specStorage); // currentCommitID = undefined
+
+    // Create a commit
+    const hash = commitFile(repo, 'README.md', '# hello', 'docs: init');
+
+    // Mock: not a logic change (no LLM needed)
+    vi.spyOn(
+      await import('../src/spec/evolve/logic-checker'),
+      'isLogicChange',
+    ).mockResolvedValue({ isLogic: false, reason: 'Not logic' });
+
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
+
+    expect(result.fromCommit).toBeNull();
+    expect(result.toCommit).toBe(hash);
+    expect(result.commitsProcessed).toBe(1);
+    expect(result.perCommitResults).toHaveLength(1);
+    expect(result.metaUpdated).toBe(true);
+
+    // Verify meta.json is updated
+    const meta = readMeta(repo);
+    expect(meta).not.toBeNull();
+    expect(meta!.currentCommitID).toBe(hash);
+  });
+
+  it('no new commits (currentCommitID === HEAD) → 0 processed, meta unchanged', async () => {
+    // Create a commit, then mark meta as already evolved to that commit
+    const hash = commitFile(repo, 'README.md', '# hello', 'docs: init');
+    writeMeta(repo, specStorage, hash);
+
+    const originalMeta = readMeta(repo);
+    expect(originalMeta).not.toBeNull();
+
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
+
+    expect(result.commitsProcessed).toBe(0);
+    expect(result.perCommitResults).toEqual([]);
+    expect(result.metaUpdated).toBe(false);
+    expect(result.fromCommit).toBe(hash);
+    expect(result.toCommit).toBe(hash);
+
+    // Verify meta.json was NOT modified
+    const metaAfter = readMeta(repo);
+    expect(metaAfter).not.toBeNull();
+    expect(metaAfter!.currentCommitID).toBe(hash);
+    expect(metaAfter!.updatedAt).toBe(originalMeta!.updatedAt);
+  });
+
+  it('1 new commit after last evolve → processes it and updates meta', async () => {
+    // Baseline commit (already evolved)
+    const baselineHash = commitFile(repo, 'README.md', '# baseline', 'docs: baseline');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // New commit (not yet evolved)
+    const newHash = commitFile(repo, 'src/main.ts', 'const x = 1;', 'feat: new feature');
+
+    // Mock: not a logic change
+    vi.spyOn(
+      await import('../src/spec/evolve/logic-checker'),
+      'isLogicChange',
+    ).mockResolvedValue({ isLogic: false, reason: 'Not logic' });
+
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
+
+    expect(result.fromCommit).toBe(baselineHash);
+    expect(result.toCommit).toBe(newHash);
+    expect(result.commitsProcessed).toBe(1);
+    expect(result.perCommitResults[0]!.commitHash).toBe(newHash);
+    expect(result.metaUpdated).toBe(true);
+
+    // Verify meta.json updated to new HEAD
+    const meta = readMeta(repo);
+    expect(meta!.currentCommitID).toBe(newHash);
+  });
+
+  it('3 new commits → processes all in chronological order, updates meta', async () => {
+    // Baseline
+    const baselineHash = commitFile(repo, 'README.md', '# base', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // 3 new commits
+    const hash1 = commitFile(repo, 'a.ts', 'a', 'feat: A');
+    const hash2 = commitFile(repo, 'b.ts', 'b', 'feat: B');
+    const hash3 = commitFile(repo, 'c.ts', 'c', 'feat: C');
+
+    // Mock: not logic changes
+    vi.spyOn(
+      await import('../src/spec/evolve/logic-checker'),
+      'isLogicChange',
+    ).mockResolvedValue({ isLogic: false, reason: 'Not logic' });
+
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
+
+    expect(result.fromCommit).toBe(baselineHash);
+    expect(result.toCommit).toBe(hash3);
+    expect(result.commitsProcessed).toBe(3);
+    expect(result.metaUpdated).toBe(true);
+
+    // Verify chronological order (oldest first)
+    expect(result.perCommitResults[0]!.commitHash).toBe(hash1);
+    expect(result.perCommitResults[1]!.commitHash).toBe(hash2);
+    expect(result.perCommitResults[2]!.commitHash).toBe(hash3);
+
+    // Verify meta.json updated to HEAD
+    const meta = readMeta(repo);
+    expect(meta!.currentCommitID).toBe(hash3);
+  });
+
+  it('rebase detection: currentCommitID not ancestor of HEAD → throws', async () => {
+    // Create baseline and mark as evolved
+    const baselineHash = commitFile(repo, 'README.md', '# base', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // Create a new commit so HEAD != baseline
+    commitFile(repo, 'a.ts', 'a', 'feat: after');
+
+    // Corrupt meta: set currentCommitID to a fake hash that is not an ancestor
+    writeMeta(repo, specStorage, '0000000000000000000000000000000000000000');
+
+    await expect(
+      runBatchEvolvePipeline(repo, db, llmConfig),
+    ).rejects.toThrow(/not an ancestor/);
+  });
+
+  it('Path A (GENERATE) works in batch mode', async () => {
+    // Baseline
+    const baselineHash = commitFile(repo, 'README.md', '# base', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
+
     // Create spec on disk
-    createSpecOnDisk(specStorage, 'spec01', '# Spec 01\nContent for spec 01.\n');
+    createSpecOnDisk(specStorage, 'spec01', '# Spec 01\nContent.\n');
 
-    // Commit with matching scope
-    const hash = commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): add feature');
+    // New commit with matching scope
+    const newHash = commitFile(repo, 'src/main.ts', 'const x = 1;', 'feat(spec01): add feature');
 
-    // Set up mock LLM client (via config override)
-    const llmConfig: LLMConfig = {
-      provider: 'openai',
-      apiKey: '',
-      model: 'mock-model',
-      temperature: 0,
-      maxTokens: 100,
-    };
+    // Mock: not a logic change (Path A only)
+    vi.spyOn(
+      await import('../src/spec/evolve/logic-checker'),
+      'isLogicChange',
+    ).mockResolvedValue({ isLogic: false, reason: 'Not logic' });
 
-    const result = await runEvolvePipeline(repo, db, hash, llmConfig);
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
 
-    expect(result.commitHash).toBe(hash);
-    expect(result.generateSpecId).toBe('spec01');
-    expect(result.generateRelationCreated).toBe(true);
-    expect(result.persisted).toBe(true);
+    expect(result.commitsProcessed).toBe(1);
+    expect(result.perCommitResults[0]!.generateSpecId).toBe('spec01');
+    expect(result.perCommitResults[0]!.generateRelationCreated).toBe(true);
+    expect(result.metaUpdated).toBe(true);
 
-    // Verify GENERATE relation in DB
-    const relRow = db.prepare(
-      'SELECT * FROM spec_commit_relations WHERE spec_id = ? AND commit_hash = ? AND relation_type = ?'
-    ).get('spec01', hash, 'GENERATE') as any;
-    expect(relRow).toBeDefined();
-
-    // Verify spec node exists
-    const specRow = db.prepare('SELECT * FROM spec_nodes WHERE id = ?').get('spec01') as any;
-    expect(specRow).toBeDefined();
-    expect(specRow.title).toBe('Spec 01');
+    // Verify meta.json updated
+    const meta = readMeta(repo);
+    expect(meta!.currentCommitID).toBe(newHash);
   });
 
-  it('Path B: logic change + affected spec → UPDATE, version incremented', async () => {
+  it('processes all commits even when some produce no changes', async () => {
+    // Baseline
+    const baselineHash = commitFile(repo, 'README.md', '# base', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
+
+    // 3 new commits — none match any spec or trigger logic change
+    const hash1 = commitFile(repo, 'a.ts', 'a', 'chore: task A');
+    const hash2 = commitFile(repo, 'b.ts', 'b', 'chore: task B');
+    const hash3 = commitFile(repo, 'c.ts', 'c', 'chore: task C');
+
+    // Mock: not logic changes
+    vi.spyOn(
+      await import('../src/spec/evolve/logic-checker'),
+      'isLogicChange',
+    ).mockResolvedValue({ isLogic: false, reason: 'No logic change' });
+
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
+
+    // All 3 processed, none persisted (no spec matches, no logic changes)
+    expect(result.commitsProcessed).toBe(3);
+    expect(result.perCommitResults).toHaveLength(3);
+    for (const r of result.perCommitResults) {
+      expect(r.persisted).toBe(false);
+    }
+    // All succeeded (no errors) → meta updated to HEAD
+    expect(result.metaUpdated).toBe(true);
+
+    const meta = readMeta(repo);
+    expect(meta!.currentCommitID).toBe(hash3);
+  });
+
+  it('JSON output contains BatchEvolveResult structure', async () => {
+    writeMeta(repo, specStorage);
+
+    const hash = commitFile(repo, 'README.md', '# hello', 'docs: init');
+
+    vi.spyOn(
+      await import('../src/spec/evolve/logic-checker'),
+      'isLogicChange',
+    ).mockResolvedValue({ isLogic: false, reason: 'Not logic' });
+
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
+
+    // Verify BatchEvolveResult shape
+    expect(result).toHaveProperty('fromCommit');
+    expect(result).toHaveProperty('toCommit');
+    expect(result).toHaveProperty('commitsProcessed');
+    expect(result).toHaveProperty('perCommitResults');
+    expect(result).toHaveProperty('metaUpdated');
+
+    expect(result.fromCommit === null || typeof result.fromCommit === 'string').toBe(true);
+    expect(typeof result.toCommit).toBe('string');
+    expect(typeof result.commitsProcessed).toBe('number');
+    expect(Array.isArray(result.perCommitResults)).toBe(true);
+    expect(typeof result.metaUpdated).toBe('boolean');
+
+    // Verify per-commit results have EvolveResult shape
+    if (result.perCommitResults.length > 0) {
+      const r = result.perCommitResults[0]!;
+      expect(r).toHaveProperty('commitHash');
+      expect(r).toHaveProperty('isLogicChange');
+      expect(r).toHaveProperty('persisted');
+    }
+  });
+
+  it('Path B: logic change + affected spec → UPDATE via batch', async () => {
+    // Baseline commit + meta
+    const baselineHash = commitFile(repo, 'README.md', '# Project\n', 'chore: init');
+    writeMeta(repo, specStorage, baselineHash);
+
     // Create spec on disk
     createSpecOnDisk(specStorage, 'spec02', '# Spec 02\nOriginal spec content.\n');
 
-    // Root commit has no parent → getCommitDiff returns empty.
-    // Add a baseline commit first so the logic-change commit has a parent to diff against.
-    commitFile(repo, 'README.md', '# Project\n', 'chore: init');
+    // New commit without scope (Path A won't trigger)
+    const newHash = commitFile(repo, 'src/auth.ts', 'function login() { return true; }\n', 'feat: add login');
 
-    // Commit without scope (so Path A doesn't trigger)
-    const hash = commitFile(repo, 'src/auth.ts', 'function login() { return true; }\n', 'feat: add login');
-
-    // Pre-populate DB with spec, commit, fragment, and relations (simulating mining)
+    // Pre-populate DB with mining data
     insertSpecNode(db, {
       id: 'spec02', title: 'Spec 02', subtitles: ['Spec 02 - Original spec content.'],
       status: 'active', version: 1,
       filePath: path.join(specStorage, 'spec02', 'plan.md'), timestamp: Date.now(),
     });
     insertCommitNode(db, {
-      hash, message: 'feat: add login', author: 'tester', timestamp: Date.now(),
+      hash: newHash, message: 'feat: add login', author: 'tester', timestamp: Date.now(),
     });
     const frag = insertCodeFragment(db, {
       id: '', changeType: 'MODIFY', filePath: 'src/auth.ts',
       startLine: 1, endLine: 1, codeDiff: '+function login() { return true; }',
     });
-    insertCommitFragmentRelation(db, hash, frag.id);
-    insertSpecCommitRelation(db, 'spec02', hash, 'SUMMARIZED_FROM');
+    insertCommitFragmentRelation(db, newHash, frag.id);
+    insertSpecCommitRelation(db, 'spec02', newHash, 'SUMMARIZED_FROM');
 
-    // Set up mock LLM: logic change = true, evaluate = UPDATE
-    const llmConfig: LLMConfig = {
-      provider: 'openai',
-      apiKey: '',
-      model: 'mock-model',
-      temperature: 0,
-      maxTokens: 100,
-    };
-
-    // Need to pre-set mock responses on the LLMClient that pipeline creates.
-    // Since runEvolvePipeline creates its own client, we need to mock at a lower level.
-    // The mock provider's default pattern matching:
-    // - "logic change" keyword → is_logic_change: false (default mock response)
-    // - "evolve" keyword → UNCHANGED (default mock response)
-    //
-    // To make Path B work, we need isLogicChange=true. We'll use a spy/mock approach.
-    // The simplest approach: we use mock provider but set responses via the client.
-    //
-    // However, runEvolvePipeline creates its own LLMClient. We need to intercept.
-    // Let's use vi.spyOn to mock the isLogicChange and evaluateSpec functions
-    // since they're the ones that interact with LLM.
-
-    // Actually, let's use vi.mock to intercept the LLMClient or the logic/evaluate functions.
-    // For test simplicity, we'll spy on isLogicChange and evaluateSpec.
-
-    // But wait - that would make the test about mocks, not about real pipeline.
-    // Let me reconsider: the mock LLM provider in the default mode returns
-    // is_logic_change: false for "logic change" pattern. So Path B won't trigger
-    // with default mock. We need to inject mock responses.
-
-    // The cleanest approach: use vi.spyOn to mock the isLogicChange function
-    // and evaluateSpec function at the module level.
-
+    // Mock LLM
     vi.spyOn(
       await import('../src/spec/evolve/logic-checker'),
       'isLogicChange',
@@ -748,110 +916,42 @@ describe('evolve pipeline — runEvolvePipeline', () => {
       plan_content: '# Updated Spec 02\nNew content.\n',
     });
 
-    const result = await runEvolvePipeline(repo, db, hash, llmConfig);
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
 
-    expect(result.isLogicChange).toBe(true);
-    expect(result.affectedSpecCount).toBeGreaterThanOrEqual(1);
-    expect(result.persisted).toBe(true);
+    expect(result.commitsProcessed).toBe(1);
+    const r = result.perCommitResults[0]!;
+    expect(r.isLogicChange).toBe(true);
+    expect(r.persisted).toBe(true);
 
-    // Check evolved spec entry
-    const evolvedEntry = result.evolvedSpecs.find((e: EvolvedSpec) => e.specId === 'spec02');
+    const evolvedEntry = r.evolvedSpecs.find((e: EvolvedSpec) => e.specId === 'spec02');
     expect(evolvedEntry).toBeDefined();
     expect(evolvedEntry!.action).toBe('UPDATE');
     expect(evolvedEntry!.newVersion).toBe(2);
+    expect(result.metaUpdated).toBe(true);
 
     vi.restoreAllMocks();
   });
 
-  it('Path B: no affected specs → not persisted', async () => {
-    const hash = commitFile(repo, 'src/other.ts', 'unrelated\n', 'feat: unrelated');
+  it('Path B: no affected specs → not persisted (batch)', async () => {
+    const baselineHash = commitFile(repo, 'README.md', '# base', 'docs: base');
+    writeMeta(repo, specStorage, baselineHash);
 
-    // Mock: logic change = true, but no affected specs in DB
+    const newHash = commitFile(repo, 'src/other.ts', 'unrelated\n', 'feat: unrelated');
+
     vi.spyOn(
       await import('../src/spec/evolve/logic-checker'),
       'isLogicChange',
     ).mockResolvedValue({ isLogic: true, reason: 'Logic change' });
 
-    const llmConfig: LLMConfig = {
-      provider: 'openai',
-      apiKey: '',
-      model: 'mock-model',
-      temperature: 0,
-      maxTokens: 100,
-    };
+    const result = await runBatchEvolvePipeline(repo, db, llmConfig);
 
-    const result = await runEvolvePipeline(repo, db, hash, llmConfig);
-
-    // Logic change but no affected specs and no Path A scope match
-    expect(result.isLogicChange).toBe(true);
-    expect(result.affectedSpecCount).toBe(0);
-    expect(result.persisted).toBe(false);
-
-    vi.restoreAllMocks();
-  });
-
-  it('no scope + no logic change → not persisted', async () => {
-    const hash = commitFile(repo, 'src/styles.css', 'body { color: red; }\n', 'style: colors');
-
-    // Default mock: logic change = false
-    vi.spyOn(
-      await import('../src/spec/evolve/logic-checker'),
-      'isLogicChange',
-    ).mockResolvedValue({ isLogic: false, reason: 'No logic change' });
-
-    const llmConfig: LLMConfig = {
-      provider: 'openai',
-      apiKey: '',
-      model: 'mock-model',
-      temperature: 0,
-      maxTokens: 100,
-    };
-
-    const result = await runEvolvePipeline(repo, db, hash, llmConfig);
-
-    expect(result.isLogicChange).toBe(false);
-    expect(result.persisted).toBe(false);
-    expect(result.generateRelationCreated).toBe(false);
-    expect(result.evolvedSpecs).toEqual([]);
-
-    vi.restoreAllMocks();
-  });
-
-  it('EvolveResult structure is complete', async () => {
-    // Minimal: just check return structure even with early exit
-    const hash = commitFile(repo, 'README.md', '# readme', 'docs: readme');
-
-    vi.spyOn(
-      await import('../src/spec/evolve/logic-checker'),
-      'isLogicChange',
-    ).mockResolvedValue({ isLogic: false, reason: 'Not logic' });
-
-    const llmConfig: LLMConfig = {
-      provider: 'openai', apiKey: '', model: 'mock', temperature: 0, maxTokens: 100,
-    };
-
-    const result = await runEvolvePipeline(repo, db, hash, llmConfig);
-
-    // Check all fields present
-    expect(result).toHaveProperty('commitHash');
-    expect(result).toHaveProperty('generateRelationCreated');
-    expect(result).toHaveProperty('isLogicChange');
-    expect(result).toHaveProperty('logicCheckReason');
-    expect(result).toHaveProperty('affectedSpecCount');
-    expect(result).toHaveProperty('evolvedSpecs');
-    expect(result).toHaveProperty('fragmentsCount');
-    expect(result).toHaveProperty('relationsCreated');
-    expect(result).toHaveProperty('persisted');
-
-    expect(typeof result.commitHash).toBe('string');
-    expect(typeof result.generateRelationCreated).toBe('boolean');
-    expect(typeof result.isLogicChange).toBe('boolean');
-    expect(typeof result.logicCheckReason).toBe('string');
-    expect(typeof result.affectedSpecCount).toBe('number');
-    expect(Array.isArray(result.evolvedSpecs)).toBe(true);
-    expect(typeof result.fragmentsCount).toBe('number');
-    expect(typeof result.relationsCreated).toBe('number');
-    expect(typeof result.persisted).toBe('boolean');
+    expect(result.commitsProcessed).toBe(1);
+    const r = result.perCommitResults[0]!;
+    expect(r.isLogicChange).toBe(true);
+    expect(r.affectedSpecCount).toBe(0);
+    expect(r.persisted).toBe(false);
+    // All "succeeded" (no error thrown), so meta updated
+    expect(result.metaUpdated).toBe(true);
 
     vi.restoreAllMocks();
   });
