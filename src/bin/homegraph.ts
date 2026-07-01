@@ -2266,8 +2266,12 @@ evolveCommand
         '# Triggers spec self-evolution after each commit. Runs in background.',
         '# Installed by: homegraph spec evolve install',
         `# Logs: ${SPEC_DATA_DIR}/logs/evolve-hook.log`,
-        `"${homegraphBin}" spec evolve process --path "$(pwd)" --json \\`,
-        `    >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
+        '# Runtime guard: skip if homegraph is not available',
+        `HOMEGRAPH_BIN="${homegraphBin}"`,
+        'if [ -x "$HOMEGRAPH_BIN" ] || command -v homegraph >/dev/null 2>&1; then',
+        '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" --json \\',
+        `      >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
+        'fi',
         MARKER_END,
       ].join('\n');
 
@@ -2305,11 +2309,85 @@ evolveCommand
   });
 
 /**
+ * homegraph spec evolve uninstall
+ */
+evolveCommand
+  .command('uninstall')
+  .description('Remove the git post-commit hook installed by spec evolve')
+  .option('-p, --path <path>', 'Path to the repository')
+  .action(async (options: { path?: string }) => {
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { isGitRepo } = await import('../spec/mining/git-scanner');
+
+      if (!isGitRepo(repoPath)) {
+        error(`Not a git repository: ${repoPath}`);
+        process.exit(1);
+      }
+
+      const { execFileSync } = await import('child_process');
+
+      const hooksDir = execFileSync('git', ['rev-parse', '--git-path', 'hooks'], {
+        cwd: repoPath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      }).trim();
+
+      const resolvedHooksDir = path.isAbsolute(hooksDir)
+        ? hooksDir
+        : path.resolve(repoPath, hooksDir);
+
+      const hookPath = path.join(resolvedHooksDir, 'post-commit');
+
+      if (!fs.existsSync(hookPath)) {
+        info('No post-commit hook found — nothing to uninstall.');
+        return;
+      }
+
+      const MARKER_BEGIN = '# >>> homegraph spec evolve hook >>>';
+      const MARKER_END = '# <<< homegraph spec evolve hook <<<';
+
+      const existing = fs.readFileSync(hookPath, 'utf8');
+      const lines = existing.split('\n');
+      const kept: string[] = [];
+      let inBlock = false;
+      let removedBlock = false;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed === MARKER_BEGIN) { inBlock = true; removedBlock = true; continue; }
+        if (trimmed === MARKER_END) { inBlock = false; continue; }
+        if (!inBlock) kept.push(line);
+      }
+
+      if (!removedBlock) {
+        info('No homegraph spec evolve hook block found — nothing to uninstall.');
+        return;
+      }
+
+      const remaining = kept.join('\n').trim();
+
+      if (remaining.length === 0 || /^#!\/bin\/sh\s*$/.test(remaining)) {
+        // Hook only contained our block (or just a shebang) — delete entirely
+        fs.unlinkSync(hookPath);
+        success(`Removed post-commit hook at ${hookPath}`);
+      } else {
+        fs.writeFileSync(hookPath, remaining + '\n');
+        success(`Removed spec evolve hook block from ${hookPath} (user content preserved)`);
+      }
+    } catch (err) {
+      error(`Hook uninstall failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
  * homegraph spec evolve process
  */
 evolveCommand
   .command('process')
-  .description('Process a commit through the spec self-evolve pipeline')
+  .description('Process commits through the spec self-evolve pipeline since last evolve')
   .option('-p, --path <path>', 'Path to the repository')
   .option('--db-path <path>', 'Path to the SQLite database file')
   .option('-j, --json', 'Output as JSON')

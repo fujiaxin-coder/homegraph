@@ -7,10 +7,11 @@
  * @module spec/evolve/pipeline
  */
 import * as path from 'path';
+import * as fs from 'fs';
 import { execFileSync } from 'child_process';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { LLMConfig, loadSpecConfig } from '../config';
-import { readMeta, writeMeta } from '../utils';
+import { readMeta, writeMeta, SPEC_DATA_DIR } from '../utils';
 import { initSpecSchema } from '../db/schema';
 import { insertSpecNode, findSpecById } from '../db/spec-node';
 import { insertCommitNode } from '../db/commit-node';
@@ -454,6 +455,31 @@ export interface BatchEvolveResult {
  * - `currentCommitID` is not an ancestor of HEAD (rebase / force-push) →
  *   throws an error asking the user to re-mine.
  */
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Acquire a file-based advisory lock to prevent concurrent evolve runs.
+ * Returns true if the lock was acquired (or the existing lock is stale).
+ * Returns false if another evolve instance holds the lock.
+ */
+function acquireEvolveLock(lockFile: string): boolean {
+  try {
+    if (fs.existsSync(lockFile)) {
+      const stat = fs.statSync(lockFile);
+      if (Date.now() - stat.mtimeMs > LOCK_TIMEOUT_MS) {
+        // Stale lock — previous process may have crashed
+        fs.unlinkSync(lockFile);
+      } else {
+        return false;
+      }
+    }
+    fs.writeFileSync(lockFile, String(process.pid));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runBatchEvolvePipeline(
   repoPath: string,
   db: SqliteDatabase,
@@ -464,8 +490,40 @@ export async function runBatchEvolvePipeline(
     throw new Error("No meta.json found. Run 'homegraph spec mine' first.");
   }
 
+  // Ensure only one evolve instance runs at a time (post-commit hook may
+  // fire multiple times in quick succession).
+  const lockFile = path.join(repoPath, SPEC_DATA_DIR, 'logs', 'evolve.lock');
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  if (!acquireEvolveLock(lockFile)) {
+    logDebug('runBatchEvolvePipeline: another evolve instance is running, skipping');
+    return {
+      fromCommit: meta.currentCommitID || null,
+      toCommit: '',
+      commitsProcessed: 0,
+      perCommitResults: [],
+      metaUpdated: false,
+    };
+  }
+
   initSpecSchema(db);
 
+  try {
+    return await runBatchEvolvePipelineImpl(repoPath, db, meta, llmConfig);
+  } finally {
+    try { fs.unlinkSync(lockFile); } catch { /* may already be deleted */ }
+  }
+}
+
+/**
+ * Inner implementation — split out so the lock clean-up in the outer function
+ * only needs one try/finally block.
+ */
+async function runBatchEvolvePipelineImpl(
+  repoPath: string,
+  db: SqliteDatabase,
+  meta: { specStoragePath: string; currentCommitID?: string },
+  llmConfig: LLMConfig | undefined,
+): Promise<BatchEvolveResult> {
   // Resolve HEAD
   let headHash: string;
   try {

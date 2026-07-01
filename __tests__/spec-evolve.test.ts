@@ -19,7 +19,7 @@ import * as os from 'os';
 import { createDatabase, SqliteDatabase } from '../src/db/sqlite-adapter';
 import { silentLogger, setLogger } from '../src/errors';
 import { DEFAULT_CONFIG, LLMConfig, SpecConfig } from '../src/spec/config';
-import { writeMeta, readMeta } from '../src/spec/utils';
+import { writeMeta, readMeta, SPEC_DATA_DIR } from '../src/spec/utils';
 import { initSpecSchema, insertSpecNode, findSpecById } from '../src/spec/db';
 import {
   insertCommitNode,
@@ -954,5 +954,206 @@ describe('evolve pipeline — runBatchEvolvePipeline', () => {
     expect(result.metaUpdated).toBe(true);
 
     vi.restoreAllMocks();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F. spec evolve — install / uninstall
+// ---------------------------------------------------------------------------
+
+describe('spec evolve — install / uninstall', () => {
+  let repo: string;
+  let specStorage: string;
+
+  beforeEach(() => {
+    repo = initTempGitRepo();
+    specStorage = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-evolvehook-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(repo)) fs.rmSync(repo, { recursive: true, force: true });
+    if (fs.existsSync(specStorage)) fs.rmSync(specStorage, { recursive: true, force: true });
+  });
+
+  // Helper: simulate what the install command does programmatically
+  function installSpecEvolveHook(repoPath: string): string {
+    const hooksDir = execFileSync('git', ['rev-parse', '--git-path', 'hooks'], {
+      cwd: repoPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+
+    const resolvedHooksDir = path.isAbsolute(hooksDir)
+      ? hooksDir
+      : path.resolve(repoPath, hooksDir);
+
+    fs.mkdirSync(resolvedHooksDir, { recursive: true });
+
+    const hookPath = path.join(resolvedHooksDir, 'post-commit');
+    const MARKER_BEGIN = '# >>> homegraph spec evolve hook >>>';
+    const MARKER_END = '# <<< homegraph spec evolve hook <<<';
+
+    const hookBlock = [
+      MARKER_BEGIN,
+      '# Triggers spec self-evolution after each commit. Runs in background.',
+      '# Installed by: homegraph spec evolve install',
+      `# Logs: ${SPEC_DATA_DIR}/logs/evolve-hook.log`,
+      '# Runtime guard: skip if homegraph is not available',
+      'HOMEGRAPH_BIN="/usr/local/bin/homegraph"',
+      'if [ -x "$HOMEGRAPH_BIN" ] || command -v homegraph >/dev/null 2>&1; then',
+      '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" --json \\',
+      `      >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
+      'fi',
+      MARKER_END,
+    ].join('\n');
+
+    let content: string;
+    if (fs.existsSync(hookPath)) {
+      const existing = fs.readFileSync(hookPath, 'utf8');
+      const lines = existing.split('\n');
+      const kept: string[] = [];
+      let inBlock = false;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed === MARKER_BEGIN) { inBlock = true; continue; }
+        if (trimmed === MARKER_END) { inBlock = false; continue; }
+        if (!inBlock) kept.push(line);
+      }
+      const base = kept.join('\n').replace(/\s*$/, '');
+      content = base.length > 0
+        ? `${base}\n\n${hookBlock}\n`
+        : `#!/bin/sh\n${hookBlock}\n`;
+    } else {
+      content = `#!/bin/sh\n${hookBlock}\n`;
+    }
+
+    fs.writeFileSync(hookPath, content);
+    fs.chmodSync(hookPath, 0o755);
+    return hookPath;
+  }
+
+  // Helper: simulate what the uninstall command does
+  function uninstallSpecEvolveHook(repoPath: string): { path: string; deleted: boolean } {
+    const hooksDir = execFileSync('git', ['rev-parse', '--git-path', 'hooks'], {
+      cwd: repoPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+
+    const resolvedHooksDir = path.isAbsolute(hooksDir)
+      ? hooksDir
+      : path.resolve(repoPath, hooksDir);
+
+    const hookPath = path.join(resolvedHooksDir, 'post-commit');
+    const MARKER_BEGIN = '# >>> homegraph spec evolve hook >>>';
+    const MARKER_END = '# <<< homegraph spec evolve hook <<<';
+
+    if (!fs.existsSync(hookPath)) {
+      return { path: hookPath, deleted: false };
+    }
+
+    const existing = fs.readFileSync(hookPath, 'utf8');
+    const lines = existing.split('\n');
+    const kept: string[] = [];
+    let inBlock = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed === MARKER_BEGIN) { inBlock = true; continue; }
+      if (trimmed === MARKER_END) { inBlock = false; continue; }
+      if (!inBlock) kept.push(line);
+    }
+
+    const remaining = kept.join('\n').trim();
+
+    if (remaining.length === 0 || /^#!\/bin\/sh\s*$/.test(remaining)) {
+      fs.unlinkSync(hookPath);
+      return { path: hookPath, deleted: true };
+    } else {
+      fs.writeFileSync(hookPath, remaining + '\n');
+      return { path: hookPath, deleted: false };
+    }
+  }
+
+  it('install creates post-commit hook with marker block', () => {
+    const hookPath = installSpecEvolveHook(repo);
+
+    expect(fs.existsSync(hookPath)).toBe(true);
+    const content = fs.readFileSync(hookPath, 'utf8');
+    expect(content).toContain('# >>> homegraph spec evolve hook >>>');
+    expect(content).toContain('# <<< homegraph spec evolve hook <<<');
+    expect(content).toContain('spec evolve process');
+    expect(content).toContain('#!/bin/sh');
+
+    // Verify executable
+    const stat = fs.statSync(hookPath);
+    // eslint-disable-next-line no-bitwise
+    expect(stat.mode & 0o111).not.toBe(0);
+  });
+
+  it('uninstall removes hook that only contains our block', () => {
+    const hookPath = installSpecEvolveHook(repo);
+    expect(fs.existsSync(hookPath)).toBe(true);
+
+    const result = uninstallSpecEvolveHook(repo);
+    expect(result.deleted).toBe(true);
+    expect(fs.existsSync(hookPath)).toBe(false);
+  });
+
+  it('uninstall preserves user content outside our block', () => {
+    // Create a hook with user content first
+    const hooksDir = execFileSync('git', ['rev-parse', '--git-path', 'hooks'], {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const resolvedHooksDir = path.isAbsolute(hooksDir)
+      ? hooksDir
+      : path.resolve(repo, hooksDir);
+    fs.mkdirSync(resolvedHooksDir, { recursive: true });
+    const hookPath = path.join(resolvedHooksDir, 'post-commit');
+    fs.writeFileSync(hookPath, '#!/bin/sh\necho "my custom logic"\n', { mode: 0o755 });
+
+    // Now install our hook
+    installSpecEvolveHook(repo);
+
+    const contentBefore = fs.readFileSync(hookPath, 'utf8');
+    expect(contentBefore).toContain('my custom logic');
+    expect(contentBefore).toContain('# >>> homegraph spec evolve hook >>>');
+
+    // Uninstall
+    const result = uninstallSpecEvolveHook(repo);
+    expect(result.deleted).toBe(false);
+    expect(fs.existsSync(hookPath)).toBe(true);
+
+    const contentAfter = fs.readFileSync(hookPath, 'utf8');
+    expect(contentAfter).toContain('my custom logic');
+    expect(contentAfter).not.toContain('# >>> homegraph spec evolve hook >>>');
+    expect(contentAfter).not.toContain('# <<< homegraph spec evolve hook <<<');
+  });
+
+  it('install is idempotent — running twice produces only one block', () => {
+    const hookPath = installSpecEvolveHook(repo);
+    installSpecEvolveHook(repo); // second install
+
+    const content = fs.readFileSync(hookPath, 'utf8');
+    const beginCount = (content.match(/# >>> homegraph spec evolve hook >>>/g) || []).length;
+    const endCount = (content.match(/# <<< homegraph spec evolve hook <<</g) || []).length;
+    expect(beginCount).toBe(1);
+    expect(endCount).toBe(1);
+  });
+
+  it('uninstall with no marker block reports nothing to do', () => {
+    // Don't install anything, just try to uninstall
+    const result = uninstallSpecEvolveHook(repo);
+    expect(result.deleted).toBe(false);
+  });
+
+  it('installed hook includes runtime guard with command -v fallback', () => {
+    const hookPath = installSpecEvolveHook(repo);
+    const content = fs.readFileSync(hookPath, 'utf8');
+    expect(content).toContain('HOMEGRAPH_BIN=');
+    expect(content).toContain('command -v homegraph');
+    expect(content).toContain('${HOMEGRAPH_BIN:-homegraph}');
+    expect(content).toContain('if [ -x "$HOMEGRAPH_BIN" ]');
   });
 });
