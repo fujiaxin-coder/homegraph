@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Migration definition
@@ -72,6 +72,21 @@ const migrations: Migration[] = [
     up: (db) => {
       db.exec(`
         ALTER TABLE nodes ADD COLUMN return_type TEXT;
+      `);
+    },
+  },
+  {
+    version: 6,
+    description: 'Add mcp_query_cache table for MCP tool response caching',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mcp_query_cache (
+          cache_key   TEXT PRIMARY KEY,
+          tool        TEXT NOT NULL,
+          response    TEXT NOT NULL,
+          created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mcp_query_cache_tool ON mcp_query_cache(tool);
       `);
     },
   },

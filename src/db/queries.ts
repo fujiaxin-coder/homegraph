@@ -1867,12 +1867,37 @@ export class QueryBuilder {
     return result;
   }
 
+  // ===========================================================================
+  // MCP Query Cache
+  // ===========================================================================
+
+  clearMcpQueryCache(): void {
+    this.db.exec('DELETE FROM mcp_query_cache');
+  }
+
+  getMcpQueryCache(cacheKey: string): { tool: string; response: string } | null {
+    const row = this.db
+      .prepare('SELECT tool, response FROM mcp_query_cache WHERE cache_key = ?')
+      .get(cacheKey) as { tool: string; response: string } | undefined;
+    return row ?? null;
+  }
+
+  setMcpQueryCache(cacheKey: string, tool: string, response: string, createdAt: number): void {
+    this.db
+      .prepare(
+        'INSERT INTO mcp_query_cache (cache_key, tool, response, created_at) VALUES (?, ?, ?, ?) ' +
+          'ON CONFLICT(cache_key) DO UPDATE SET tool = excluded.tool, response = excluded.response, created_at = excluded.created_at',
+      )
+      .run(cacheKey, tool, response, createdAt);
+  }
+
   /**
    * Clear all data from the database
    */
   clear(): void {
     this.nodeCache.clear();
     this.db.transaction(() => {
+      this.db.exec('DELETE FROM mcp_query_cache');
       this.db.exec('DELETE FROM unresolved_refs');
       this.db.exec('DELETE FROM edges');
       this.db.exec('DELETE FROM nodes');

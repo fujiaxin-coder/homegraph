@@ -690,6 +690,13 @@ export class HomeGraph {
   }
 
   /**
+   * Access the underlying query layer. Used by the MCP query-cache layer.
+   */
+  getQueryBuilder(): QueryBuilder {
+    return this.queries;
+  }
+
+  /**
    * Which engine built the current index: the package version + extraction
    * version stamped at the last full `indexAll`. Either field is null for an
    * index built before stamping existed (treated as stale). See

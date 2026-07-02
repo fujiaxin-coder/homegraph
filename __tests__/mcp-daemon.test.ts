@@ -415,7 +415,11 @@ describe('Shared MCP daemon (issue #411)', () => {
     // Timeouts are generous: under full-suite parallel load (especially WSL +
     // heavy ArkTS/Scene tests on other workers) daemon spawn + tools/call can
     // exceed 10s even though the path is correct.
-    const env = { HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '30000', HOMEGRAPH_PPID_POLL_MS: '5000' };
+    const env = {
+      HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '30000',
+      HOMEGRAPH_PPID_POLL_MS: '5000',
+      HOMEGRAPH_CATCHUP_GATE_TIMEOUT_MS: '500',
+    };
     const server = spawnServer(tempDir, env);
     servers.push(server);
     sendInitialize(server.child, `file://${tempDir}`, 1);
@@ -427,11 +431,25 @@ describe('Shared MCP daemon (issue #411)', () => {
       'proxy attached to daemon',
     );
     await waitFor(() => (readLockPid(realRoot) ?? 0) > 0, 15000, 25, 'daemon pidfile');
+    await waitFor(
+      () => readDaemonLog(realRoot).includes('File watcher active'),
+      20000,
+      25,
+      'daemon engine ready',
+    );
     const daemonPid = readLockPid(realRoot)!;
 
-    // A warm call goes through the daemon.
-    sendMessage(server.child, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'homegraph_status', arguments: {} } });
-    await waitFor(() => findResponse(server.stdout, 2), 25000, 25, 'warm tools/call via daemon').catch((e) => {
+    // Warm the daemon JSON-RPC path with a cheap round-trip before tools/call.
+    sendMessage(server.child, { jsonrpc: '2.0', id: 2, method: 'ping' });
+    await waitFor(() => findResponse(server.stdout, 2), 15000, 25, 'warm ping via daemon').catch((e) => {
+      throw new Error(
+        `${(e as Error).message}\nstderr:\n${server.stderr.join('\n')}\ndaemon.log:\n${readDaemonLog(realRoot)}`
+      );
+    });
+
+    // A warm tools/call goes through the daemon (tools/list is answered locally by the proxy).
+    sendMessage(server.child, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'homegraph_status', arguments: {} } });
+    await waitFor(() => findResponse(server.stdout, 3), 45000, 25, 'warm tools/call via daemon').catch((e) => {
       throw new Error(
         `${(e as Error).message}\nstderr:\n${server.stderr.join('\n')}\ndaemon.log:\n${readDaemonLog(realRoot)}`
       );
@@ -449,13 +467,13 @@ describe('Shared MCP daemon (issue #411)', () => {
       25,
       'in-process fallback logged',
     );
-    sendMessage(server.child, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'homegraph_status', arguments: {} } });
-    const resp = await waitFor(() => findResponse(server.stdout, 3), 25000, 25, 'tools/call after daemon death').catch((e) => {
+    sendMessage(server.child, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'homegraph_status', arguments: {} } });
+    const resp = await waitFor(() => findResponse(server.stdout, 4), 45000, 25, 'tools/call after daemon death').catch((e) => {
       throw new Error(
         `${(e as Error).message}\nstderr:\n${server.stderr.join('\n')}\ndaemon.log:\n${readDaemonLog(realRoot)}`
       );
     });
     expect(resp.result !== undefined || resp.error !== undefined).toBe(true);
     expect(isAlive(server.child.pid!)).toBe(true);
-  }, 90000);
+  }, 120000);
 });
