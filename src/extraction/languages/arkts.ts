@@ -29,8 +29,11 @@ import {
   STATIC_BLOCK_METHOD_NAME_PREFIX,
   STATIC_INIT_METHOD_NAME,
   DummyMainCreater,
+  CALLBACK_METHOD_NAME,
+  ClassSignature,
+  MethodSignature,
 } from 'arkanalyzer';
-import type { AliasType, Local, MethodSignature } from 'arkanalyzer';
+import type { AliasType, Local, Stmt, ViewTreeNode } from 'arkanalyzer';
 import {
   Edge,
   ExtractionError,
@@ -46,7 +49,123 @@ import { QueryBuilder as QueryBuilderClass } from '../../db/queries';
 import { bindExtractionContext, getExtractionProjectRoot, getExtractionQueries, reportArkTSBatchProgress, setArktsBatchRunning } from '../context';
 import { generateNodeId } from '../tree-sitter-helpers';
 import { buildRelaunchArgv } from '../wasm-runtime-flags';
-import { indexViewTreeForClass } from './arkts-viewtree';
+
+/** Primitive / void return types — not stored in nodes.return_type (inference-only column). */
+const ARKTS_NON_CLASS_RETURN = new Set([
+  'void',
+  'number',
+  'string',
+  'boolean',
+  'bigint',
+  'undefined',
+  'null',
+  'never',
+  'any',
+  'unknown',
+  'Object',
+]);
+
+/** Strip arkanalyzer file-location prefixes from type text (`@proj/file.ets: Foo` → `Foo`). */
+export function cleanArkTypeString(raw: string): string {
+  return raw.replace(/@[^/\s]+\/[^\s:]*:\s*/g, '').trim();
+}
+
+/**
+ * Normalize an ArkTS method return type to a bare class name for receiver inference
+ * (aligned with C++/Java `return_type` usage elsewhere in HomeGraph).
+ */
+export function normalizeArktsReturnType(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let t = cleanArkTypeString(raw);
+  if (!t || ARKTS_NON_CLASS_RETURN.has(t)) return undefined;
+  // Unwrap common wrappers to the pointee (`Promise<Foo>` → `Foo`).
+  const wrapper = t.match(/\b(?:Promise|Array|ReadonlyArray|Set|Map)\s*<\s*([^,>]+?)\s*>/);
+  if (wrapper?.[1]) t = wrapper[1].trim();
+  t = t.replace(/<[^>]*>/g, ' ').replace(/\[\]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t || ARKTS_NON_CLASS_RETURN.has(t)) return undefined;
+  const last = t.split('.').filter(Boolean).pop() ?? t;
+  return last || undefined;
+}
+
+function formatArkMethodSignatureLine(
+  method: ArkMethod,
+  sig: MethodSignature,
+  useParamNames: boolean
+): string {
+  const sub = sig.getMethodSubSignature();
+  const name = sub.getMethodName();
+  const ret = cleanArkTypeString(sub.getReturnType()?.toString() ?? 'void');
+  const paramTypes = sub.getParameterTypes();
+
+  let params: string;
+  if (useParamNames) {
+    const named = method.getParameters();
+    if (named.length > 0 && named.length === paramTypes.length) {
+      params = named
+        .map((p, i) => {
+          const rest = p.isRest?.() ? '...' : '';
+          const optional = p.isOptional?.() ? '?' : '';
+          const typeStr = cleanArkTypeString(
+            p.getType()?.toString() ?? paramTypes[i]?.toString() ?? 'unknown'
+          );
+          return `${rest}${p.getName()}${optional}: ${typeStr}`;
+        })
+        .join(', ');
+    } else {
+      params = paramTypes
+        .map((t) => cleanArkTypeString(t?.toString() ?? 'unknown'))
+        .join(', ');
+    }
+  } else {
+    params = paramTypes
+      .map((t) => cleanArkTypeString(t?.toString() ?? 'unknown'))
+      .join(', ');
+  }
+
+  const prefix = sub.isStatic() ? 'static ' : '';
+  return `${prefix}${name}(${params}): ${ret}`;
+}
+
+/** Collect human-readable signature lines (canonical first, overloads on following lines). */
+export function buildArkMethodSignatureFields(
+  method: ArkMethod
+): { signature?: string; returnType?: string } {
+  const impl = method.getImplementationSignature();
+  const declares = method.getDeclareSignatures();
+  const primary = impl ?? method.getSignature();
+  if (!primary && (!declares || declares.length === 0)) return {};
+
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const push = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    lines.push(trimmed);
+  };
+
+  if (impl) {
+    push(formatArkMethodSignatureLine(method, impl, true));
+  }
+
+  if (declares?.length) {
+    for (const d of declares) {
+      push(formatArkMethodSignatureLine(method, d, false));
+    }
+  } else if (!impl && primary) {
+    push(formatArkMethodSignatureLine(method, primary, true));
+  }
+
+  if (lines.length === 0) return {};
+
+  const canonicalSig = impl ?? declares?.[0] ?? primary!;
+  const retRaw = canonicalSig.getMethodSubSignature().getReturnType()?.toString();
+
+  return {
+    signature: lines.join('\n'),
+    returnType: normalizeArktsReturnType(retRaw),
+  };
+}
 
 /** Parallel read chunk size during ArkTS batch persist (writes stay sequential for SQLite). */
 function resolveArkTSPersistParallel(etsFileCount: number): number {
@@ -1066,6 +1185,192 @@ function sceneHasArkUiEntries(scene: Scene): boolean {
   return false;
 }
 
+// =============================================================================
+// ArkUI ViewTree — component tree, @Prop/@Link transfer, event bindings
+// =============================================================================
+
+const VIEWTREE_CALLBACK_ATTRS = new Set<string>(CALLBACK_METHOD_NAME);
+
+/** State decorator kinds on a field (@State, @Prop, @Link, …) from arkanalyzer. */
+export function stateDecoratorKinds(field: ArkField): string[] {
+  const decs = field.getStateDecorators?.();
+  if (!decs) return [];
+  return [...decs].map((d) => d.getKind()).filter(Boolean);
+}
+
+/** Child @Prop / @Link — edge `via` uses the decorator name as-is. */
+export function stateTransferViaForField(field: ArkField): 'Prop' | 'Link' | null {
+  for (const kind of stateDecoratorKinds(field)) {
+    if (kind === 'Prop' || kind === 'Link') return kind;
+  }
+  return null;
+}
+
+interface ViewTreeIndexerContext {
+  scene: Scene;
+  methodToId: Map<ArkMethod, string>;
+  classToId: Map<ArkClass, string>;
+  fieldToId: Map<ArkField, string>;
+  addEdge(
+    result: ExtractionResult,
+    source: string,
+    target: string,
+    kind: Edge['kind'],
+    callerFile: string,
+    via: string,
+    line: number
+  ): void;
+  ensureMethodNode(
+    method: ArkMethod,
+    relativePath: string,
+    result: ExtractionResult,
+    parentId: string
+  ): string | null;
+  resolveClassNodeId(cls: ArkClass): string | null;
+  markFieldStateDecorators?: (field: ArkField, fieldNodeId: string, result: ExtractionResult) => void;
+}
+
+function viewTreeLineFromStmt(stmt: Stmt | undefined): number {
+  return stmt?.getOriginFullPosition()?.getFirstLine() ?? 1;
+}
+
+function isViewTreeClassSignature(sig: ClassSignature | MethodSignature): sig is ClassSignature {
+  return sig instanceof ClassSignature;
+}
+
+function walkViewTree(node: ViewTreeNode, visit: (node: ViewTreeNode) => void): void {
+  visit(node);
+  for (const child of node.children) {
+    walkViewTree(child, visit);
+  }
+}
+
+function indexViewTreeForClass(
+  ctx: ViewTreeIndexerContext,
+  cls: ArkClass,
+  result: ExtractionResult,
+  relativePath: string
+): void {
+  if (!cls.hasViewTree()) return;
+  const viewTree = cls.getViewTree();
+  if (!viewTree) return;
+  const root = viewTree.getRoot();
+  if (!root) return;
+
+  const classNodeId = ctx.resolveClassNodeId(cls);
+  if (!classNodeId) return;
+
+  const buildMethod = cls.getMethods(true).find((m) => m.getName() === 'build');
+  if (!buildMethod) return;
+
+  const buildId = ctx.ensureMethodNode(buildMethod, relativePath, result, classNodeId);
+  if (!buildId) return;
+
+  const seen = new Set<string>();
+  const link = (
+    source: string,
+    target: string,
+    kind: Edge['kind'],
+    via: string,
+    line: number
+  ) => {
+    const key = `${source}>${target}>${kind}>${via}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    ctx.addEdge(result, source, target, kind, relativePath, via, line);
+  };
+
+  for (const [field] of viewTree.getStateValues()) {
+    const fieldId = ctx.fieldToId.get(field);
+    if (fieldId) {
+      ctx.markFieldStateDecorators?.(field, fieldId, result);
+      const line =
+        field.getOriginFullPosition?.()?.getFirstLine?.() ??
+        buildMethod.getImplOriginFullPosition()?.getFirstLine() ??
+        1;
+      link(fieldId, buildId, 'references', 'state-binding', line);
+    }
+  }
+
+  walkViewTree(root, (node) => {
+    const sig = node.signature;
+    if (sig) {
+      if (isViewTreeClassSignature(sig)) {
+        const childCls = ctx.scene.getClass(sig);
+        if (childCls) {
+          const childId = ctx.resolveClassNodeId(childCls);
+          if (childId) {
+            const firstAttr = node.attributes.values().next().value;
+            const line = firstAttr
+              ? viewTreeLineFromStmt(firstAttr[0])
+              : buildMethod.getImplOriginFullPosition()?.getFirstLine() ?? 1;
+            link(buildId, childId, 'references', 'child-component', line);
+          }
+        }
+      } else {
+        const builderMethod = ctx.scene.getMethod(sig);
+        if (builderMethod) {
+          const builderId = ctx.ensureMethodNode(builderMethod, relativePath, result, classNodeId);
+          if (builderId) {
+            link(
+              buildId,
+              builderId,
+              'references',
+              'builder',
+              builderMethod.getImplOriginFullPosition()?.getFirstLine() ?? 1
+            );
+          }
+        }
+      }
+    }
+
+    if (node.stateValuesTransfer) {
+      for (const [childField, parentValue] of node.stateValuesTransfer) {
+        const childFieldId = ctx.fieldToId.get(childField);
+        if (parentValue instanceof ArkField) {
+          const via = stateTransferViaForField(childField);
+          if (!via || !childFieldId) continue;
+          ctx.markFieldStateDecorators?.(childField, childFieldId, result);
+          const parentFieldId = ctx.fieldToId.get(parentValue);
+          if (parentFieldId) {
+            ctx.markFieldStateDecorators?.(parentValue, parentFieldId, result);
+            link(
+              parentFieldId,
+              childFieldId,
+              'references',
+              via,
+              childField.getOriginFullPosition()?.getFirstLine() ?? 1
+            );
+          }
+        } else if (parentValue instanceof ArkMethod) {
+          const builderId = ctx.ensureMethodNode(parentValue, relativePath, result, classNodeId);
+          if (childFieldId && builderId) {
+            link(
+              builderId,
+              childFieldId,
+              'references',
+              'builder-param',
+              childField.getOriginFullPosition()?.getFirstLine() ?? 1
+            );
+          }
+        }
+      }
+    }
+
+    for (const [attr, [stmt, values]] of node.attributes) {
+      if (!VIEWTREE_CALLBACK_ATTRS.has(attr)) continue;
+      const line = viewTreeLineFromStmt(stmt);
+      for (const v of values) {
+        if (!(v instanceof MethodSignature)) continue;
+        const handler = ctx.scene.getMethod(v);
+        if (!handler) continue;
+        const handlerId = ctx.ensureMethodNode(handler, relativePath, result, classNodeId);
+        if (handlerId) link(buildId, handlerId, 'references', attr, line);
+      }
+    }
+  });
+}
+
 class ArkTSAdapter {
   private readonly rootDir: string;
   private readonly scanned: Set<string>;
@@ -1527,8 +1832,10 @@ class ArkTSAdapter {
 
     const { line, endLine, col } = linesFromPosition(field.getOriginFullPosition());
     const qn = buildFieldQualifiedName(field);
+    const stateDecs = stateDecoratorKinds(field);
     const fieldNode = makeNode(relativePath, language, kind, name, qn, line, endLine, col, {
       signature: field.getType()?.toString(),
+      ...(stateDecs.length > 0 ? { decorators: stateDecs } : {}),
       ...modelModifiersToNodeExtras(field),
     });
     this.addNode(result, fieldNode);
@@ -1565,6 +1872,12 @@ class ArkTSAdapter {
         parentId: string
       ) => this.ensureMethodNode(method, relativePath, result, parentId),
       resolveClassNodeId: (cls: ArkClass) => this.resolveClassNodeId(cls),
+      markFieldStateDecorators: (field: ArkField, fieldNodeId: string, result: ExtractionResult) => {
+        const kinds = stateDecoratorKinds(field);
+        if (kinds.length === 0) return;
+        const node = result.nodes.find((n) => n.id === fieldNodeId);
+        if (node) node.decorators = kinds;
+      },
     };
   }
 
@@ -1676,9 +1989,10 @@ class ArkTSAdapter {
       forcedKind ?? (cls.isDefaultArkClass() ? 'function' : 'method');
     const qn = buildMethodQualifiedName(method, displayName);
     const { line, endLine, col } = linesFromPosition(method.getImplOriginFullPosition());
-    const sig = method.getSignature()?.toString();
+    const { signature, returnType } = buildArkMethodSignatureFields(method);
     const methodNode = makeNode(relativePath, language, kind, displayName, qn, line, endLine, col, {
-      signature: sig,
+      ...(signature ? { signature } : {}),
+      ...(returnType ? { returnType } : {}),
       ...modelModifiersToNodeExtras(method),
     });
     this.addNode(result, methodNode);

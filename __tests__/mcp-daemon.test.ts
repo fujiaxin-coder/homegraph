@@ -120,6 +120,7 @@ function waitFor<T>(
   predicate: () => T | undefined | null | false,
   timeoutMs: number,
   pollMs = 25,
+  label?: string,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
@@ -127,7 +128,10 @@ function waitFor<T>(
       let v: T | undefined | null | false;
       try { v = predicate(); } catch (e) { return reject(e); }
       if (v) return resolve(v as T);
-      if (Date.now() - started > timeoutMs) return reject(new Error(`Timed out after ${timeoutMs}ms`));
+      if (Date.now() - started > timeoutMs) {
+        const hint = label ? ` (${label})` : '';
+        return reject(new Error(`Timed out after ${timeoutMs}ms${hint}`));
+      }
       setTimeout(tick, pollMs);
     };
     tick();
@@ -407,29 +411,51 @@ describe('Shared MCP daemon (issue #411)', () => {
     // The #662 scenario: an MCP host SIGTERM's the shared daemon while a session
     // is live. The proxy must NOT exit (losing HomeGraph for that session) — it
     // falls back to an in-process engine and keeps answering.
+    //
+    // Timeouts are generous: under full-suite parallel load (especially WSL +
+    // heavy ArkTS/Scene tests on other workers) daemon spawn + tools/call can
+    // exceed 10s even though the path is correct.
     const env = { HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '30000', HOMEGRAPH_PPID_POLL_MS: '5000' };
     const server = spawnServer(tempDir, env);
     servers.push(server);
     sendInitialize(server.child, `file://${tempDir}`, 1);
-    await waitFor(() => findResponse(server.stdout, 1), 10000);
-    await waitFor(() => server.stderr.some((l) => l.includes('Attached to shared daemon')), 8000);
-    await waitFor(() => (readLockPid(realRoot) ?? 0) > 0, 8000);
+    await waitFor(() => findResponse(server.stdout, 1), 20000, 25, 'initialize response');
+    await waitFor(
+      () => server.stderr.some((l) => l.includes('Attached to shared daemon')),
+      15000,
+      25,
+      'proxy attached to daemon',
+    );
+    await waitFor(() => (readLockPid(realRoot) ?? 0) > 0, 15000, 25, 'daemon pidfile');
     const daemonPid = readLockPid(realRoot)!;
 
     // A warm call goes through the daemon.
     sendMessage(server.child, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'homegraph_status', arguments: {} } });
-    await waitFor(() => findResponse(server.stdout, 2), 10000);
+    await waitFor(() => findResponse(server.stdout, 2), 25000, 25, 'warm tools/call via daemon').catch((e) => {
+      throw new Error(
+        `${(e as Error).message}\nstderr:\n${server.stderr.join('\n')}\ndaemon.log:\n${readDaemonLog(realRoot)}`
+      );
+    });
 
     // Kill the daemon out from under the live proxy.
     process.kill(daemonPid, 'SIGTERM');
-    expect(await waitProcessExit(daemonPid, 8000)).toBe(true);
+    expect(await waitProcessExit(daemonPid, 12000)).toBe(true);
 
     // The proxy must still be alive and still answer — served in-process now.
     expect(isAlive(server.child.pid!)).toBe(true);
-    await waitFor(() => server.stderr.some((l) => l.includes('serving this session in-process')), 8000);
+    await waitFor(
+      () => server.stderr.some((l) => l.includes('serving this session in-process')),
+      15000,
+      25,
+      'in-process fallback logged',
+    );
     sendMessage(server.child, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'homegraph_status', arguments: {} } });
-    const resp = await waitFor(() => findResponse(server.stdout, 3), 15000);
+    const resp = await waitFor(() => findResponse(server.stdout, 3), 25000, 25, 'tools/call after daemon death').catch((e) => {
+      throw new Error(
+        `${(e as Error).message}\nstderr:\n${server.stderr.join('\n')}\ndaemon.log:\n${readDaemonLog(realRoot)}`
+      );
+    });
     expect(resp.result !== undefined || resp.error !== undefined).toBe(true);
     expect(isAlive(server.child.pid!)).toBe(true);
-  }, 45000);
+  }, 90000);
 });
