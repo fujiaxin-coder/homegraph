@@ -252,9 +252,7 @@ export function funcB(): void { funcC(); }
 export function funcC(): void { console.log('c'); }
 `);
 
-    const cg = HomeGraph.initSync(testDir, {
-      config: { include: ['src/**/*.ts'], exclude: [] },
-    });
+    const cg = HomeGraph.initSync(testDir);
 
     await cg.indexAll();
     cg.resolveReferences();
@@ -475,9 +473,7 @@ export function myFunc(): void {}
 export function otherFunc(): void { myFunc(); }
 `);
 
-    const cg = HomeGraph.initSync(testDir, {
-      config: { include: ['src/**/*.ts'], exclude: [] },
-    });
+    const cg = HomeGraph.initSync(testDir);
 
     await cg.indexAll();
 
@@ -561,9 +557,7 @@ export function getValue(): number { return 1; }
 export function getValueFromCache(): number { return 2; }
 `);
 
-      const cg = HomeGraph.initSync(tmpDir, {
-        config: { include: ['src/**/*.ts'], exclude: [] },
-      });
+      const cg = HomeGraph.initSync(tmpDir);
       await cg.indexAll();
 
       const handler = new ToolHandler(cg);
@@ -595,9 +589,7 @@ export function handle(): void {}
 export function handle(): void {}
 `);
 
-      const cg = HomeGraph.initSync(tmpDir, {
-        config: { include: ['src/**/*.ts'], exclude: [] },
-      });
+      const cg = HomeGraph.initSync(tmpDir);
       await cg.indexAll();
 
       const handler = new ToolHandler(cg);
@@ -624,9 +616,7 @@ export function handle(): void {}
       fs.mkdirSync(srcDir, { recursive: true });
       fs.writeFileSync(path.join(srcDir, 'a.ts'), `export function foo(): void {}`);
 
-      const cg = HomeGraph.initSync(tmpDir, {
-        config: { include: ['src/**/*.ts'], exclude: [] },
-      });
+      const cg = HomeGraph.initSync(tmpDir);
       await cg.indexAll();
 
       const handler = new ToolHandler(cg);
