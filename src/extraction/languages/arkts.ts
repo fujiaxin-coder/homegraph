@@ -48,6 +48,123 @@ import { generateNodeId } from '../tree-sitter-helpers';
 import { buildRelaunchArgv } from '../wasm-runtime-flags';
 import { indexViewTreeForClass } from './arkts-viewtree';
 
+/** Primitive / void return types — not stored in nodes.return_type (inference-only column). */
+const ARKTS_NON_CLASS_RETURN = new Set([
+  'void',
+  'number',
+  'string',
+  'boolean',
+  'bigint',
+  'undefined',
+  'null',
+  'never',
+  'any',
+  'unknown',
+  'Object',
+]);
+
+/** Strip arkanalyzer file-location prefixes from type text (`@proj/file.ets: Foo` → `Foo`). */
+export function cleanArkTypeString(raw: string): string {
+  return raw.replace(/@[^/\s]+\/[^\s:]*:\s*/g, '').trim();
+}
+
+/**
+ * Normalize an ArkTS method return type to a bare class name for receiver inference
+ * (aligned with C++/Java `return_type` usage elsewhere in HomeGraph).
+ */
+export function normalizeArktsReturnType(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let t = cleanArkTypeString(raw);
+  if (!t || ARKTS_NON_CLASS_RETURN.has(t)) return undefined;
+  // Unwrap common wrappers to the pointee (`Promise<Foo>` → `Foo`).
+  const wrapper = t.match(/\b(?:Promise|Array|ReadonlyArray|Set|Map)\s*<\s*([^,>]+?)\s*>/);
+  if (wrapper?.[1]) t = wrapper[1].trim();
+  t = t.replace(/<[^>]*>/g, ' ').replace(/\[\]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t || ARKTS_NON_CLASS_RETURN.has(t)) return undefined;
+  const last = t.split('.').filter(Boolean).pop() ?? t;
+  return last || undefined;
+}
+
+function formatArkMethodSignatureLine(
+  method: ArkMethod,
+  sig: MethodSignature,
+  useParamNames: boolean
+): string {
+  const sub = sig.getMethodSubSignature();
+  const name = sub.getMethodName();
+  const ret = cleanArkTypeString(sub.getReturnType()?.toString() ?? 'void');
+  const paramTypes = sub.getParameterTypes();
+
+  let params: string;
+  if (useParamNames) {
+    const named = method.getParameters();
+    if (named.length > 0 && named.length === paramTypes.length) {
+      params = named
+        .map((p, i) => {
+          const rest = p.isRest?.() ? '...' : '';
+          const optional = p.isOptional?.() ? '?' : '';
+          const typeStr = cleanArkTypeString(
+            p.getType()?.toString() ?? paramTypes[i]?.toString() ?? 'unknown'
+          );
+          return `${rest}${p.getName()}${optional}: ${typeStr}`;
+        })
+        .join(', ');
+    } else {
+      params = paramTypes
+        .map((t) => cleanArkTypeString(t?.toString() ?? 'unknown'))
+        .join(', ');
+    }
+  } else {
+    params = paramTypes
+      .map((t) => cleanArkTypeString(t?.toString() ?? 'unknown'))
+      .join(', ');
+  }
+
+  const prefix = sub.isStatic() ? 'static ' : '';
+  return `${prefix}${name}(${params}): ${ret}`;
+}
+
+/** Collect human-readable signature lines (canonical first, overloads on following lines). */
+export function buildArkMethodSignatureFields(
+  method: ArkMethod
+): { signature?: string; returnType?: string } {
+  const impl = method.getImplementationSignature();
+  const declares = method.getDeclareSignatures();
+  const primary = impl ?? method.getSignature();
+  if (!primary && (!declares || declares.length === 0)) return {};
+
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const push = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    lines.push(trimmed);
+  };
+
+  if (impl) {
+    push(formatArkMethodSignatureLine(method, impl, true));
+  }
+
+  if (declares?.length) {
+    for (const d of declares) {
+      push(formatArkMethodSignatureLine(method, d, false));
+    }
+  } else if (!impl && primary) {
+    push(formatArkMethodSignatureLine(method, primary, true));
+  }
+
+  if (lines.length === 0) return {};
+
+  const canonicalSig = impl ?? declares?.[0] ?? primary!;
+  const retRaw = canonicalSig.getMethodSubSignature().getReturnType()?.toString();
+
+  return {
+    signature: lines.join('\n'),
+    returnType: normalizeArktsReturnType(retRaw),
+  };
+}
+
 /** Parallel read chunk size during ArkTS batch persist (writes stay sequential for SQLite). */
 function resolveArkTSPersistParallel(etsFileCount: number): number {
   const raw = process.env.HOMEGRAPH_ARKTS_PERSIST_PARALLEL?.trim();
@@ -1676,9 +1793,10 @@ class ArkTSAdapter {
       forcedKind ?? (cls.isDefaultArkClass() ? 'function' : 'method');
     const qn = buildMethodQualifiedName(method, displayName);
     const { line, endLine, col } = linesFromPosition(method.getImplOriginFullPosition());
-    const sig = method.getSignature()?.toString();
+    const { signature, returnType } = buildArkMethodSignatureFields(method);
     const methodNode = makeNode(relativePath, language, kind, displayName, qn, line, endLine, col, {
-      signature: sig,
+      ...(signature ? { signature } : {}),
+      ...(returnType ? { returnType } : {}),
       ...modelModifiersToNodeExtras(method),
     });
     this.addNode(result, methodNode);

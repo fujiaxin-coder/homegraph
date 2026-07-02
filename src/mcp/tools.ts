@@ -339,6 +339,31 @@ function numberSourceLines(slice: string, firstLineNumber: number): string {
   return out.join('\n');
 }
 
+/** Primary signature line (first line when overloads are stored newline-separated). */
+function primarySignatureLine(signature: string): string {
+  return signature.split('\n')[0]?.trim() ?? signature.trim();
+}
+
+/** Render a stored signature (single line or newline-separated overloads) for MCP output. */
+function formatNodeSignatureBlock(signature: string): string[] {
+  const lines = signature.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) {
+    return lines.length ? [`**Signature:** \`${lines[0]}\``] : [];
+  }
+  return [
+    '**Signature:**',
+    `- \`${lines[0]}\` (primary)`,
+    ...lines.slice(1).map((l) => `- \`${l}\` (overload)`),
+  ];
+}
+
+function formatInlineSignature(signature: string): string {
+  const primary = primarySignatureLine(signature);
+  const overloadCount = signature.split('\n').filter((l) => l.trim()).length - 1;
+  if (overloadCount <= 0) return primary;
+  return `${primary} (+${overloadCount} overload${overloadCount === 1 ? '' : 's'})`;
+}
+
 /**
  * Unique line-prefix for a per-file source section in homegraph_explore output.
  * Issue #778: tool results dropped ATX headings (`####`, `##`, `###`) for bold
@@ -3577,7 +3602,7 @@ export class ToolHandler {
     const symbolMap = (heading: string, limit = 200): string[] => {
       const lines: string[] = [heading];
       for (const n of nodes.slice(0, limit)) {
-        const sig = n.signature ? ` ${n.signature.replace(/\s+/g, ' ').trim()}` : '';
+        const sig = n.signature ? ` ${formatInlineSignature(n.signature)}` : '';
         lines.push(`- \`${n.name}\` (${n.kind})${sig} — :${n.startLine}`);
       }
       if (nodes.length > limit) lines.push(`- … +${nodes.length - limit} more`);
@@ -4346,7 +4371,7 @@ export class ToolHandler {
       // Compact format: one line per result with key info
       lines.push(`**${node.name}** (${node.kind})`);
       lines.push(`${node.filePath}${location}`);
-      if (node.signature) lines.push(`\`${node.signature}\``);
+      if (node.signature) lines.push(`\`${formatInlineSignature(node.signature)}\``);
       lines.push('');
     }
 
@@ -4428,7 +4453,7 @@ export class ToolHandler {
     const lines = [`**Members (${children.length}):**`, ''];
     for (const c of children) {
       const loc = c.startLine ? `:${c.startLine}` : '';
-      const sig = c.signature ? ` — \`${c.signature}\`` : '';
+      const sig = c.signature ? ` — \`${formatInlineSignature(c.signature)}\`` : '';
       lines.push(`- ${c.name} (${c.kind})${loc}${sig}`);
     }
     return lines.join('\n');
@@ -4443,7 +4468,7 @@ export class ToolHandler {
     ];
 
     if (node.signature) {
-      lines.push(`**Signature:** \`${node.signature}\``);
+      lines.push(...formatNodeSignatureBlock(node.signature));
     }
 
     // Only include docstring if it's short and useful
