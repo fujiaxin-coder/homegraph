@@ -137,7 +137,7 @@ describe('languages/arkts viewtree', () => {
     expect(result.errors.filter((e) => e.severity === 'error')).toHaveLength(0);
 
     expect(
-      edgeBetween(result.edges, 'countDownStartValue', 'count', result.nodes, 'prop-transfer')
+      edgeBetween(result.edges, 'countDownStartValue', 'count', result.nodes, 'Prop')
     ).toBeDefined();
 
     expect(

@@ -34,7 +34,8 @@ import { scanDynamicDispatch } from './dynamic-boundaries';
 const VIEWTREE_STRUCTURE_VIAS = new Set([
   'child-component',
   'state-binding',
-  'prop-transfer',
+  'Prop',
+  'Link',
   'builder',
   'builder-param',
 ]);
@@ -1706,6 +1707,20 @@ export class ToolHandler {
     }
     if (m?.synthesizedBy === 'viewtree') {
       const via = typeof m.via === 'string' ? m.via : '';
+      if (via === 'Prop') {
+        return {
+          label: `@Prop one-way state transfer (parent → child)`,
+          compact: `state: @Prop one-way${at}`,
+          registeredAt,
+        };
+      }
+      if (via === 'Link') {
+        return {
+          label: `@Link two-way state transfer (parent ↔ child)`,
+          compact: `state: @Link two-way${at}`,
+          registeredAt,
+        };
+      }
       if (via && !VIEWTREE_STRUCTURE_VIAS.has(via)) {
         return {
           label: `ArkUI event \`.${via}\` — bound handler (dynamic dispatch)`,
