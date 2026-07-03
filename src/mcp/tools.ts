@@ -29,6 +29,14 @@ import {
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { scanDynamicDispatch } from './dynamic-boundaries';
+import {
+  buildMcpQueryCacheKey,
+  ensureMcpQueryCacheValid,
+  getMcpQueryCacheEntry,
+  isCacheableMcpTool,
+  isMcpQueryCacheEnabled,
+  setMcpQueryCacheEntry,
+} from './query-cache';
 
 /** ViewTree structural `references` vias — not UI event bindings. */
 const VIEWTREE_STRUCTURE_VIAS = new Set([
@@ -1331,6 +1339,33 @@ export class ToolHandler {
         if (typeof check === 'object' && check !== undefined) return check;
       }
 
+      const projectPath = args.projectPath as string | undefined;
+      const cacheEnabled = isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
+      let cacheKey: string | undefined;
+      let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
+
+      if (cacheEnabled) {
+        try {
+          const cacheCg = this.getHomeGraph(projectPath);
+          cacheQueries = cacheCg.getQueryBuilder();
+          ensureMcpQueryCacheValid(cacheQueries, () => cacheCg.getLastIndexedAt());
+          let fileCount: number | undefined;
+          try {
+            fileCount = cacheCg.getStats().fileCount;
+          } catch {
+            fileCount = undefined;
+          }
+          cacheKey = buildMcpQueryCacheKey(toolName, args, fileCount);
+          const cached = getMcpQueryCacheEntry(cacheQueries, cacheKey);
+          if (cached) {
+            const withWorktree = this.withWorktreeNotice(cached, projectPath);
+            return this.withStalenessNotice(withWorktree, projectPath);
+          }
+        } catch {
+          // No indexed project — fall through; handler returns guidance.
+        }
+      }
+
       // Read tools resolve through a single result variable so cross-cutting
       // notices — worktree-index mismatch (issue #155) and per-file
       // staleness (issue #403) — can be applied in one place. status embeds
@@ -1365,8 +1400,11 @@ export class ToolHandler {
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
-      const withWorktree = this.withWorktreeNotice(result, args.projectPath as string | undefined);
-      return this.withStalenessNotice(withWorktree, args.projectPath as string | undefined);
+      if (cacheEnabled && cacheKey && cacheQueries && !result.isError) {
+        setMcpQueryCacheEntry(cacheQueries, cacheKey, toolName, result);
+      }
+      const withWorktree = this.withWorktreeNotice(result, projectPath);
+      return this.withStalenessNotice(withWorktree, projectPath);
     } catch (err) {
       // Expected condition, not a malfunction: answer as a SUCCESS so the
       // agent keeps trusting the toolset for projects that ARE indexed.
