@@ -1,56 +1,33 @@
 /**
  * Provider-agnostic LLM client for spec self-evolution.
  *
- * Replaces `commit4spec/utils/llm_client.py`. Supports OpenAI-compatible chat
- * completions API with mock mode for testing. Mock responses are consumed
- * FIFO: each `setMockResponse` call adds one response, each `chat` call
- * consumes one. When the mock queue is empty, pattern-based fallback responses
- * are returned.
+ * Supports OpenAI-compatible chat completions API. No mock mode — callers
+ * that need test doubles inject their own stubs implementing the interface.
  *
- * @module spec/evolve/llm-client
+ * @module spec/llm/client
  */
 import OpenAI from 'openai';
 import { LLMConfig } from '../config';
 import { logDebug } from '../../errors';
 
 // =============================================================================
-// Results
+// Interface
 // =============================================================================
 
-export interface ChatResult {
-  content: string;
-  json: Record<string, unknown> | null;
+export interface LlmClient {
+  chat(systemPrompt: string, userPrompt: string): Promise<string>;
+  chatJson(systemPrompt: string, userPrompt: string): Promise<Record<string, unknown>>;
 }
 
 // =============================================================================
-// LLMClient
+// OpenAiLlmClient
 // =============================================================================
 
-export class LLMClient {
+export class OpenAiLlmClient implements LlmClient {
   private config: LLMConfig;
-  private mockResponses: string[];
 
   constructor(config: LLMConfig) {
     this.config = config;
-    this.mockResponses = [];
-  }
-
-  /**
-   * Append a mock response to the FIFO queue.
-   *
-   * When provider is `"mock"`, `chat()` dequeues the first response.
-   * Responses are consumed in insertion order; each call to `chat()` removes
-   * and returns the front element.
-   */
-  setMockResponse(_key: string, response: string): void {
-    this.mockResponses.push(response);
-  }
-
-  /**
-   * Clear all mock responses.
-   */
-  clearMockResponses(): void {
-    this.mockResponses = [];
   }
 
   // ===========================================================================
@@ -60,47 +37,10 @@ export class LLMClient {
   /**
    * Send a chat completion request and return the message content string.
    *
-   * **Mock mode** (`provider === "mock"`):
-   * 1. If mockResponses has entries, consumes the first one (FIFO).
-   * 2. Otherwise matches `userPrompt` against known patterns (case-insensitive):
-   *    - `"logic change"` or `"logic_change"` → no-op JSON.
-   *    - `"spec evolution"` or `"evolve"` → UNCHANGED JSON.
-   *    - Default → UNCHANGED JSON.
-   *
-   * **OpenAI / Anthropic mode**:
    * Calls the OpenAI-compatible chat completions API and returns
    * `choices[0].message.content`. On any error, returns an empty string.
    */
   async chat(systemPrompt: string, userPrompt: string): Promise<string> {
-    // --- Mock mode -------------------------------------------------------
-    if (this.config.provider === 'mock') {
-      if (this.mockResponses.length > 0) {
-        return this.mockResponses.shift()!;
-      }
-
-      const lower = userPrompt.toLowerCase();
-
-      if (lower.includes('logic change') || lower.includes('logic_change')) {
-        return JSON.stringify({
-          is_logic_change: false,
-          reason: 'Mock: no logic change detected',
-        });
-      }
-
-      if (lower.includes('spec evolution') || lower.includes('evolve')) {
-        return JSON.stringify({
-          action: 'UNCHANGED',
-          reason: 'Mock: no changes needed',
-        });
-      }
-
-      return JSON.stringify({
-        action: 'UNCHANGED',
-        reason: 'Mock: default no-op response',
-      });
-    }
-
-    // --- OpenAI / Anthropic mode -----------------------------------------
     const baseURL = this.config.baseUrl
       ? this.config.baseUrl
       : this.config.provider === 'anthropic'
@@ -108,7 +48,7 @@ export class LLMClient {
         : undefined;
 
     const client = new OpenAI({
-      apiKey: this.config.apiKey || 'sk-placeholder',
+      apiKey: this.config.apiKey,
       baseURL,
     });
 

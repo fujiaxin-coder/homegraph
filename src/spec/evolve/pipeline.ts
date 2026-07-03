@@ -7,10 +7,11 @@
  * @module spec/evolve/pipeline
  */
 import * as path from 'path';
+import * as fs from 'fs';
 import { execFileSync } from 'child_process';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { LLMConfig, loadSpecConfig } from '../config';
-import { readMeta } from '../utils';
+import { readMeta, writeMeta, SPEC_DATA_DIR } from '../utils';
 import { initSpecSchema } from '../db/schema';
 import { insertSpecNode, findSpecById } from '../db/spec-node';
 import { insertCommitNode } from '../db/commit-node';
@@ -19,11 +20,11 @@ import {
   insertSpecCommitRelation,
   insertCommitFragmentRelation,
 } from '../db/relations';
-import { getCommitInfo, getCommitDiff } from '../mining/git-scanner';
+import { getCommitInfo, getCommitDiff, getCommitRange } from '../mining/git-scanner';
 import { resolveScopeToSpec } from '../mining/scope-resolver';
 import { extractSpecMetadata, SpecMetadata } from '../mining/spec-extractor';
 import { analyzeCommitDiff } from '../mining/diff-parser';
-import { LLMClient } from './llm-client';
+import { LlmClient, OpenAiLlmClient } from '../llm/client';
 import { isLogicChange } from './logic-checker';
 import { locateAffectedSpecs } from './impact-locator';
 import {
@@ -56,6 +57,10 @@ export interface EvolveResult {
   fragmentsCount: number;
   relationsCreated: number;
   persisted: boolean;
+  /** True when the commit was skipped because LLM is not available. */
+  skipped: boolean;
+  /** Human-readable reason for skipping, if skipped is true. */
+  skipReason?: string;
 }
 
 // =============================================================================
@@ -79,15 +84,19 @@ function getSpecPathInfo(
 }
 
 // =============================================================================
-// runEvolvePipeline
+// runEvolvePipeline  (internal — only called by runBatchEvolvePipeline)
 // =============================================================================
 
 /**
  * Run the full self-evolve pipeline for a single commit.
  *
+ * **Internal.**  Not exported — the public entry point is
+ * {@link runBatchEvolvePipeline}, which reads meta.json, initialises the
+ * schema, and calls this function for each commit in the range.
+ *
  * Flow (ported from pipeline.py:79-289):
  *
- * 1. Load context (meta, schema, commit info, diff, LLM client, config).
+ * 1. Load context (commit info, diff, LLM client, config).
  * 2. **Path A (GENERATE):** resolve scope from commit message.
  * 3. **LLM logic check:** determine if the commit is a business-logic change.
  * 4. **Path B (impact + rewrite):** if logic change, find affected active
@@ -95,14 +104,16 @@ function getSpecPathInfo(
  * 5. If neither Path A nor Path B produced candidates, return early.
  * 6. Persist everything in a single DB transaction.
  *
- * @param repoPath   - Absolute path to the git repository.
- * @param db         - Active SQLite database handle.
- * @param commitHash - Optional commit hash; defaults to HEAD.
- * @param llmConfig  - Optional LLM config override; falls back to spec config.
+ * @param repoPath        - Absolute path to the git repository.
+ * @param db              - Active SQLite database handle (schema already initialised).
+ * @param specStoragePath - Path to the spec storage directory (from meta.json).
+ * @param commitHash      - Commit hash to process.
+ * @param llmConfig       - Optional LLM config override; falls back to spec config.
  */
-export async function runEvolvePipeline(
+async function runEvolvePipeline(
   repoPath: string,
   db: SqliteDatabase,
+  specStoragePath: string,
   commitHash?: string,
   llmConfig?: LLMConfig,
 ): Promise<EvolveResult> {
@@ -110,14 +121,7 @@ export async function runEvolvePipeline(
   // 1. Context loading
   // ------------------------------------------------------------------
 
-  // Read meta
-  const meta = readMeta(repoPath);
-  if (!meta) {
-    throw new Error("No meta.json found. Run 'homegraph spec mine' first.");
-  }
-
-  // Init schema
-  initSpecSchema(db);
+  // meta.json and schema already handled by runBatchEvolvePipeline
 
   // Resolve commit hash
   const resolvedHash =
@@ -149,10 +153,13 @@ export async function runEvolvePipeline(
   // Parse diff into fragments once — reused for file paths and persistence.
   const diffFragments = analyzeCommitDiff(repoPath, resolvedHash, diff);
 
-  // Load spec config and create LLM client
+  // Load spec config and optionally create LLM client.
+  // When LLM is not available we still run Path A (scope-based GENERATE).
   const specConfig = loadSpecConfig(repoPath);
   const resolvedLLMConfig = llmConfig || specConfig.llm;
-  const client = new LLMClient(resolvedLLMConfig);
+  const client: LlmClient | undefined = resolvedLLMConfig
+    ? new OpenAiLlmClient(resolvedLLMConfig)
+    : undefined;
 
   // ------------------------------------------------------------------
   // 2. Path A (GENERATE) — commit message scope resolution
@@ -160,16 +167,41 @@ export async function runEvolvePipeline(
 
   const pathASpecId = resolveScopeToSpec(
     commitInfo.message,
-    meta.specStoragePath,
+    specStoragePath,
     specConfig,
   );
   let pathASpecMetadata: SpecMetadata | null = null;
   if (pathASpecId) {
     pathASpecMetadata = extractSpecMetadata(
-      meta.specStoragePath,
+      specStoragePath,
       pathASpecId,
       specConfig,
     );
+  }
+
+  // ------------------------------------------------------------------
+  // 2.5 Early skip: Path A didn't match and no LLM client is available.
+  //     Non-Path-A commits cannot be processed without LLM for logic
+  //     checking and spec evaluation.
+  // ------------------------------------------------------------------
+  if (!pathASpecId && !client) {
+    logWarn('Skipping commit — no LLM configured and commit does not match Path A', {
+      commitHash: resolvedHash.slice(0, 7),
+    });
+    return {
+      commitHash: resolvedHash,
+      generateRelationCreated: false,
+      isLogicChange: false,
+      logicCheckReason: '',
+      affectedSpecCount: 0,
+      evolvedSpecs: [],
+      fragmentsCount: 0,
+      relationsCreated: 0,
+      persisted: false,
+      skipped: true,
+      skipReason:
+        'LLM not configured — commit message does not contain a spec scope (Path A)',
+    };
   }
 
   // ------------------------------------------------------------------
@@ -177,13 +209,15 @@ export async function runEvolvePipeline(
   // ------------------------------------------------------------------
 
   let logicResult = { isLogic: false, reason: '' };
-  try {
-    logicResult = await isLogicChange(commitInfo.message, diff, client);
-  } catch {
-    logWarn('LLM logic check failed, treating as non-logic change', {
-      commitHash: resolvedHash.slice(0, 7),
-    });
-    logicResult = { isLogic: false, reason: 'LLM call failed' };
+  if (client) {
+    try {
+      logicResult = await isLogicChange(commitInfo.message, diff, client);
+    } catch {
+      logWarn('LLM logic check failed, treating as non-logic change', {
+        commitHash: resolvedHash.slice(0, 7),
+      });
+      logicResult = { isLogic: false, reason: 'LLM call failed' };
+    }
   }
 
   // ------------------------------------------------------------------
@@ -241,6 +275,7 @@ export async function runEvolvePipeline(
       fragmentsCount: 0,
       relationsCreated: 0,
       persisted: false,
+      skipped: false,
     };
   }
 
@@ -264,13 +299,13 @@ export async function runEvolvePipeline(
     const scheduleNextSpecs = pathBSpecIds.slice(idx + 1);
     const { version, filePath } = getSpecPathInfo(
       db,
-      meta.specStoragePath,
+      specStoragePath,
       specId,
     );
 
     const decision: EvolveDecision = await evaluateSpec(
       specId,
-      meta.specStoragePath,
+      specStoragePath,
       filePath,
       commitInfo.message,
       diff,
@@ -297,6 +332,7 @@ export async function runEvolvePipeline(
     fragmentsCount: 0,
     relationsCreated: 0,
     persisted: true,
+    skipped: false,
   };
 
   db.exec('BEGIN');
@@ -344,7 +380,7 @@ export async function runEvolvePipeline(
       if (decision.action === 'UPDATE') {
         const updateResult = applyUpdate(
           db,
-          meta.specStoragePath,
+          specStoragePath,
           specId,
           filePath,
           version,
@@ -399,4 +435,274 @@ export async function runEvolvePipeline(
   }
 
   return evolveResult;
+}
+
+// =============================================================================
+// BatchEvolveResult
+// =============================================================================
+
+export interface BatchEvolveResult {
+  /** The last evolved commit hash from meta.json (null if never evolved). */
+  fromCommit: string | null;
+  /** The commit hash that was just evolved up to (usually HEAD). */
+  toCommit: string;
+  /** Number of commits in the range (including skipped). */
+  commitsProcessed: number;
+  /** Per-commit results. */
+  perCommitResults: EvolveResult[];
+  /** Whether meta.json was updated at the end. */
+  metaUpdated: boolean;
+  /** Number of commits skipped (no LLM, did not match Path A). */
+  skippedCommits: number;
+  /** Number of commits that threw an error during evolve. */
+  failures: number;
+}
+
+// =============================================================================
+// runBatchEvolvePipeline
+// =============================================================================
+
+/**
+ * Run the self-evolve pipeline for all NEW commits since the last evolve.
+ *
+ * Reads `currentCommitID` from `meta.json` and processes every commit between
+ * that hash and `HEAD` in chronological order.  Each commit is independently
+ * evolved via `runEvolvePipeline`.  On full success, `meta.json` is refreshed
+ * with the new HEAD as `currentCommitID` and `updatedAt` set to now.
+ *
+ * When `currentCommitID` is missing (first evolve after an older mine, or
+ * corrupt meta), the function falls back to processing only HEAD.
+ *
+ * **Partial failure:** If any commit fails, the failing commit is logged but
+ * processing continues to the next one. `meta.json` is **only** updated when
+ * **all** commits succeed — this preserves the invariant that
+ * `currentCommitID` always points to the last *successfully* evolved commit.
+ *
+ * Edge cases:
+ * - `currentCommitID` equals HEAD → 0 new commits, `metaUpdated: false`.
+ * - `currentCommitID` is not an ancestor of HEAD (rebase / force-push) →
+ *   throws an error asking the user to re-mine.
+ */
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Acquire a file-based advisory lock to prevent concurrent evolve runs.
+ * Returns true if the lock was acquired (or the existing lock is stale).
+ * Returns false if another evolve instance holds the lock.
+ */
+function acquireEvolveLock(lockFile: string): boolean {
+  try {
+    if (fs.existsSync(lockFile)) {
+      const stat = fs.statSync(lockFile);
+      if (Date.now() - stat.mtimeMs > LOCK_TIMEOUT_MS) {
+        // Stale lock — previous process may have crashed
+        fs.unlinkSync(lockFile);
+      } else {
+        return false;
+      }
+    }
+    fs.writeFileSync(lockFile, String(process.pid));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function runBatchEvolvePipeline(
+  repoPath: string,
+  db: SqliteDatabase,
+  llmConfig?: LLMConfig,
+): Promise<BatchEvolveResult> {
+  const meta = readMeta(repoPath);
+  if (!meta) {
+    throw new Error("No meta.json found. Run 'homegraph spec mine' first.");
+  }
+
+  // Ensure only one evolve instance runs at a time (post-commit hook may
+  // fire multiple times in quick succession).
+  const lockFile = path.join(repoPath, SPEC_DATA_DIR, 'logs', 'evolve.lock');
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  if (!acquireEvolveLock(lockFile)) {
+    logDebug('runBatchEvolvePipeline: another evolve instance is running, skipping');
+    return {
+      fromCommit: meta.currentCommitID || null,
+      toCommit: '',
+      commitsProcessed: 0,
+      perCommitResults: [],
+      metaUpdated: false,
+      skippedCommits: 0,
+      failures: 0,
+    };
+  }
+
+  initSpecSchema(db);
+
+  try {
+    return await runBatchEvolvePipelineImpl(repoPath, db, meta, llmConfig);
+  } finally {
+    try { fs.unlinkSync(lockFile); } catch { /* may already be deleted */ }
+  }
+}
+
+/**
+ * Inner implementation — split out so the lock clean-up in the outer function
+ * only needs one try/finally block.
+ */
+async function runBatchEvolvePipelineImpl(
+  repoPath: string,
+  db: SqliteDatabase,
+  meta: { specStoragePath: string; currentCommitID?: string },
+  llmConfig: LLMConfig | undefined,
+): Promise<BatchEvolveResult> {
+  // Resolve HEAD
+  let headHash: string;
+  try {
+    headHash = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'] as const,
+      windowsHide: true,
+    }).trim();
+  } catch {
+    throw new Error('Failed to resolve HEAD. Not a valid git repository?');
+  }
+  if (!headHash) {
+    throw new Error('No commits found in repository.');
+  }
+
+  const lastEvolved = meta.currentCommitID || null;
+
+  // Fallback: no currentCommitID → process just HEAD
+  if (!lastEvolved) {
+    logDebug('runBatchEvolvePipeline: no currentCommitID in meta.json — processing HEAD only', {
+      headHash: headHash.slice(0, 7),
+    });
+
+    const result = await runEvolvePipeline(repoPath, db, meta.specStoragePath, headHash, llmConfig);
+
+    // Only refresh meta.json when the commit was actually processed (not skipped).
+    const metaUpdated = !result.skipped;
+    if (metaUpdated) {
+      writeMeta(repoPath, meta.specStoragePath, headHash);
+    }
+
+    return {
+      fromCommit: null,
+      toCommit: headHash,
+      commitsProcessed: 1,
+      perCommitResults: [result],
+      metaUpdated,
+      skippedCommits: result.skipped ? 1 : 0,
+      failures: 0,
+    };
+  }
+
+  // No new commits
+  if (lastEvolved === headHash) {
+    logDebug('runBatchEvolvePipeline: no new commits to evolve', {
+      currentCommitID: lastEvolved.slice(0, 7),
+    });
+
+    return {
+      fromCommit: lastEvolved,
+      toCommit: headHash,
+      commitsProcessed: 0,
+      perCommitResults: [],
+      metaUpdated: false,
+      skippedCommits: 0,
+      failures: 0,
+    };
+  }
+
+  // Validate ancestry: lastEvolved must be an ancestor of HEAD
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', lastEvolved, headHash], {
+      cwd: repoPath,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch {
+    throw new Error(
+      `The last evolved commit (${lastEvolved.slice(0, 7)}) is not an ancestor of ` +
+      `HEAD (${headHash.slice(0, 7)}). This usually happens after a rebase ` +
+      `or force-push. Please re-run 'homegraph spec mine' to rebuild the ` +
+      `knowledge graph, then run 'homegraph spec evolve' again.`,
+    );
+  }
+
+  // Get commit range in chronological order (oldest first)
+  const commits = getCommitRange(repoPath, lastEvolved, headHash);
+  if (commits.length === 0) {
+    logDebug('runBatchEvolvePipeline: range query returned 0 commits', {
+      from: lastEvolved.slice(0, 7),
+      to: headHash.slice(0, 7),
+    });
+
+    return {
+      fromCommit: lastEvolved,
+      toCommit: headHash,
+      commitsProcessed: 0,
+      perCommitResults: [],
+      metaUpdated: false,
+      skippedCommits: 0,
+      failures: 0,
+    };
+  }
+
+  logDebug('runBatchEvolvePipeline: processing commit range', {
+    count: commits.length,
+    from: lastEvolved.slice(0, 7),
+    to: headHash.slice(0, 7),
+  });
+
+  // Process each commit independently
+  const perCommitResults: EvolveResult[] = [];
+  let failures = 0;
+  let skippedCount = 0;
+
+  for (const commit of commits) {
+    try {
+      const result = await runEvolvePipeline(
+        repoPath, db, meta.specStoragePath, commit.hash, llmConfig,
+      );
+      perCommitResults.push(result);
+      if (result.skipped) skippedCount++;
+    } catch (err) {
+      failures++;
+      logWarn('runBatchEvolvePipeline: commit evolve failed, continuing', {
+        commitHash: commit.hash.slice(0, 7),
+        error: err instanceof Error ? err.message : String(err),
+      });
+      perCommitResults.push({
+        commitHash: commit.hash,
+        generateRelationCreated: false,
+        isLogicChange: false,
+        logicCheckReason: `Evolve failed: ${err instanceof Error ? err.message : String(err)}`,
+        affectedSpecCount: 0,
+        evolvedSpecs: [],
+        fragmentsCount: 0,
+        relationsCreated: 0,
+        persisted: false,
+        skipped: false,
+      });
+    }
+  }
+
+  // Refresh meta.json as long as at least one commit was actually
+  // processed (neither skipped nor failed).
+  const processedCount = commits.length - failures - skippedCount;
+  const metaUpdated = processedCount > 0;
+  if (metaUpdated) {
+    writeMeta(repoPath, meta.specStoragePath, headHash);
+  }
+
+  return {
+    fromCommit: lastEvolved,
+    toCommit: headHash,
+    commitsProcessed: commits.length,
+    perCommitResults,
+    metaUpdated,
+    skippedCommits: skippedCount,
+    failures,
+  };
 }

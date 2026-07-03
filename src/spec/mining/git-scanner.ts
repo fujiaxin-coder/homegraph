@@ -234,6 +234,59 @@ export function getCommitDiff(repoPath: string, commitHash: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// getCommitRange
+// ---------------------------------------------------------------------------
+
+/**
+ * Return every commit between `fromHash` (exclusive) and `toHash`
+ * (inclusive) in chronological order (oldest first).
+ *
+ * Runs `git log --reverse --format="..." fromHash..toHash`. Returns an empty
+ * array when either hash is not found or the range is empty.
+ *
+ * Callers should validate that `fromHash` is an ancestor of `toHash` before
+ * calling this function (use `git merge-base --is-ancestor`).  Results are
+ * undefined when the two hashes are on unrelated branches.
+ */
+export function getCommitRange(
+  repoPath: string,
+  fromHash: string,
+  toHash: string,
+): CommitInfo[] {
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      'git',
+      ['log', '--reverse', `--format=%H%n%aI%n%an%n%s%n---END---`, `${fromHash}..${toHash}`],
+      gitExecOptions(repoPath),
+    );
+  } catch {
+    return [];
+  }
+
+  const lines = stdout.trim().split('\n');
+  const commits: CommitInfo[] = [];
+
+  for (let i = 0; i + 4 < lines.length; i += 5) {
+    const hash = lines[i]!.trim();
+    const isoString = lines[i + 1]!.trim();
+    const author = lines[i + 2]!.trim();
+    const message = lines[i + 3]!.trim();
+
+    if (!hash) continue;
+
+    commits.push({
+      hash,
+      message,
+      author,
+      timestamp: parseISOTimestamp(isoString),
+    });
+  }
+
+  return commits;
+}
+
+// ---------------------------------------------------------------------------
 // scan
 // ---------------------------------------------------------------------------
 

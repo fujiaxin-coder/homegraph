@@ -1,4 +1,5 @@
-import { LLMClient } from './llm-client';
+import { LlmClient } from '../llm/client';
+import { LOGIC_CHECK_SYSTEM_PROMPT, buildLogicCheckUserPrompt } from '../llm/prompts';
 import { truncateText } from '../utils';
 
 export interface LogicCheckResult {
@@ -14,7 +15,7 @@ export interface LogicCheckResult {
 export async function isLogicChange(
   commitMessage: string,
   commitDiff: string,
-  client?: LLMClient,
+  client?: LlmClient,
 ): Promise<LogicCheckResult> {
   if (!client) {
     return { isLogic: false, reason: 'LLM unavailable' };
@@ -23,35 +24,9 @@ export async function isLogicChange(
   // Truncate diff to 6000 chars for prompt budget
   const truncatedDiff = truncateText(commitDiff, 6000);
 
-  const systemPrompt = `You are a code review assistant. Your task is to determine whether a git commit represents a business-logic change (as opposed to purely cosmetic, formatting, comment-only, or test-only changes).
+  const userPrompt = buildLogicCheckUserPrompt(commitMessage, truncatedDiff);
 
-A business-logic change includes:
-- Changes to algorithms, data structures, or control flow
-- Changes to business rules, validation logic, or domain behavior
-- Adding or removing functionality
-- Bug fixes that change behavior
-
-NOT business-logic changes:
-- Whitespace, formatting, or code style changes
-- Comment-only changes
-- Test-only changes (adding tests without changing production code)
-- Configuration changes that don't alter behavior
-- Package/dependency version bumps
-
-Respond with a JSON object:
-{
-  "is_logic_change": true/false,
-  "reason": "Brief explanation of why this is or is not a logic change"
-}`;
-
-  const userPrompt = `Analyze this commit:
-
-Commit Message: ${commitMessage}
-
-Diff:
-${truncatedDiff}`;
-
-  const result = await client.chatJson(systemPrompt, userPrompt);
+  const result = await client.chatJson(LOGIC_CHECK_SYSTEM_PROMPT, userPrompt);
 
   return {
     isLogic: result.is_logic_change === true,

@@ -2101,7 +2101,6 @@ specCommand
 
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { resolveDbPath, computeBudgetProfile } = await import('../spec/utils');
-      const { initSpecSchema } = await import('../spec/db/schema');
       const { searchAndGetContext } = await import('../spec/graph/queries');
 
       const dbPath = resolveDbPath(repoPath, options.dbPath);
@@ -2113,7 +2112,6 @@ specCommand
 
       const created = createDatabase(dbPath);
       db = created.db;
-      initSpecSchema(db);
 
       const topK = Math.max(1, Math.min(parseInt(options.topK || '5', 10) || 5, 50));
       const includeFragments = options.fragments !== false;
@@ -2168,6 +2166,128 @@ specCommand
       }
     } catch (err) {
       error(`Match failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
+      try { db?.close(); } catch { /* best effort */ }
+    }
+  });
+
+/**
+ * homegraph spec find <filePath>
+ */
+specCommand
+  .command('find <filePath>')
+  .description('Find specs related to the given file path via code-fragment matching')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (filePath: string, options: {
+    path?: string;
+    dbPath?: string;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+      const { findSpecsByFilePath } = await import('../spec/graph/queries');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      if (!fs.existsSync(dbPath)) {
+        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        process.exit(1);
+      }
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+
+      const result = findSpecsByFilePath(db, filePath);
+
+      if (options.json) {
+        console.log(JSON.stringify({
+          filePath,
+          matched_count: result.matched_count,
+          truncated: result.truncated,
+          results: result.results,
+        }, null, 2));
+      } else {
+        console.log(chalk.bold(`\n${result.matched_count} spec${result.matched_count !== 1 ? 's' : ''} matched for ${filePath}:\n`));
+        for (const r of result.results) {
+          console.log(
+            `  ${chalk.cyan(r.id.padEnd(16))} ${r.title.padEnd(32)} ${chalk.green(r.status.padEnd(12))} v${r.version}  ${chalk.dim(r.filePath)}`,
+          );
+        }
+        console.log();
+        if (result.truncated) {
+          console.log(chalk.yellow(`  ... and more (showing first ${result.matched_count} of >${result.matched_count} results)`));
+          console.log();
+        }
+        if (result.matched_count === 0) {
+          info(`No specs found for file path "${filePath}". Try a partial path (e.g. "src/auth" instead of "src/auth/login.ts").`);
+        }
+      }
+    } catch (err) {
+      error(`Find failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
+      try { db?.close(); } catch { /* best effort */ }
+    }
+  });
+
+/**
+ * homegraph spec stats
+ */
+specCommand
+  .command('stats')
+  .description('Show statistics about the spec knowledge graph')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: {
+    path?: string;
+    dbPath?: string;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+      const { getSpecStats } = await import('../spec/graph/queries');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      if (!fs.existsSync(dbPath)) {
+        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        process.exit(1);
+      }
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+
+      const stats = getSpecStats(db);
+
+      if (options.json) {
+        console.log(JSON.stringify(stats, null, 2));
+      } else {
+        console.log(chalk.bold('\nSpec Knowledge Graph Stats\n'));
+        console.log(`  Specs:       ${chalk.cyan(String(stats.specCount))}`);
+        console.log(`    Active:     ${chalk.green(String(stats.activeSpecCount))}`);
+        console.log(`    Deprecated: ${chalk.yellow(String(stats.deprecatedSpecCount))}`);
+        console.log(`  Commits:     ${stats.commitCount}`);
+        console.log(`  Fragments:   ${stats.fragmentCount}`);
+        console.log(`  Relations:   ${stats.relationCount}`);
+        console.log();
+        if (stats.specCount === 0) {
+          info("No specs yet. Run 'homegraph spec mine' to build the knowledge graph.");
+        }
+      }
+    } catch (err) {
+      error(`Stats failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     } finally {
       try { db?.close(); } catch { /* best effort */ }
@@ -2266,8 +2386,12 @@ evolveCommand
         '# Triggers spec self-evolution after each commit. Runs in background.',
         '# Installed by: homegraph spec evolve install',
         `# Logs: ${SPEC_DATA_DIR}/logs/evolve-hook.log`,
-        `"${homegraphBin}" spec evolve process --path "$(pwd)" --json \\`,
-        `    >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
+        '# Runtime guard: skip if homegraph is not available',
+        `HOMEGRAPH_BIN="${homegraphBin}"`,
+        'if [ -x "$HOMEGRAPH_BIN" ] || command -v homegraph >/dev/null 2>&1; then',
+        '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" --json \\',
+        `      >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
+        'fi',
         MARKER_END,
       ].join('\n');
 
@@ -2305,19 +2429,91 @@ evolveCommand
   });
 
 /**
+ * homegraph spec evolve uninstall
+ */
+evolveCommand
+  .command('uninstall')
+  .description('Remove the git post-commit hook installed by spec evolve')
+  .option('-p, --path <path>', 'Path to the repository')
+  .action(async (options: { path?: string }) => {
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { isGitRepo } = await import('../spec/mining/git-scanner');
+
+      if (!isGitRepo(repoPath)) {
+        error(`Not a git repository: ${repoPath}`);
+        process.exit(1);
+      }
+
+      const { execFileSync } = await import('child_process');
+
+      const hooksDir = execFileSync('git', ['rev-parse', '--git-path', 'hooks'], {
+        cwd: repoPath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      }).trim();
+
+      const resolvedHooksDir = path.isAbsolute(hooksDir)
+        ? hooksDir
+        : path.resolve(repoPath, hooksDir);
+
+      const hookPath = path.join(resolvedHooksDir, 'post-commit');
+
+      if (!fs.existsSync(hookPath)) {
+        info('No post-commit hook found — nothing to uninstall.');
+        return;
+      }
+
+      const MARKER_BEGIN = '# >>> homegraph spec evolve hook >>>';
+      const MARKER_END = '# <<< homegraph spec evolve hook <<<';
+
+      const existing = fs.readFileSync(hookPath, 'utf8');
+      const lines = existing.split('\n');
+      const kept: string[] = [];
+      let inBlock = false;
+      let removedBlock = false;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed === MARKER_BEGIN) { inBlock = true; removedBlock = true; continue; }
+        if (trimmed === MARKER_END) { inBlock = false; continue; }
+        if (!inBlock) kept.push(line);
+      }
+
+      if (!removedBlock) {
+        info('No homegraph spec evolve hook block found — nothing to uninstall.');
+        return;
+      }
+
+      const remaining = kept.join('\n').trim();
+
+      if (remaining.length === 0 || /^#!\/bin\/sh\s*$/.test(remaining)) {
+        // Hook only contained our block (or just a shebang) — delete entirely
+        fs.unlinkSync(hookPath);
+        success(`Removed post-commit hook at ${hookPath}`);
+      } else {
+        fs.writeFileSync(hookPath, remaining + '\n');
+        success(`Removed spec evolve hook block from ${hookPath} (user content preserved)`);
+      }
+    } catch (err) {
+      error(`Hook uninstall failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
  * homegraph spec evolve process
  */
 evolveCommand
   .command('process')
-  .description('Process a commit through the spec self-evolve pipeline')
+  .description('Process commits through the spec self-evolve pipeline since last evolve')
   .option('-p, --path <path>', 'Path to the repository')
   .option('--db-path <path>', 'Path to the SQLite database file')
-  .option('--commit-hash <hash>', 'Commit hash to process (default: HEAD)', 'HEAD')
   .option('-j, --json', 'Output as JSON')
   .action(async (options: {
     path?: string;
     dbPath?: string;
-    commitHash?: string;
     json?: boolean;
   }) => {
     let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
@@ -2328,7 +2524,7 @@ evolveCommand
       const { resolveDbPath } = await import('../spec/utils');
       const { initSpecSchema } = await import('../spec/db/schema');
       const { loadSpecConfig } = await import('../spec/config');
-      const { runEvolvePipeline } = await import('../spec/evolve/pipeline');
+      const { runBatchEvolvePipeline } = await import('../spec/evolve/pipeline');
       const { isGitRepo } = await import('../spec/mining/git-scanner');
 
       if (!isGitRepo(repoPath)) {
@@ -2344,30 +2540,83 @@ evolveCommand
 
       const config = loadSpecConfig(repoPath);
       const llmConfig = config.llm;
+      if (!llmConfig) {
+        warn('LLM not configured — Path B (LLM-based spec evolution) will be skipped.');
+        warn('Only Path A (commit message scope → GENERATE) will be processed.');
+        warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
+          '{\n' +
+          '  "llm": {\n' +
+          '    "provider": "openai",\n' +
+          '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
+          '    "model": "gpt-4o"\n' +
+          '  }\n' +
+          '}');
+      }
 
-      const commitHash = options.commitHash || 'HEAD';
-
-      const result = await runEvolvePipeline(repoPath, db, commitHash, llmConfig);
+      const result = await runBatchEvolvePipeline(repoPath, db, llmConfig ?? undefined);
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
-        console.log(chalk.bold(`Processing commit ${result.commitHash.slice(0, 7)}`));
-        console.log(`Is logic change: ${result.isLogicChange ? chalk.green('✅ yes') : chalk.red('❌ no')}`);
-        console.log(`Reason: ${result.logicCheckReason}`);
-
-        if (result.generateSpecId) {
-          console.log(chalk.cyan(`Link Path A - GENERATE ${result.generateSpecId}`));
-        }
-
-        if (result.evolvedSpecs.length > 0) {
-          console.log(chalk.cyan(`Cycle Path B - Self-evolve (${result.affectedSpecCount} affected)`));
-          for (const evolved of result.evolvedSpecs) {
-            console.log(`  ${evolved.specId}: ${evolved.action}`);
+        if (result.commitsProcessed === 0) {
+          console.log(chalk.green('No new commits to evolve.'));
+          console.log(`Last evolved commit: ${result.fromCommit ? result.fromCommit.slice(0, 7) : 'none'}`);
+          console.log(`Current HEAD: ${result.toCommit.slice(0, 7)}`);
+        } else {
+          console.log(chalk.bold(`Evolve complete: ${result.commitsProcessed} commit(s) processed`));
+          console.log(`Range: ${result.fromCommit ? result.fromCommit.slice(0, 7) : 'none'} → ${result.toCommit.slice(0, 7)}`);
+          if (result.metaUpdated) {
+            console.log(chalk.green(`meta.json updated (currentCommitID = ${result.toCommit.slice(0, 7)})`));
+          } else if (result.failures > 0) {
+            console.log(chalk.yellow(`⚠ meta.json NOT updated — ${result.failures} commit(s) failed`));
+          } else if (result.skippedCommits > 0) {
+            console.log(chalk.yellow('⚠ meta.json NOT updated — all commits were skipped (no Path A match, no LLM)'));
+          } else {
+            console.log(chalk.yellow('⚠ meta.json NOT updated'));
           }
-        }
 
-        console.log(`Summary: fragments=${result.fragmentsCount}, relations=${result.relationsCreated}`);
+          // Show per-commit summary
+          for (const r of result.perCommitResults) {
+            let prefix: string;
+            if (r.skipped) {
+              prefix = chalk.yellow('  ⚠');
+            } else {
+              prefix = r.persisted ? chalk.green('  ✓') : chalk.red('  ✗');
+            }
+            console.log(`${prefix} ${r.commitHash.slice(0, 7)}`);
+            if (r.skipped) {
+              console.log(`    skipped: ${r.skipReason}`);
+            }
+            if (r.isLogicChange) {
+              console.log(`    logic change: ${r.logicCheckReason}`);
+            }
+            if (r.generateSpecId) {
+              console.log(`    Path A - GENERATE ${r.generateSpecId}`);
+            }
+            for (const ev of r.evolvedSpecs) {
+              console.log(`    ${ev.specId}: ${ev.action}`);
+            }
+          }
+
+          // Aggregate summary
+          const totalFragments = result.perCommitResults.reduce((s, r) => s + r.fragmentsCount, 0);
+          const totalRelations = result.perCommitResults.reduce((s, r) => s + r.relationsCreated, 0);
+          if (result.skippedCommits > 0) {
+            console.log(
+              chalk.yellow(
+                `${result.skippedCommits} commit(s) skipped — no LLM configured, did not match Path A`,
+              ),
+            );
+          }
+          if (result.failures > 0) {
+            console.log(
+              chalk.red(
+                `${result.failures} commit(s) failed — see details above`,
+              ),
+            );
+          }
+          console.log(`Summary: fragments=${totalFragments}, relations=${totalRelations}`);
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
