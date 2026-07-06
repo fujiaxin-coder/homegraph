@@ -60,7 +60,8 @@ export function escapeFtsQuery(query: string): string {
 
   const segmented = segmentCjk(trimmed);
   const tokens = segmented.split(/\s+/).filter(Boolean);
-  return tokens.map((t) => `"${t}"`).join(' ') || '""';
+  // Escape embedded double-quotes: inside FTS5 quoted phrases, " is escaped as ""
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' ') || '""';
 }
 
 // ===========================================================================
@@ -186,12 +187,14 @@ function searchSpecsLike(
   limit: number,
   excludeIds: Set<string>
 ): SpecSearchResult[] {
-  const likePat = `%${query}%`;
+  // Escape LIKE metacharacters so '%' and '_' are treated as literals
+  const escaped = query.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+  const likePat = `%${escaped}%`;
 
   const rows = db
     .prepare(
       `SELECT id, title, subtitles FROM spec_nodes
-       WHERE title LIKE ? OR subtitles LIKE ?
+       WHERE title LIKE ? ESCAPE '\\' OR subtitles LIKE ? ESCAPE '\\'
        ORDER BY id LIMIT ?`
     )
     .all(likePat, likePat, limit * 3) as SpecFtsRow[];
@@ -240,7 +243,7 @@ function searchSpecsLike(
 function discoveryFallback(db: SqliteDatabase, limit: number): SpecSearchResult[] {
   const rows = db
     .prepare(
-      'SELECT id, title, subtitles FROM spec_nodes ORDER BY id LIMIT ?'
+      'SELECT id, title, subtitles FROM spec_nodes ORDER BY timestamp DESC LIMIT ?'
     )
     .all(limit) as SpecFtsRow[];
 
@@ -328,4 +331,48 @@ export function searchSpecs(
   }
 
   return combined.slice(0, limit);
+}
+
+// ===========================================================================
+// Code Fragment FTS5 Search
+// ===========================================================================
+
+/**
+ * Search code fragment diffs by entity name or keyword.
+ *
+ * Uses FTS5 on the ``code_fragments_fts`` virtual table to find fragments
+ * whose ``code_diff`` text matches the query. This is used to bridge
+ * code-entity names (e.g. ``validatePassword``) to Specs when the entity
+ * name does not appear in the Spec's title/subtitles.
+ *
+ * @param db     Active SQLite database handle.
+ * @param query  Entity name or keyword to search for in code diffs.
+ * @param limit  Maximum number of fragment IDs to return (default 50).
+ * @returns Array of matching fragment IDs, ordered by FTS5 rank.
+ */
+export function searchCodeFragments(
+  db: SqliteDatabase,
+  query: string,
+  limit: number = 50
+): string[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  // Escape FTS5 special characters and quote each token for literal matching
+  const escaped = escapeFtsQuery(trimmed);
+
+  let rows: Array<{ id: string }>;
+  try {
+    rows = db
+      .prepare(
+        `SELECT id FROM code_fragments_fts
+         WHERE code_fragments_fts MATCH ?
+         ORDER BY rank LIMIT ?`
+      )
+      .all(escaped, limit) as Array<{ id: string }>;
+  } catch {
+    return [];
+  }
+
+  return rows.map((r) => r.id);
 }

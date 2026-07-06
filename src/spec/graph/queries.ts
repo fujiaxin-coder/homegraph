@@ -14,7 +14,7 @@ import {
   SpecCommitContext,
   SpecStats,
 } from '../types';
-import { searchSpecs } from '../db/fts';
+import { searchSpecs, searchCodeFragments } from '../db/fts';
 
 // ===========================================================================
 // Row shapes from SQLite (snake_case column names)
@@ -407,4 +407,254 @@ export function searchAndGetContext(
   });
 
   return scored.map((c) => c.context);
+}
+
+// ===========================================================================
+// findSpecsByCodeSymbol — code entity → Spec (reverse trace)
+// ===========================================================================
+
+/**
+ * Metadata about a code entity for which we want to find associated Specs.
+ * Typically sourced from a homegraph.db ``nodes`` row.
+ */
+export interface CodeEntityInfo {
+  name: string;
+  qualifiedName: string;
+  kind: string;
+  filePath: string;
+  startLine: number;
+  endLine: number;
+}
+
+/** A single scored match between a code entity and a Spec. */
+export interface CodeEntitySpecMatch {
+  spec: {
+    id: string;
+    title: string;
+    status: string;
+    version: number;
+    filePath: string;
+    timestamp: number;
+  };
+  /** Five-dimension weighted score (0.0–1.0). */
+  score: number;
+  /** Score breakdown for transparency. */
+  scoreDetail: {
+    filePathScore: number;
+    contentScore: number;
+    nameScore: number;
+    recencyScore: number;
+    overlapScore: number;
+  };
+  /** Number of overlapping code fragments for this spec. */
+  fragmentCount: number;
+  /** Total commits linking this spec to the entity's file. */
+  commitCount: number;
+}
+
+/** Result container for findSpecsByCodeSymbol. */
+export interface FindSpecsByCodeSymbolResult {
+  entity: CodeEntityInfo;
+  matches: CodeEntitySpecMatch[];
+  totalCandidates: number;
+}
+
+/** Weight constants for the five scoring dimensions. */
+const WEIGHTS = {
+  filePath: 0.30,
+  content: 0.25,
+  name: 0.15,
+  recency: 0.20,
+  overlap: 0.10,
+};
+
+/** Maximum candidates to consider from the initial file-path JOIN. */
+const MAX_CANDIDATES = 200;
+
+/**
+ * Escape LIKE metacharacters in a string, also escaping the escape character.
+ */
+function escapeLike(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+}
+
+/**
+ * Find Specs associated with a code entity by multi-dimensional scoring:
+ *
+ * 1. File path match (weight 0.30) — most stable anchor; function rarely changes file
+ * 2. Code-diff content match via FTS5 (weight 0.25) — catches entity names in diff text
+ *    that never appear in Spec titles
+ * 3. Spec title/subtitle name match via FTS5 (weight 0.15) — semantic alignment
+ * 4. Recency (weight 0.20) — newer Specs are more likely to describe current code
+ * 5. Line-range overlap (weight 0.10) — soft signal; code drifts over time
+ *
+ * All five dimensions contribute even when some are zero — a spec without line
+ * overlap can still rank first if its content/name/recency scores are high.
+ *
+ * @param specDb       commit4spec.db connection
+ * @param entity       Code entity info (from homegraph.db nodes)
+ * @param topK         Maximum matches to return (default 10)
+ * @returns Ranked, scored matches with score breakdowns
+ */
+export function findSpecsByCodeSymbol(
+  specDb: SqliteDatabase,
+  entity: CodeEntityInfo,
+  topK: number = 10,
+): FindSpecsByCodeSymbolResult {
+  const pathEscaped = escapeLike(entity.filePath);
+  const likePattern = `%${pathEscaped}%`;
+  const suffixLikePattern = `%${pathEscaped}`; // cf.file_path ends with entity's path
+
+  // -----------------------------------------------------------------------
+  // 1. Gather candidates: all specs whose fragments touch the entity's file
+  // -----------------------------------------------------------------------
+
+  const candidateRows = specDb
+    .prepare(`
+      SELECT
+          s.id, s.title, s.status, s.version, s.file_path, s.timestamp,
+          MAX(
+            MIN(cf.end_line, @entityEnd) - MAX(cf.start_line, @entityStart) + 1,
+            0
+          ) AS overlap_lines,
+          COUNT(DISTINCT cf.id) AS fragment_count,
+          COUNT(DISTINCT scr.commit_hash) AS commit_count,
+          MAX(CASE
+            WHEN cf.file_path = @exactFilePath THEN 3
+            WHEN cf.file_path LIKE @suffixLikePattern ESCAPE '\\' THEN 2
+            ELSE 1
+          END) AS file_path_match_level
+      FROM spec_nodes s
+      JOIN spec_commit_relations scr ON scr.spec_id = s.id
+      JOIN commit_fragment_relations cfr ON cfr.commit_hash = scr.commit_hash
+      JOIN code_fragment_nodes cf ON cf.id = cfr.fragment_id
+      WHERE s.status = 'active'
+        AND cf.file_path LIKE @likePattern ESCAPE '\\'
+      GROUP BY s.id
+      ORDER BY s.timestamp DESC
+      LIMIT @maxCandidates
+    `)
+    .all({
+      entityEnd: entity.endLine,
+      entityStart: entity.startLine,
+      exactFilePath: entity.filePath,
+      suffixLikePattern,
+      likePattern,
+      maxCandidates: MAX_CANDIDATES,
+    }) as Array<{
+      id: string;
+      title: string;
+      status: string;
+      version: number;
+      file_path: string;
+      timestamp: number;
+      overlap_lines: number;
+      fragment_count: number;
+      commit_count: number;
+      file_path_match_level: number;
+    }>;
+
+  // -----------------------------------------------------------------------
+  // 2. Content-match signal: search code_fragments_fts for the entity name
+  // -----------------------------------------------------------------------
+  const contentFragmentIds = new Set(
+    searchCodeFragments(specDb, entity.name, 50),
+  );
+
+  // Map from spec_id → whether any of its fragments matched in content search
+  const contentSpecIds = new Set<string>();
+  if (contentFragmentIds.size > 0) {
+    const fragsIn = [...contentFragmentIds].map(() => '?').join(',');
+    const contentSpecRows = specDb
+      .prepare(`
+        SELECT DISTINCT scr.spec_id
+        FROM commit_fragment_relations cfr
+        JOIN spec_commit_relations scr ON scr.commit_hash = cfr.commit_hash
+        WHERE cfr.fragment_id IN (${fragsIn})
+      `)
+      .all(...contentFragmentIds) as Array<{ spec_id: string }>;
+    for (const r of contentSpecRows) {
+      contentSpecIds.add(r.spec_id);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 3. Name-match signal: search specs_fts for the entity name
+  // -----------------------------------------------------------------------
+  const nameResults = searchSpecs(specDb, entity.name, topK * 3);
+  const nameScoreMap = new Map<string, number>();
+  const nameMaxScore = Math.max(1, ...nameResults.map((r) => r._score ?? 0));
+  for (const r of nameResults) {
+    nameScoreMap.set(r.id, (r._score ?? 0) / nameMaxScore); // normalize to [0, 1]
+  }
+
+  // -----------------------------------------------------------------------
+  // 4. Compute weighted score for each candidate
+  // -----------------------------------------------------------------------
+  const now = Date.now();
+  const entityLength = Math.max(1, entity.endLine - entity.startLine + 1);
+
+  const scored = candidateRows.map((row) => {
+    // 4a. File-path score — derived from the best-matching fragment's file_path
+    // (computed in SQL as file_path_match_level: 3=exact, 2=suffix, 1=LIKE)
+    const filePathScore = row.file_path_match_level === 3 ? 1.0
+      : row.file_path_match_level === 2 ? 0.8
+      : 0.6;
+
+    // 4b. Content score
+    const contentScore = contentSpecIds.has(row.id) ? 1.0 : 0;
+
+    // 4c. Name score
+    const nameScore = nameScoreMap.get(row.id) ?? 0;
+
+    // 4d. Recency score: MapSpec(timestamp, 0, maxTs)MapSpec => [0, 1]
+    const daysSinceUpdate = (now - row.timestamp) / (1000 * 60 * 60 * 24);
+    const recencyScore = 1 / (1 + Math.max(0, daysSinceUpdate) / 180);
+
+    // 4e. Overlap score
+    const overlapRatio = Math.min(1.0, row.overlap_lines / entityLength);
+    const overlapScore = overlapRatio;
+
+    const score =
+      filePathScore * WEIGHTS.filePath +
+      contentScore * WEIGHTS.content +
+      nameScore * WEIGHTS.name +
+      recencyScore * WEIGHTS.recency +
+      overlapScore * WEIGHTS.overlap;
+
+    return {
+      spec: {
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        version: row.version,
+        filePath: row.file_path,
+        timestamp: row.timestamp,
+      },
+      score,
+      scoreDetail: {
+        filePathScore,
+        contentScore,
+        nameScore,
+        recencyScore,
+        overlapScore,
+      },
+      fragmentCount: row.fragment_count,
+      commitCount: row.commit_count,
+    };
+  });
+
+  // -----------------------------------------------------------------------
+  // 5. Sort and trim
+  // -----------------------------------------------------------------------
+  scored.sort((a, b) => b.score - a.score);
+
+  return {
+    entity,
+    matches: scored.slice(0, topK),
+    totalCandidates: candidateRows.length,
+  };
 }

@@ -25,7 +25,8 @@ import {
   getSpecStats,
   findSpecsByFragmentPath,
   findSpecsByFilePath,
-  FindSpecsByFilePathResult,
+  findSpecsByCodeSymbol,
+  CodeEntityInfo,
 } from '../src/spec/graph/queries';
 import { SpecNode, CommitNode, CodeFragmentNode, SpecContext, SpecStats } from '../src/spec/types';
 
@@ -845,5 +846,342 @@ describe('findSpecsByFilePath', () => {
     const result = findSpecsByFilePath(db, 'src\\auth');
     expect(result.matched_count).toBe(1);
     expect(result.results[0]!.id).toBe('spec-win');
+  });
+});
+
+// ===========================================================================
+// 5. findSpecsByCodeSymbol — code entity → Spec reverse trace
+// ===========================================================================
+
+/**
+ * Helper: wire up a spec → commit → fragment chain and return the entity.
+ *
+ * Inserts the spec, commit, and fragment into the DB, then creates
+ * the spec_commit_relations and commit_fragment_relations.
+ */
+function seedSpecChain(
+  db: SqliteDatabase,
+  specPartial: Partial<SpecNode>,
+  commitPartial: Partial<CommitNode>,
+  fragmentPartial: Partial<CodeFragmentNode>,
+): CodeEntityInfo {
+  const spec = makeSpec(
+    specPartial.id || 'spec-chain',
+    specPartial.title || 'Chain Spec',
+    specPartial.subtitles,
+    specPartial,
+  );
+  const commit = makeCommit(
+    commitPartial.hash || 'c'.repeat(40),
+    commitPartial.message || 'feat: chain commit',
+    commitPartial,
+  );
+  const fragment = insertCodeFragment(db, makeFragment(fragmentPartial));
+
+  insertSpecNode(db, spec);
+  insertCommitNode(db, commit);
+  insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
+  insertCommitFragmentRelation(db, commit.hash, fragment.id);
+
+  return {
+    name: 'chainFunction',
+    qualifiedName: 'src/chain.ts:chainFunction',
+    kind: 'function',
+    filePath: fragment.filePath,
+    startLine: fragment.startLine,
+    endLine: fragment.endLine,
+  };
+}
+
+/** Create a CodeEntityInfo pointing at a file with given line range. */
+function makeEntity(overrides: Partial<CodeEntityInfo> = {}): CodeEntityInfo {
+  return {
+    name: 'testFunction',
+    qualifiedName: 'src/test.ts:testFunction',
+    kind: 'function',
+    filePath: 'src/test.ts',
+    startLine: 10,
+    endLine: 20,
+    ...overrides,
+  };
+}
+
+describe('findSpecsByCodeSymbol', () => {
+  let db: SqliteDatabase;
+
+  beforeEach(() => {
+    db = createTestDb();
+    initSpecSchema(db);
+  });
+
+  it('returns empty matches when database has no specs', () => {
+    const entity = makeEntity();
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.entity).toEqual(entity);
+    expect(result.matches).toEqual([]);
+    expect(result.totalCandidates).toBe(0);
+  });
+
+  it('returns entity info in the result', () => {
+    const entity = makeEntity({ name: 'myFunc' });
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.entity.name).toBe('myFunc');
+    expect(result.entity.kind).toBe('function');
+    expect(result.entity.filePath).toBe('src/test.ts');
+  });
+
+  it('finds spec by file path match (no line overlap needed)', () => {
+    const spec = makeSpec('fp-spec', 'File Path Spec');
+    const commit = makeCommit('d'.repeat(40), 'feat: add file');
+    const fragment = insertCodeFragment(db, makeFragment({
+      filePath: 'src/test.ts',
+      startLine: 50,  // Different lines — no overlap
+      endLine: 60,
+      codeDiff: '@@ -50,11 +50,11 @@\n+ some other code',
+    }));
+
+    insertSpecNode(db, spec);
+    insertCommitNode(db, commit);
+    insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
+    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+
+    const entity = makeEntity({ startLine: 10, endLine: 20 });
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.totalCandidates).toBeGreaterThanOrEqual(1);
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    expect(result.matches[0]!.spec.id).toBe(spec.id);
+    // No line overlap, so overlapScore should be 0
+    expect(result.matches[0]!.scoreDetail.overlapScore).toBe(0);
+  });
+
+  it('line overlap contributes to score (overlapScore > 0)', () => {
+    const spec = makeSpec('overlap-spec', 'Overlap Spec');
+    const commit = makeCommit('e'.repeat(40), 'feat: overlap');
+    const fragment = insertCodeFragment(db, makeFragment({
+      filePath: 'src/test.ts',
+      startLine: 5,   // Overlaps with entity's 10-20
+      endLine: 15,
+      codeDiff: '@@ -5,11 +5,11 @@',
+    }));
+
+    insertSpecNode(db, spec);
+    insertCommitNode(db, commit);
+    insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
+    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+
+    const entity = makeEntity({ startLine: 10, endLine: 20 });
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    // Should have some overlap: lines 10-15 = 6 overlapping lines
+    expect(result.matches[0]!.scoreDetail.overlapScore).toBeGreaterThan(0);
+  });
+
+  it('content diff match — entity name appears in code_diff', () => {
+    const spec = makeSpec('content-spec', 'Content Match Spec', []);
+    const commit = makeCommit('f'.repeat(40), 'feat: content');
+    const fragment = insertCodeFragment(db, makeFragment({
+      filePath: 'src/other.ts',     // Different file
+      startLine: 1,
+      endLine: 5,
+      codeDiff: '@@ -1,3 +1,5 @@\n+function matchMe() {\n+  return true;\n+}',
+    }));
+
+    insertSpecNode(db, spec);
+    insertCommitNode(db, commit);
+    insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
+    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+
+    const entity = makeEntity({ name: 'matchMe', filePath: 'src/other.ts', startLine: 1, endLine: 5 });
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    // Because filePath matches, it should be found
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    expect(result.matches[0]!.scoreDetail.contentScore).toBe(1);
+  });
+
+  it('name match — entity name appears in spec title', () => {
+    const spec = makeSpec('name-spec', 'authenticate', []); // exact title match
+    const commit = makeCommit('a1'.repeat(20), 'feat: auth');
+    const fragment = insertCodeFragment(db, makeFragment({
+      filePath: 'src/auth.ts',
+      codeDiff: '@@ -1,3 +1,3 @@',
+    }));
+
+    insertSpecNode(db, spec);
+    insertCommitNode(db, commit);
+    insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
+    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+
+    const entity = makeEntity({ name: 'authenticate', filePath: 'src/auth.ts' });
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    // name score should be > 0 because the spec title matches
+    const nameMatch = result.matches.find((m) => m.spec.id === 'name-spec');
+    expect(nameMatch).toBeDefined();
+    expect(nameMatch!.scoreDetail.nameScore).toBeGreaterThan(0);
+  });
+
+  it('scores newer specs higher (recency dimension)', () => {
+    const oldSpec = makeSpec('old-spec', 'Old Spec', [], {
+      timestamp: 1000000000000, // Old timestamp
+    });
+    const newSpec = makeSpec('new-spec', 'New Spec', [], {
+      timestamp: Date.now(),    // Current timestamp
+    });
+
+    const commit1 = makeCommit('b1'.repeat(20), 'old commit', { timestamp: 1000000000000 });
+    const commit2 = makeCommit('b2'.repeat(20), 'new commit', { timestamp: Date.now() });
+
+    const frag1 = insertCodeFragment(db, makeFragment({
+      filePath: 'src/test.ts', startLine: 1, endLine: 10,
+      codeDiff: '@@ -1,10 +1,10 @@',
+    }));
+    const frag2 = insertCodeFragment(db, makeFragment({
+      filePath: 'src/test.ts', startLine: 1, endLine: 10,
+      codeDiff: '@@ -1,10 +1,10 @@',
+    }));
+
+    insertSpecNode(db, oldSpec);
+    insertSpecNode(db, newSpec);
+    insertCommitNode(db, commit1);
+    insertCommitNode(db, commit2);
+    insertSpecCommitRelation(db, oldSpec.id, commit1.hash, 'GENERATE');
+    insertSpecCommitRelation(db, newSpec.id, commit2.hash, 'GENERATE');
+    insertCommitFragmentRelation(db, commit1.hash, frag1.id);
+    insertCommitFragmentRelation(db, commit2.hash, frag2.id);
+
+    const entity = makeEntity({ startLine: 1, endLine: 10 });
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    // Both should be found, and the newer one should rank first
+    expect(result.matches.length).toBeGreaterThanOrEqual(2);
+    expect(result.matches[0]!.spec.id).toBe('new-spec');
+    expect(result.matches[0]!.scoreDetail.recencyScore).toBeGreaterThan(
+      result.matches[1]!.scoreDetail.recencyScore,
+    );
+  });
+
+  it('score detail contains all five dimensions', () => {
+    const entity = seedSpecChain(db,
+      { id: 'all-dim', title: 'All Dimensions Spec' },
+      { hash: 'cc'.repeat(20), message: 'feat: all' },
+      { filePath: 'src/test.ts', codeDiff: '@@ -10,11 +10,11 @@\n+ chainFunction() {}' },
+    );
+
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    const detail = result.matches[0]!.scoreDetail;
+    expect(detail).toHaveProperty('filePathScore');
+    expect(detail).toHaveProperty('contentScore');
+    expect(detail).toHaveProperty('nameScore');
+    expect(detail).toHaveProperty('recencyScore');
+    expect(detail).toHaveProperty('overlapScore');
+
+    // All scores should be in [0, 1] range
+    for (const key of Object.keys(detail) as Array<keyof typeof detail>) {
+      expect(detail[key]).toBeGreaterThanOrEqual(0);
+      expect(detail[key]).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('composite score is weighted sum of five dimensions', () => {
+    const entity = seedSpecChain(db,
+      { id: 'weight-spec', title: 'Weight Spec' },
+      { hash: 'dd'.repeat(20), message: 'feat: weight' },
+      { filePath: 'src/test.ts', startLine: 10, endLine: 20,
+        codeDiff: '@@ -10,11 +10,11 @@\n+ chainFunction() {}' },
+    );
+
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    const match = result.matches[0]!;
+    const d = match.scoreDetail;
+
+    // Weighted sum check: 0.30*fp + 0.25*content + 0.15*name + 0.20*recency + 0.10*overlap
+    const expected = 0.30 * d.filePathScore + 0.25 * d.contentScore
+      + 0.15 * d.nameScore + 0.20 * d.recencyScore + 0.10 * d.overlapScore;
+    expect(match.score).toBeCloseTo(expected, 10);
+  });
+
+  it('respects topK limit', () => {
+    // Create 5 specs all pointing to the same file
+    for (let i = 0; i < 5; i++) {
+      seedSpecChain(db,
+        { id: `topk-${i}`, title: `TopK Spec ${i}` },
+        { hash: `topk${i}`.padEnd(40, 'x'), message: `feat: topk ${i}` },
+        { filePath: 'src/test.ts', startLine: 10, endLine: 20,
+          codeDiff: `@@ -10,11 +10,11 @@\n+ thing${i}` },
+      );
+    }
+
+    const entity = makeEntity({ startLine: 10, endLine: 20 });
+    const result = findSpecsByCodeSymbol(db, entity, 3);
+
+    expect(result.matches.length).toBeLessThanOrEqual(3);
+    expect(result.totalCandidates).toBeGreaterThanOrEqual(5);
+  });
+
+  it('returns zero matches when spec is in a different file with no content/name match', () => {
+    // Spec in a completely different file, with no content or name overlap
+    const spec = makeSpec('diff-spec', 'Unrelated Spec');
+    const commit = makeCommit('ee'.repeat(20), 'feat: unrelated');
+    const fragment = insertCodeFragment(db, makeFragment({
+      filePath: 'src/completely-different.ts',  // Different file
+      startLine: 100,
+      endLine: 200,
+      codeDiff: '@@ -100,101 +100,101 @@\n+ unrelated code',
+    }));
+
+    insertSpecNode(db, spec);
+    insertCommitNode(db, commit);
+    insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
+    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+
+    const entity = makeEntity({
+      name: 'uniqueName12345',  // Won't appear in any FTS
+      filePath: 'src/test.ts',   // Doesn't match fragment path
+      startLine: 10,
+      endLine: 20,
+    });
+
+    const result = findSpecsByCodeSymbol(db, entity);
+    expect(result.matches).toEqual([]);
+  });
+
+  it('entity with exact file path match gets filePathScore = 1.0', () => {
+    // The SQL now computes file_path_match_level by comparing cf.file_path
+    // (the fragment's code file) against entity.filePath, so exact match gives 1.0.
+    const entity = seedSpecChain(db,
+      { id: 'exact-fp', title: 'Exact FilePath' },
+      { hash: 'ff'.repeat(20), message: 'feat: exact' },
+      { filePath: 'src/exact-match.ts', startLine: 10, endLine: 20,
+        codeDiff: '@@ -10,11 +10,11 @@\n+ chainFunction() {}' },
+    );
+
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    expect(result.matches[0]!.scoreDetail.filePathScore).toBe(1.0);
+  });
+
+  it('includes fragmentCount and commitCount in match results', () => {
+    const entity = seedSpecChain(db,
+      { id: 'count-spec', title: 'Count Spec' },
+      { hash: 'gg'.repeat(20), message: 'feat: count' },
+      { filePath: 'src/test.ts', codeDiff: '@@ -10,11 +10,11 @@\n+ chainFunction() {}' },
+    );
+
+    const result = findSpecsByCodeSymbol(db, entity);
+
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    expect(result.matches[0]!.fragmentCount).toBeGreaterThanOrEqual(1);
+    expect(result.matches[0]!.commitCount).toBeGreaterThanOrEqual(1);
   });
 });

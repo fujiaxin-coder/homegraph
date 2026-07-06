@@ -1,5 +1,5 @@
 -- Commit4Spec Schema for HomeGraph
--- Version 1
+-- Version 2
 --
 -- Independent tables that coexist alongside HomeGraph's `nodes`/`edges`
 -- core graph. These tables form a three-layer Spec→Commit→CodeFragment
@@ -78,6 +78,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS specs_fts USING fts5(
     subtitles
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS code_fragments_fts USING fts5(
+    id,
+    file_path,
+    code_diff
+);
+
 -- =============================================================================
 -- Indexes
 -- =============================================================================
@@ -86,6 +92,7 @@ CREATE INDEX IF NOT EXISTS idx_spec_nodes_status ON spec_nodes(status);
 CREATE INDEX IF NOT EXISTS idx_spec_nodes_file_path ON spec_nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_commit_nodes_timestamp ON commit_nodes(timestamp);
 CREATE INDEX IF NOT EXISTS idx_code_fragment_file_path ON code_fragment_nodes(file_path);
+CREATE INDEX IF NOT EXISTS idx_code_fragment_path_lines ON code_fragment_nodes(file_path, start_line, end_line);
 CREATE INDEX IF NOT EXISTS idx_scr_spec_id ON spec_commit_relations(spec_id);
 CREATE INDEX IF NOT EXISTS idx_scr_commit_hash ON spec_commit_relations(commit_hash);
 CREATE INDEX IF NOT EXISTS idx_cfr_commit_hash ON commit_fragment_relations(commit_hash);
@@ -105,3 +112,6 @@ CREATE TABLE IF NOT EXISTS spec_schema_versions (
 
 INSERT OR IGNORE INTO spec_schema_versions (version, applied_at, description)
 VALUES (1, strftime('%s', 'now') * 1000, 'Initial Commit4Spec schema');
+
+INSERT OR IGNORE INTO spec_schema_versions (version, applied_at, description)
+VALUES (2, strftime('%s', 'now') * 1000, 'Add code_fragments_fts for content-based fragment search');

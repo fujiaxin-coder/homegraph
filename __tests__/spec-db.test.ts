@@ -42,6 +42,7 @@ import {
   segmentCjk,
   escapeFtsQuery,
   searchSpecs,
+  searchCodeFragments,
 } from '../src/spec/db/fts';
 import { SpecNode, CommitNode, CodeFragmentNode } from '../src/spec/types';
 
@@ -244,18 +245,18 @@ describe('Spec Schema (schema.ts)', () => {
     expect(getCurrentSpecVersion(db)).toBe(0);
   });
 
-  it('getCurrentSpecVersion returns 1 after schema init', () => {
+  it('getCurrentSpecVersion returns 2 after schema init', () => {
     initSpecSchema(db);
-    expect(getCurrentSpecVersion(db)).toBe(1);
+    expect(getCurrentSpecVersion(db)).toBe(2);
   });
 
-  it('CURRENT_SPEC_SCHEMA_VERSION constant equals 1', () => {
-    expect(CURRENT_SPEC_SCHEMA_VERSION).toBe(1);
+  it('CURRENT_SPEC_SCHEMA_VERSION constant equals 2', () => {
+    expect(CURRENT_SPEC_SCHEMA_VERSION).toBe(2);
   });
 
-  it('runSpecMigrations does not throw (no pending migrations for v1)', () => {
+  it('runSpecMigrations does not throw (no pending migrations for v2)', () => {
     initSpecSchema(db);
-    expect(() => runSpecMigrations(db, 1)).not.toThrow();
+    expect(() => runSpecMigrations(db, 2)).not.toThrow();
   });
 });
 
@@ -1081,5 +1082,119 @@ describe('FTS (fts.ts)', () => {
         expect(exactResult._score).toBeGreaterThanOrEqual(partialResult._score);
       }
     });
+  });
+});
+
+// ===========================================================================
+// 7. Code Fragment FTS5 Search (searchCodeFragments)
+// ===========================================================================
+
+describe('searchCodeFragments', () => {
+  let db: SqliteDatabase;
+
+  beforeEach(() => {
+    db = createTestDb();
+    initSpecSchema(db);
+  });
+
+  it('returns empty array on empty database', () => {
+    const results = searchCodeFragments(db, 'authenticate');
+    expect(results).toEqual([]);
+  });
+
+  it('returns empty array for empty query', () => {
+    insertCodeFragment(db, makeFragment({
+      filePath: 'src/auth.ts',
+      codeDiff: '@@ -1,5 +1,6 @@\n+function authenticate() {',
+    }));
+
+    const results = searchCodeFragments(db, '');
+    expect(results).toEqual([]);
+  });
+
+  it('finds fragments by function name in code diff', () => {
+    const frag1 = insertCodeFragment(db, makeFragment({
+      filePath: 'src/auth.ts',
+      codeDiff: '@@ -1,5 +1,6 @@\n+function authenticate() {\n+  return true;\n+}',
+    }));
+    insertCodeFragment(db, makeFragment({
+      filePath: 'src/log.ts',
+      codeDiff: '@@ -10,5 +10,6 @@\n+function logMessage(msg) {',
+    }));
+
+    const results = searchCodeFragments(db, 'authenticate');
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results).toContain(frag1.id);
+  });
+
+  it('finds fragments by class name in code diff', () => {
+    const frag = insertCodeFragment(db, makeFragment({
+      filePath: 'src/user.ts',
+      codeDiff: '@@ -1,3 +1,10 @@\n+class UserService {\n+  getUser() {}\n+}',
+    }));
+
+    const results = searchCodeFragments(db, 'UserService');
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results).toContain(frag.id);
+  });
+
+  it('inserting a fragment populates code_fragments_fts index', () => {
+    const frag = insertCodeFragment(db, makeFragment({
+      filePath: 'src/calc.ts',
+      codeDiff: '@@ -5,3 +5,7 @@\n+function calculateTotal(items) {',
+    }));
+
+    // Verify the FTS index contains the fragment
+    const ftsRow = db
+      .prepare('SELECT id FROM code_fragments_fts WHERE id = ?')
+      .get(frag.id) as { id: string } | undefined;
+    expect(ftsRow).toBeDefined();
+    expect(ftsRow!.id).toBe(frag.id);
+  });
+
+  it('re-inserting a fragment replaces its FTS entry (DELETE + INSERT pattern)', () => {
+    // The fragment-node.ts now uses DELETE + INSERT (not INSERT OR REPLACE)
+    // which properly replaces the FTS entry without accumulating stale rows.
+    const frag = makeFragment({
+      filePath: 'src/dup.ts',
+      codeDiff: '@@ -1,3 +1,5 @@\n+function handleDuplicate() {}',
+    });
+
+    const explicitId = 'deadbeef1234';
+    insertCodeFragment(db, { ...frag, id: explicitId });
+    insertCodeFragment(db, { ...frag, id: explicitId });
+
+    // After DELETE + INSERT, FTS should have exactly one entry
+    const rows = db
+      .prepare('SELECT COUNT(*) as cnt FROM code_fragments_fts WHERE id = ?')
+      .get(explicitId) as { cnt: number };
+    expect(rows.cnt).toBe(1);
+  });
+
+  it('returns fragment IDs ordered by FTS5 relevance rank', () => {
+    // Fragment with more occurrences of the search term should rank higher
+    const frag1 = insertCodeFragment(db, makeFragment({
+      filePath: 'src/a.ts',
+      codeDiff: '@@ -1,3 +1,3 @@\n+function validatePassword() {}\n+// validatePassword checks input',
+    }));
+    const frag2 = insertCodeFragment(db, makeFragment({
+      filePath: 'src/b.ts',
+      codeDiff: '@@ -1,2 +1,2 @@\n+validatePassword(input);\n+',
+    }));
+
+    const results = searchCodeFragments(db, 'validatePassword');
+    // Both should be found, and frag1 should rank before frag2 (more matches)
+    expect(results.length).toBeGreaterThanOrEqual(2);
+    expect(results[0]).toBe(frag1.id);
+  });
+
+  it('returns empty array when query does not match any fragment', () => {
+    insertCodeFragment(db, makeFragment({
+      filePath: 'src/a.ts',
+      codeDiff: '@@ -1,3 +1,3 @@\n+function foo() {}',
+    }));
+
+    const results = searchCodeFragments(db, 'nonexistent_function');
+    expect(results).toEqual([]);
   });
 });

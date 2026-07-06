@@ -2295,6 +2295,195 @@ specCommand
   });
 
 /**
+ * homegraph spec trace <symbol>
+ */
+specCommand
+  .command('trace <symbol>')
+  .description('Trace a code symbol back to its associated design Specs')
+  .option('-f, --file <path>', 'File path for symbol disambiguation')
+  .option('-l, --line <number>', 'Line number for symbol disambiguation')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('--top-k <number>', 'Number of results to return', '10')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (symbol: string, options: {
+    file?: string;
+    line?: string;
+    path?: string;
+    dbPath?: string;
+    topK?: string;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    let cg: import('../index').HomeGraph | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+      // isNaN check so --line 0 is handled correctly (parseInt('0') → 0 is falsy)
+      const lineRaw = options.line !== undefined ? parseInt(options.line, 10) : NaN;
+      const line = isNaN(lineRaw) ? undefined : lineRaw;
+
+      // Open HomeGraph code index
+      const { default: HomeGraph } = await import('../index');
+      cg = await HomeGraph.open(repoPath);
+
+      // Inline symbol resolution (mirrors findSymbolMatches in tools.ts)
+      const isQualified = /[.\/]|::/.test(symbol);
+      const { isGeneratedFile } = await import('../extraction/generated-detection');
+      let nodes: Array<{ name: string; qualifiedName: string; kind: string; filePath: string; startLine: number; endLine: number }> = [];
+
+      if (!isQualified) {
+        const exact = cg.getNodesByName(symbol);
+        if (exact.length > 0) {
+          nodes = [...exact].sort((a, b) => (isGeneratedFile(a.filePath) ? 1 : 0) - (isGeneratedFile(b.filePath) ? 1 : 0));
+        } else {
+          const fuzzy = cg.searchNodes(symbol, { limit: 10 });
+          if (fuzzy[0]) nodes = [fuzzy[0].node];
+        }
+      } else {
+        let results = cg.searchNodes(symbol, { limit: 50 });
+        if (results.length === 0) {
+          const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
+          const tail = parts[parts.length - 1];
+          if (tail && tail !== symbol) results = cg.searchNodes(tail, { limit: 50 });
+        }
+
+        // Rough matchesSymbol equivalent for CLI
+        const exactMatches = results.filter((r) => {
+          const n = r.node;
+          if (n.name === symbol) return true;
+          const fileBase = n.filePath.split('/').pop()?.replace(/\.[^.]+$/, '');
+          if (fileBase === symbol) return true;
+          const parts = symbol.split(/::|[./]/);
+          if (parts[parts.length - 1] === n.name) {
+            const firstPart = parts[0]!;
+            if (n.qualifiedName.includes(firstPart)) return true;
+            if (n.filePath.includes(firstPart)) return true;
+            return parts.length === 1;
+          }
+          return false;
+        });
+
+        if (exactMatches.length > 0) {
+          nodes = exactMatches
+            .sort((a, b) => (isGeneratedFile(a.node.filePath) ? 1 : 0) - (isGeneratedFile(b.node.filePath) ? 1 : 0))
+            .map((r) => r.node);
+        }
+      }
+
+      if (nodes.length === 0) {
+        console.log(chalk.yellow(`No code entities found for symbol "${symbol}".`));
+        return;
+      }
+
+      // Disambiguate
+      if (options.file) {
+        // Use endsWith for precise file name matching (not substring matching)
+        const filePattern = options.file!;
+        nodes = nodes.filter((n) => n.filePath.endsWith(filePattern));
+      }
+      if (line !== undefined && nodes.length > 1) {
+        const closest = nodes.reduce((best, n) => {
+          const bestDist = Math.abs(best.startLine - line!) + Math.abs(best.endLine - line!);
+          const curDist = Math.abs(n.startLine - line!) + Math.abs(n.endLine - line!);
+          return curDist < bestDist ? n : best;
+        });
+        nodes = [closest];
+      }
+
+      const node = nodes[0];
+      if (!node) {
+        console.log(chalk.yellow(`Could not resolve symbol "${symbol}" to a specific code entity.`));
+        return;
+      }
+      // Open Spec database
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+      const { findSpecsByCodeSymbol } = await import('../spec/graph/queries');
+      const { initSpecSchema, runSpecMigrations, getCurrentSpecVersion, CURRENT_SPEC_SCHEMA_VERSION } = await import('../spec/db/schema');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+      if (!fs.existsSync(dbPath)) {
+        console.log(chalk.yellow(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`));
+        return;
+      }
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+
+      initSpecSchema(db);
+      const currentVersion = getCurrentSpecVersion(db);
+      if (currentVersion < CURRENT_SPEC_SCHEMA_VERSION) {
+        runSpecMigrations(db, currentVersion);
+      }
+
+      const topKRaw = parseInt(options.topK || '10', 10);
+      const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 10 : topKRaw, 50));
+
+      console.log(chalk.dim(`Resolved: ${node.name} (${node.kind}) in ${node.filePath}:${node.startLine}-${node.endLine}`));
+
+      const result = findSpecsByCodeSymbol(db, {
+        name: node.name,
+        qualifiedName: node.qualifiedName,
+        kind: node.kind,
+        filePath: node.filePath,
+        startLine: node.startLine,
+        endLine: node.endLine,
+      }, topK);
+
+      if (options.json) {
+        console.log(JSON.stringify({
+          symbol,
+          entity: {
+            name: node.name,
+            qualifiedName: node.qualifiedName,
+            kind: node.kind,
+            filePath: node.filePath,
+            startLine: node.startLine,
+            endLine: node.endLine,
+          },
+          matched_count: result.matches.length,
+          total_candidates: result.totalCandidates,
+          matches: result.matches.map((m) => ({
+            spec_id: m.spec.id,
+            title: m.spec.title,
+            status: m.spec.status,
+            version: m.spec.version,
+            file_path: m.spec.filePath,
+            score: Math.round(m.score * 1000) / 1000,
+            score_detail: {
+              file_path: Math.round(m.scoreDetail.filePathScore * 1000) / 1000,
+              content: Math.round(m.scoreDetail.contentScore * 1000) / 1000,
+              name: Math.round(m.scoreDetail.nameScore * 1000) / 1000,
+              recency: Math.round(m.scoreDetail.recencyScore * 1000) / 1000,
+              line_overlap: Math.round(m.scoreDetail.overlapScore * 1000) / 1000,
+            },
+            fragment_count: m.fragmentCount,
+            commit_count: m.commitCount,
+          })),
+        }, null, 2));
+      } else {
+        console.log(chalk.bold(`\n${result.matches.length} spec${result.matches.length !== 1 ? 's' : ''} matched (${result.totalCandidates} candidates):\n`));
+        for (const m of result.matches) {
+          const scoreColor = m.score >= 0.7 ? chalk.green : m.score >= 0.4 ? chalk.yellow : chalk.red;
+          console.log(`  ${chalk.cyan(m.spec.id.padEnd(14))} ${m.spec.title.padEnd(36)} ${scoreColor((m.score * 100).toFixed(1) + '%')}`);
+          console.log(chalk.dim(`    fp=${m.scoreDetail.filePathScore.toFixed(2)} content=${m.scoreDetail.contentScore.toFixed(2)} name=${m.scoreDetail.nameScore.toFixed(2)} recency=${m.scoreDetail.recencyScore.toFixed(2)} overlap=${m.scoreDetail.overlapScore.toFixed(2)}`));
+          console.log();
+        }
+        if (result.matches.length === 0) {
+          info(`No Specs found for symbol "${symbol}". Try a more specific file path or check that specs have been mined for this project.`);
+        }
+      }
+
+    } catch (err) {
+      error(`Trace failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
+      try { await cg?.close(); } catch { /* best effort */ }
+      try { db?.close(); } catch { /* best effort */ }
+    }
+  });
+
+/**
  * homegraph spec evolve
  */
 const evolveCommand = specCommand
