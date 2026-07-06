@@ -430,6 +430,14 @@ function printIndexResult(clack: typeof import('@clack/prompts'), result: IndexR
     }
   }
 
+  const ohosApiWarnings = result.errors.filter(
+    (e) => e.severity === 'warning' && e.code?.startsWith('ohos_api_')
+  );
+  if (ohosApiWarnings.length > 0) {
+    clack.log.warn('OHOS SDK API db not attached — project index is complete; explore uses project code only.');
+    clack.note(ohosApiWarnings.map((e) => e.message).join('\n'), 'OHOS API notice');
+  }
+
   const arktsDegraded = result.errors.filter((e) => e.code === 'arkts_degraded');
   if (arktsDegraded.length > 0) {
     clack.log.warn('ArkTS index quality notice — see details below.');
@@ -829,6 +837,7 @@ program
 
       const buildInfo = cg.getIndexBuildInfo();
       const reindexRecommended = cg.isIndexStale();
+      const ohosApi = cg.getOhosApiBinding();
 
       // JSON output mode
       if (options.json) {
@@ -854,6 +863,9 @@ program
           },
           worktreeMismatch: worktreeMismatch
             ? { worktreeRoot: worktreeMismatch.worktreeRoot, indexRoot: worktreeMismatch.indexRoot }
+            : null,
+          ohosApi: ohosApi
+            ? { version: ohosApi.version, packageName: ohosApi.packageName, dbPath: ohosApi.dbPath }
             : null,
           index: {
             builtWithVersion: buildInfo.version,
@@ -914,6 +926,14 @@ program
         console.log(`  ${lang.padEnd(15)} ${formatNumber(count)}`);
       }
       console.log();
+
+      if (ohosApi) {
+        console.log(chalk.bold('OHOS API Database:'));
+        console.log(`  Version:   ${ohosApi.version}`);
+        console.log(`  Package:   ${ohosApi.packageName}`);
+        console.log(`  DB:        ${ohosApi.dbPath}`);
+        console.log();
+      }
 
       // Pending changes
       const totalChanges = changes.added.length + changes.modified.length + changes.removed.length;

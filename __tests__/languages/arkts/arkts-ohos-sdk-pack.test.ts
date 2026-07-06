@@ -17,6 +17,11 @@ import {
   parseOhosToolsVersionFromName,
   resetArkTSBatch,
   resolveOhosSdkInput,
+  detectOhosCompileSdkVersion,
+  isOhosApiFilePath,
+  markOhosApiFilePath,
+  normalizeOhosApiVersion,
+  parseJson5Minimal,
 } from '../../../src/extraction/languages/arkts';
 
 const tempDirs: string[] = [];
@@ -109,6 +114,39 @@ describe('languages/arkts ohos-sdk-pack', () => {
   it('names one npm package per API version', () => {
     expect(ohosApiDbPackageName('6.0.1')).toBe('homegraph-ohos-api-db-6.0.1');
     expect(ohosApiDbPackageName('6.1.1')).toBe('homegraph-ohos-api-db-6.1.1');
+  });
+
+  it('normalizes compileSdkVersion strings', () => {
+    expect(normalizeOhosApiVersion('6.0.1(21)')).toBe('6.0.1');
+    expect(normalizeOhosApiVersion('6.1.1')).toBe('6.1.1');
+  });
+
+  it('detects compileSdkVersion from build-profile.json5', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ohos-profile-'));
+    tempDirs.push(root);
+    fs.writeFileSync(
+      path.join(root, 'build-profile.json5'),
+      `{
+  app: {
+    products: [
+      { name: "default", compileSdkVersion: "6.0.1(21)" }
+    ]
+  }
+}
+`
+    );
+    expect(detectOhosCompileSdkVersion(root)).toBe('6.0.1');
+  });
+
+  it('marks SDK API file paths for explore rendering', () => {
+    expect(markOhosApiFilePath('api/@ohos.base.d.ts')).toBe('ohos-sdk:api/@ohos.base.d.ts');
+    expect(isOhosApiFilePath('ohos-sdk:api/@ohos.base.d.ts')).toBe(true);
+    expect(isOhosApiFilePath('src/main/ets/Index.ets')).toBe(false);
+  });
+
+  it('parses minimal json5', () => {
+    const parsed = parseJson5Minimal('{ // comment\n"a": 1, }') as { a: number };
+    expect(parsed.a).toBe(1);
   });
 
   it('indexes SDK API declarations into a standalone database', async () => {

@@ -28,6 +28,7 @@ import {
 } from 'fs';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { isGeneratedFile } from '../extraction/generated-detection';
+import { isOhosApiFilePath, OHOS_API_FILE_PREFIX } from '../extraction/languages/arkts';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import {
   buildMcpQueryCacheKey,
@@ -3012,6 +3013,25 @@ export class ToolHandler {
       const fileNecessary = group.nodes.some(n =>
         entryNodeIds.has(n.id) || flow.pathNodeIds.has(n.id) || flow.uniqueNamedNodeIds.has(n.id));
       if (!fileNecessary && totalChars > budget.maxOutputChars * 0.9) continue;
+
+      if (isOhosApiFilePath(filePath)) {
+        const rel = filePath.slice(OHOS_API_FILE_PREFIX.length);
+        const syms = group.nodes
+          .filter((n) => n.kind !== 'import' && n.kind !== 'export')
+          .sort((a, b) => a.startLine - b.startLine);
+        if (syms.length === 0) continue;
+
+        lines.push(fileSectionHeader(rel, 'HarmonyOS SDK API (prebuilt db)'));
+        lines.push('');
+        for (const n of syms) {
+          const sig = n.signature || n.docstring || `${n.kind} ${n.qualifiedName || n.name}`;
+          lines.push(`\`${sig}\``);
+        }
+        lines.push('');
+        totalChars = lines.join('\n').length;
+        filesIncluded++;
+        continue;
+      }
 
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) continue;

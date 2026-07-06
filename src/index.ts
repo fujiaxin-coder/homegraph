@@ -39,7 +39,15 @@ import {
   initGrammars,
 } from './extraction';
 import { bindExtractionContext } from './extraction/context';
-import { resetArkTSBatch } from './extraction/languages/arkts';
+import {
+  bindOhosApiDbForProject,
+  restoreOhosApiDbAttach,
+  ohosApiDbPackageName,
+  resetArkTSBatch,
+  type OhosApiDbBinding,
+  OHOS_API_DB_PATH_META,
+  OHOS_API_VERSION_META,
+} from './extraction/languages/arkts';
 import {
   ReferenceResolver,
   createResolver,
@@ -190,6 +198,10 @@ export class HomeGraph {
       this.queries,
       this.traverser
     );
+    restoreOhosApiDbAttach(this.queries);
+    if (!this.queries.getOhosApiDbPath()) {
+      bindOhosApiDbForProject(this.projectRoot, this.queries);
+    }
   }
 
   /**
@@ -507,6 +519,14 @@ export class HomeGraph {
             this.queries.setMetadata('indexed_with_version', HomeGraphPackageVersion);
             this.queries.setMetadata('indexed_with_extraction_version', String(EXTRACTION_VERSION));
           } catch { /* metadata is advisory — never fail an index over it */ }
+
+          const languages = Object.entries(this.getStats().filesByLanguage)
+            .filter(([, count]) => count > 0)
+            .map(([lang]) => lang);
+          const ohosBinding = bindOhosApiDbForProject(this.projectRoot, this.queries, languages);
+          if (ohosBinding && 'code' in ohosBinding) {
+            result.errors.push({ message: ohosBinding.message, severity: 'warning', code: ohosBinding.code });
+          }
         }
 
         return result;
@@ -755,6 +775,19 @@ export class HomeGraph {
     const ev = this.queries.getMetadata('indexed_with_extraction_version');
     const parsed = ev != null ? parseInt(ev, 10) : NaN;
     return { version, extractionVersion: Number.isFinite(parsed) ? parsed : null };
+  }
+
+  /** Bound OHOS API db for this project, if any. */
+  getOhosApiBinding(): OhosApiDbBinding | null {
+    const version = this.queries.getMetadata(OHOS_API_VERSION_META);
+    const dbPath = this.queries.getMetadata(OHOS_API_DB_PATH_META);
+    if (!version || !dbPath) return null;
+    return {
+      version,
+      dbPath,
+      packageName: ohosApiDbPackageName(version),
+      installed: false,
+    };
   }
 
   /**

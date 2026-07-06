@@ -2511,3 +2511,250 @@ export async function indexOhosApiDb(options: OhosApiIndexOptions): Promise<Inde
     db.close();
   }
 }
+
+// =============================================================================
+// OHOS API db consumer: compileSdkVersion detect, npm fetch, ATTACH for queries
+// =============================================================================
+
+export const OHOS_API_FILE_PREFIX = 'ohos-sdk:';
+export const OHOS_API_VERSION_META = 'ohos_api_version';
+export const OHOS_API_DB_PATH_META = 'ohos_api_db_path';
+
+export interface OhosApiDbBinding {
+  version: string;
+  dbPath: string;
+  packageName: string;
+  installed: boolean;
+}
+
+export interface OhosApiDbBindingWarning {
+  message: string;
+  code: 'ohos_api_version_unknown' | 'ohos_api_install_failed' | 'ohos_api_db_missing';
+}
+
+/** Prefix applied to API db node file paths so explore can render without disk reads. */
+export function markOhosApiFilePath(relativePath: string): string {
+  return `${OHOS_API_FILE_PREFIX}${relativePath.replace(/\\/g, '/')}`;
+}
+
+export function isOhosApiFilePath(filePath: string): boolean {
+  return filePath.startsWith(OHOS_API_FILE_PREFIX);
+}
+
+/** Strip json5 comments/trailing commas enough for compileSdkVersion extraction. */
+export function parseJson5Minimal(text: string): unknown {
+  const stripped = text
+    .replace(/\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/,(\s*[}\]])/g, '$1');
+  return JSON.parse(stripped);
+}
+
+/** Normalize compileSdkVersion values like "6.0.1(21)" → "6.0.1". */
+export function normalizeOhosApiVersion(raw: unknown): string | null {
+  if (raw == null) return null;
+  if (typeof raw === 'number') {
+    const s = String(raw);
+    if (/^\d+$/.test(s) && s.length >= 8) {
+      const major = Math.floor(Number(s) / 1_000_000);
+      const minor = Math.floor((Number(s) % 1_000_000) / 1000);
+      const patch = Number(s) % 1000;
+      return `${major}.${minor}.${patch}`;
+    }
+    return null;
+  }
+  const match = String(raw).match(/(\d+\.\d+\.\d+)/);
+  return match?.[1] ?? null;
+}
+
+function findBuildProfileFiles(projectRoot: string): string[] {
+  const found: string[] = [];
+  const rootProfile = path.join(projectRoot, 'build-profile.json5');
+  if (fs.existsSync(rootProfile)) found.push(rootProfile);
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(projectRoot, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') continue;
+    const nested = path.join(projectRoot, entry.name, 'build-profile.json5');
+    if (fs.existsSync(nested)) found.push(nested);
+  }
+  return found;
+}
+
+function extractCompileSdkFromObject(obj: unknown): string | null {
+  if (!obj || typeof obj !== 'object') return null;
+  const record = obj as Record<string, unknown>;
+  for (const key of ['compileSdkVersion', 'compileSdk', 'targetSdkVersion']) {
+    const v = normalizeOhosApiVersion(record[key]);
+    if (v) return v;
+  }
+  const app = record.app;
+  if (app && typeof app === 'object') {
+    const products = (app as Record<string, unknown>).products;
+    if (Array.isArray(products)) {
+      for (const product of products) {
+        const v = extractCompileSdkFromObject(product);
+        if (v) return v;
+      }
+    }
+  }
+  for (const value of Object.values(record)) {
+    if (value && typeof value === 'object') {
+      const v = extractCompileSdkFromObject(value);
+      if (v) return v;
+    }
+  }
+  return null;
+}
+
+/** Read compileSdkVersion from build-profile.json5 (root or module). */
+export function detectOhosCompileSdkVersion(projectRoot: string): string | null {
+  const envOverride = process.env.HOMEGRAPH_OHOS_API_VERSION?.trim();
+  if (envOverride) {
+    return normalizeOhosApiVersion(envOverride) ?? envOverride;
+  }
+
+  for (const profilePath of findBuildProfileFiles(projectRoot)) {
+    try {
+      const text = fs.readFileSync(profilePath, 'utf-8');
+      const parsed = parseJson5Minimal(text);
+      const version = extractCompileSdkFromObject(parsed);
+      if (version) return version;
+    } catch {
+      const match = fs.readFileSync(profilePath, 'utf-8').match(/compileSdkVersion\s*:\s*['"]?([^'"\s,)]+)/);
+      const v = normalizeOhosApiVersion(match?.[1]);
+      if (v) return v;
+    }
+  }
+  return null;
+}
+
+export function isOhosArktsProject(projectRoot: string, languages?: string[]): boolean {
+  if (languages?.includes('arkts')) return true;
+  if (findBuildProfileFiles(projectRoot).length > 0) return true;
+  return hasEtsUnder(projectRoot, 0);
+}
+
+function hasEtsUnder(dir: string, depth: number): boolean {
+  if (depth > 4) return false;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isFile() && entry.name.endsWith('.ets')) return true;
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') continue;
+      if (hasEtsUnder(full, depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
+/** Install npm package if local db is missing; non-throwing on failure. */
+export function ensureOhosApiDb(version: string): OhosApiDbBinding | OhosApiDbBindingWarning {
+  const dbPath = ohosApiDbInstallPath(version);
+  if (fs.existsSync(dbPath)) {
+    return {
+      version,
+      dbPath,
+      packageName: ohosApiDbPackageName(version),
+      installed: false,
+    };
+  }
+
+  const packageName = ohosApiDbPackageName(version);
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-ohos-npm-'));
+  try {
+    execFileSync('npm', ['install', '--no-save', packageName], {
+      cwd: installDir,
+      stdio: 'pipe',
+      timeout: 180_000,
+      env: { ...process.env, npm_config_loglevel: 'error' },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      code: 'ohos_api_install_failed',
+      message:
+        `Could not fetch ${packageName} (${msg}). ` +
+        'Explore will use project code only until the matching API db is available.',
+    };
+  } finally {
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+
+  if (!fs.existsSync(dbPath)) {
+    return {
+      code: 'ohos_api_db_missing',
+      message:
+        `${packageName} was fetched but ${ohosApiDbFilename(version)} is missing under ~/.homegraph/api/. ` +
+        'Explore will use project code only.',
+    };
+  }
+
+  return { version, dbPath, packageName, installed: true };
+}
+
+/** Detect version, ensure db, persist metadata, ATTACH — never throws. */
+export function bindOhosApiDbForProject(
+  projectRoot: string,
+  queries: QueryBuilder,
+  languages?: string[]
+): OhosApiDbBinding | OhosApiDbBindingWarning | null {
+  if (!isOhosArktsProject(projectRoot, languages)) return null;
+
+  const version = detectOhosCompileSdkVersion(projectRoot);
+  if (!version) {
+    return {
+      code: 'ohos_api_version_unknown',
+      message:
+        'HarmonyOS project detected but compileSdkVersion not found in build-profile.json5. ' +
+        'SDK API lookup disabled; project indexing continues normally.',
+    };
+  }
+
+  const ensured = ensureOhosApiDb(version);
+  if ('code' in ensured) return ensured;
+
+  try {
+    queries.attachOhosApiDb(ensured.dbPath);
+    queries.setMetadata(OHOS_API_VERSION_META, ensured.version);
+    queries.setMetadata(OHOS_API_DB_PATH_META, ensured.dbPath);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      code: 'ohos_api_db_missing',
+      message: `Failed to attach OHOS API db at ${ensured.dbPath}: ${msg}`,
+    };
+  }
+
+  return ensured;
+}
+
+/** Re-ATTACH from project metadata after reopen / new QueryBuilder. */
+export function restoreOhosApiDbAttach(queries: QueryBuilder): OhosApiDbBinding | null {
+  const dbPath = queries.getMetadata(OHOS_API_DB_PATH_META);
+  const version = queries.getMetadata(OHOS_API_VERSION_META);
+  if (!dbPath || !version || !fs.existsSync(dbPath)) return null;
+  try {
+    queries.attachOhosApiDb(dbPath);
+    return {
+      version,
+      dbPath,
+      packageName: ohosApiDbPackageName(version),
+      installed: false,
+    };
+  } catch {
+    return null;
+  }
+}
