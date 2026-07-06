@@ -4,6 +4,8 @@
  * Prepared statements for CRUD operations on the knowledge graph.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { SqliteDatabase, SqliteStatement } from './sqlite-adapter';
 import {
   Node,
@@ -21,6 +23,7 @@ import { safeJsonParse } from '../utils';
 import { kindBonus, nameMatchBonus, scorePathRelevance } from '../search/query-utils';
 import { parseQuery, boundedEditDistance } from '../search/query-parser';
 import { isGeneratedFile } from '../extraction/generated-detection';
+import { markOhosApiFilePath } from '../extraction/languages/arkts';
 
 /**
  * Path-only heuristic for files that should not be candidates for
@@ -186,6 +189,9 @@ export class QueryBuilder {
   private nodeCache: Map<string, Node> = new Map();
   private readonly maxCacheSize = 1000;
 
+  /** Attached prebuilt OHOS API db (see arkts.ts). */
+  private ohosApiDbPath: string | null = null;
+
   // Prepared statements (lazily initialized)
   private stmts: {
     insertNode?: SqliteStatement;
@@ -223,6 +229,43 @@ export class QueryBuilder {
 
   constructor(db: SqliteDatabase) {
     this.db = db;
+  }
+
+  /** Attach a versioned OHOS API db for federated symbol lookup. */
+  attachOhosApiDb(dbPath: string | null): void {
+    if (dbPath === this.ohosApiDbPath) return;
+    if (this.ohosApiDbPath) {
+      try {
+        this.db.exec('DETACH DATABASE ohos_api');
+      } catch {
+        /* already detached */
+      }
+      this.ohosApiDbPath = null;
+    }
+    if (!dbPath) return;
+    const resolved = path.resolve(dbPath);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`OHOS API db not found: ${resolved}`);
+    }
+    const escaped = resolved.replace(/'/g, "''");
+    this.db.exec(`ATTACH DATABASE '${escaped}' AS ohos_api`);
+    this.ohosApiDbPath = resolved;
+    this.stmts = {};
+    this.nodeCache.clear();
+  }
+
+  getOhosApiDbPath(): string | null {
+    return this.ohosApiDbPath;
+  }
+
+  private hasOhosApiAttached(): boolean {
+    return this.ohosApiDbPath != null;
+  }
+
+  private mapOhosApiNodeRow(row: NodeRow): Node {
+    const node = rowToNode(row);
+    node.filePath = markOhosApiFilePath(node.filePath);
+    return node;
   }
 
   /** Set the normalized project-name tokens used to down-weight non-discriminative
@@ -735,7 +778,15 @@ export class QueryBuilder {
       this.stmts.getNodesByName = this.db.prepare('SELECT * FROM nodes WHERE name = ?');
     }
     const rows = this.stmts.getNodesByName.all(name) as NodeRow[];
-    return rows.map(rowToNode);
+    const main = rows.map(rowToNode);
+    if (!this.hasOhosApiAttached()) return main;
+
+    const apiRows = this.db
+      .prepare('SELECT * FROM ohos_api.nodes WHERE name = ?')
+      .all(name) as NodeRow[];
+    const seen = new Set(main.map((n) => n.id));
+    const api = apiRows.map((r) => this.mapOhosApiNodeRow(r)).filter((n) => !seen.has(n.id));
+    return [...main, ...api];
   }
 
   /**
@@ -888,7 +939,50 @@ export class QueryBuilder {
       });
     }
 
+    if (this.hasOhosApiAttached() && text.length >= 2) {
+      results = this.mergeOhosApiTextSearch(text, { kinds, languages, limit }, results);
+    }
+
     return results;
+  }
+
+  private mergeOhosApiTextSearch(
+    text: string,
+    options: Pick<SearchOptions, 'kinds' | 'languages' | 'limit'>,
+    existing: SearchResult[]
+  ): SearchResult[] {
+    const { kinds, languages, limit = 100 } = options;
+    const seen = new Set(existing.map((r) => r.node.id));
+    const merged = [...existing];
+    const apiLimit = Math.min(20, Math.max(5, Math.floor(limit / 4)));
+
+    let sql = `
+      SELECT nodes.*, 0.9 as score
+      FROM ohos_api.nodes
+      WHERE (name LIKE ? OR qualified_name LIKE ?)
+    `;
+    const pattern = `%${text}%`;
+    const params: (string | number)[] = [pattern, pattern];
+    if (kinds && kinds.length > 0) {
+      sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+      params.push(...kinds);
+    }
+    if (languages && languages.length > 0) {
+      sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+      params.push(...languages);
+    }
+    sql += ' LIMIT ?';
+    params.push(apiLimit);
+
+    const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
+    for (const row of rows) {
+      const node = this.mapOhosApiNodeRow(row);
+      if (seen.has(node.id)) continue;
+      seen.add(node.id);
+      merged.push({ node, score: row.score });
+    }
+    merged.sort((a, b) => b.score - a.score);
+    return merged.slice(0, limit);
   }
 
   /**
@@ -1194,6 +1288,32 @@ export class QueryBuilder {
       for (const r of nameResults.slice(0, perNameLimit)) {
         seenIds.add(r.node.id);
         allResults.push(r);
+      }
+
+      if (this.hasOhosApiAttached()) {
+        let apiSql = `
+          SELECT nodes.*, 0.95 as score
+          FROM ohos_api.nodes
+          WHERE name COLLATE NOCASE = ?
+        `;
+        const apiParams: (string | number)[] = [name];
+        if (kinds && kinds.length > 0) {
+          apiSql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+          apiParams.push(...kinds);
+        }
+        if (languages && languages.length > 0) {
+          apiSql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+          apiParams.push(...languages);
+        }
+        apiSql += ' LIMIT ?';
+        apiParams.push(perNameLimit);
+        const apiRows = this.db.prepare(apiSql).all(...apiParams) as (NodeRow & { score: number })[];
+        for (const row of apiRows) {
+          const node = this.mapOhosApiNodeRow(row);
+          if (seenIds.has(node.id)) continue;
+          seenIds.add(node.id);
+          allResults.push({ node, score: row.score });
+        }
       }
     }
 
