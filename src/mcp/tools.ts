@@ -760,6 +760,48 @@ export const tools: ToolDefinition[] = [
       required: ['filePath'],
     },
   },
+  {
+    name: 'homegraph_spec_trace',
+    description:
+      'Trace a code symbol (function, method, class) back to its associated design Specs in the Commit4Spec ' +
+      'knowledge graph. Resolves the symbol via the HomeGraph code index, then matches against code-fragment ' +
+      'records in the Spec database using five-dimensional scoring: file-path match, code-diff content search ' +
+      '(FTS5), Spec title/subtitle name match, Spec recency, and line-range overlap. ' +
+      'Returns ranked Specs with score breakdowns even when exact line overlap is absent — code drifts over ' +
+      'time, so recency and content matching compensate. ' +
+      'The Spec DB defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        symbol: {
+          type: 'string',
+          description: 'Symbol name (bare or qualified). E.g. "authenticate", "AuthService.login", "auth::validate".',
+        },
+        file: {
+          type: 'string',
+          description: 'File path for disambiguation when multiple symbols share the same name (optional).',
+        },
+        line: {
+          type: 'number',
+          description: 'Line number for disambiguation (optional).',
+        },
+        repoPath: {
+          type: 'string',
+          description: 'Path to the repository root. Defaults to the current working directory.',
+        },
+        topK: {
+          type: 'number',
+          description: 'Maximum number of matching Specs to return (default: 10).',
+          default: 10,
+        },
+        dbPath: {
+          type: 'string',
+          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
+        },
+      },
+      required: ['symbol'],
+    },
+  },
 ];
 
 /**
@@ -1397,6 +1439,8 @@ export class ToolHandler {
           result = await this.handleSpecMatch(args); break;
         case 'homegraph_spec_find':
           result = await this.handleSpecFind(args); break;
+        case 'homegraph_spec_trace':
+          result = await this.handleSpecTrace(args); break;
         default:
           return this.errorResult(`Unknown tool: ${toolName}`);
       }
@@ -1437,8 +1481,8 @@ export class ToolHandler {
     // NodeKind is 'type_alias'. Without the mapping, kind: "type" silently
     // matched nothing — a filter value we advertise must work.
     const kind = rawKind === 'type' ? 'type_alias' : rawKind;
-    const rawLimit = Number(args.limit) || 10;
-    const limit = clamp(rawLimit, 1, 100);
+    const rawLimit = Number(args.limit);
+    const limit = clamp(isNaN(rawLimit) ? 10 : rawLimit, 1, 100);
 
     const results = cg.searchNodes(query, {
       limit,
@@ -4145,7 +4189,8 @@ export class ToolHandler {
 
     const repoPath = args.repoPath as string | undefined;
     const explicitDbPath = args.dbPath as string | undefined;
-    const topK = Math.max(1, Math.min(Number(args.topK) || 5, 50));
+    const topKRaw = Number(args.topK);
+    const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 5 : topKRaw, 50));
     const includeFragments = args.includeFragments !== false;
 
     // Lazily require spec modules so the MCP startup path stays lean.
@@ -4256,9 +4301,8 @@ export class ToolHandler {
         }
       }
 
-      // Fallback: hard-truncate the JSON.
-      const truncated = json.slice(0, MAX_OUTPUT_LENGTH - 3) + '...';
-      return this.textResult(truncated);
+      // Fallback: truncate at a newline to avoid broken JSON.
+      return this.textResult(this.truncateOutput(json));
     } finally {
       db.close();
     }
@@ -4311,9 +4355,200 @@ export class ToolHandler {
         results: result.results,
       };
 
-      return this.textResult(JSON.stringify(response, null, 2));
+      const json = JSON.stringify(response, null, 2);
+      if (json.length <= MAX_OUTPUT_LENGTH) {
+        return this.textResult(json);
+      }
+
+      // Truncate: reduce results
+      const slim = {
+        ...response,
+        results: response.results.slice(0, Math.max(1, Math.floor(response.results.length / 2))),
+      };
+      const slimJson = JSON.stringify(slim, null, 2);
+      if (slimJson.length <= MAX_OUTPUT_LENGTH) {
+        return this.textResult(`(Results trimmed to fit output limit)\n\n${slimJson}`);
+      }
+
+      return this.textResult(this.truncateOutput(json));
     } finally {
       db.close();
+    }
+  }
+
+  // =========================================================================
+  // handleSpecTrace — code symbol → Spec reverse trace
+  // =========================================================================
+
+  /**
+   * Trace a code symbol back to its associated Specs.
+   *
+   * Uses the HomeGraph code index to resolve the symbol to AST-level node(s),
+   * then queries the Commit4Spec knowledge graph for associated Specs via
+   * five-dimensional scoring (file-path, content FTS5, name FTS5, recency,
+   * line overlap).
+   *
+   * This bridges the two databases: homegraph.db (code entities) →
+   * commit4spec.db (Spec knowledge graph).
+   */
+  private async handleSpecTrace(args: Record<string, unknown>): Promise<ToolResult> {
+    const symbol = this.validateString(args.symbol, 'symbol');
+    if (typeof symbol !== 'string') return symbol;
+
+    const fileRaw = this.validateOptionalPath(args.file, 'file');
+    if (typeof fileRaw === 'object') return fileRaw;
+    const file: string | undefined = fileRaw;
+    const line = typeof args.line === 'number' ? args.line : undefined;
+    const repoPath = args.repoPath as string | undefined;
+    const explicitDbPath = args.dbPath as string | undefined;
+    const topKRaw = Number(args.topK);
+    const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 10 : topKRaw, 50));
+
+    // Lazily require all needed modules
+    const HomeGraph = loadHomeGraph();
+    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
+    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
+    const { findSpecsByCodeSymbol } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
+    const { initSpecSchema, runSpecMigrations, getCurrentSpecVersion, CURRENT_SPEC_SCHEMA_VERSION } = require('../spec/db/schema') as typeof import('../spec/db/schema');
+
+    // Resolve project path for the code graph
+    const projectPath = repoPath || process.cwd();
+
+    // Open the HomeGraph code index
+    let cg: HomeGraph;
+    try {
+      cg = await HomeGraph.open(projectPath);
+    } catch (err) {
+      return this.errorResult(
+        `Failed to open HomeGraph code index at "${projectPath}": ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    try {
+      // Step 1: Resolve symbol to nodes via findSymbolMatches
+      let nodes = this.findSymbolMatches(cg, symbol);
+
+      if (nodes.length === 0) {
+        await cg.close();
+        return this.textResult(JSON.stringify({
+          symbol,
+          error: `No code entities found for symbol "${symbol}".`,
+          matches: [],
+        }, null, 2));
+      }
+
+      // Disambiguate by file/line if provided
+      if (file) {
+        // Use endsWith for precise file path matching
+        nodes = nodes.filter((n) => n.filePath.endsWith(file));
+      }
+      if (line !== undefined && nodes.length > 1) {
+        const closest = nodes.reduce((best, n) => {
+          const bestDist = Math.abs(best.startLine - line!) + Math.abs(best.endLine - line!);
+          const curDist = Math.abs(n.startLine - line!) + Math.abs(n.endLine - line!);
+          return curDist < bestDist ? n : best;
+        });
+        nodes = [closest];
+      }
+
+      // Take the best disambiguated node
+      const node = nodes[0];
+      if (!node) {
+        await cg.close();
+        return this.textResult(JSON.stringify({
+          symbol,
+          error: `Could not resolve symbol "${symbol}" to a specific code entity.`,
+          matches: [],
+        }, null, 2));
+      }
+
+      // Step 2: Resolve the Spec database path
+      const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+
+      // Step 3: Open the Spec database
+      let db: SqliteDatabase;
+      try {
+        db = createDatabase(dbPath).db;
+      } catch (err) {
+        await cg.close();
+        return this.errorResult(
+          `Failed to open Commit4Spec database at "${dbPath}": ` +
+          `${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      try {
+        // Ensure schema is up to date
+        initSpecSchema(db);
+        const currentVersion = getCurrentSpecVersion(db);
+        if (currentVersion < CURRENT_SPEC_SCHEMA_VERSION) {
+          runSpecMigrations(db, currentVersion);
+        }
+
+        // Step 4: Query Specs for the code entity
+        const result = findSpecsByCodeSymbol(db, {
+          name: node.name,
+          qualifiedName: node.qualifiedName,
+          kind: node.kind,
+          filePath: node.filePath,
+          startLine: node.startLine,
+          endLine: node.endLine,
+        }, topK);
+
+        // Step 5: Serialize the response
+        const response = {
+          symbol,
+          entity: {
+            name: result.entity.name,
+            qualifiedName: result.entity.qualifiedName,
+            kind: result.entity.kind,
+            filePath: result.entity.filePath,
+            startLine: result.entity.startLine,
+            endLine: result.entity.endLine,
+          },
+          matched_count: result.matches.length,
+          total_candidates: result.totalCandidates,
+          matches: result.matches.map((m) => ({
+            spec_id: m.spec.id,
+            title: m.spec.title,
+            status: m.spec.status,
+            version: m.spec.version,
+            file_path: m.spec.filePath,
+            score: Math.round(m.score * 1000) / 1000,
+            score_detail: {
+              file_path: Math.round(m.scoreDetail.filePathScore * 1000) / 1000,
+              content: Math.round(m.scoreDetail.contentScore * 1000) / 1000,
+              name: Math.round(m.scoreDetail.nameScore * 1000) / 1000,
+              recency: Math.round(m.scoreDetail.recencyScore * 1000) / 1000,
+              line_overlap: Math.round(m.scoreDetail.overlapScore * 1000) / 1000,
+            },
+            fragment_count: m.fragmentCount,
+            commit_count: m.commitCount,
+          })),
+        };
+
+        const json = JSON.stringify(response, null, 2);
+        if (json.length <= MAX_OUTPUT_LENGTH) {
+          return this.textResult(json);
+        }
+
+        // Truncate: reduce matches
+        const slim = {
+          ...response,
+          matches: response.matches.slice(0, Math.max(1, Math.floor(topK / 2))),
+        };
+        const slimJson = JSON.stringify(slim, null, 2);
+        if (slimJson.length <= MAX_OUTPUT_LENGTH) {
+          return this.textResult(`(Results trimmed to fit output limit)\n\n${slimJson}`);
+        }
+
+        return this.textResult(this.truncateOutput(json));
+      } finally {
+        try { db.close(); } catch { /* best effort */ }
+      }
+    } finally {
+      try { await cg.close(); } catch { /* best effort */ }
     }
   }
 

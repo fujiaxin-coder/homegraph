@@ -52,6 +52,7 @@ function rowToFragment(row: FragmentNodeRow): CodeFragmentNode {
 
 /**
  * Insert a CodeFragmentNode, auto-generating an ID if the `id` field is empty.
+ * Also writes to the code_fragments_fts index for content-based search.
  */
 export function insertCodeFragment(
   db: SqliteDatabase,
@@ -74,6 +75,14 @@ export function insertCodeFragment(
     endLine: fragment.endLine,
     codeDiff: fragment.codeDiff,
   });
+
+  // Sync to FTS5 index for content-based search.
+  // DELETE + INSERT (not INSERT OR REPLACE) because code_fragments_fts is a
+  // standalone FTS5 table without UNIQUE constraints — INSERT OR REPLACE has
+  // no conflict to trigger on and would accumulate stale index entries.
+  db.prepare('DELETE FROM code_fragments_fts WHERE id = ?').run(fragment.id);
+  db.prepare('INSERT INTO code_fragments_fts (id, file_path, code_diff) VALUES (?, ?, ?)')
+    .run(fragment.id, fragment.filePath, fragment.codeDiff);
 
   return fragment;
 }
