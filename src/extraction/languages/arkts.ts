@@ -11,8 +11,9 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import {
   Scene,
   buildSceneConfigFromProject,
@@ -46,7 +47,10 @@ import {
 import type { QueryBuilder } from '../../db/queries';
 import { DatabaseConnection } from '../../db';
 import { QueryBuilder as QueryBuilderClass } from '../../db/queries';
-import { bindExtractionContext, getExtractionProjectRoot, getExtractionQueries, reportArkTSBatchProgress, setArktsBatchRunning } from '../context';
+import { bindExtractionContext, getExtractionProjectRoot, getExtractionQueries, reportArkTSBatchProgress, resetExtractionContext, setArktsBatchRunning } from '../context';
+import type { IndexProgress, IndexResult } from '../index';
+import { EXTRACTION_VERSION } from '../extraction-version';
+import { HomeGraphPackageVersion } from '../../mcp/version';
 import { generateNodeId } from '../tree-sitter-helpers';
 import { buildRelaunchArgv } from '../wasm-runtime-flags';
 
@@ -2145,5 +2149,365 @@ function buildArkTSIndex(rootDir: string, scannedFiles: Iterable<string>): ArkTS
     const message = e instanceof Error ? e.message : String(e);
     errors.push({ message: `ArkTS adapter failed: ${message}`, severity: 'error' });
     return emptyArkTSBatchIndex(errors);
+  }
+}
+
+// =============================================================================
+// OHOS SDK input resolution + prebuilt API database indexing
+// =============================================================================
+
+const OHOS_ARCHIVE_EXTENSIONS = ['.tar.gz', '.tgz', '.zip', '.tar'] as const;
+
+export class OhosSdkInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OhosSdkInputError';
+  }
+}
+
+/** Parse `6.1.1.290` or `commandline-tools-linux-x64-6.1.1.290.zip` → `6.1.1`. */
+export function parseOhosToolsVersionFromName(name: string): string | null {
+  const base = path.basename(name);
+  const withoutExt = stripOhosArchiveExtension(base);
+  const match = withoutExt.match(/(\d+\.\d+\.\d+)(?:\.\d+)?$/);
+  return match?.[1] ?? null;
+}
+
+function stripOhosArchiveExtension(filename: string): string {
+  for (const ext of OHOS_ARCHIVE_EXTENSIONS) {
+    if (filename.toLowerCase().endsWith(ext)) {
+      return filename.slice(0, -ext.length);
+    }
+  }
+  return filename;
+}
+
+export function isArchivePath(inputPath: string): boolean {
+  const lower = inputPath.toLowerCase();
+  return OHOS_ARCHIVE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+/** Locate `sdk/default` that contains `openharmony/ets` under an extracted tree. */
+export function findOhosSdkHome(searchRoot: string): string | null {
+  const resolved = path.resolve(searchRoot);
+  const direct = [
+    path.join(resolved, 'sdk', 'default'),
+    path.join(resolved, 'command-line-tools', 'sdk', 'default'),
+  ];
+  for (const candidate of direct) {
+    if (hasOpenHarmonyEts(candidate)) {
+      return candidate;
+    }
+  }
+
+  const queue: Array<{ dir: string; depth: number }> = [{ dir: resolved, depth: 0 }];
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const { dir, depth } = queue.shift()!;
+    if (seen.has(dir) || depth > 5) continue;
+    seen.add(dir);
+
+    const sdkDefault = path.join(dir, 'sdk', 'default');
+    if (hasOpenHarmonyEts(sdkDefault)) {
+      return sdkDefault;
+    }
+
+    if (depth >= 5) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      queue.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
+    }
+  }
+
+  return null;
+}
+
+export function hasOpenHarmonyEts(sdkHome: string): boolean {
+  return fs.existsSync(path.join(sdkHome, 'openharmony', 'ets'));
+}
+
+export function listOhosApiEtsRoots(sdkHome: string): string[] {
+  const roots: string[] = [];
+  const openharmony = path.join(sdkHome, 'openharmony', 'ets');
+  if (fs.existsSync(openharmony)) {
+    roots.push(openharmony);
+  }
+  const hms = path.join(sdkHome, 'hms', 'ets');
+  if (fs.existsSync(hms)) {
+    roots.push(hms);
+  }
+  return roots;
+}
+
+export interface ResolvedOhosSdkInput {
+  sdkHome: string;
+  version: string;
+  sourcePath: string;
+  /** Present when the input archive was extracted to a temp directory. */
+  cleanup?: () => void;
+}
+
+export interface ResolveOhosSdkInputOptions {
+  inputPath: string;
+  /** When set, overrides any version parsed from the path name. */
+  versionOverride?: string;
+}
+
+/** Resolve a command-line-tools archive or directory to an SDK home + API db version. */
+export function resolveOhosSdkInput(options: ResolveOhosSdkInputOptions): ResolvedOhosSdkInput {
+  const inputPath = path.resolve(options.inputPath);
+  if (!fs.existsSync(inputPath)) {
+    throw new OhosSdkInputError(`Path does not exist: ${inputPath}`);
+  }
+
+  let searchRoot = inputPath;
+  let cleanup: (() => void) | undefined;
+
+  if (fs.statSync(inputPath).isFile()) {
+    if (!isArchivePath(inputPath)) {
+      throw new OhosSdkInputError(
+        `Unsupported file type: ${path.basename(inputPath)} (expected .zip, .tar.gz, .tgz, or .tar)`
+      );
+    }
+    const extracted = extractOhosSdkArchive(inputPath);
+    searchRoot = extracted.dir;
+    cleanup = extracted.cleanup;
+  }
+
+  const sdkHome = findOhosSdkHome(searchRoot);
+  if (!sdkHome) {
+    cleanup?.();
+    throw new OhosSdkInputError(
+      `Could not find sdk/default/openharmony/ets under ${inputPath}. ` +
+        'Expected HarmonyOS command-line-tools layout.'
+    );
+  }
+
+  const version =
+    options.versionOverride?.trim() ||
+    parseOhosToolsVersionFromName(inputPath) ||
+    parseOhosToolsVersionFromName(searchRoot);
+
+  if (!version) {
+    cleanup?.();
+    throw new OhosSdkInputError(
+      'Could not determine API db version. Use a path like commandline-tools-linux-x64-6.1.1.290.zip ' +
+        'or pass the version as the second argument.'
+    );
+  }
+
+  return {
+    sdkHome,
+    version,
+    sourcePath: inputPath,
+    cleanup,
+  };
+}
+
+function extractOhosSdkArchive(archivePath: string): { dir: string; cleanup: () => void } {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-ohos-sdk-'));
+  const lower = archivePath.toLowerCase();
+
+  try {
+    if (lower.endsWith('.zip')) {
+      execFileSync('unzip', ['-q', archivePath, '-d', tempDir], { stdio: 'pipe' });
+    } else if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+      execFileSync('tar', ['-xzf', archivePath, '-C', tempDir], { stdio: 'pipe' });
+    } else if (lower.endsWith('.tar')) {
+      execFileSync('tar', ['-xf', archivePath, '-C', tempDir], { stdio: 'pipe' });
+    } else {
+      throw new OhosSdkInputError(`Unsupported archive: ${path.basename(archivePath)}`);
+    }
+  } catch (err) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new OhosSdkInputError(`Failed to extract ${archivePath}: ${msg}`);
+  }
+
+  return {
+    dir: tempDir,
+    cleanup: () => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Default filename for a versioned OHOS API db. */
+export function ohosApiDbFilename(version: string): string {
+  return `ohos-api-${version}.db`;
+}
+
+/** npm package name — one package per API version (e.g. homegraph-ohos-api-db-6.0.1). */
+export function ohosApiDbPackageName(version: string): string {
+  return `homegraph-ohos-api-db-${version}`;
+}
+
+/** Target path under ~/.homegraph/api/ for a versioned db. */
+export function ohosApiDbInstallPath(version: string): string {
+  return path.join(os.homedir(), '.homegraph', 'api', ohosApiDbFilename(version));
+}
+
+export interface OhosApiIndexOptions {
+  sdkHome: string;
+  version: string;
+  outputPath?: string;
+  onProgress?: (progress: IndexProgress) => void;
+}
+
+function scanFirstOhosApiTriggerFile(etsRoot: string): string | null {
+  let found: string | null = null;
+  function walk(dir: string): void {
+    if (found) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        walk(full);
+      } else if (entry.isFile()) {
+        const lower = entry.name.toLowerCase();
+        if (
+          lower.endsWith('.ets') ||
+          lower.endsWith('.d.ts') ||
+          lower.endsWith('.d.ets') ||
+          (lower.endsWith('.ts') && !lower.endsWith('.d.ts'))
+        ) {
+          found = path.relative(etsRoot, full).replace(/\\/g, '/');
+          return;
+        }
+      }
+    }
+  }
+  walk(etsRoot);
+  return found;
+}
+
+function countOhosApiSources(etsRoot: string): number {
+  let count = 0;
+  function walk(dir: string): void {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        walk(full);
+      } else if (entry.isFile()) {
+        const lower = entry.name.toLowerCase();
+        if (
+          lower.endsWith('.ets') ||
+          lower.endsWith('.d.ts') ||
+          lower.endsWith('.d.ets') ||
+          (lower.endsWith('.ts') && !lower.endsWith('.d.ts'))
+        ) {
+          count++;
+        }
+      }
+    }
+  }
+  walk(etsRoot);
+  return count;
+}
+
+/** Index OpenHarmony (and optional HMS) SDK API declarations into a SQLite db. */
+export async function indexOhosApiDb(options: OhosApiIndexOptions): Promise<IndexResult> {
+  const sdkHome = path.resolve(options.sdkHome);
+  if (!hasOpenHarmonyEts(sdkHome)) {
+    throw new Error(`SDK home is missing openharmony/ets: ${sdkHome}`);
+  }
+
+  const etsRoots = listOhosApiEtsRoots(sdkHome);
+  if (etsRoots.length === 0) {
+    throw new Error(`No API ets roots found under ${sdkHome}`);
+  }
+
+  const outputPath = path.resolve(
+    options.outputPath ?? path.join(process.cwd(), ohosApiDbFilename(options.version))
+  );
+  if (fs.existsSync(outputPath)) {
+    fs.unlinkSync(outputPath);
+  }
+
+  const startTime = Date.now();
+  const errors: IndexResult['errors'] = [];
+  let filesIndexed = 0;
+
+  const db = DatabaseConnection.initialize(outputPath);
+  const queries = new QueryBuilderClass(db.getDb());
+
+  try {
+    for (const etsRoot of etsRoots) {
+      const trigger = scanFirstOhosApiTriggerFile(etsRoot);
+      if (!trigger) {
+        errors.push({
+          message: `No ArkTS sources under ${etsRoot}`,
+          severity: 'warning',
+        });
+        continue;
+      }
+
+      const total = countOhosApiSources(etsRoot);
+      options.onProgress?.({
+        phase: 'arkts-batch',
+        current: 0,
+        total,
+        currentFile: etsRoot,
+        subphase: 'scene',
+      });
+
+      resetArkTSBatch();
+      resetExtractionContext();
+      bindExtractionContext(etsRoot, queries);
+      await primeArkTSBatch(etsRoot, queries, trigger);
+      filesIndexed += total;
+
+      options.onProgress?.({
+        phase: 'arkts-batch',
+        current: total,
+        total,
+        currentFile: etsRoot,
+        subphase: 'persist',
+      });
+    }
+
+    const counts = queries.getNodeAndEdgeCount();
+    queries.setMetadata('ohos_api_version', options.version);
+    queries.setMetadata('ohos_api_sdk_home', sdkHome);
+    queries.setMetadata('ohos_api_db_kind', ohosApiDbPackageName(options.version));
+    queries.setMetadata('indexed_with_version', HomeGraphPackageVersion);
+    queries.setMetadata('indexed_with_extraction_version', String(EXTRACTION_VERSION));
+
+    db.runMaintenance();
+
+    return {
+      success: errors.every((e) => e.severity !== 'error'),
+      filesIndexed,
+      filesSkipped: 0,
+      filesErrored: errors.filter((e) => e.severity === 'error').length,
+      nodesCreated: counts.nodes,
+      edgesCreated: counts.edges,
+      errors,
+      durationMs: Date.now() - startTime,
+    };
+  } finally {
+    resetArkTSBatch();
+    resetExtractionContext();
+    db.close();
   }
 }

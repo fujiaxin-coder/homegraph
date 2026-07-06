@@ -19,7 +19,7 @@
  *   homegraph callers <symbol>   Find what calls a function/method
  *   homegraph callees <symbol>   Find what a function/method calls
  *   homegraph impact <symbol>    Analyze what code is affected by changing a symbol
- *   homegraph affected [files]   Find test files affected by changes
+ *   homegraph index-api <tools>   Build OHOS API db from command-line-tools
  *   homegraph upgrade [version]  Update HomeGraph to the latest release
  */
 
@@ -2960,6 +2960,76 @@ program
     console.log(`Machine ID: ${s.machineId ?? chalk.dim('(random UUID, created on first use)')}`);
     console.log(`Config:     ${s.configPath}`);
     console.log(chalk.dim(`\nExactly what is collected (and never collected): ${TELEMETRY_DOCS}\n`));
+  });
+
+/**
+ * homegraph index-api <input> [version]
+ * Build a standalone OHOS API database from command-line-tools SDK.
+ */
+program
+  .command('index-api <input> [version]')
+  .description('Index OpenHarmony SDK API declarations into a standalone SQLite db')
+  .option('-o, --output <path>', 'Output database path')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (input: string, versionArg: string | undefined, options: { output?: string; quiet?: boolean }) => {
+    try {
+      const { resolveOhosSdkInput, ohosApiDbFilename, indexOhosApiDb } = await import(
+        '../extraction/languages/arkts'
+      );
+
+      const resolved = resolveOhosSdkInput({
+        inputPath: input,
+        versionOverride: versionArg,
+      });
+
+      const outputPath =
+        options.output ?? path.join(process.cwd(), ohosApiDbFilename(resolved.version));
+
+      if (!options.quiet) {
+        info(`SDK home: ${resolved.sdkHome}`);
+        info(`API version: ${resolved.version}`);
+        info(`Output: ${outputPath}`);
+      }
+
+      const result = await indexOhosApiDb({
+        sdkHome: resolved.sdkHome,
+        version: resolved.version,
+        outputPath,
+        onProgress: options.quiet
+          ? undefined
+          : (progress) => {
+              if (progress.phase === 'arkts-batch') {
+                const label = progress.subphase === 'scene' ? 'Scene' : 'Persist';
+                process.stdout.write(
+                  `\r${label}: ${progress.current}/${progress.total} ${progress.currentFile ?? ''}`.padEnd(80)
+                );
+              }
+            },
+      });
+
+      resolved.cleanup?.();
+
+      if (!options.quiet) {
+        process.stdout.write('\n');
+        if (result.success) {
+          info(
+            `Indexed ${result.filesIndexed} SDK files → ${result.nodesCreated} nodes, ${result.edgesCreated} edges (${result.durationMs}ms)`
+          );
+        } else {
+          error('OHOS API indexing failed');
+          for (const err of result.errors.filter((e) => e.severity === 'error')) {
+            error(err.message);
+          }
+        }
+      }
+
+      if (!result.success) {
+        process.exit(1);
+      }
+    } catch (err) {
+      error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
   });
 
 /**
