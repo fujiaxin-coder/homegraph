@@ -1,14 +1,14 @@
 /**
  * Daemon socket + lockfile path helpers — issue #411.
  *
- * One shared `codegraph serve --mcp` daemon per project root means we need a
+ * One shared `homegraph serve --mcp` daemon per project root means we need a
  * stable, project-keyed rendezvous between cooperating processes. The IPC
  * surface area is just two file paths:
  *
  *   - `daemon.sock` — Unix domain socket / named pipe the daemon listens on.
  *   - `daemon.pid` — atomic-create lockfile holding the daemon's pid + version.
  *
- * Both live under `.codegraph/` so the project-scoped uninstall (`codegraph
+ * Both live under `.homegraph/` so the project-scoped uninstall (`homegraph
  * uninit`) sweeps them up for free.
  *
  * Special-case: Unix domain socket paths have a hard length limit (~104 on
@@ -31,7 +31,7 @@
 import * as crypto from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
-import { getCodeGraphDir } from '../directory';
+import { getHomeGraphDir } from '../directory';
 
 /** Soft upper bound for in-project socket paths. */
 const POSIX_SOCKET_PATH_LIMIT = 100;
@@ -49,7 +49,7 @@ function projectHash(projectRoot: string): string {
  * path without talking to each other.
  */
 function tmpdirSocketPath(projectRoot: string): string {
-  return path.join(os.tmpdir(), `codegraph-${projectHash(projectRoot)}.sock`);
+  return path.join(os.tmpdir(), `homegraph-${projectHash(projectRoot)}.sock`);
 }
 
 /**
@@ -68,9 +68,9 @@ function tmpdirSocketPath(projectRoot: string): string {
  */
 export function getDaemonSocketCandidates(projectRoot: string): string[] {
   if (process.platform === 'win32') {
-    return [`\\\\.\\pipe\\codegraph-${projectHash(projectRoot)}`];
+    return [`\\\\.\\pipe\\homegraph-${projectHash(projectRoot)}`];
   }
-  const inProject = path.join(getCodeGraphDir(projectRoot), 'daemon.sock');
+  const inProject = path.join(getHomeGraphDir(projectRoot), 'daemon.sock');
   const tmp = tmpdirSocketPath(projectRoot);
   if (inProject.length > POSIX_SOCKET_PATH_LIMIT) return [tmp];
   return [inProject, tmp];
@@ -90,7 +90,7 @@ export function getDaemonSocketPath(projectRoot: string): string {
 
 /** Absolute path to the daemon pid lockfile for `projectRoot`. */
 export function getDaemonPidPath(projectRoot: string): string {
-  return path.join(getCodeGraphDir(projectRoot), 'daemon.pid');
+  return path.join(getHomeGraphDir(projectRoot), 'daemon.pid');
 }
 
 /** Structured contents of the pid lockfile. */

@@ -8,7 +8,7 @@
  * + node_modules), so resolution and version lookup behave hermetically.
  *
  * The download/checksum paths run against a local self-signed HTTPS server via
- * CODEGRAPH_DOWNLOAD_BASE — no real network, no published release needed. The
+ * HOMEGRAPH_DOWNLOAD_BASE — no real network, no published release needed. The
  * shim is launched with async `spawn` (not spawnSync), so the test's event loop
  * stays free to serve those requests.
  *
@@ -27,7 +27,7 @@ import type { AddressInfo } from 'net';
 
 const SHIM_SRC = path.join(__dirname, '..', 'scripts', 'npm-shim.js');
 const target = `${process.platform}-${process.arch}`;
-const asset = `codegraph-${target}.tar.gz`;
+const asset = `homegraph-${target}.tar.gz`;
 const isWindows = process.platform === 'win32';
 
 function hasOpenssl(): boolean {
@@ -39,12 +39,12 @@ function mkTmp(label: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cg-shim-${label}-`));
 }
 
-// A temp dir standing in for the installed @colbymchenry/codegraph main package.
+// A temp dir standing in for the installed homegraph main package.
 function makePkg(version = '9.9.9-test'): string {
   const dir = mkTmp('pkg');
   fs.copyFileSync(SHIM_SRC, path.join(dir, 'npm-shim.js'));
   fs.writeFileSync(path.join(dir, 'package.json'),
-    JSON.stringify({ name: '@colbymchenry/codegraph', version }) + '\n');
+    JSON.stringify({ name: 'homegraph', version }) + '\n');
   return dir;
 }
 
@@ -52,7 +52,7 @@ function makePkg(version = '9.9.9-test'): string {
 // shim found and exec'd it (and passed args through).
 function writeLauncher(binDir: string): void {
   fs.mkdirSync(binDir, { recursive: true });
-  const p = path.join(binDir, 'codegraph');
+  const p = path.join(binDir, 'homegraph');
   fs.writeFileSync(p, '#!/bin/sh\necho "FAKE_BUNDLE_RAN args:$*"\n');
   fs.chmodSync(p, 0o755);
 }
@@ -91,12 +91,12 @@ describe('npm-shim windowsHide (#1092)', () => {
 describe.skipIf(isWindows)('npm-shim launcher', () => {
   it('runs the installed optional-dependency bundle without any download', async () => {
     const pkg = makePkg();
-    const platformPkg = path.join(pkg, 'node_modules', '@colbymchenry', `codegraph-${target}`);
+    const platformPkg = path.join(pkg, 'node_modules', `homegraph-${target}`);
     writeLauncher(path.join(platformPkg, 'bin'));
     fs.writeFileSync(path.join(platformPkg, 'package.json'),
-      JSON.stringify({ name: `@colbymchenry/codegraph-${target}`, version: '9.9.9-test' }) + '\n');
+      JSON.stringify({ name: `homegraph-${target}`, version: '9.9.9-test' }) + '\n');
     const cache = mkTmp('cache');
-    const r = await runShim(pkg, ['--probe-abc'], { CODEGRAPH_INSTALL_DIR: cache });
+    const r = await runShim(pkg, ['--probe-abc'], { HOMEGRAPH_INSTALL_DIR: cache });
 
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('FAKE_BUNDLE_RAN');
@@ -110,8 +110,8 @@ describe.skipIf(isWindows)('npm-shim launcher', () => {
     const cache = mkTmp('cache');
     writeLauncher(path.join(cache, 'bundles', `${target}-1.2.3-cached`, 'bin'));
     const r = await runShim(pkg, ['--probe-xyz'], {
-      CODEGRAPH_INSTALL_DIR: cache,
-      CODEGRAPH_NO_DOWNLOAD: '1',
+      HOMEGRAPH_INSTALL_DIR: cache,
+      HOMEGRAPH_NO_DOWNLOAD: '1',
     });
 
     expect(r.status).toBe(0);
@@ -133,8 +133,8 @@ describe.skipIf(isWindows)('npm-shim launcher', () => {
     fs.mkdirSync(path.join(bundles, '.dl-inflight'), { recursive: true });
 
     const r = await runShim(pkg, ['--probe-prune'], {
-      CODEGRAPH_INSTALL_DIR: cache,
-      CODEGRAPH_NO_DOWNLOAD: '1',
+      HOMEGRAPH_INSTALL_DIR: cache,
+      HOMEGRAPH_NO_DOWNLOAD: '1',
     });
 
     expect(r.status).toBe(0);
@@ -150,13 +150,13 @@ describe.skipIf(isWindows)('npm-shim launcher', () => {
   it('prints actionable guidance and exits 1 when disabled with no bundle', async () => {
     const pkg = makePkg();
     const r = await runShim(pkg, ['--version'], {
-      CODEGRAPH_INSTALL_DIR: mkTmp('cache'),
-      CODEGRAPH_NO_DOWNLOAD: '1',
+      HOMEGRAPH_INSTALL_DIR: mkTmp('cache'),
+      HOMEGRAPH_NO_DOWNLOAD: '1',
     });
 
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(`no prebuilt bundle for ${target}`);
-    expect(r.stderr).toContain(`@colbymchenry/codegraph-${target}`);
+    expect(r.stderr).toContain(`homegraph-${target}`);
     expect(r.stderr).toContain('--registry=https://registry.npmjs.org');
     expect(r.stderr).toContain('install.sh');
   });
@@ -179,11 +179,11 @@ describe.skipIf(!CAN_NET)('npm-shim download fallback (local HTTPS)', () => {
       { stdio: 'ignore' },
     );
 
-    // Build a fake bundle archive (codegraph-<target>/bin/codegraph), like a real release asset.
+    // Build a fake bundle archive (homegraph-<target>/bin/homegraph), like a real release asset.
     const work = mkTmp('fixture');
-    writeLauncher(path.join(work, `codegraph-${target}`, 'bin'));
+    writeLauncher(path.join(work, `homegraph-${target}`, 'bin'));
     const archive = path.join(work, asset);
-    execSync(`tar -czf ${JSON.stringify(archive)} -C ${JSON.stringify(work)} codegraph-${target}`);
+    execSync(`tar -czf ${JSON.stringify(archive)} -C ${JSON.stringify(work)} homegraph-${target}`);
     fixtureBytes = fs.readFileSync(archive);
     fixtureSha = crypto.createHash('sha256').update(fixtureBytes).digest('hex');
 
@@ -206,8 +206,8 @@ describe.skipIf(!CAN_NET)('npm-shim download fallback (local HTTPS)', () => {
 
   function netEnv(cache: string): Record<string, string> {
     return {
-      CODEGRAPH_INSTALL_DIR: cache,
-      CODEGRAPH_DOWNLOAD_BASE: `https://127.0.0.1:${port}`,
+      HOMEGRAPH_INSTALL_DIR: cache,
+      HOMEGRAPH_DOWNLOAD_BASE: `https://127.0.0.1:${port}`,
       NODE_TLS_REJECT_UNAUTHORIZED: '0',
     };
   }
@@ -223,7 +223,7 @@ describe.skipIf(!CAN_NET)('npm-shim download fallback (local HTTPS)', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('FAKE_BUNDLE_RAN');
     expect(r.stdout).toContain('--probe-net');
-    expect(fs.existsSync(path.join(cache, 'bundles', `${target}-5.0.0-net`, 'bin', 'codegraph'))).toBe(true);
+    expect(fs.existsSync(path.join(cache, 'bundles', `${target}-5.0.0-net`, 'bin', 'homegraph'))).toBe(true);
   }, 20000);
 
   it('prunes older cached bundles after downloading a new one (#1074)', async () => {
@@ -240,7 +240,7 @@ describe.skipIf(!CAN_NET)('npm-shim download fallback (local HTTPS)', () => {
     expect(r.stderr).toContain('downloading');
     expect(r.stdout).toContain('FAKE_BUNDLE_RAN');
     // freshly downloaded version present, stale one pruned
-    expect(fs.existsSync(path.join(bundles, `${target}-6.0.0-new`, 'bin', 'codegraph'))).toBe(true);
+    expect(fs.existsSync(path.join(bundles, `${target}-6.0.0-new`, 'bin', 'homegraph'))).toBe(true);
     expect(fs.existsSync(path.join(bundles, `${target}-5.0.0-stale`))).toBe(false);
   }, 20000);
 

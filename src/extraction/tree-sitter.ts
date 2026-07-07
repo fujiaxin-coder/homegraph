@@ -29,6 +29,7 @@ import { AstroExtractor } from './astro-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
+import { ArkTSExtractor } from './languages/arkts';
 import {
   getAllFrameworkResolvers,
   getApplicableFrameworks,
@@ -346,12 +347,12 @@ export class TreeSitterExtractor {
   private nodes: Node[] = [];
   private edges: Edge[] = [];
   private unresolvedReferences: UnresolvedReference[] = [];
-  // Value-reference edges (default ON; set CODEGRAPH_VALUE_REFS=0 to disable; see flushValueRefs).
+  // Value-reference edges (default ON; set HOMEGRAPH_VALUE_REFS=0 to disable; see flushValueRefs).
   // Same-file reads of file-scope const/var symbols → `references` edges so impact analysis catches
   // value consumers ("change this constant/table, affect its readers").
   private static readonly VALUE_REF_LANGS = new Set<string>(['typescript', 'javascript', 'tsx', 'go', 'python', 'rust', 'ruby', 'c', 'java', 'csharp', 'php', 'scala', 'kotlin', 'swift', 'dart', 'pascal']);
   private static readonly MAX_VALUE_REF_NODES = 20_000;
-  private readonly valueRefsEnabled = process.env.CODEGRAPH_VALUE_REFS !== '0';
+  private readonly valueRefsEnabled = process.env.HOMEGRAPH_VALUE_REFS !== '0';
   private fileScopeValues = new Map<string, string>();
   private fileScopeValueCounts = new Map<string, number>(); // file-scope nodes per name (conditional-def detection)
   private valueRefScopes: Array<{ id: string; node: SyntaxNode; name: string }> = [];
@@ -697,7 +698,7 @@ export class TreeSitterExtractor {
    * The engine doesn't edge const→consumer, so impact analysis misses "change this table, affect
    * its readers" (the ReScript-PR false positive). Same-file only (resolution is unambiguous),
    * distinctive target names only (dodges the local-shadowing precision trap documented on
-   * function_ref), deduped per (reader, target). Default on (CODEGRAPH_VALUE_REFS=0 disables) +
+   * function_ref), deduped per (reader, target). Default on (HOMEGRAPH_VALUE_REFS=0 disables) +
    * additive. Shadowed targets are pruned — see below.
    */
   private flushValueRefs(): void {
@@ -2956,7 +2957,7 @@ export class TreeSitterExtractor {
    * dynamic factory (`createService<MyServiceList>()`) turns into a callable
    * property (`api.query_apply_record(…)`). Static extraction otherwise never
    * sees that name — it's a type argument, not a declaration — so
-   * `codegraph query query_apply_record` returned nothing (issue #634). We emit
+   * `homegraph query query_apply_record` returned nothing (issue #634). We emit
    * each name as a `method` node under the type alias (qualifiedName
    * `MyServiceList::query_apply_record`) so it's searchable and resolvable as a
    * symbol. (A call through the proxy, `api.query_apply_record(…)`, still
@@ -5819,6 +5820,9 @@ export function extractFromSource(
     // Custom extractor for MyBatis mapper XML. Non-mapper XML returns just a
     // file node so the watcher tracks it without emitting symbols.
     const extractor = new MyBatisExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'arkts') {
+    const extractor = new ArkTSExtractor(filePath, source);
     result = extractor.extract();
   } else if (isFileLevelOnlyLanguage(detectedLanguage)) {
     // No symbol extraction at this stage — files are tracked at the file-record

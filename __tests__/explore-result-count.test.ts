@@ -1,5 +1,5 @@
 /**
- * codegraph_explore — the "Found N symbols across M files." header reflects the
+ * homegraph_explore — the "Found N symbols across M files." header reflects the
  * CURATED answer actually rendered, not the raw candidate gather (#1046).
  *
  * A broad natural-language query FTS-matches a huge pool of symbols ("status",
@@ -19,7 +19,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import CodeGraph from '../src/index';
+import HomeGraph from '../src/index';
 import { ToolHandler } from '../src/mcp/tools';
 
 /** Files explore rendered as ``**`<path>`**`` source sections (issue #778: bold
@@ -38,9 +38,9 @@ function headerFileCount(text: string): number | null {
   return m ? parseInt(m[1], 10) : null;
 }
 
-describe('codegraph_explore — curated result count (#1046)', () => {
+describe('homegraph_explore — curated result count (#1046)', () => {
   let testDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
   let handler: ToolHandler;
 
   beforeEach(async () => {
@@ -63,7 +63,7 @@ describe('codegraph_explore — curated result count (#1046)', () => {
         `export function status_widget_${i}() { return ${i}; }\n`);
     }
 
-    cg = CodeGraph.initSync(testDir, { config: { include: ['**/*.ts'], exclude: [] } });
+    cg = HomeGraph.initSync(testDir, { config: { include: ['**/*.ts'], exclude: [] } });
     await cg.indexAll();
     handler = new ToolHandler(cg);
   });
@@ -74,7 +74,7 @@ describe('codegraph_explore — curated result count (#1046)', () => {
   });
 
   it('header file count equals the number of rendered source sections', async () => {
-    const res = await handler.execute('codegraph_explore', { query: 'publish status' });
+    const res = await handler.execute('homegraph_explore', { query: 'publish status' });
     const text = res.content[0].text;
 
     const headerFiles = headerFileCount(text);

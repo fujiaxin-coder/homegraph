@@ -5,7 +5,7 @@
  * menus) split into typed, optionally qualified subdirectories. None of it yields
  * a code symbol, yet on an Android app it dominates the file count (one report:
  * 26k XML = 97% of files, 0 symbols), bloating the DB, slowing indexing, and
- * skewing explore results. CodeGraph now default-ignores the Android resource
+ * skewing explore results. HomeGraph now default-ignores the Android resource
  * type directories — `res/layout/`, `res/values/`, `res/drawable/`, … and their
  * `-<qualifier>` variants — at discovery.
  *
@@ -21,11 +21,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import CodeGraph from '../src/index';
+import HomeGraph from '../src/index';
 
 describe('Android resource XML exclusion (#1047)', () => {
   let dir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   const write = (rel: string, body: string) => {
     const p = path.join(dir, rel);
@@ -52,7 +52,7 @@ describe('Android resource XML exclusion (#1047)', () => {
     write('pom.xml', '<project><artifactId>demo</artifactId></project>\n');
     write('app/src/main/res/raw/payload.xml', '<data><item>1</item></data>\n');
 
-    cg = CodeGraph.initSync(dir);
+    cg = HomeGraph.initSync(dir);
     await cg.indexAll();
   });
 

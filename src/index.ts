@@ -1,5 +1,5 @@
 /**
- * CodeGraph
+ * HomeGraph
  *
  * A local-first code intelligence system that builds a semantic
  * knowledge graph from any codebase.
@@ -38,6 +38,16 @@ import {
   extractFromSource,
   initGrammars,
 } from './extraction';
+import { bindExtractionContext } from './extraction/context';
+import {
+  bindOhosApiDbForProject,
+  restoreOhosApiDbAttach,
+  ohosApiDbPackageName,
+  resetArkTSBatch,
+  type OhosApiDbBinding,
+  OHOS_API_DB_PATH_META,
+  OHOS_API_VERSION_META,
+} from './extraction/languages/arkts';
 import {
   ReferenceResolver,
   createResolver,
@@ -48,29 +58,29 @@ import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
 import { EXTRACTION_VERSION } from './extraction/extraction-version';
-import { getCodeGraphDir } from './directory';
+import { getHomeGraphDir } from './directory';
 import { deriveProjectNameTokens } from './search/query-utils';
-import { CodeGraphPackageVersion } from './mcp/version';
+import { HomeGraphPackageVersion } from './mcp/version';
 
 // Re-export types for consumers
 export * from './types';
 // Storage building blocks for embedded/SDK consumers that drive the graph
-// directly (open a DB, run prepared queries) rather than through the CodeGraph
+// directly (open a DB, run prepared queries) rather than through the HomeGraph
 // facade. Exposed from the package entry so they no longer require deep imports
 // into dist/ (issue #354).
 export { getDatabasePath, DatabaseConnection } from './db';
 export { QueryBuilder } from './db/queries';
 export {
-  getCodeGraphDir,
+  getHomeGraphDir,
   isInitialized,
-  findNearestCodeGraphRoot,
-  CODEGRAPH_DIR,
+  findNearestHomeGraphRoot,
+  HOMEGRAPH_DIR,
 } from './directory';
 export { IndexProgress, IndexResult, SyncResult } from './extraction';
 export { detectLanguage, isLanguageSupported, isGrammarLoaded, getSupportedLanguages, initGrammars, loadGrammarsForLanguages, loadAllGrammars } from './extraction';
 export { ResolutionResult } from './resolution';
 export {
-  CodeGraphError,
+  HomeGraphError,
   FileError,
   ParseError,
   DatabaseError,
@@ -88,7 +98,7 @@ export { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './
 export { MCPServer } from './mcp';
 
 /**
- * Options for initializing a new CodeGraph project
+ * Options for initializing a new HomeGraph project
  */
 export interface InitOptions {
   /** Whether to run initial indexing after init */
@@ -99,7 +109,7 @@ export interface InitOptions {
 }
 
 /**
- * Options for opening an existing CodeGraph project
+ * Options for opening an existing HomeGraph project
  */
 export interface OpenOptions {
   /** Whether to run sync if files have changed */
@@ -124,11 +134,11 @@ export interface IndexOptions {
 }
 
 /**
- * Main CodeGraph class
+ * Main HomeGraph class
  *
  * Provides the primary interface for interacting with the code knowledge graph.
  */
-export class CodeGraph {
+export class HomeGraph {
   private db: DatabaseConnection;
   private queries: QueryBuilder;
   private projectRoot: string;
@@ -158,8 +168,9 @@ export class CodeGraph {
     this.db = db;
     this.queries = queries;
     this.projectRoot = projectRoot;
+    bindExtractionContext(projectRoot, queries);
     this.fileLock = new FileLock(
-      path.join(getCodeGraphDir(projectRoot), 'codegraph.lock')
+      path.join(getHomeGraphDir(projectRoot), 'homegraph.lock')
     );
     this.wireLayers();
   }
@@ -187,12 +198,16 @@ export class CodeGraph {
       this.queries,
       this.traverser
     );
+    restoreOhosApiDbAttach(this.queries);
+    if (!this.queries.getOhosApiDbPath()) {
+      bindOhosApiDbForProject(this.projectRoot, this.queries);
+    }
   }
 
   /**
-   * Heal a stale database handle in place. If `.codegraph/` was removed and
+   * Heal a stale database handle in place. If `.homegraph/` was removed and
    * recreated at the SAME path while this instance held the DB open — a git
-   * worktree removed and re-added, or `rm -rf .codegraph` + `codegraph init` —
+   * worktree removed and re-added, or `rm -rf .homegraph` + `homegraph init` —
    * our open fd points at the now-unlinked inode and can never see the new
    * index, so every query returns the pre-removal snapshot until the process
    * restarts (#925). When that's detected, open the live file at the same path,
@@ -225,21 +240,21 @@ export class CodeGraph {
   // ===========================================================================
 
   /**
-   * Initialize a new CodeGraph project
+   * Initialize a new HomeGraph project
    *
-   * Creates the .CodeGraph directory, database, and configuration.
+   * Creates the .HomeGraph directory, database, and configuration.
    *
    * @param projectRoot - Path to the project root directory
    * @param options - Initialization options
-   * @returns A new CodeGraph instance
+   * @returns A new HomeGraph instance
    */
-  static async init(projectRoot: string, options: InitOptions = {}): Promise<CodeGraph> {
+  static async init(projectRoot: string, options: InitOptions = {}): Promise<HomeGraph> {
     await initGrammars();
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if already initialized
     if (isInitialized(resolvedRoot)) {
-      throw new Error(`CodeGraph already initialized in ${resolvedRoot}`);
+      throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
     }
 
     // Create directory structure
@@ -250,7 +265,7 @@ export class CodeGraph {
     const db = DatabaseConnection.initialize(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    const instance = new CodeGraph(db, queries, resolvedRoot);
+    const instance = new HomeGraph(db, queries, resolvedRoot);
 
     // Run initial indexing if requested
     if (options.index) {
@@ -263,12 +278,12 @@ export class CodeGraph {
   /**
    * Initialize synchronously (without indexing)
    */
-  static initSync(projectRoot: string): CodeGraph {
+  static initSync(projectRoot: string): HomeGraph {
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if already initialized
     if (isInitialized(resolvedRoot)) {
-      throw new Error(`CodeGraph already initialized in ${resolvedRoot}`);
+      throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
     }
 
     // Create directory structure
@@ -279,29 +294,29 @@ export class CodeGraph {
     const db = DatabaseConnection.initialize(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    return new CodeGraph(db, queries, resolvedRoot);
+    return new HomeGraph(db, queries, resolvedRoot);
   }
 
   /**
-   * Open an existing CodeGraph project
+   * Open an existing HomeGraph project
    *
    * @param projectRoot - Path to the project root directory
    * @param options - Open options
-   * @returns A CodeGraph instance
+   * @returns A HomeGraph instance
    */
-  static async open(projectRoot: string, options: OpenOptions = {}): Promise<CodeGraph> {
+  static async open(projectRoot: string, options: OpenOptions = {}): Promise<HomeGraph> {
     await initGrammars();
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if initialized
     if (!isInitialized(resolvedRoot)) {
-      throw new Error(`CodeGraph not initialized in ${resolvedRoot}. Run init() first.`);
+      throw new Error(`HomeGraph not initialized in ${resolvedRoot}. Run init() first.`);
     }
 
     // Validate directory structure
     const validation = validateDirectory(resolvedRoot);
     if (!validation.valid) {
-      throw new Error(`Invalid CodeGraph directory: ${validation.errors.join(', ')}`);
+      throw new Error(`Invalid HomeGraph directory: ${validation.errors.join(', ')}`);
     }
 
     // Open database
@@ -309,7 +324,7 @@ export class CodeGraph {
     const db = DatabaseConnection.open(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    const instance = new CodeGraph(db, queries, resolvedRoot);
+    const instance = new HomeGraph(db, queries, resolvedRoot);
 
     // Sync if requested
     if (options.sync) {
@@ -335,14 +350,14 @@ export class CodeGraph {
    * files is O(1) regardless of size, reclaims the disk, and sidesteps opening
    * (and running migrations against) the poisoned database entirely.
    */
-  static async recreate(projectRoot: string): Promise<CodeGraph> {
+  static async recreate(projectRoot: string): Promise<HomeGraph> {
     await initGrammars();
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if initialized — recreate REBUILDS an existing project; it is not a
     // first-time `init`.
     if (!isInitialized(resolvedRoot)) {
-      throw new Error(`CodeGraph not initialized in ${resolvedRoot}. Run init() first.`);
+      throw new Error(`HomeGraph not initialized in ${resolvedRoot}. Run init() first.`);
     }
 
     const dbPath = getDatabasePath(resolvedRoot);
@@ -355,8 +370,8 @@ export class CodeGraph {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(
         `Could not rebuild the index — the database file is in use (${reason}). ` +
-          `Stop any running CodeGraph MCP server/daemon for this project and retry, ` +
-          `or remove the ${getCodeGraphDir(resolvedRoot)} directory and run "codegraph init".`
+          `Stop any running HomeGraph MCP server/daemon for this project and retry, ` +
+          `or remove the ${getHomeGraphDir(resolvedRoot)} directory and run "homegraph init".`
       );
     }
 
@@ -364,24 +379,24 @@ export class CodeGraph {
     const db = DatabaseConnection.initialize(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    return new CodeGraph(db, queries, resolvedRoot);
+    return new HomeGraph(db, queries, resolvedRoot);
   }
 
   /**
    * Open synchronously (without sync)
    */
-  static openSync(projectRoot: string): CodeGraph {
+  static openSync(projectRoot: string): HomeGraph {
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if initialized
     if (!isInitialized(resolvedRoot)) {
-      throw new Error(`CodeGraph not initialized in ${resolvedRoot}. Run init() first.`);
+      throw new Error(`HomeGraph not initialized in ${resolvedRoot}. Run init() first.`);
     }
 
     // Validate directory structure
     const validation = validateDirectory(resolvedRoot);
     if (!validation.valid) {
-      throw new Error(`Invalid CodeGraph directory: ${validation.errors.join(', ')}`);
+      throw new Error(`Invalid HomeGraph directory: ${validation.errors.join(', ')}`);
     }
 
     // Open database
@@ -389,18 +404,18 @@ export class CodeGraph {
     const db = DatabaseConnection.open(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    return new CodeGraph(db, queries, resolvedRoot);
+    return new HomeGraph(db, queries, resolvedRoot);
   }
 
   /**
-   * Check if a directory has been initialized as a CodeGraph project
+   * Check if a directory has been initialized as a HomeGraph project
    */
   static isInitialized(projectRoot: string): boolean {
     return isInitialized(path.resolve(projectRoot));
   }
 
   /**
-   * Close the CodeGraph instance and release resources
+   * Close the HomeGraph instance and release resources
    */
   close(): void {
     this.unwatch();
@@ -494,16 +509,24 @@ export class CodeGraph {
           result.edgesCreated = after.edges - before.edges;
         }
 
-        // Stamp the index with the engine that built it, so `codegraph status`
-        // and `codegraph upgrade` can recommend a re-index when the running
+        // Stamp the index with the engine that built it, so `homegraph status`
+        // and `homegraph upgrade` can recommend a re-index when the running
         // engine produces richer extraction than the one on disk. Only on a
         // real full index — a sync touches a subset, so it must NOT advance the
         // extraction stamp (the bulk would still be stale). See extraction-version.ts.
         if (result.success && result.filesIndexed > 0) {
           try {
-            this.queries.setMetadata('indexed_with_version', CodeGraphPackageVersion);
+            this.queries.setMetadata('indexed_with_version', HomeGraphPackageVersion);
             this.queries.setMetadata('indexed_with_extraction_version', String(EXTRACTION_VERSION));
           } catch { /* metadata is advisory — never fail an index over it */ }
+
+          const languages = Object.entries(this.getStats().filesByLanguage)
+            .filter(([, count]) => count > 0)
+            .map(([lang]) => lang);
+          const ohosBinding = bindOhosApiDbForProject(this.projectRoot, this.queries, languages);
+          if (ohosBinding && 'code' in ohosBinding) {
+            result.errors.push({ message: ohosBinding.message, severity: 'warning', code: ohosBinding.code });
+          }
         }
 
         return result;
@@ -728,10 +751,17 @@ export class CodeGraph {
   /**
    * Most recent index timestamp (ms since epoch) across all tracked files, or
    * null when nothing is indexed yet. Lets library consumers check index
-   * freshness without shelling out to `codegraph status --json`. (#329)
+   * freshness without shelling out to `homegraph status --json`. (#329)
    */
   getLastIndexedAt(): number | null {
     return this.queries.getLastIndexedAt();
+  }
+
+  /**
+   * Access the underlying query layer. Used by the MCP query-cache layer.
+   */
+  getQueryBuilder(): QueryBuilder {
+    return this.queries;
   }
 
   /**
@@ -747,12 +777,25 @@ export class CodeGraph {
     return { version, extractionVersion: Number.isFinite(parsed) ? parsed : null };
   }
 
+  /** Bound OHOS API db for this project, if any. */
+  getOhosApiBinding(): OhosApiDbBinding | null {
+    const version = this.queries.getMetadata(OHOS_API_VERSION_META);
+    const dbPath = this.queries.getMetadata(OHOS_API_DB_PATH_META);
+    if (!version || !dbPath) return null;
+    return {
+      version,
+      dbPath,
+      packageName: ohosApiDbPackageName(version),
+      installed: false,
+    };
+  }
+
   /**
    * True when the on-disk index was built by an engine whose extraction is
    * older than the one now running — i.e. a re-index would add data a migration
    * can't backfill. False when there's no index yet (nothing to refresh) or the
-   * stamp is current. This is the signal behind `codegraph status`'s re-index
-   * hint and `codegraph upgrade`'s reminder.
+   * stamp is current. This is the signal behind `homegraph status`'s re-index
+   * hint and `homegraph upgrade`'s reminder.
    */
   isIndexStale(): boolean {
     if (this.queries.getLastIndexedAt() == null) return false;
@@ -823,8 +866,8 @@ export class CodeGraph {
 
   /**
    * Active SQLite backend for this project's connection (`node-sqlite` — Node's
-   * built-in real-SQLite module). Surfaced via `codegraph status` and the
-   * `codegraph_status` MCP tool alongside the effective journal mode.
+   * built-in real-SQLite module). Surfaced via `homegraph status` and the
+   * `homegraph_status` MCP tool alongside the effective journal mode.
    */
   getBackend(): import('./db').SqliteBackend {
     return this.db.getBackend();
@@ -834,7 +877,7 @@ export class CodeGraph {
    * The journal mode actually in effect ('wal', 'delete', …). 'wal' means
    * readers never block on a concurrent writer; anything else means they can,
    * which is the precondition for the "database is locked" failures in issue
-   * #238. Surfaced via `codegraph status` and the `codegraph_status` MCP tool.
+   * #238. Surfaced via `homegraph status` and the `homegraph_status` MCP tool.
    */
   getJournalMode(): string {
     return this.db.getJournalMode();
@@ -896,9 +939,9 @@ export class CodeGraph {
    * Find the project's "primary route file" — the file with the densest
    * concentration of framework-emitted `route` nodes (≥3 routes, ≥30%
    * of all non-test routes). Used to inline the routing config in
-   * `codegraph_explore` responses on small realworld template repos
+   * `homegraph_explore` responses on small realworld template repos
    * (rails-realworld, laravel-realworld, drupal-admintoolbar, …) where
-   * Glob+Read of `routes.rb`/`urls.py`/etc. otherwise beats codegraph.
+   * Glob+Read of `routes.rb`/`urls.py`/etc. otherwise beats homegraph.
    */
   getTopRouteFile(): { filePath: string; routeCount: number; totalRoutes: number } | null {
     return this.queries.getTopRouteFile();
@@ -1223,6 +1266,7 @@ export class CodeGraph {
    */
   clear(): void {
     this.queries.clear();
+    resetArkTSBatch();
   }
 
   /**
@@ -1234,10 +1278,10 @@ export class CodeGraph {
   }
 
   /**
-   * Completely remove CodeGraph from the project.
-   * This closes the database and deletes the .CodeGraph directory.
+   * Completely remove HomeGraph from the project.
+   * This closes the database and deletes the .HomeGraph directory.
    *
-   * WARNING: This permanently deletes all CodeGraph data for the project.
+   * WARNING: This permanently deletes all HomeGraph data for the project.
    */
   uninitialize(): void {
     this.close();
@@ -1246,4 +1290,4 @@ export class CodeGraph {
 }
 
 // Default export
-export default CodeGraph;
+export default HomeGraph;

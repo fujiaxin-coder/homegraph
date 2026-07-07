@@ -29,6 +29,10 @@ import { stripCommentsForRegex } from './strip-comments';
 import { cFnPointerDispatchEdges } from './c-fnptr-synthesizer';
 import { goframeRouteEdges } from './goframe-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
+import {
+  findArktsEntryPageComponent,
+  findArktsLifecycleMethod,
+} from './frameworks/arkts-entry';
 
 const REGISTRAR_NAME = /^(on[A-Z]\w*|subscribe|addListener|addEventListener|register|watch|listen|addCallback)$/;
 const DISPATCHER_NAME = /(emit|trigger|notify|dispatch|fire|publish|flush)/i;
@@ -554,7 +558,7 @@ function goImplementsEdges(queries: QueryBuilder): Edge[] {
  * when the receiver type is in the SAME file — the owner lookup in
  * `tree-sitter.ts` is scoped to the file being parsed — so a cross-file method
  * is left orphaned from its type (it's still `contains`ed by its file, just not
- * its struct). That breaks `codegraph_node` member outlines, any
+ * its struct). That breaks `homegraph_node` member outlines, any
  * callers/callees/impact traversal that goes through the type's `contains`
  * edges, and the {@link goImplementsEdges} method-set computation (which derives
  * a struct's method set from those same edges, so it under-counts interfaces a
@@ -1660,6 +1664,95 @@ function svelteKitLoadEdges(ctx: ResolutionContext): Edge[] {
   return edges;
 }
 
+/** ArkTS startup + UI lifecycle: loadContent → first screen, Ability chain, aboutToAppear → build. */
+function arktsEntryEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] {
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+
+  const add = (source: string, target: string, synthesizedBy: string, extra: Record<string, string> = {}) => {
+    const key = `${source}>${target}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const targetNode = queries.getNodeById(target);
+    edges.push({
+      source,
+      target,
+      kind: 'calls',
+      provenance: 'heuristic',
+      metadata: {
+        synthesizedBy,
+        registeredAt: targetNode ? `${targetNode.filePath}:${targetNode.startLine}` : '',
+        ...extra,
+      },
+    });
+  };
+
+  for (const m of methodAndFunctionNodes(queries)) {
+    if (m.language !== 'arkts') continue;
+    const content = ctx.readFile(m.filePath);
+    if (!content) continue;
+    const lines = content.split('\n');
+    const start = Math.max((m.startLine ?? 1) - 1, 0);
+    const end = Math.min(m.endLine ?? m.startLine ?? lines.length, lines.length);
+    const body = lines.slice(start, end).join('\n');
+    const loadMatch = body.match(/loadContent\s*\(\s*['"]([^'"]+)['"]/);
+    if (!loadMatch) continue;
+    const page = loadMatch[1]!;
+    const pageComponent = findArktsEntryPageComponent(ctx, page);
+    if (pageComponent) {
+      const aboutToAppear = findArktsLifecycleMethod(ctx, pageComponent, 'aboutToAppear');
+      if (aboutToAppear) {
+        add(m.id, aboutToAppear.id, 'arkts-load-content', { page });
+      }
+    }
+  }
+
+  for (const cls of [...queries.getNodesByKind('class'), ...queries.getNodesByKind('struct')]) {
+    if (cls.language !== 'arkts') continue;
+    const methods = queries
+      .getOutgoingEdges(cls.id, ['contains'])
+      .map((e) => queries.getNodeById(e.target))
+      .filter((n): n is Node => !!n && n.kind === 'method');
+    const onCreate = methods.find((n) => n.name === 'onCreate');
+    const onWindowStageCreate = methods.find((n) => n.name === 'onWindowStageCreate');
+    if (onCreate && onWindowStageCreate) {
+      add(onCreate.id, onWindowStageCreate.id, 'arkts-lifecycle', { via: 'ability' });
+    }
+  }
+
+  for (const comp of [
+    ...queries.getNodesByKind('component'),
+    ...queries.getNodesByKind('class'),
+    ...queries.getNodesByKind('struct'),
+  ]) {
+    if (comp.language !== 'arkts') continue;
+    const owner =
+      comp.kind === 'component'
+        ? queries.getNodesByKind('struct').find(
+            (c) => c.filePath === comp.filePath && c.name === comp.name
+          ) ??
+          queries.getNodesByKind('class').find(
+            (c) => c.filePath === comp.filePath && c.name === comp.name
+          ) ??
+          comp
+        : comp;
+    const methods = queries
+      .getOutgoingEdges(owner.id, ['contains'])
+      .map((e) => queries.getNodeById(e.target))
+      .filter((n): n is Node => !!n && n.kind === 'method');
+    const build = methods.find((n) => n.name === 'build');
+    if (!build) continue;
+    for (const life of ['aboutToAppear', 'onPageShow'] as const) {
+      const lifeMethod = methods.find((n) => n.name === life);
+      if (lifeMethod) {
+        add(lifeMethod.id, build.id, 'arkts-lifecycle', { via: life });
+      }
+    }
+  }
+
+  return edges;
+}
+
 /**
  * Redux-thunk dispatch chain. `export const X = createAsyncThunk(prefix, async (a, api) => {...})`
  * (or a wrapper like trezor's `createThunk(...)`) passes the async body as an ARGUMENT, so
@@ -2730,6 +2823,7 @@ export async function synthesizeCallbackEdges(queries: QueryBuilder, ctx: Resolu
   const laravelEdges = laravelEventEdges(ctx); await yieldToLoop();
   const cFnPtrEdges = cFnPointerDispatchEdges(queries, ctx); await yieldToLoop();
   const goframeEdges = goframeRouteEdges(ctx); await yieldToLoop();
+  const arktsStartupEdges = arktsEntryEdges(queries, ctx); await yieldToLoop();
 
   const merged: Edge[] = [];
   const seen = new Set<string>();
@@ -2765,6 +2859,7 @@ export async function synthesizeCallbackEdges(queries: QueryBuilder, ctx: Resolu
     ...laravelEdges,
     ...cFnPtrEdges,
     ...goframeEdges,
+    ...arktsStartupEdges,
   ]) {
     const key = `${e.source}>${e.target}`;
     if (seen.has(key)) continue;

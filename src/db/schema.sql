@@ -1,4 +1,4 @@
--- CodeGraph SQLite Schema
+-- HomeGraph SQLite Schema
 -- Version 1
 
 -- Schema version tracking
@@ -161,3 +161,12 @@ CREATE TABLE IF NOT EXISTS project_metadata (
     value TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- MCP tool response cache (invalidated wholesale on index stamp change)
+CREATE TABLE IF NOT EXISTS mcp_query_cache (
+    cache_key   TEXT PRIMARY KEY,
+    tool        TEXT NOT NULL,
+    response    TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_query_cache_tool ON mcp_query_cache(tool);

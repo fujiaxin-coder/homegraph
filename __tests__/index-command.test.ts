@@ -1,6 +1,6 @@
 /**
- * Regression coverage for issue #874: `codegraph index` produced 0 nodes / 0
- * edges while `codegraph init` worked, and appeared to wipe the graph.
+ * Regression coverage for issue #874: `homegraph index` produced 0 nodes / 0
+ * edges while `homegraph init` worked, and appeared to wipe the graph.
  *
  * Root cause: `index` ran a full extraction against the already-populated DB
  * without clearing it first. Every file's content hash still matched, so the
@@ -13,15 +13,25 @@
  * library) is covered.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { CodeGraph } from '../src';
+import { HomeGraph } from '../src';
 import { DatabaseConnection } from '../src/db';
 
-const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
+const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
+const DIST_SCHEMA = path.resolve(__dirname, '../dist/db/schema.sql');
+const SRC_SCHEMA = path.resolve(__dirname, '../src/db/schema.sql');
+
+/** CLI init reads schema.sql from dist/ — tsc-only builds omit copy-assets. */
+beforeAll(() => {
+  if (!fs.existsSync(DIST_SCHEMA)) {
+    fs.mkdirSync(path.dirname(DIST_SCHEMA), { recursive: true });
+    fs.copyFileSync(SRC_SCHEMA, DIST_SCHEMA);
+  }
+});
 
 /** Normalize a PRAGMA read across return shapes (array | object | scalar). */
 function pragmaValue(raw: unknown, key: string): unknown {
@@ -34,13 +44,13 @@ function runCodegraph(args: string[], cwd: string): string {
   return execFileSync(process.execPath, [BIN, ...args], {
     cwd,
     encoding: 'utf-8',
-    env: { ...process.env, CODEGRAPH_NO_DAEMON: '1' },
+    env: { ...process.env, HOMEGRAPH_NO_DAEMON: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
 function graphCounts(dir: string): { nodes: number; edges: number } {
-  const cg = CodeGraph.openSync(dir);
+  const cg = HomeGraph.openSync(dir);
   try {
     const stats = cg.getStats();
     return { nodes: stats.nodeCount, edges: stats.edgeCount };
@@ -49,11 +59,11 @@ function graphCounts(dir: string): { nodes: number; edges: number } {
   }
 }
 
-describe('codegraph index — full re-index keeps the graph populated (#874)', () => {
+describe('homegraph index — full re-index keeps the graph populated (#874)', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-index-cmd-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-index-cmd-'));
     // A couple of files with a call edge so there is a non-trivial graph to
     // (fail to) reproduce.
     fs.writeFileSync(
@@ -128,7 +138,7 @@ describe('codegraph index — full re-index keeps the graph populated (#874)', (
  */
 describe('codegraph index — recovers a stale/oversized prior index (#1067)', () => {
   let tempDir: string;
-  const dbPath = (dir: string) => path.join(dir, '.codegraph', 'codegraph.db');
+  const dbPath = (dir: string) => path.join(dir, '.homegraph', 'homegraph.db');
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-index-recover-'));

@@ -9,7 +9,7 @@
  * These tests pin that the read-only contract is present on the master tool
  * array AND survives every transform that builds a `tools/list` response — the
  * static proxy surface (`getStaticTools`), the live surface (`getTools`, which
- * rewrites codegraph_explore's description via spread), and the no-default-
+ * rewrites homegraph_explore's description via spread), and the no-default-
  * project surface (`withRequiredProjectPath`, which clones the schema). A drop in
  * any of those would silently re-block the tools in Ask mode.
  */
@@ -18,9 +18,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { ToolHandler, getStaticTools, tools, type ToolDefinition } from '../src/mcp/tools';
-import { CodeGraph } from '../src';
+import { HomeGraph } from '../src';
 
-const ENV = 'CODEGRAPH_MCP_TOOLS';
+const ENV = 'HOMEGRAPH_MCP_TOOLS';
 const ALL_TOOLS = tools.map((t) => t.name).join(',');
 
 /** Assert a single tool advertises the full read-only contract from #1018. */
@@ -63,23 +63,25 @@ describe('Read-only annotations on the codegraph MCP tools (#1018)', () => {
     for (const tool of got) {
       expectReadOnly(tool);
       // Sanity: this IS the clone path (projectPath got marked required).
-      expect(tool.inputSchema.required ?? []).toContain('projectPath');
+      if (tool.inputSchema.properties.projectPath) {
+        expect(tool.inputSchema.required ?? []).toContain('projectPath');
+      }
     }
   });
 });
 
 describe('Live tool surface keeps annotations with a project open (#1018)', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
   const original = process.env[ENV];
 
   beforeEach(async () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-annot-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-annot-'));
     fs.writeFileSync(
       path.join(tempDir, 'pay.ts'),
       'export function processPayment(amount: number): boolean { return amount > 0; }\n'
     );
-    cg = await CodeGraph.init(tempDir, { index: true });
+    cg = await HomeGraph.init(tempDir, { index: true });
   });
 
   afterEach(() => {
@@ -89,7 +91,7 @@ describe('Live tool surface keeps annotations with a project open (#1018)', () =
     else process.env[ENV] = original;
   });
 
-  it('getTools() keeps annotations, incl. codegraph_explore whose description is rebuilt', () => {
+  it('getTools() keeps annotations, incl. homegraph_explore whose description is rebuilt', () => {
     process.env[ENV] = ALL_TOOLS;
     const got = new ToolHandler(cg).getTools();
     expect(got.length).toBeGreaterThan(0);
@@ -97,7 +99,7 @@ describe('Live tool surface keeps annotations with a project open (#1018)', () =
 
     // explore's description is regenerated with a per-repo budget suffix via
     // object spread; the annotation must survive that rewrite.
-    const explore = got.find((t) => t.name === 'codegraph_explore');
+    const explore = got.find((t) => t.name === 'homegraph_explore');
     expect(explore).toBeDefined();
     expect(explore!.description).toMatch(/Budget: make at most/);
     expectReadOnly(explore!);

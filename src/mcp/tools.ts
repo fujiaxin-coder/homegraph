@@ -1,18 +1,18 @@
 /**
  * MCP Tool Definitions
  *
- * Defines the tools exposed by the CodeGraph MCP server.
+ * Defines the tools exposed by the HomeGraph MCP server.
  */
 
-import type CodeGraph from '../index';
+import type HomeGraph from '../index';
 import type { QueryPool } from './query-pool';
-import { findNearestCodeGraphRoot } from '../directory';
-// Lazy-load the heavy CodeGraph chain off the MCP startup path — see the same
+import { findNearestHomeGraphRoot } from '../directory';
+// Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
 // schemas), but it must NOT drag in sqlite/query layers before the daemon binds;
-// CodeGraph is pulled in only when a tool actually opens a project. require() is
+// HomeGraph is pulled in only when a tool actually opens a project. require() is
 // sync + cached (CommonJS build).
-const loadCodeGraph = (): typeof import('../index').default =>
+const loadHomeGraph = (): typeof import('../index').default =>
   (require('../index') as typeof import('../index')).default;
 import {
   detectWorktreeIndexMismatch,
@@ -29,14 +29,37 @@ import {
 } from 'fs';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { isGeneratedFile } from '../extraction/generated-detection';
+import { isOhosApiFilePath, OHOS_API_FILE_PREFIX } from '../extraction/languages/arkts';
 import { scanDynamicDispatch } from './dynamic-boundaries';
+import {
+  buildMcpQueryCacheKey,
+  ensureMcpQueryCacheValid,
+  getMcpQueryCacheEntry,
+  isCacheableMcpTool,
+  isMcpQueryCacheEnabled,
+  setMcpQueryCacheEntry,
+} from './query-cache';
+
+/** ViewTree structural `references` vias — not UI event bindings. */
+const VIEWTREE_STRUCTURE_VIAS = new Set([
+  'child-component',
+  'state-binding',
+  'Prop',
+  'Link',
+  'builder',
+  'builder-param',
+]);
+
+// Spec knowledge-graph tooling — loaded lazily so the MCP startup path
+// doesn't pull in SQLite / spec-graph layers before the daemon binds.
+import type { SqliteDatabase } from '../db/sqlite-adapter';
 
 /**
- * An expected, recoverable "codegraph can't serve this" condition — most
+ * An expected, recoverable "homegraph can't serve this" condition — most
  * importantly a project with no index. The dispatch catch converts these to
  * SUCCESS-shaped responses (guidance text, NO isError): an `isError: true`
  * early in a session teaches the agent the toolset is broken and it stops
- * calling codegraph entirely (observed repeatedly), which is exactly wrong
+ * calling homegraph entirely (observed repeatedly), which is exactly wrong
  * for conditions the agent can simply work around (use built-in tools for
  * that codebase / pass projectPath). isError is reserved for "stop trying"
  * cases: security refusals ({@link PathRefusalError}) and genuine
@@ -80,7 +103,7 @@ const MAX_PATH_LENGTH = 4_096;
 const RUST_PATH_PREFIXES = new Set(['crate', 'super', 'self']);
 
 /**
- * Node kinds that contain other symbols. For these, `codegraph_node` with
+ * Node kinds that contain other symbols. For these, `homegraph_node` with
  * `includeCode=true` returns a structural outline (member names + signatures
  * + line numbers) instead of the full body, which for a large class is a
  * multi-thousand-character wall of source that bloats the agent's context.
@@ -96,7 +119,7 @@ function lastQualifierPart(symbol: string): string {
 }
 
 /**
- * Calculate the recommended number of codegraph_explore calls based on project size.
+ * Calculate the recommended number of homegraph_explore calls based on project size.
  * Larger codebases need more exploration calls to cover their surface area,
  * but smaller ones should use fewer to avoid unnecessary overhead.
  */
@@ -109,7 +132,7 @@ export function getExploreBudget(fileCount: number): number {
 }
 
 /**
- * Adaptive output budget for `codegraph_explore`, scaled to project size.
+ * Adaptive output budget for `homegraph_explore`, scaled to project size.
  *
  * Smaller codebases get a tighter total cap, fewer default files, smaller
  * per-file cap, and tighter clustering — so a focused query on a 100-file
@@ -259,22 +282,22 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
 }
 
 /**
- * Whether `codegraph_explore` should prefix source lines with their line
+ * Whether `homegraph_explore` should prefix source lines with their line
  * numbers (cat -n style: `<num>\t<code>`).
  *
  * Line numbers let the agent cite `file:line` straight from the explore
  * payload instead of re-Reading the file just to find a line number — the
  * dominant residual cost on precise-tracing questions (#185 follow-up).
  *
- * Defaults ON. Set `CODEGRAPH_EXPLORE_LINENUMS=0` to disable (used by the
+ * Defaults ON. Set `HOMEGRAPH_EXPLORE_LINENUMS=0` to disable (used by the
  * A/B harness to measure the payload-cost vs. read-savings tradeoff).
  */
 function exploreLineNumbersEnabled(): boolean {
-  return process.env.CODEGRAPH_EXPLORE_LINENUMS !== '0';
+  return process.env.HOMEGRAPH_EXPLORE_LINENUMS !== '0';
 }
 
 /**
- * Adaptive explore sizing (default ON). `codegraph_explore` skeletonizes OFF-SPINE
+ * Adaptive explore sizing (default ON). `homegraph_explore` skeletonizes OFF-SPINE
  * polymorphic-sibling files — a file whose class is one of ≥3 interchangeable
  * implementations of a shared interface (e.g. OkHttp's `: Interceptor` classes) —
  * to class + member signatures (bodies elided), keeping the on-spine exemplar full.
@@ -283,10 +306,10 @@ function exploreLineNumbersEnabled(): boolean {
  * search, reads flat). It is PROVABLY INERT elsewhere: distinct pipeline steps (no
  * ≥3-implementer supertype, e.g. Excalidraw's `renderStaticScene`) and on-spine
  * files keep full source — output is byte-identical to shipped on excalidraw /
- * tokio / django / vscode / gin. Set `CODEGRAPH_ADAPTIVE_EXPLORE=0` to disable.
+ * tokio / django / vscode / gin. Set `HOMEGRAPH_ADAPTIVE_EXPLORE=0` to disable.
  */
 function adaptiveExploreEnabled(): boolean {
-  return process.env.CODEGRAPH_ADAPTIVE_EXPLORE !== '0' && process.env.CODEGRAPH_ADAPTIVE_EXPLORE !== 'false';
+  return process.env.HOMEGRAPH_ADAPTIVE_EXPLORE !== '0' && process.env.HOMEGRAPH_ADAPTIVE_EXPLORE !== 'false';
 }
 
 /**
@@ -298,12 +321,12 @@ function adaptiveExploreEnabled(): boolean {
  * for a clean answer, then serve and let the reconcile finish in the background
  * (it yields to the event loop, so a concurrent read still runs).
  *
- * `CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS` overrides the default; `0` restores the
+ * `HOMEGRAPH_CATCHUP_GATE_TIMEOUT_MS` overrides the default; `0` restores the
  * old unbounded-wait behavior (always block until the reconcile completes).
  */
 const DEFAULT_CATCHUP_GATE_TIMEOUT_MS = 3000;
 function resolveCatchUpGateTimeoutMs(): number {
-  const raw = process.env.CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS;
+  const raw = process.env.HOMEGRAPH_CATCHUP_GATE_TIMEOUT_MS;
   if (raw === undefined || raw === '') return DEFAULT_CATCHUP_GATE_TIMEOUT_MS;
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return DEFAULT_CATCHUP_GATE_TIMEOUT_MS;
@@ -327,8 +350,33 @@ function numberSourceLines(slice: string, firstLineNumber: number): string {
   return out.join('\n');
 }
 
+/** Primary signature line (first line when overloads are stored newline-separated). */
+function primarySignatureLine(signature: string): string {
+  return signature.split('\n')[0]?.trim() ?? signature.trim();
+}
+
+/** Render a stored signature (single line or newline-separated overloads) for MCP output. */
+function formatNodeSignatureBlock(signature: string): string[] {
+  const lines = signature.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) {
+    return lines.length ? [`**Signature:** \`${lines[0]}\``] : [];
+  }
+  return [
+    '**Signature:**',
+    `- \`${lines[0]}\` (primary)`,
+    ...lines.slice(1).map((l) => `- \`${l}\` (overload)`),
+  ];
+}
+
+function formatInlineSignature(signature: string): string {
+  const primary = primarySignatureLine(signature);
+  const overloadCount = signature.split('\n').filter((l) => l.trim()).length - 1;
+  if (overloadCount <= 0) return primary;
+  return `${primary} (+${overloadCount} overload${overloadCount === 1 ? '' : 's'})`;
+}
+
 /**
- * Unique line-prefix for a per-file source section in codegraph_explore output.
+ * Unique line-prefix for a per-file source section in homegraph_explore output.
  * Issue #778: tool results dropped ATX headings (`####`, `##`, `###`) for bold
  * labels so Markdown-rendering MCP clients (e.g. the Claude Code VSCode
  * extension) stop blowing every header up to H1–H4. The path is bold + a code
@@ -365,7 +413,7 @@ export function formatStaleBanner(stale: PendingFile[]): string {
   });
   return (
     '⚠️ Some files referenced below were edited since the last index sync — ' +
-    'their codegraph entries may be stale:\n' +
+    'their homegraph entries may be stale:\n' +
     lines.join('\n') +
     '\nFor accurate content of those specific files, Read them directly. ' +
     'The rest of this response is fresh.'
@@ -398,11 +446,11 @@ export function formatStaleFooter(stale: PendingFile[]): string {
  * `getPendingFiles()` is empty, so the per-file banner above can't fire even
  * though the index is now FROZEN and silently drifting stale. Leads with the
  * agent-actionable instruction (Read directly) and carries the reason, which
- * already names the operator remedy (`codegraph sync` / git hooks).
+ * already names the operator remedy (`homegraph sync` / git hooks).
  */
 export function formatDegradedBanner(reason: string | null): string {
   return (
-    '⚠️ CodeGraph auto-sync is DISABLED — live file watching stopped, so the index is ' +
+    '⚠️ HomeGraph auto-sync is DISABLED — live file watching stopped, so the index is ' +
     'frozen and any file edited since then is stale here. Read files directly to confirm ' +
     'current content before relying on it.' +
     (reason ? `\n  Reason: ${reason}` : '')
@@ -473,11 +521,11 @@ export interface ToolResult {
  */
 const projectPathProperty: PropertySchema = {
   type: 'string',
-  description: 'Absolute path to the project to query (or any directory inside it) — codegraph uses the nearest .codegraph/ index at or above that path. Omit to use this session\'s default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).',
+  description: 'Absolute path to the project to query (or any directory inside it) — homegraph uses the nearest .homegraph/ index at or above that path. Omit to use this session\'s default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).',
 };
 
 /**
- * EVERY codegraph tool is query-only: it reads the pre-built index and never
+ * EVERY homegraph tool is query-only: it reads the pre-built index and never
  * mutates the workspace (indexing is the user's explicit CLI call, never the
  * agent's). Advertising this read-only contract lets clients that gate on it run
  * the tools where a possibly-mutating tool would be blocked — most concretely,
@@ -495,9 +543,9 @@ const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
 };
 
 /**
- * All CodeGraph MCP tools
+ * All HomeGraph MCP tools
  *
- * Designed for minimal context usage - use codegraph_explore as the primary tool
+ * Designed for minimal context usage - use homegraph_explore as the primary tool
  * (one call usually answers the whole question), and only use other tools for
  * targeted follow-up queries.
  *
@@ -505,8 +553,8 @@ const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
  */
 export const tools: ToolDefinition[] = [
   {
-    name: 'codegraph_search',
-    description: 'Quick symbol search by name. Returns locations only (no code). Use codegraph_explore instead to get the actual source / understand an area in one call.',
+    name: 'homegraph_search',
+    description: 'Quick symbol search by name. Returns locations only (no code). Use homegraph_explore instead to get the actual source / understand an area in one call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -531,8 +579,8 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_callers',
-    description: 'List functions that call <symbol>. For the full flow, use codegraph_explore.',
+    name: 'homegraph_callers',
+    description: 'List functions that call <symbol>. For the full flow, use homegraph_explore.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -556,8 +604,8 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_callees',
-    description: 'List functions that <symbol> calls. For the full flow, use codegraph_explore.',
+    name: 'homegraph_callees',
+    description: 'List functions that <symbol> calls. For the full flow, use homegraph_explore.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -581,7 +629,7 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_impact',
+    name: 'homegraph_impact',
     description: 'List symbols affected by changing <symbol>. Use before a refactor.',
     inputSchema: {
       type: 'object',
@@ -606,8 +654,8 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_node',
-    description: 'Two modes. (1) READ A FILE — use INSTEAD of the Read tool: pass `file` (a path or basename) with no `symbol` and it returns that file\'s current on-disk source with line numbers, exactly the shape Read gives you (`<n>\\t<line>`, safe to Edit from), narrowable with `offset`/`limit` just like Read — PLUS a one-line note of which files depend on it. Same bytes as Read, faster (served from the index), with the blast radius attached. Use it whenever you would Read a source file. (2) ONE SYMBOL you can name — its location, signature, verbatim source (includeCode=true) and caller/callee trail in one call, so before changing it you see what calls it and what your edit would break. For an AMBIGUOUS name it returns EVERY matching definition\'s body in one call (so you never Read a file to find the right overload); pass `file`/`line` to pin one. Use codegraph_explore for several related symbols or the full flow.',
+    name: 'homegraph_node',
+    description: 'Two modes. (1) READ A FILE — use INSTEAD of the Read tool: pass `file` (a path or basename) with no `symbol` and it returns that file\'s current on-disk source with line numbers, exactly the shape Read gives you (`<n>\\t<line>`, safe to Edit from), narrowable with `offset`/`limit` just like Read — PLUS a one-line note of which files depend on it. Same bytes as Read, faster (served from the index), with the blast radius attached. Use it whenever you would Read a source file. (2) ONE SYMBOL you can name — its location, signature, verbatim source (includeCode=true) and caller/callee trail in one call, so before changing it you see what calls it and what your edit would break. For an AMBIGUOUS name it returns EVERY matching definition\'s body in one call (so you never Read a file to find the right overload); pass `file`/`line` to pin one. Use homegraph_explore for several related symbols or the full flow.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -648,14 +696,14 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_explore',
+    name: 'homegraph_explore',
     description: 'PRIMARY TOOL — call FIRST for almost any question OR before an edit: how does X work, architecture, a bug, where/what is X, surveying an area, or the symbols you are about to change. Returns the verbatim source of the relevant symbols grouped by file in ONE capped call (Read-equivalent — treat the shown source as already Read; do NOT re-open those files), plus the call path among them. Query can be a natural-language question OR a bag of symbol/file names. Usually the ONLY call you need — more accurate context, in far fewer tokens and round-trips than a search/Read/Grep loop.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Symbol names, file names, or short code terms to explore (e.g., "AuthService loginUser session-manager", "GraphTraverser BFS impact traversal.ts"). For a flow question, name the symbols spanning the flow (e.g. "mutateElement renderScene"). A natural-language question works too — no prior codegraph_search needed.',
+          description: 'Symbol names, file names, or short code terms to explore (e.g., "AuthService loginUser session-manager", "GraphTraverser BFS impact traversal.ts"). For a flow question, name the symbols spanning the flow (e.g. "mutateElement renderScene"). A natural-language question works too — no prior homegraph_search needed.',
         },
         maxFiles: {
           type: 'number',
@@ -669,7 +717,7 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_status',
+    name: 'homegraph_status',
     description: 'Index health check (files / nodes / edges). Skip unless debugging.',
     inputSchema: {
       type: 'object',
@@ -680,7 +728,7 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
-    name: 'codegraph_files',
+    name: 'homegraph_files',
     description: 'Indexed file tree with language + symbol counts. Faster than Glob for project layout.',
     inputSchema: {
       type: 'object',
@@ -710,6 +758,112 @@ export const tools: ToolDefinition[] = [
         },
         projectPath: projectPathProperty,
       },
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'homegraph_spec_match',
+    description:
+      'Match a new spec/feature description against the Commit4Spec knowledge graph using FTS5 full-text search. ' +
+      'Returns the most similar historical specs with their associated commits and code fragments. ' +
+      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Spec text (title + description) to match against historical specs.',
+        },
+        repoPath: {
+          type: 'string',
+          description: 'Path to the repository root. Defaults to the current working directory.',
+        },
+        topK: {
+          type: 'number',
+          description: 'Maximum number of similar specs to return (default: 5).',
+          default: 5,
+        },
+        includeFragments: {
+          type: 'boolean',
+          description: 'Whether to include full code diffs per commit (default: true).',
+          default: true,
+        },
+        dbPath: {
+          type: 'string',
+          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
+        },
+      },
+      required: ['query'],
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'homegraph_spec_find',
+    description:
+      'Find which specs are related to the given file path by matching against code-fragment file paths ' +
+      'in the Commit4Spec knowledge graph. Traverses code_fragment_nodes → commit_fragment_relations ' +
+      '→ spec_commit_relations → spec_nodes. Useful for answering "which specs does this file affect?" ' +
+      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filePath: {
+          type: 'string',
+          description: 'File path to look up (substring LIKE match). E.g. "src/auth.ts" or "src/auth".',
+        },
+        repoPath: {
+          type: 'string',
+          description: 'Path to the repository root. Defaults to the current working directory.',
+        },
+        dbPath: {
+          type: 'string',
+          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
+        },
+      },
+      required: ['filePath'],
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'homegraph_spec_trace',
+    description:
+      'Trace a code symbol (function, method, class) back to its associated design Specs in the Commit4Spec ' +
+      'knowledge graph. Resolves the symbol via the HomeGraph code index, then matches against code-fragment ' +
+      'records in the Spec database using five-dimensional scoring: file-path match, code-diff content search ' +
+      '(FTS5), Spec title/subtitle name match, Spec recency, and line-range overlap. ' +
+      'Returns ranked Specs with score breakdowns even when exact line overlap is absent — code drifts over ' +
+      'time, so recency and content matching compensate. ' +
+      'The Spec DB defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        symbol: {
+          type: 'string',
+          description: 'Symbol name (bare or qualified). E.g. "authenticate", "AuthService.login", "auth::validate".',
+        },
+        file: {
+          type: 'string',
+          description: 'File path for disambiguation when multiple symbols share the same name (optional).',
+        },
+        line: {
+          type: 'number',
+          description: 'Line number for disambiguation (optional).',
+        },
+        repoPath: {
+          type: 'string',
+          description: 'Path to the repository root. Defaults to the current working directory.',
+        },
+        topK: {
+          type: 'number',
+          description: 'Maximum number of matching Specs to return (default: 10).',
+          default: 10,
+        },
+        dbPath: {
+          type: 'string',
+          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
+        },
+      },
+      required: ['symbol'],
     },
     annotations: READ_ONLY_ANNOTATIONS,
   },
@@ -748,46 +902,33 @@ function withRequiredProjectPath(defs: ToolDefinition[]): ToolDefinition[] {
 /**
  * Allowlist-filtered tool definitions WITHOUT an engine — the static surface the
  * proxy answers `tools/list` with before any project is open. Mirrors
- * `ToolHandler.getTools()` in the no-CodeGraph case (the dynamic per-repo budget
+ * `ToolHandler.getTools()` in the no-HomeGraph case (the dynamic per-repo budget
  * note in a description only adds once `cg` is loaded; the schemas are static).
  */
 export function getStaticTools(): ToolDefinition[] {
-  const raw = process.env.CODEGRAPH_MCP_TOOLS;
+  const raw = process.env.HOMEGRAPH_MCP_TOOLS ?? process.env.HOMEGRAPH_MCP_TOOLS;
   if (!raw || !raw.trim()) {
-    return tools.filter(t => DEFAULT_MCP_TOOLS.has(t.name.replace(/^codegraph_/, '')));
+    return tools;
   }
-  const allow = new Set(raw.split(',').map(s => s.trim().replace(/^codegraph_/, '')).filter(Boolean));
-  return allow.size ? tools.filter(t => allow.has(t.name.replace(/^codegraph_/, ''))) : tools;
+  const allow = new Set(raw.split(',').map(s => s.trim().replace(/^homegraph_/, '').replace(/^homegraph_/, '')).filter(Boolean));
+  return allow.size ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, ''))) : tools;
 }
 
 /**
- * The MCP tools served by DEFAULT (short names). Pared to ONLY `codegraph_explore`
- * — the single tool that reliably earns its place: one capped call returns the
- * verbatim source of the relevant symbols grouped by file. Every other tool is a
- * narrower slice of what explore already does, and presence itself steers
- * mis-picks, so they are no longer LISTED to agents.
- *
- * The other defined tools (`node`, `search`, `callers`, plus callees/impact/files/
- * status) remain fully functional — handlers stay, the library API and CLI are
- * untouched, and `CODEGRAPH_MCP_TOOLS=explore,node,...` re-enables any of them.
- */
-const DEFAULT_MCP_TOOLS = new Set(['explore']);
-
-/**
- * Tool handler that executes tools against a CodeGraph instance
+ * Tool handler that executes tools against a HomeGraph instance
  *
  * Supports cross-project queries via the projectPath parameter.
  * Other projects are opened on-demand and cached for performance.
  */
 export class ToolHandler {
-  // Cache of opened CodeGraph instances for cross-project queries
-  private projectCache: Map<string, CodeGraph> = new Map();
+  // Cache of opened HomeGraph instances for cross-project queries
+  private projectCache: Map<string, HomeGraph> = new Map();
   // The directory the server last searched for a default project. Surfaced in
   // the "not initialized" error so users can see why detection missed.
   private defaultProjectHint: string | null = null;
   // Per-start-path cache of the git worktree/index mismatch (issue #155). The
   // mismatch is a fixed property of (where the request came from → which
-  // .codegraph/ it resolves to), so the up-to-two `git rev-parse` spawns run
+  // .homegraph/ it resolves to), so the up-to-two `git rev-parse` spawns run
   // once and every later tool call reuses the result — never shelling out to
   // git on the hot path. `undefined` = not computed yet; `null` = no mismatch.
   private worktreeMismatchCache: Map<string, WorktreeIndexMismatch | null> = new Map();
@@ -807,7 +948,7 @@ export class ToolHandler {
   // direct/in-process mode (one client, no concurrency to parallelize).
   private queryPool: QueryPool | null = null;
 
-  constructor(private cg: CodeGraph | null) {}
+  constructor(private cg: HomeGraph | null) {}
 
   /**
    * Engine-only: attach (or detach with null) the worker-thread query pool. The
@@ -820,9 +961,9 @@ export class ToolHandler {
   }
 
   /**
-   * Update the default CodeGraph instance (e.g. after lazy initialization)
+   * Update the default HomeGraph instance (e.g. after lazy initialization)
    */
-  setDefaultCodeGraph(cg: CodeGraph): void {
+  setDefaultHomeGraph(cg: HomeGraph): void {
     this.cg = cg;
   }
 
@@ -865,8 +1006,8 @@ export class ToolHandler {
       ]);
       if (outcome === 'timeout') {
         process.stderr.write(
-          `[CodeGraph MCP] Catch-up reconcile still running after ${timeoutMs}ms; serving this tool call now and finishing the reconcile in the background (#905). ` +
-          `Set CODEGRAPH_CATCHUP_GATE_TIMEOUT_MS=0 to always wait for it.\n`
+          `[HomeGraph MCP] Catch-up reconcile still running after ${timeoutMs}ms; serving this tool call now and finishing the reconcile in the background (#905). ` +
+          `Set HOMEGRAPH_CATCHUP_GATE_TIMEOUT_MS=0 to always wait for it.\n`
         );
       }
     } finally {
@@ -883,48 +1024,48 @@ export class ToolHandler {
   }
 
   /**
-   * Whether a default CodeGraph instance is available
+   * Whether a default HomeGraph instance is available
    */
-  hasDefaultCodeGraph(): boolean {
+  hasDefaultHomeGraph(): boolean {
     return this.cg !== null;
   }
 
   /**
-   * Optional allowlist of exposed tools, parsed from the CODEGRAPH_MCP_TOOLS
-   * env var (comma-separated short names, e.g. "trace,search,node,context").
-   * Unset/empty → every tool is exposed. Lets an operator (or an A/B harness)
-   * trim the tool surface without rebuilding the client config; the ablated
-   * tool is then truly absent from ListTools rather than merely denied on call.
-   * Matching is on the short form, so "node" and "codegraph_node" both work.
+   * Optional allowlist of exposed tools, parsed from the HOMEGRAPH_MCP_TOOLS
+   * env var (comma-separated short names, e.g. "explore,search,node").
+   * Unset/empty → every tool is exposed. Set → only the listed tools are
+   * exposed. Lets an operator (or an A/B harness) trim the tool surface
+   * without rebuilding the client config; the ablated tool is then truly
+   * absent from ListTools rather than merely denied on call.
+   * Matching is on the short form, so "node" and "homegraph_node" both work.
    */
   private toolAllowlist(): Set<string> | null {
-    const raw = process.env.CODEGRAPH_MCP_TOOLS;
+    const raw = process.env.HOMEGRAPH_MCP_TOOLS ?? process.env.HOMEGRAPH_MCP_TOOLS;
     if (!raw || !raw.trim()) return null;
-    const short = (s: string) => s.trim().replace(/^codegraph_/, '');
+    const short = (s: string) => s.trim().replace(/^homegraph_/, '');
     const set = new Set(raw.split(',').map(short).filter(Boolean));
     return set.size ? set : null;
   }
 
-  /** Whether a tool name passes the CODEGRAPH_MCP_TOOLS allowlist (if any). */
+  /** Whether a tool name passes the HOMEGRAPH_MCP_TOOLS allowlist (if any). */
   private isToolAllowed(name: string): boolean {
     const allow = this.toolAllowlist();
-    return !allow || allow.has(name.replace(/^codegraph_/, ''));
+    return !allow || allow.has(name.replace(/^homegraph_/, ''));
   }
 
   /**
    * Get tool definitions with dynamic descriptions based on project size.
-   * The codegraph_explore tool description includes a budget recommendation
-   * scaled to the number of indexed files. Honors the CODEGRAPH_MCP_TOOLS
+   * The homegraph_explore tool description includes a budget recommendation
+   * scaled to the number of indexed files. Honors the HOMEGRAPH_MCP_TOOLS
    * allowlist so a trimmed surface is reflected in ListTools.
    */
   getTools(): ToolDefinition[] {
     const allow = this.toolAllowlist();
-    // No explicit allowlist → the default 4-tool surface (see
-    // DEFAULT_MCP_TOOLS for the evidence). An allowlist replaces the
-    // default entirely, so any defined tool can be re-enabled.
+    // No explicit allowlist → expose every defined tool. An allowlist trims
+    // the surface to only the listed short names.
     let visible = allow
-      ? tools.filter(t => allow.has(t.name.replace(/^codegraph_/, '')))
-      : tools.filter(t => DEFAULT_MCP_TOOLS.has(t.name.replace(/^codegraph_/, '')));
+      ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, '')))
+      : tools;
     // No default project loaded → no-root-index case (#993): a gateway server
     // started outside any repo, or a monorepo root whose indexes live in
     // sub-projects. With nothing to fall back to, EVERY call needs an explicit
@@ -950,7 +1091,7 @@ export class ToolHandler {
       // n=2 audits ruled out cutting below 5 tools:
       // - 3-tool gate (search + context + trace): cost regressed on
       //   cobra/ky/sinatra. The agent fell back to raw Reads to cover
-      //   what codegraph_node + codegraph_explore would have answered.
+      //   what homegraph_node + homegraph_explore would have answered.
       // - 1-tool gate (search only): catastrophic regression — express
       //   went from -43% WIN to +107% LOSS. With only search, the agent
       //   can't navigate the call graph structurally and reads everything.
@@ -966,16 +1107,16 @@ export class ToolHandler {
       // so it deserves the same gating.
       const TINY_REPO_FILE_THRESHOLD = 500;
       const TINY_REPO_CORE_TOOLS = new Set([
-        'codegraph_explore',
-        'codegraph_search',
-        'codegraph_node',
+        'homegraph_explore',
+        'homegraph_search',
+        'homegraph_node',
       ]);
       if (stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
         visible = visible.filter(t => TINY_REPO_CORE_TOOLS.has(t.name));
       }
 
       return visible.map(tool => {
-        if (tool.name === 'codegraph_explore') {
+        if (tool.name === 'homegraph_explore') {
           return {
             ...tool,
             description: `${tool.description} Budget: make at most ${budget} calls for this project (${stats.fileCount.toLocaleString()} files indexed).`,
@@ -989,30 +1130,30 @@ export class ToolHandler {
   }
 
   /**
-   * Get CodeGraph instance for a project
+   * Get HomeGraph instance for a project
    *
-   * If projectPath is provided, opens that project's CodeGraph (cached).
-   * Otherwise returns the default CodeGraph instance.
+   * If projectPath is provided, opens that project's HomeGraph (cached).
+   * Otherwise returns the default HomeGraph instance.
    *
-   * Walks up parent directories to find the nearest .codegraph/ folder,
+   * Walks up parent directories to find the nearest .homegraph/ folder,
    * similar to how git finds .git/ directories.
    */
-  private getCodeGraph(projectPath?: string): CodeGraph {
+  private getHomeGraph(projectPath?: string): HomeGraph {
     if (!projectPath) {
       if (!this.cg) {
         const searched = this.defaultProjectHint ?? process.cwd();
         throw new NotIndexedError(
-          'No CodeGraph project is loaded for this session.\n' +
-          `Searched for a .codegraph/ directory starting from: ${searched}\n` +
+          'No HomeGraph project is loaded for this session.\n' +
+          `Searched for a .homegraph/ directory starting from: ${searched}\n` +
           'Either the server root has no index of its own (e.g. a monorepo where only ' +
           "sub-projects are indexed), or the MCP client launched the server outside your " +
           'project without reporting the workspace root. Either way, target the project ' +
           'explicitly:\n' +
           '  • Pass projectPath to the tool call, e.g. projectPath: "/absolute/path/to/your/project" ' +
-          '(any project that has a .codegraph/ — including a sub-project of a monorepo)\n' +
+          '(any project that has a .homegraph/ — including a sub-project of a monorepo)\n' +
           '  • Or add --path to the server\'s MCP config args: ["serve", "--mcp", "--path", "/absolute/path/to/your/project"]\n' +
           'If a project simply has no index, use your built-in tools (Read/Grep/Glob) for THAT ' +
-          "project (the user can run 'codegraph init' there to enable it) — you can still query " +
+          "project (the user can run 'homegraph init' there to enable it) — you can still query " +
           'other indexed projects by projectPath in the same session.'
         );
       }
@@ -1021,7 +1162,7 @@ export class ToolHandler {
 
     // Reject sensitive system directories before opening. Only validate a
     // path that actually exists — a nested or not-yet-created sub-path of a
-    // real project must still be allowed to resolve UP to its .codegraph/
+    // real project must still be allowed to resolve UP to its .homegraph/
     // root below (issue #238), so we don't run the existence-checking
     // validator on paths that are meant to walk up.
     if (existsSync(projectPath)) {
@@ -1031,24 +1172,24 @@ export class ToolHandler {
       }
     }
 
-    // Always RE-RESOLVE the nearest .codegraph/ from the input path. The walk
+    // Always RE-RESOLVE the nearest .homegraph/ from the input path. The walk
     // is cheap (a few existsSync up the tree) and is the only thing that
     // notices a path whose index root CHANGED since it was first seen — most
-    // importantly a git worktree that gained its own .codegraph/ after the
+    // importantly a git worktree that gained its own .homegraph/ after the
     // (long-lived) server first resolved it up to the parent checkout. We used
     // to short-circuit on a `projectCache[projectPath]` entry before resolving,
     // which pinned that first resolution for the server's whole lifetime, so a
     // worktree kept being served the parent checkout's index until restart
     // (#926). The DB connection itself is still cached (by resolved root,
     // below), so re-resolving costs only the stat walk, never a reopen.
-    const resolvedRoot = findNearestCodeGraphRoot(projectPath);
+    const resolvedRoot = findNearestHomeGraphRoot(projectPath);
 
     if (!resolvedRoot) {
       throw new NotIndexedError(
-        `The project at ${projectPath} isn't indexed with codegraph (no .codegraph/ directory found ` +
-        'walking up from it), so codegraph cannot query it. Use your built-in tools (Read/Grep/Glob) ' +
-        "for that codebase instead, and don't call codegraph for it again this session. " +
-        "Indexing is the user's decision — they can run 'codegraph init' in that project to enable it."
+        `The project at ${projectPath} isn't indexed with homegraph (no .homegraph/ directory found ` +
+        'walking up from it), so homegraph cannot query it. Use your built-in tools (Read/Grep/Glob) ' +
+        "for that codebase instead, and don't call homegraph for it again this session. " +
+        "Indexing is the user's decision — they can run 'homegraph init' in that project to enable it."
       );
     }
 
@@ -1069,14 +1210,14 @@ export class ToolHandler {
     const cached = this.projectCache.get(resolvedRoot);
     if (cached) return this.freshen(cached);
 
-    const cg = loadCodeGraph().openSync(resolvedRoot);
+    const cg = loadHomeGraph().openSync(resolvedRoot);
     this.projectCache.set(resolvedRoot, cg);
     return cg;
   }
 
   /**
-   * Heal a long-lived connection whose `.codegraph/` was removed and recreated
-   * at the same path (a worktree recreated, or `rm -rf .codegraph` + re-init)
+   * Heal a long-lived connection whose `.homegraph/` was removed and recreated
+   * at the same path (a worktree recreated, or `rm -rf .homegraph` + re-init)
    * before handing it to a tool. Otherwise the daemon keeps serving the
    * pre-removal snapshot from its now-unlinked file handle until restart — and
    * because the daemon registry is keyed by path, a same-path recreate routes
@@ -1084,11 +1225,11 @@ export class ToolHandler {
    * stat() and a no-op unless the inode actually changed; it never throws into a
    * tool call.
    */
-  private freshen(cg: CodeGraph): CodeGraph {
+  private freshen(cg: HomeGraph): HomeGraph {
     try {
       if (cg.reopenIfReplaced()) {
         process.stderr.write(
-          '[CodeGraph MCP] The index was replaced on disk (e.g. a git worktree ' +
+          '[HomeGraph MCP] The index was replaced on disk (e.g. a git worktree ' +
           'recreated at the same path); reopened the live database in place.\n'
         );
       }
@@ -1169,7 +1310,7 @@ export class ToolHandler {
 
     // The verdict depends on BOTH the start path AND the index root it resolves
     // to, so the cache must be keyed on the pair. Resolve the index root first
-    // (cheap — getCodeGraph re-walks to the nearest .codegraph/, no git), then
+    // (cheap — getHomeGraph re-walks to the nearest .homegraph/, no git), then
     // key on `(startPath, indexRoot)`. The moment that root changes — most
     // importantly when a git worktree gains its own index and the walk-up stops
     // there instead of at the parent checkout — the key changes and the verdict
@@ -1178,7 +1319,7 @@ export class ToolHandler {
     // that first verdict until restart (#926).
     let indexRoot: string;
     try {
-      indexRoot = this.getCodeGraph(projectPath).getProjectRoot();
+      indexRoot = this.getHomeGraph(projectPath).getProjectRoot();
     } catch {
       // No resolvable project (or any other resolution error) → nothing to warn.
       return null;
@@ -1198,7 +1339,7 @@ export class ToolHandler {
    * notice when the resolved index belongs to a different git working tree than
    * the caller's (issue #155). Without this, an agent in a nested worktree
    * silently trusts main-branch results. No-op on error results and when there
-   * is no mismatch. `codegraph_status` is excluded — it embeds its own verbose
+   * is no mismatch. `homegraph_status` is excluded — it embeds its own verbose
    * warning — so it stays out of this path.
    */
   private withWorktreeNotice(result: ToolResult, projectPath?: string): ToolResult {
@@ -1230,14 +1371,14 @@ export class ToolHandler {
   private withStalenessNotice(result: ToolResult, projectPath?: string): ToolResult {
     if (result.isError) return result;
 
-    let cg: CodeGraph;
+    let cg: HomeGraph;
     try {
-      cg = this.getCodeGraph(projectPath);
+      cg = this.getHomeGraph(projectPath);
     } catch {
       return result; // no default project — leave as is
     }
 
-    // Cross-project `projectPath` calls open a cached CodeGraph WITHOUT a
+    // Cross-project `projectPath` calls open a cached HomeGraph WITHOUT a
     // watcher (watchers are only attached to the default session project).
     // When the cross-project path happens to be the same project as the
     // default cg, the cached instance is the wrong one — its pendingFiles is
@@ -1259,7 +1400,7 @@ export class ToolHandler {
     // fire — but the index is now FROZEN and silently drifting stale. Surface
     // one global notice instead, so the agent Reads for current content rather
     // than trusting a response off a no-longer-updating index. (Cross-project
-    // calls open a watcher-less CodeGraph, so this is false there — correct: we
+    // calls open a watcher-less HomeGraph, so this is false there — correct: we
     // only know degraded state for the default session project.)
     let degraded = false;
     try {
@@ -1280,7 +1421,7 @@ export class ToolHandler {
       return { ...result, content: [{ type: 'text', text: composed }, ...tail] };
     }
 
-    // Defensive: some test fakes inject a partial CodeGraph stub without the
+    // Defensive: some test fakes inject a partial HomeGraph stub without the
     // newer pending-files API. Treat missing/throwing as "no pending files."
     let pending: PendingFile[] = [];
     try {
@@ -1298,7 +1439,7 @@ export class ToolHandler {
     const elsewhere: PendingFile[] = [];
     for (const p of pending) {
       // Substring match against the project-relative POSIX path — that's
-      // exactly the format both the watcher and every codegraph response
+      // exactly the format both the watcher and every homegraph response
       // emit, so a plain includes() is sufficient and avoids regex pitfalls.
       if (text.includes(p.path)) inResponse.push(p);
       else elsewhere.push(p);
@@ -1336,10 +1477,10 @@ export class ToolHandler {
         this.catchUpGate = null;
         await this.awaitCatchUpGate(gate);
       }
-      // Honor the optional tool allowlist (CODEGRAPH_MCP_TOOLS): a trimmed
+      // Honor the optional tool allowlist (HOMEGRAPH_MCP_TOOLS): a trimmed
       // surface rejects ablated tools defensively even if a client cached them.
       if (!this.isToolAllowed(toolName)) {
-        return this.errorResult(`Tool ${toolName} is disabled via CODEGRAPH_MCP_TOOLS`);
+        return this.errorResult(`Tool ${toolName} is disabled via HOMEGRAPH_MCP_TOOLS`);
       }
       // Cross-cutting input validation. All tools accept an optional
       // `projectPath` and most accept either `query`, `task`, or
@@ -1349,7 +1490,7 @@ export class ToolHandler {
       if (typeof pathCheck === 'object' && pathCheck !== undefined) {
         return pathCheck;
       }
-      // The `path` and `pattern` properties used by codegraph_files are
+      // The `path` and `pattern` properties used by homegraph_files are
       // also path-shaped — apply the same cap.
       if (args.path !== undefined) {
         const check = this.validateOptionalPath(args.path, 'path');
@@ -1360,12 +1501,39 @@ export class ToolHandler {
         if (typeof check === 'object' && check !== undefined) return check;
       }
 
-      // codegraph_status reports watcher state (pending files, degraded mode,
+      const projectPath = args.projectPath as string | undefined;
+      const cacheEnabled = isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
+      let cacheKey: string | undefined;
+      let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
+
+      if (cacheEnabled) {
+        try {
+          const cacheCg = this.getHomeGraph(projectPath);
+          cacheQueries = cacheCg.getQueryBuilder();
+          ensureMcpQueryCacheValid(cacheQueries, () => cacheCg.getLastIndexedAt());
+          let fileCount: number | undefined;
+          try {
+            fileCount = cacheCg.getStats().fileCount;
+          } catch {
+            fileCount = undefined;
+          }
+          cacheKey = buildMcpQueryCacheKey(toolName, args, fileCount);
+          const cached = getMcpQueryCacheEntry(cacheQueries, cacheKey);
+          if (cached) {
+            const withWorktree = this.withWorktreeNotice(cached, projectPath);
+            return this.withStalenessNotice(withWorktree, projectPath);
+          }
+        } catch {
+          // No indexed project — fall through; handler returns guidance.
+        }
+      }
+
+      // homegraph_status reports watcher state (pending files, degraded mode,
       // worktree warning) and embeds its own sections — it must run on the MAIN
       // thread against the watched default instance, so it is NEVER off-loaded to
       // a worker (whose read connection has no watcher). It also skips the
       // auto-banner wrapper to avoid duplicating its own pending-files section.
-      if (toolName === 'codegraph_status') {
+      if (toolName === 'homegraph_status') {
         return await this.handleStatus(args);
       }
 
@@ -1381,8 +1549,11 @@ export class ToolHandler {
       const result = (this.queryPool && this.queryPool.healthy)
         ? await this.queryPool.run(toolName, args)
         : await this.executeReadTool(toolName, args);
-      const withWorktree = this.withWorktreeNotice(result, args.projectPath as string | undefined);
-      return this.withStalenessNotice(withWorktree, args.projectPath as string | undefined);
+      if (cacheEnabled && cacheKey && cacheQueries && !result.isError) {
+        setMcpQueryCacheEntry(cacheQueries, cacheKey, toolName, result);
+      }
+      const withWorktree = this.withWorktreeNotice(result, projectPath);
+      return this.withStalenessNotice(withWorktree, projectPath);
     } catch (err) {
       // Expected condition, not a malfunction: answer as a SUCCESS so the
       // agent keeps trusting the toolset for projects that ARE indexed.
@@ -1396,8 +1567,8 @@ export class ToolHandler {
       }
       return this.errorResult(
         `Tool execution failed: ${err instanceof Error ? err.message : String(err)}. ` +
-        'This is an internal codegraph error — retry the call once; if it persists, ' +
-        'continue without codegraph for this task.'
+        'This is an internal homegraph error — retry the call once; if it persists, ' +
+        'continue without homegraph for this task.'
       );
     }
   }
@@ -1427,46 +1598,49 @@ export class ToolHandler {
       }
       return this.errorResult(
         `Tool execution failed: ${err instanceof Error ? err.message : String(err)}. ` +
-        'This is an internal codegraph error — retry the call once; if it persists, ' +
-        'continue without codegraph for this task.'
+        'This is an internal homegraph error — retry the call once; if it persists, ' +
+        'continue without homegraph for this task.'
       );
     }
   }
 
   /**
    * Pure dispatch over the read tools — the switch, with no gate, no notices, no
-   * allowlist/validation (the caller owns those). `codegraph_status` is handled
+   * allowlist/validation (the caller owns those). `homegraph_status` is handled
    * on the main thread in {@link execute} and never reaches here. May throw
    * NotIndexed/PathRefusal, which {@link executeReadTool} classifies.
    */
   private async dispatchTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
     switch (toolName) {
-      case 'codegraph_search': return await this.handleSearch(args);
-      case 'codegraph_callers': return await this.handleCallers(args);
-      case 'codegraph_callees': return await this.handleCallees(args);
-      case 'codegraph_impact': return await this.handleImpact(args);
-      case 'codegraph_explore': return await this.handleExplore(args);
-      case 'codegraph_node': return await this.handleNode(args);
-      case 'codegraph_files': return await this.handleFiles(args);
+      case 'homegraph_search': return await this.handleSearch(args);
+      case 'homegraph_callers': return await this.handleCallers(args);
+      case 'homegraph_callees': return await this.handleCallees(args);
+      case 'homegraph_impact': return await this.handleImpact(args);
+      case 'homegraph_explore': return await this.handleExplore(args);
+      case 'homegraph_node': return await this.handleNode(args);
+      case 'homegraph_files': return await this.handleFiles(args);
+      case 'homegraph_spec_match': return await this.handleSpecMatch(args);
+      case 'homegraph_spec_find': return await this.handleSpecFind(args);
+      case 'homegraph_spec_trace': return await this.handleSpecTrace(args);
       default: return this.errorResult(`Unknown tool: ${toolName}`);
     }
   }
 
   /**
-   * Handle codegraph_search
+   * Handle homegraph_search
    */
   private async handleSearch(args: Record<string, unknown>): Promise<ToolResult> {
     const query = this.validateString(args.query, 'query');
     if (typeof query !== 'string') return query;
 
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const rawKind = args.kind as string | undefined;
     // The schema enum says 'type' (what agents naturally reach for); the
     // NodeKind is 'type_alias'. Without the mapping, kind: "type" silently
     // matched nothing — a filter value we advertise must work.
     const kind = rawKind === 'type' ? 'type_alias' : rawKind;
-    const rawLimit = Number(args.limit) || 10;
-    const limit = clamp(rawLimit, 1, 100);
+    const rawLimit = Number(args.limit);
+    const limit = clamp(isNaN(rawLimit) ? 10 : rawLimit, 1, 100);
 
     const results = cg.searchNodes(query, {
       limit,
@@ -1532,13 +1706,13 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_callers
+   * Handle homegraph_callers
    */
   private async handleCallers(args: Record<string, unknown>): Promise<ToolResult> {
     const symbol = this.validateString(args.symbol, 'symbol');
     if (typeof symbol !== 'string') return symbol;
 
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const limit = clamp((args.limit as number) || 20, 1, 100);
     const fileFilter = typeof args.file === 'string' ? args.file : undefined;
 
@@ -1605,13 +1779,13 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_callees
+   * Handle homegraph_callees
    */
   private async handleCallees(args: Record<string, unknown>): Promise<ToolResult> {
     const symbol = this.validateString(args.symbol, 'symbol');
     if (typeof symbol !== 'string') return symbol;
 
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const limit = clamp((args.limit as number) || 20, 1, 100);
     const fileFilter = typeof args.file === 'string' ? args.file : undefined;
 
@@ -1675,13 +1849,13 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_impact
+   * Handle homegraph_impact
    */
   private async handleImpact(args: Record<string, unknown>): Promise<ToolResult> {
     const symbol = this.validateString(args.symbol, 'symbol');
     if (typeof symbol !== 'string') return symbol;
 
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const depth = clamp((args.depth as number) || 2, 1, 10);
     const fileFilter = typeof args.file === 'string' ? args.file : undefined;
 
@@ -1738,6 +1912,16 @@ export class ToolHandler {
     return this.textResult(this.truncateOutput(sections.join('\n') + filterNote));
   }
 
+  /** Whether a graph edge may be traversed by homegraph_explore's main Flow BFS. */
+  private isExploreFlowEdge(edge: Edge): boolean {
+    if (edge.kind === 'calls') return true;
+    if (edge.kind !== 'references' || edge.provenance !== 'heuristic') return false;
+    const m = edge.metadata as Record<string, unknown> | undefined;
+    if (m?.synthesizedBy !== 'viewtree') return false;
+    const via = typeof m.via === 'string' ? m.via : '';
+    return via.length > 0 && !VIEWTREE_STRUCTURE_VIAS.has(via);
+  }
+
   /**
    * Describe a synthesized (dynamic-dispatch) edge for human output: how the
    * callback was wired up — the bridge static parsing can't see. Returns null
@@ -1789,6 +1973,30 @@ export class ToolHandler {
         registeredAt,
       };
     }
+    if (m?.synthesizedBy === 'viewtree') {
+      const via = typeof m.via === 'string' ? m.via : '';
+      if (via === 'Prop') {
+        return {
+          label: `@Prop one-way state transfer (parent → child)`,
+          compact: `state: @Prop one-way${at}`,
+          registeredAt,
+        };
+      }
+      if (via === 'Link') {
+        return {
+          label: `@Link two-way state transfer (parent ↔ child)`,
+          compact: `state: @Link two-way${at}`,
+          registeredAt,
+        };
+      }
+      if (via && !VIEWTREE_STRUCTURE_VIAS.has(via)) {
+        return {
+          label: `ArkUI event \`.${via}\` — bound handler (dynamic dispatch)`,
+          compact: `dynamic: ArkUI .${via}${at}`,
+          registeredAt,
+        };
+      }
+    }
     if (m?.synthesizedBy === 'interface-impl') {
       return {
         label: `interface/abstract dispatch — runs the implementation override (dynamic dispatch)`,
@@ -1831,7 +2039,7 @@ export class ToolHandler {
   }
 
   /**
-   * Flow-from-named-symbols: an agent's codegraph_explore query is a bag of
+   * Flow-from-named-symbols: an agent's homegraph_explore query is a bag of
    * symbol names that usually spans the flow it's investigating (e.g.
    * "PmsProductController getList PmsProductService list PmsProductServiceImpl").
    * Surface the longest call chain AMONG those named symbols — scoped to what the
@@ -1844,7 +2052,7 @@ export class ToolHandler {
    * whose qualifiedName contains another named token (`PmsProductServiceImpl::list`),
    * dropping unrelated `OmsOrderService::list`.
    */
-  private buildFlowFromNamedSymbols(cg: CodeGraph, query: string): { text: string; pathNodeIds: Set<string>; namedNodeIds: Set<string>; uniqueNamedNodeIds: Set<string>; spineCallSites: Map<string, number> } {
+  private buildFlowFromNamedSymbols(cg: HomeGraph, query: string): { text: string; pathNodeIds: Set<string>; namedNodeIds: Set<string>; uniqueNamedNodeIds: Set<string>; spineCallSites: Map<string, number> } {
     // spineCallSites: for each spine node, the line where it CALLS the next hop —
     // lets the source assembler window an oversize spine method (e.g. n8n's 962-line
     // processRunExecutionData) to the call site instead of dumping the whole body.
@@ -1983,7 +2191,7 @@ export class ToolHandler {
           if (id !== seed.id && named.has(id) && depth > deepDepth) { deep = id; deepDepth = depth; }
           if (depth >= MAX_HOPS - 1) continue;
           for (const c of cg.getCallees(id)) {
-            if (c.edge.kind !== 'calls' || parent.has(c.node.id)) continue;
+            if (!this.isExploreFlowEdge(c.edge) || parent.has(c.node.id)) continue;
             const newStreak = named.has(c.node.id) ? 0 : streak + 1;
             if (newStreak > MAX_BRIDGE) continue;
             parent.set(c.node.id, { prev: id, edge: c.edge, node: c.node });
@@ -2116,7 +2324,7 @@ export class ToolHandler {
    * at runtime. Query-time, deterministic, zero graph mutation; a fully
    * connected flow never reaches this method.
    */
-  private buildDynamicBoundaries(cg: CodeGraph, scanList: Node[], named: Map<string, Node>): string {
+  private buildDynamicBoundaries(cg: HomeGraph, scanList: Node[], named: Map<string, Node>): string {
     const MAX_NOTES = 4;       // boundary bullets per explore
     const MAX_SCAN = 8;        // bodies scanned
     const MAX_TOTAL_CHARS = 200_000;
@@ -2156,7 +2364,7 @@ export class ToolHandler {
       '',
       ...notes,
       '',
-      '> These sites choose their call target at runtime (registry / bus / reflection) — the site shown IS where the flow continues. To follow it, run codegraph_explore or codegraph_node on a candidate; source for the sites above is included below.',
+      '> These sites choose their call target at runtime (registry / bus / reflection) — the site shown IS where the flow continues. To follow it, run homegraph_explore or homegraph_node on a candidate; source for the sites above is included below.',
       '',
     ].join('\n');
   }
@@ -2171,7 +2379,7 @@ export class ToolHandler {
    * the concrete target is chosen at runtime from N implementations, so no single
    * static edge is "the answer" — the implementations ARE the continuations. We
    * announce the supertype, its TRUE implementer count, and a few concrete targets,
-   * then steer to codegraph_explore. Graph-only, query-time, zero mutation; the
+   * then steer to homegraph_explore. Graph-only, query-time, zero mutation; the
    * caller fires it ONLY for an UNCOVERED named token, so a connected flow is silent.
    *
    * Robust to FTS sampling bias: the same-name family is a capped FTS sample that
@@ -2180,7 +2388,7 @@ export class ToolHandler {
    * 611 implementers vs a handful). So candidate supertypes are ranked by their
    * TRUE graph-wide implementer count, NOT their frequency in the sample.
    */
-  private buildPolymorphicBoundaries(cg: CodeGraph, candidates: Array<{ token: string; family: Node[] }>, named: Map<string, Node>): string {
+  private buildPolymorphicBoundaries(cg: HomeGraph, candidates: Array<{ token: string; family: Node[] }>, named: Map<string, Node>): string {
     const CLASSY = new Set(['class', 'struct', 'interface', 'trait', 'protocol', 'abstract']);
     const MIN_IMPL = 8;     // a supertype needs >= this many implementers to count as "polymorphic"
     const MIN_SUPPORT = 2;  // >= this many sampled definers must share the supertype (ties it to the token)
@@ -2243,7 +2451,7 @@ export class ToolHandler {
       '',
       ...notes,
       '',
-      '> The method above is dispatched at runtime to one of the listed implementations (a registry / plugin / strategy interface) — there is no single static caller→callee edge; the implementations ARE the continuations. To follow one, run codegraph_explore on a listed target.',
+      '> The method above is dispatched at runtime to one of the listed implementations (a registry / plugin / strategy interface) — there is no single static caller→callee edge; the implementations ARE the continuations. To follow one, run homegraph_explore on a listed target.',
       '',
     ].join('\n');
   }
@@ -2256,7 +2464,7 @@ export class ToolHandler {
    * candidate list should be). Symbols the agent already named sort first and
    * are marked — that's the "you were right, here's the wiring" case.
    */
-  private boundaryCandidates(cg: CodeGraph, key: string, keyIsType: boolean, named: Map<string, Node>, selfId: string): string {
+  private boundaryCandidates(cg: HomeGraph, key: string, keyIsType: boolean, named: Map<string, Node>, selfId: string): string {
     const CALLABLE = new Set(['method', 'function', 'component', 'constructor', 'class']);
     const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
     const keyNorm = norm(key);
@@ -2323,7 +2531,7 @@ export class ToolHandler {
    * that have no dependents (nothing to warn about), and returns '' when none
    * qualify so a leaf-only exploration stays clean.
    */
-  private buildBlastRadiusSection(cg: CodeGraph, subgraph: Subgraph): string {
+  private buildBlastRadiusSection(cg: HomeGraph, subgraph: Subgraph): string {
     const ROOT_CAP = 5; // only the symbols the query actually targeted
     const FILE_CAP = 4; // caller files listed per symbol before "+N more"
     const MEANINGFUL = new Set<string>([
@@ -2380,7 +2588,7 @@ export class ToolHandler {
    * PageRank) from the query's matched SEED nodes over the call/reference graph.
    *
    * This is the ranking signal text search (FTS/bm25) CANNOT provide, and it's
-   * codegraph's home turf: relevance by STRUCTURE, not words. A file whose
+   * homegraph's home turf: relevance by STRUCTURE, not words. A file whose
    * symbols are call-connected to the matched cluster accrues walk mass and
    * ranks high; a lone TEXT match — e.g. `LensSwitcher.swift` matched the word
    * "switch" from `switchOrganization`, but calls none of `setUser`/`fetchUser`
@@ -2447,11 +2655,11 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_explore — deep exploration in a single call
+   * Handle homegraph_explore — deep exploration in a single call
    *
    * Strategy: find relevant symbols via graph traversal, group by file,
    * then read contiguous file sections covering all symbols per file.
-   * This replaces multiple codegraph_node + Read calls.
+   * This replaces multiple homegraph_node + Read calls.
    *
    * Output size is adaptive to project file count via
    * `getExploreOutputBudget` — see #185 for why a fixed 35k cap was a
@@ -2461,7 +2669,7 @@ export class ToolHandler {
     const query = this.validateString(args.query, 'query');
     if (typeof query !== 'string') return query;
 
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const projectRoot = cg.getProjectRoot();
 
     // Resolve adaptive output budget from project size. Falls back to the
@@ -2572,7 +2780,7 @@ export class ToolHandler {
         // 50+-overload name (tokio `poll`) ranks the wanted def (`Harness::poll`)
         // below the FTS cut, so findAllSymbols would never see it and the
         // type-token bias below couldn't pick the harness.rs one. (Same fix as
-        // codegraph_node's findSymbolMatches.) Qualified tokens keep findAllSymbols.
+        // homegraph_node's findSymbolMatches.) Qualified tokens keep findAllSymbols.
         const isQual = /[.\/]|::/.test(t);
         const raw = isQual ? this.findAllSymbols(cg, t).nodes : cg.getNodesByName(t);
         const cands = raw
@@ -2583,7 +2791,7 @@ export class ToolHandler {
         // only: the overloads whose file/class the query ALSO names (the agent
         // told us which one it wants — DataRequest's, not Validation.swift's),
         // capped; else fall back to the single most-substantive def. This is the
-        // explore-side mirror of codegraph_node's overload disambiguation.
+        // explore-side mirror of homegraph_node's overload disambiguation.
         let picks: Node[];
         let tierPicks: Node[]; // subset that earns the named-first tier (#1064)
         if (cands.length <= 3) {
@@ -2866,9 +3074,9 @@ export class ToolHandler {
     // neither entry nor central (a type/util file that matches "element"+x but isn't
     // the flow) is NOT promoted, so it can't displace the graph-central answer file
     // (hits=1) the way a blunt hits-only tier would. Single-layer repos with one
-    // cluster are unaffected (no competing mass). Set CODEGRAPH_RANK_NO_MULTITERM=1
+    // cluster are unaffected (no competing mass). Set HOMEGRAPH_RANK_NO_MULTITERM=1
     // to disable.
-    const MULTITERM_OFF = process.env.CODEGRAPH_RANK_NO_MULTITERM === '1';
+    const MULTITERM_OFF = process.env.HOMEGRAPH_RANK_NO_MULTITERM === '1';
     const isCorroborated = (fp: string) =>
       !MULTITERM_OFF &&
       (fileTermHits.get(fp) ?? 0) >= 2 &&
@@ -3053,6 +3261,25 @@ export class ToolHandler {
         entryNodeIds.has(n.id) || flow.pathNodeIds.has(n.id) || flow.uniqueNamedNodeIds.has(n.id));
       if (!fileNecessary && totalChars > budget.maxOutputChars * 0.9) continue;
 
+      if (isOhosApiFilePath(filePath)) {
+        const rel = filePath.slice(OHOS_API_FILE_PREFIX.length);
+        const syms = group.nodes
+          .filter((n) => n.kind !== 'import' && n.kind !== 'export')
+          .sort((a, b) => a.startLine - b.startLine);
+        if (syms.length === 0) continue;
+
+        lines.push(fileSectionHeader(rel, 'HarmonyOS SDK API (prebuilt db)'));
+        lines.push('');
+        for (const n of syms) {
+          const sig = n.signature || n.docstring || `${n.kind} ${n.qualifiedName || n.name}`;
+          lines.push(`\`${sig}\``);
+        }
+        lines.push('');
+        totalChars = lines.join('\n').length;
+        filesIncluded++;
+        continue;
+      }
+
       const absPath = validatePathWithinRoot(projectRoot, filePath);
       if (!absPath || !existsSync(absPath)) continue;
 
@@ -3066,7 +3293,7 @@ export class ToolHandler {
       const fileLines = fileContent.split('\n');
       const lang = group.nodes[0]?.language || '';
 
-      // Adaptive sizing (CODEGRAPH_ADAPTIVE_EXPLORE, default on): collapse a file
+      // Adaptive sizing (HOMEGRAPH_ADAPTIVE_EXPLORE, default on): collapse a file
       // to a per-symbol view when it's a redundant member of a polymorphic family.
       // Engages iff ALL hold:
       //   1. a flow spine exists,
@@ -3167,15 +3394,15 @@ export class ToolHandler {
         if (skel.length > 0) {
           const names = [...new Set(group.nodes.filter(n => n.kind !== 'import' && n.kind !== 'export').map(n => n.name))]
             .slice(0, budget.maxSymbolsInFileHeader).join(', ');
-          // Steer the agent to codegraph_explore for an elided body — NEVER to
+          // Steer the agent to homegraph_explore for an elided body — NEVER to
           // Read. The old "Read for more" / "Read for a full body" tags invited
           // a Read of the very file just skeletonized; on a central, wanted file
           // (Session.swift, DataRequest.swift) that fired an over-investigation
           // spiral (the agent Read the skeletonized file, then kept digging).
           // CLAUDE.md: explore output must never tell the agent to Read.
           const tag = bodyIds.size > 0
-            ? 'focused (the methods you named in full, the rest as signatures — codegraph_explore a signature by name for its body; do NOT Read)'
-            : 'skeleton (signatures only — codegraph_explore a name for its full body; do NOT Read)';
+            ? 'focused (the methods you named in full, the rest as signatures — homegraph_explore a signature by name for its body; do NOT Read)'
+            : 'skeleton (signatures only — homegraph_explore a name for its full body; do NOT Read)';
           lines.push(fileSectionHeader(filePath, `${names} · ${tag}`), '', '```' + lang, skel.join('\n'), '```', '');
           totalChars += skel.join('\n').length + 120;
           renderedFilePaths.push(filePath);
@@ -3553,10 +3780,10 @@ export class ToolHandler {
     if (budget.includeCompletenessSignal) {
       lines.push('');
       lines.push('---');
-      lines.push(`> **Complete source for ${filesIncluded} files is included above — do NOT re-read them.** If your question also needs files/symbols listed under "Not shown above" (or any area this call didn't cover), make ANOTHER codegraph_explore targeting those names — it returns the same source with line numbers and is cheaper and more complete than reading. Reserve Read for a single specific line range explore can't surface.`);
+      lines.push(`> **Complete source for ${filesIncluded} files is included above — do NOT re-read them.** If your question also needs files/symbols listed under "Not shown above" (or any area this call didn't cover), make ANOTHER homegraph_explore targeting those names — it returns the same source with line numbers and is cheaper and more complete than reading. Reserve Read for a single specific line range explore can't surface.`);
     } else if (anyFileTrimmed) {
       lines.push('');
-      lines.push(`> Some file sections were trimmed for size. For a specific symbol you still need, run another \`codegraph_explore\` (or \`codegraph_node\`) with its exact name — line-numbered source, cheaper and more complete than Read.`);
+      lines.push(`> Some file sections were trimmed for size. For a specific symbol you still need, run another \`homegraph_explore\` (or \`homegraph_node\`) with its exact name — line-numbered source, cheaper and more complete than Read.`);
     }
 
     // Add explore budget note based on project size
@@ -3593,7 +3820,7 @@ export class ToolHandler {
       const lastSection = cut.lastIndexOf('\n' + FILE_SECTION_PREFIX);
       const boundary = lastSection > hardCeiling * 0.5 ? lastSection : cut.lastIndexOf('\n');
       const safe = boundary > 0 ? cut.slice(0, boundary) : cut;
-      finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For any area not covered, run another codegraph_explore with the specific names — do NOT Read these files.)';
+      finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For any area not covered, run another homegraph_explore with the specific names — do NOT Read these files.)';
     } else {
       finalText = output;
     }
@@ -3623,10 +3850,10 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_node
+   * Handle homegraph_node
    */
   private async handleNode(args: Record<string, unknown>): Promise<ToolResult> {
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
     // Default to false to minimize context usage
     const includeCode = args.includeCode === true;
     const fileHint = typeof args.file === 'string' && args.file.trim() ? args.file.trim() : undefined;
@@ -3685,7 +3912,7 @@ export class ToolHandler {
     // different types (Alamofire `didCompleteTask`/`task`/`validate`, gin
     // `reset`). Returning ONE forces the agent to guess, and when it guesses
     // wrong it READS the file to find the right overload — the dominant
-    // codegraph_node read cause on Swift/Go. So return them ALL: pack as many
+    // homegraph_node read cause on Swift/Go. So return them ALL: pack as many
     // FULL bodies as fit a char budget (the agent gets the one it needs in this
     // one call, no follow-up parameter to learn), and list any remainder by
     // file:line so a large overload set can't overflow the per-tool cap.
@@ -3735,7 +3962,7 @@ export class ToolHandler {
       if (listed.length > LIST_CAP) out.push(`- … +${listed.length - LIST_CAP} more`);
       out.push(
         '',
-        `> Need one of these in full? Call codegraph_node again with \`file\` (e.g. \`"${listed[0]!.filePath.split('/').pop()}"\`) or \`line\` — do NOT Read it.`,
+        `> Need one of these in full? Call homegraph_node again with \`file\` (e.g. \`"${listed[0]!.filePath.split('/').pop()}"\`) or \`line\` — do NOT Read it.`,
       );
     }
     return this.textResult(this.truncateOutput(out.join('\n')));
@@ -3755,14 +3982,14 @@ export class ToolHandler {
    * through validatePathWithinRoot (#527).
    */
   private async handleFileView(
-    cg: CodeGraph,
+    cg: HomeGraph,
     fileArg: string,
     opts: { offset?: number; limit?: number; symbolsOnly?: boolean } = {},
   ): Promise<ToolResult> {
     const normalize = (p: string) => p.replace(/\\/g, '/').replace(/^(?:\.?\/+)+/, '').replace(/\/+$/, '');
     const wantLower = normalize(fileArg).toLowerCase();
     const allFiles = cg.getFiles();
-    if (allFiles.length === 0) return this.textResult('No files indexed. Run `codegraph index` first.');
+    if (allFiles.length === 0) return this.textResult('No files indexed. Run `homegraph index` first.');
 
     let resolved = allFiles.find((f) => f.path.toLowerCase() === wantLower);
     let candidates: typeof allFiles = [];
@@ -3792,7 +4019,7 @@ export class ToolHandler {
       .sort((a, b) => a.startLine - b.startLine);
     const dependents = cg.getFileDependents(filePath);
 
-    // Compact, one-line blast radius (codegraph's value-add over a plain Read).
+    // Compact, one-line blast radius (homegraph's value-add over a plain Read).
     const depSummary = dependents.length
       ? `used by ${dependents.length} file${dependents.length === 1 ? '' : 's'}: ${dependents.slice(0, 8).join(', ')}${dependents.length > 8 ? `, +${dependents.length - 8} more` : ''}`
       : 'no other indexed file depends on it';
@@ -3801,7 +4028,7 @@ export class ToolHandler {
     const symbolMap = (heading: string, limit = 200): string[] => {
       const lines: string[] = [heading];
       for (const n of nodes.slice(0, limit)) {
-        const sig = n.signature ? ` ${n.signature.replace(/\s+/g, ' ').trim()}` : '';
+        const sig = n.signature ? ` ${formatInlineSignature(n.signature)}` : '';
         lines.push(`- \`${n.name}\` (${n.kind})${sig} — :${n.startLine}`);
       }
       if (nodes.length > limit) lines.push(`- … +${nodes.length - limit} more`);
@@ -3822,7 +4049,7 @@ export class ToolHandler {
     if (CONFIG_LEAF_LANGUAGES.has(resolved.language)) {
       const out = [`**${filePath}** — configuration/data file, ${depSummary}`, ''];
       if (nodes.length) out.push(...symbolMap('**Keys (values withheld for safety)**'));
-      out.push('', '> Values may be secrets, so codegraph indexes keys only. Read the file directly if you need a value.');
+      out.push('', '> Values may be secrets, so homegraph indexes keys only. Read the file directly if you need a value.');
       return this.textResult(this.truncateOutput(out.join('\n')));
     }
 
@@ -3877,7 +4104,7 @@ export class ToolHandler {
     if (!complete) {
       out.push(
         '',
-        `(lines ${offset}–${shownEnd} of ${total} — pass \`offset\`/\`limit\` for another range, or \`codegraph_node <symbol>\` for one symbol in full)`,
+        `(lines ${offset}–${shownEnd} of ${total} — pass \`offset\`/\`limit\` for another range, or \`homegraph_node <symbol>\` for one symbol in full)`,
       );
     }
     // Self-bounded to CHAR_BUDGET — do NOT route through truncateOutput (15k).
@@ -3885,7 +4112,7 @@ export class ToolHandler {
   }
 
   /** Render one symbol: details + (optional) body/outline + its caller/callee trail. */
-  private async renderNodeSection(cg: CodeGraph, node: Node, includeCode: boolean): Promise<string> {
+  private async renderNodeSection(cg: HomeGraph, node: Node, includeCode: boolean): Promise<string> {
     let code: string | null = null;
     let outline: string | null = null;
     if (includeCode) {
@@ -3905,14 +4132,14 @@ export class ToolHandler {
 
   /**
    * Build the "trail" for a symbol: its direct callees (what it calls) and
-   * callers (what calls it), each with file:line — so codegraph_node doubles as
+   * callers (what calls it), each with file:line — so homegraph_node doubles as
    * the structural Grep→Read→expand primitive: a spot PLUS where to go next.
-   * Capped to stay cheap. Walk the graph by calling codegraph_node on a trail
+   * Capped to stay cheap. Walk the graph by calling homegraph_node on a trail
    * entry; no Read needed for covered hops. Empty edges on a non-leaf often mean
    * dynamic dispatch the static graph couldn't resolve — that absence is itself
    * a signal (read that one hop) rather than a dead end.
    */
-  private formatTrail(cg: CodeGraph, node: Node): string {
+  private formatTrail(cg: HomeGraph, node: Node): string {
     const TRAIL_CAP = 12;
     const fmt = (e: { node: Node; edge: Edge }) => {
       const base = `${e.node.name} (${e.node.filePath}:${e.node.startLine})`;
@@ -3932,7 +4159,7 @@ export class ToolHandler {
     const callees = collect(cg.getCallees(node.id));
     const callers = collect(cg.getCallers(node.id));
     if (callees.length === 0 && callers.length === 0) return '';
-    const lines: string[] = ['', '**Trail — codegraph_node any of these to follow it (no Read needed)**'];
+    const lines: string[] = ['', '**Trail — homegraph_node any of these to follow it (no Read needed)**'];
     if (callees.length > 0) {
       lines.push(`**Calls →** ${callees.slice(0, TRAIL_CAP).map(fmt).join(', ')}${callees.length > TRAIL_CAP ? `, +${callees.length - TRAIL_CAP} more` : ''}`);
     }
@@ -3943,10 +4170,10 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_status
+   * Handle homegraph_status
    */
   private async handleStatus(args: Record<string, unknown>): Promise<ToolResult> {
-    let cg = this.getCodeGraph(args.projectPath as string | undefined);
+    let cg = this.getHomeGraph(args.projectPath as string | undefined);
     // Same trick as withStalenessNotice — when an explicit projectPath
     // resolves to the same project as the default session cg, prefer the
     // default so getPendingFiles() (only populated by the default's watcher)
@@ -3968,7 +4195,7 @@ export class ToolHandler {
     const mismatch = this.worktreeMismatchFor(args.projectPath as string | undefined);
 
     const lines: string[] = [
-      '**CodeGraph Status**',
+      '**HomeGraph Status**',
       '',
     ];
     if (mismatch) {
@@ -4046,10 +4273,10 @@ export class ToolHandler {
   }
 
   /**
-   * Handle codegraph_files - get project file structure from the index
+   * Handle homegraph_files - get project file structure from the index
    */
   private async handleFiles(args: Record<string, unknown>): Promise<ToolResult> {
-    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const pathFilter = args.path as string | undefined;
     const pattern = args.pattern as string | undefined;
     const format = (args.format as 'tree' | 'flat' | 'grouped') || 'tree';
@@ -4060,7 +4287,7 @@ export class ToolHandler {
     const allFiles = cg.getFiles();
 
     if (allFiles.length === 0) {
-      return this.textResult('No files indexed. Run `codegraph index` first.');
+      return this.textResult('No files indexed. Run `homegraph index` first.');
     }
 
     // Filter by path prefix. Stored paths are project-relative POSIX (e.g.
@@ -4245,6 +4472,388 @@ export class ToolHandler {
   }
 
   // =========================================================================
+  // handleSpecMatch — Commit4Spec knowledge-graph search
+  // =========================================================================
+
+  /**
+   * Match a spec/feature description against the Commit4Spec knowledge graph.
+   *
+   * Uses FTS5 full-text search to find the most similar historical specs,
+   * returning each with its linked commits and optional code fragments.
+   * The database lives at `.homegraph/commit4spec/commit4spec.db` by default and is
+   * separate from the HomeGraph code-symbol index — this tool works whether
+   * or not the code index is present.
+   */
+  private async handleSpecMatch(args: Record<string, unknown>): Promise<ToolResult> {
+    const query = this.validateString(args.query, 'query');
+    if (typeof query !== 'string') return query;
+
+    const repoPath = args.repoPath as string | undefined;
+    const explicitDbPath = args.dbPath as string | undefined;
+    const topKRaw = Number(args.topK);
+    const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 5 : topKRaw, 50));
+    const includeFragments = args.includeFragments !== false;
+
+    // Lazily require spec modules so the MCP startup path stays lean.
+    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
+    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
+    const { searchAndGetContext } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
+    const {
+      truncateCodeDiff,
+      truncateSubtitles,
+      computeBudgetProfile,
+    } = require('../spec/utils') as typeof import('../spec/utils');
+
+    // Resolve the database path.
+    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+
+    // Open the database.
+    let db: SqliteDatabase;
+    try {
+      db = createDatabase(dbPath).db;
+    } catch (err) {
+      return this.errorResult(
+        `Failed to open Commit4Spec database at "${dbPath}": ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    try {
+      // Search and traverse.
+      const contexts = searchAndGetContext(db, query, topK, includeFragments);
+
+      if (contexts.length === 0) {
+        return this.textResult(
+          JSON.stringify({
+            query: query.slice(0, 200),
+            matched_count: 0,
+            results: [],
+          }, null, 2)
+        );
+      }
+
+      // Build budget profile for truncation.
+      const profile = computeBudgetProfile(contexts.length);
+
+      // Serialize to JSON (matching Python's spec_contexts_to_results format).
+      const results = contexts.map((ctx) => {
+        const subtitles = profile.tier === 'vlarge'
+          ? [] // vlarge disables subtitles entirely
+          : truncateSubtitles(ctx.spec.subtitles, 200, profile.maxContents);
+
+        const commits = ctx.commits.slice(0, profile.maxContents || 5).map((c) => {
+          const cd: Record<string, unknown> = {
+            hash: c.commit.hash,
+            message: c.commit.message,
+            relation_type: c.relationType,
+          };
+
+          if (includeFragments) {
+            const maxFrags = profile.maxFragments || 3;
+            cd.fragments = c.fragments.slice(0, maxFrags).map((f) => ({
+              file_path: f.filePath,
+              change_type: f.changeType,
+              start_line: f.startLine,
+              end_line: f.endLine,
+              code_diff: truncateCodeDiff(f.codeDiff),
+            }));
+          }
+
+          return cd;
+        });
+
+        return {
+          spec_id: ctx.spec.id,
+          title: ctx.spec.title,
+          subtitles,
+          file_path: ctx.spec.filePath,
+          commits,
+        };
+      });
+
+      const response = {
+        query: query.slice(0, 200),
+        matched_count: results.length,
+        results,
+      };
+
+      const json = JSON.stringify(response, null, 2);
+
+      // Hard cap to MAX_OUTPUT_LENGTH to prevent context bloat.
+      if (json.length <= MAX_OUTPUT_LENGTH) {
+        return this.textResult(json);
+      }
+
+      // When the full payload exceeds the cap, drop fragments first,
+      // then trim commits, then trim the whole thing.
+      if (includeFragments) {
+        const slimResults = results.map((r) => ({
+          ...r,
+          commits: r.commits.map((c: Record<string, unknown>) => {
+            const { fragments: _, ...rest } = c;
+            return rest;
+          }),
+        }));
+        const slim = JSON.stringify({ ...response, results: slimResults }, null, 2);
+        if (slim.length <= MAX_OUTPUT_LENGTH) {
+          return this.textResult(
+            `(Fragments elided — output exceeded ${MAX_OUTPUT_LENGTH} chars)\n\n` + slim
+          );
+        }
+      }
+
+      // Fallback: truncate at a newline to avoid broken JSON.
+      return this.textResult(this.truncateOutput(json));
+    } finally {
+      db.close();
+    }
+  }
+
+  // =========================================================================
+  // handleSpecFind — file-path based spec lookup
+  // =========================================================================
+
+  /**
+   * Find which specs are related to the given file path by matching against
+   * code-fragment file paths in the Commit4Spec knowledge graph.
+   *
+   * Traverses: filePath → code_fragment_nodes → commit_fragment_relations
+   * → spec_commit_relations → spec_nodes.
+   */
+  private async handleSpecFind(args: Record<string, unknown>): Promise<ToolResult> {
+    const filePath = this.validateString(args.filePath, 'filePath');
+    if (typeof filePath !== 'string') return filePath;
+
+    const repoPath = args.repoPath as string | undefined;
+    const explicitDbPath = args.dbPath as string | undefined;
+
+    // Lazily require spec modules so the MCP startup path stays lean.
+    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
+    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
+    const { findSpecsByFilePath } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
+
+    // Resolve the database path.
+    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+
+    // Open the database.
+    let db: SqliteDatabase;
+    try {
+      db = createDatabase(dbPath).db;
+    } catch (err) {
+      return this.errorResult(
+        `Failed to open Commit4Spec database at "${dbPath}": ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    try {
+      const result = findSpecsByFilePath(db, filePath);
+
+      const response = {
+        filePath,
+        matched_count: result.matched_count,
+        truncated: result.truncated,
+        results: result.results,
+      };
+
+      const json = JSON.stringify(response, null, 2);
+      if (json.length <= MAX_OUTPUT_LENGTH) {
+        return this.textResult(json);
+      }
+
+      // Truncate: reduce results
+      const slim = {
+        ...response,
+        results: response.results.slice(0, Math.max(1, Math.floor(response.results.length / 2))),
+      };
+      const slimJson = JSON.stringify(slim, null, 2);
+      if (slimJson.length <= MAX_OUTPUT_LENGTH) {
+        return this.textResult(`(Results trimmed to fit output limit)\n\n${slimJson}`);
+      }
+
+      return this.textResult(this.truncateOutput(json));
+    } finally {
+      db.close();
+    }
+  }
+
+  // =========================================================================
+  // handleSpecTrace — code symbol → Spec reverse trace
+  // =========================================================================
+
+  /**
+   * Trace a code symbol back to its associated Specs.
+   *
+   * Uses the HomeGraph code index to resolve the symbol to AST-level node(s),
+   * then queries the Commit4Spec knowledge graph for associated Specs via
+   * five-dimensional scoring (file-path, content FTS5, name FTS5, recency,
+   * line overlap).
+   *
+   * This bridges the two databases: homegraph.db (code entities) →
+   * commit4spec.db (Spec knowledge graph).
+   */
+  private async handleSpecTrace(args: Record<string, unknown>): Promise<ToolResult> {
+    const symbol = this.validateString(args.symbol, 'symbol');
+    if (typeof symbol !== 'string') return symbol;
+
+    const fileRaw = this.validateOptionalPath(args.file, 'file');
+    if (typeof fileRaw === 'object') return fileRaw;
+    const file: string | undefined = fileRaw;
+    const line = typeof args.line === 'number' ? args.line : undefined;
+    const repoPath = args.repoPath as string | undefined;
+    const explicitDbPath = args.dbPath as string | undefined;
+    const topKRaw = Number(args.topK);
+    const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 10 : topKRaw, 50));
+
+    // Lazily require all needed modules
+    const HomeGraph = loadHomeGraph();
+    const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
+    const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
+    const { findSpecsByCodeSymbol } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
+    const { initSpecSchema, runSpecMigrations, getCurrentSpecVersion, CURRENT_SPEC_SCHEMA_VERSION } = require('../spec/db/schema') as typeof import('../spec/db/schema');
+
+    // Resolve project path for the code graph
+    const projectPath = repoPath || process.cwd();
+
+    // Open the HomeGraph code index
+    let cg: HomeGraph;
+    try {
+      cg = await HomeGraph.open(projectPath);
+    } catch (err) {
+      return this.errorResult(
+        `Failed to open HomeGraph code index at "${projectPath}": ` +
+        `${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    try {
+      // Step 1: Resolve symbol to nodes via findSymbolMatches
+      let nodes = this.findSymbolMatches(cg, symbol);
+
+      if (nodes.length === 0) {
+        await cg.close();
+        return this.textResult(JSON.stringify({
+          symbol,
+          error: `No code entities found for symbol "${symbol}".`,
+          matches: [],
+        }, null, 2));
+      }
+
+      // Disambiguate by file/line if provided
+      if (file) {
+        // Use endsWith for precise file path matching
+        nodes = nodes.filter((n) => n.filePath.endsWith(file));
+      }
+      if (line !== undefined && nodes.length > 1) {
+        const closest = nodes.reduce((best, n) => {
+          const bestDist = Math.abs(best.startLine - line!) + Math.abs(best.endLine - line!);
+          const curDist = Math.abs(n.startLine - line!) + Math.abs(n.endLine - line!);
+          return curDist < bestDist ? n : best;
+        });
+        nodes = [closest];
+      }
+
+      // Take the best disambiguated node
+      const node = nodes[0];
+      if (!node) {
+        await cg.close();
+        return this.textResult(JSON.stringify({
+          symbol,
+          error: `Could not resolve symbol "${symbol}" to a specific code entity.`,
+          matches: [],
+        }, null, 2));
+      }
+
+      // Step 2: Resolve the Spec database path
+      const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+
+      // Step 3: Open the Spec database
+      let db: SqliteDatabase;
+      try {
+        db = createDatabase(dbPath).db;
+      } catch (err) {
+        await cg.close();
+        return this.errorResult(
+          `Failed to open Commit4Spec database at "${dbPath}": ` +
+          `${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      try {
+        // Ensure schema is up to date
+        initSpecSchema(db);
+        const currentVersion = getCurrentSpecVersion(db);
+        if (currentVersion < CURRENT_SPEC_SCHEMA_VERSION) {
+          runSpecMigrations(db, currentVersion);
+        }
+
+        // Step 4: Query Specs for the code entity
+        const result = findSpecsByCodeSymbol(db, {
+          name: node.name,
+          qualifiedName: node.qualifiedName,
+          kind: node.kind,
+          filePath: node.filePath,
+          startLine: node.startLine,
+          endLine: node.endLine,
+        }, topK);
+
+        // Step 5: Serialize the response
+        const response = {
+          symbol,
+          entity: {
+            name: result.entity.name,
+            qualifiedName: result.entity.qualifiedName,
+            kind: result.entity.kind,
+            filePath: result.entity.filePath,
+            startLine: result.entity.startLine,
+            endLine: result.entity.endLine,
+          },
+          matched_count: result.matches.length,
+          total_candidates: result.totalCandidates,
+          matches: result.matches.map((m) => ({
+            spec_id: m.spec.id,
+            title: m.spec.title,
+            status: m.spec.status,
+            version: m.spec.version,
+            file_path: m.spec.filePath,
+            score: Math.round(m.score * 1000) / 1000,
+            score_detail: {
+              file_path: Math.round(m.scoreDetail.filePathScore * 1000) / 1000,
+              content: Math.round(m.scoreDetail.contentScore * 1000) / 1000,
+              name: Math.round(m.scoreDetail.nameScore * 1000) / 1000,
+              recency: Math.round(m.scoreDetail.recencyScore * 1000) / 1000,
+              line_overlap: Math.round(m.scoreDetail.overlapScore * 1000) / 1000,
+            },
+            fragment_count: m.fragmentCount,
+            commit_count: m.commitCount,
+          })),
+        };
+
+        const json = JSON.stringify(response, null, 2);
+        if (json.length <= MAX_OUTPUT_LENGTH) {
+          return this.textResult(json);
+        }
+
+        // Truncate: reduce matches
+        const slim = {
+          ...response,
+          matches: response.matches.slice(0, Math.max(1, Math.floor(topK / 2))),
+        };
+        const slimJson = JSON.stringify(slim, null, 2);
+        if (slimJson.length <= MAX_OUTPUT_LENGTH) {
+          return this.textResult(`(Results trimmed to fit output limit)\n\n${slimJson}`);
+        }
+
+        return this.textResult(this.truncateOutput(json));
+      } finally {
+        try { db.close(); } catch { /* best effort */ }
+      }
+    } finally {
+      try { await cg.close(); } catch { /* best effort */ }
+    }
+  }
+
+  // =========================================================================
   // Symbol resolution helpers
   // =========================================================================
 
@@ -4308,14 +4917,14 @@ export class ToolHandler {
   }
 
   /**
-   * Find ALL definitions matching a name, ranked, so codegraph_node can return
+   * Find ALL definitions matching a name, ranked, so homegraph_node can return
    * every overload instead of guessing one (the wrong guess → a Read). Keepers
    * rank before generated stubs (.pb.go etc.); stable within a group preserves
    * FTS order. Returns [] when nothing matches; a qualified lookup that finds no
    * exact match returns [] rather than a misleading fuzzy file hit (#173); a
    * bare name with no exact match falls back to the single top fuzzy result.
    */
-  private findSymbolMatches(cg: CodeGraph, symbol: string): Node[] {
+  private findSymbolMatches(cg: HomeGraph, symbol: string): Node[] {
     const isQualified = /[.\/]|::/.test(symbol);
 
     // For a bare name, enumerate EVERY exact-name definition via the direct index
@@ -4366,7 +4975,7 @@ export class ToolHandler {
    * Find ALL symbols matching a name. Used by callers/callees/impact to aggregate
    * results across all matching symbols (e.g., multiple classes with an `execute` method).
    */
-  private findAllSymbols(cg: CodeGraph, symbol: string): { nodes: Node[]; note: string } {
+  private findAllSymbols(cg: HomeGraph, symbol: string): { nodes: Node[]; note: string } {
     let results = cg.searchNodes(symbol, { limit: 50 });
 
     // Mirror the fallback in `findSymbol` for qualified queries — FTS
@@ -4428,7 +5037,7 @@ export class ToolHandler {
       // Compact format: one line per result with key info
       lines.push(`**${node.name}** (${node.kind})`);
       lines.push(`${node.filePath}${location}`);
-      if (node.signature) lines.push(`\`${node.signature}\``);
+      if (node.signature) lines.push(`\`${formatInlineSignature(node.signature)}\``);
       lines.push('');
     }
 
@@ -4501,7 +5110,7 @@ export class ToolHandler {
    * without the full source of every method. Returns '' when the container
    * has no indexed children, so the caller can fall back to full source.
    */
-  private buildContainerOutline(cg: CodeGraph, node: Node): string {
+  private buildContainerOutline(cg: HomeGraph, node: Node): string {
     const children = cg.getChildren(node.id)
       .filter(c => c.kind !== 'import' && c.kind !== 'export')
       .sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
@@ -4510,7 +5119,7 @@ export class ToolHandler {
     const lines = [`**Members (${children.length}):**`, ''];
     for (const c of children) {
       const loc = c.startLine ? `:${c.startLine}` : '';
-      const sig = c.signature ? ` — \`${c.signature}\`` : '';
+      const sig = c.signature ? ` — \`${formatInlineSignature(c.signature)}\`` : '';
       lines.push(`- ${c.name} (${c.kind})${loc}${sig}`);
     }
     return lines.join('\n');
@@ -4525,7 +5134,7 @@ export class ToolHandler {
     ];
 
     if (node.signature) {
-      lines.push(`**Signature:** \`${node.signature}\``);
+      lines.push(...formatNodeSignatureBlock(node.signature));
     }
 
     // Only include docstring if it's short and useful
@@ -4535,9 +5144,9 @@ export class ToolHandler {
 
     if (outline) {
       lines.push('', outline, '',
-        `> Structural outline only. Read \`${node.filePath}\` or call codegraph_node on a specific member for its body.`);
+        `> Structural outline only. Read \`${node.filePath}\` or call homegraph_node on a specific member for its body.`);
     } else if (code) {
-      // Line-numbered (cat -n style, like codegraph_explore and Read) so the
+      // Line-numbered (cat -n style, like homegraph_explore and Read) so the
       // agent can cite/edit exact lines without re-Reading the file for them.
       const numbered = node.startLine ? numberSourceLines(code, node.startLine) : code;
       lines.push('', '```' + node.language, numbered, '```');

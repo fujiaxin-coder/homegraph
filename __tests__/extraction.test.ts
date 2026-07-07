@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { CodeGraph } from '../src';
+import { HomeGraph } from '../src';
 import { extractFromSource, scanDirectory, buildDefaultIgnore, discoverEmbeddedRepoRoots, buildScopeIgnore } from '../src/extraction';
 import { detectLanguage, isLanguageSupported, getSupportedLanguages, initGrammars, loadAllGrammars, isSourceFile } from '../src/extraction/grammars';
 import { stripCppTemplateArgs, blankCppExportMacros, blankCppInlineMacros, recoverMangledCppName } from '../src/extraction/languages/c-cpp';
@@ -21,7 +21,7 @@ beforeAll(async () => {
 
 // Create a temporary directory for each test
 function createTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-test-'));
 }
 
 // Clean up temporary directory
@@ -3971,7 +3971,7 @@ end`;
     const code = `object frmMain: TfrmMain
   Left = 0
   Top = 0
-  Caption = 'CodeGraph DFM Fixture'
+  Caption = 'HomeGraph DFM Fixture'
   ClientHeight = 480
   ClientWidth = 640
   OnCreate = FormCreate
@@ -4053,7 +4053,7 @@ end`;
 
 describe('Kotlin Multiplatform expect/actual', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4108,7 +4108,7 @@ actual class Platform {
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4166,7 +4166,7 @@ actual typealias Lock = java.util.concurrent.locks.ReentrantLock
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4190,7 +4190,7 @@ actual typealias Lock = java.util.concurrent.locks.ReentrantLock
 
 describe('Scala cross-file dependencies', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4246,7 +4246,7 @@ object Folding {
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4271,7 +4271,7 @@ object Folding {
 
 describe('PHP namespace + import resolution', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4325,7 +4325,7 @@ class Service {
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4357,7 +4357,7 @@ class Service {
 
 describe('Ruby mixins (include/extend/prepend)', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4397,7 +4397,7 @@ end
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4446,7 +4446,7 @@ end
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4463,7 +4463,7 @@ end
 
 describe('C++ free-function name extraction', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4505,7 +4505,7 @@ std::string use() {
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4526,7 +4526,7 @@ std::string use() {
 
 describe('Dart mixins and type references', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4570,7 +4570,7 @@ class UserService extends Repository with Loggable {
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4598,7 +4598,7 @@ class UserService extends Repository with Loggable {
 
 describe('Static-member / value-read references', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4631,7 +4631,7 @@ describe('Static-member / value-read references', () => {
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4665,7 +4665,7 @@ describe('Static-member / value-read references', () => {
       `package app\nclass Device {\n  fun sdk(): Int = Build.VERSION\n}\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4679,7 +4679,7 @@ describe('Static-member / value-read references', () => {
 
 describe('Cross-language type/import gate (RN name collisions)', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4715,7 +4715,7 @@ describe('Cross-language type/import gate (RN name collisions)', () => {
       `package app\nclass TestRunner {\n  fun run() {}\n}\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4747,7 +4747,7 @@ describe('Cross-language type/import gate (RN name collisions)', () => {
       `import { Helper } from './util';\nexport const h = new Helper();\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4768,7 +4768,7 @@ describe('Cross-language type/import gate (RN name collisions)', () => {
 
 describe('Python absolute module import resolution', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4793,7 +4793,7 @@ describe('Python absolute module import resolution', () => {
       `import conduit.apps.signals\nimport os\n\nVALUE = 1\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4823,7 +4823,7 @@ describe('Python absolute module import resolution', () => {
       `from django.conf.urls import include, url\nurlpatterns = [url(r'^app/', include('app.urls'))]\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4849,7 +4849,7 @@ describe('Python absolute module import resolution', () => {
       `from app.api.routes import authentication\n\nROUTER = authentication\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4865,7 +4865,7 @@ describe('Python absolute module import resolution', () => {
 
 describe('Razor / Blazor markup extraction', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -4895,7 +4895,7 @@ describe('Razor / Blazor markup extraction', () => {
       `<div>\n  <ToastComponent />\n</div>\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4920,7 +4920,7 @@ describe('Razor / Blazor markup extraction', () => {
     fs.writeFileSync(path.join(tempDir, 'entity.cs'), `namespace App.Entities { public class CatalogBrand { } }`);
     fs.writeFileSync(path.join(tempDir, 'dto.cs'), `namespace App.Models { public class CatalogBrand { } }`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
 
     const brands = cg.getNodesByKind('class').filter((n) => n.name === 'CatalogBrand');
@@ -4946,7 +4946,7 @@ describe('Razor / Blazor markup extraction', () => {
       `<h1>List</h1>\n@code {\n  private CatalogBrand _b = new CatalogBrand();\n}\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4969,7 +4969,7 @@ describe('Razor / Blazor markup extraction', () => {
       `<h1>Catalog</h1>\n\n@code {\n  private CatalogService _svc = new CatalogService();\n  void Refresh() { _svc.Load(); }\n}\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -4982,7 +4982,7 @@ describe('Razor / Blazor markup extraction', () => {
 
 describe('Default import resolution (renamed default export)', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5002,7 +5002,7 @@ describe('Default import resolution (renamed default export)', () => {
     fs.writeFileSync(path.join(tempDir, 'app/controller.ts'), `const router = { get() {} };\nexport default router;\n`);
     fs.writeFileSync(path.join(tempDir, 'app/routes.ts'), `import myController from './controller';\nexport const api = myController;\n`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5015,7 +5015,7 @@ describe('Default import resolution (renamed default export)', () => {
 
 describe('Chained method-call resolution (C# extension methods)', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5040,7 +5040,7 @@ describe('Chained method-call resolution (C# extension methods)', () => {
       `namespace App {\n  public class Program {\n    public void Run(object builder) {\n      builder.Services.AddCoreServices(1);\n    }\n  }\n}\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5056,7 +5056,7 @@ describe('Chained method-call resolution (C# extension methods)', () => {
 
 describe('Same-directory include + KMP import resolution', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5081,7 +5081,7 @@ describe('Same-directory include + KMP import resolution', () => {
       `#include "Storage.h"\nint use() { Storage s; return s.n; }\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5107,7 +5107,7 @@ describe('Same-directory include + KMP import resolution', () => {
       `package app\nimport app.PlatformContext\nclass Db {\n  fun open(ctx: PlatformContext) {}\n}\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5122,7 +5122,7 @@ describe('Same-directory include + KMP import resolution', () => {
 
 describe('Delphi form code-behind pairing', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5141,7 +5141,7 @@ describe('Delphi form code-behind pairing', () => {
     fs.writeFileSync(path.join(tempDir, 'UFRMAbout.pas'),
       `unit UFRMAbout;\ninterface\nuses Forms;\ntype\n  TFRMAbout = class(TForm)\n  end;\nimplementation\n{$R *.dfm}\nend.\n`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5154,7 +5154,7 @@ describe('Delphi form code-behind pairing', () => {
 
 describe('Liquid Shopify JSON template section resolution', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5177,7 +5177,7 @@ describe('Liquid Shopify JSON template section resolution', () => {
     // Nested template dir (templates/customers/login.json) must resolve too.
     fs.writeFileSync(path.join(tempDir, 'templates/customers/login.json'), JSON.stringify({ sections: { main: { type: 'main-login' } }, order: ['main'] }));
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5192,7 +5192,7 @@ describe('Liquid Shopify JSON template section resolution', () => {
 
 describe('Lua/Luau require resolution', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5216,7 +5216,7 @@ describe('Lua/Luau require resolution', () => {
     fs.writeFileSync(path.join(tempDir, 'src/Util/helper.luau'), `local H = {}\nfunction H.go() end\nreturn H\n`);
     fs.writeFileSync(path.join(tempDir, 'src/init.luau'), `local helper = require(script.Util.helper)\nreturn helper\n`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5233,7 +5233,7 @@ describe('Lua/Luau require resolution', () => {
 
 describe('Rust module-path call resolution', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5261,7 +5261,7 @@ describe('Rust module-path call resolution', () => {
     fs.writeFileSync(path.join(http, 'users.rs'), `pub fn router() -> i32 { 1 }\n`);
     fs.writeFileSync(path.join(http, 'profiles.rs'), `pub fn router() -> i32 { 2 }\n`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5297,7 +5297,7 @@ describe('Rust module-path call resolution', () => {
       `use crate::database;\npub fn get_profile(id: i32) -> i32 {\n    database::profiles::find(id)\n}\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5325,7 +5325,7 @@ describe('Rust module-path call resolution', () => {
     fs.writeFileSync(path.join(routes, 'mod.rs'), `pub mod users;\n`);
     fs.writeFileSync(path.join(routes, 'users.rs'), `pub fn post_users() {}\npub fn get_user() {}\n`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5340,7 +5340,7 @@ describe('Rust module-path call resolution', () => {
 
 describe('SvelteKit load → page synthesizer', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5365,7 +5365,7 @@ describe('SvelteKit load → page synthesizer', () => {
     fs.writeFileSync(path.join(register, '+page.svelte'), `<script>export let data;</script>\n<h1>Register</h1>\n`);
     fs.writeFileSync(path.join(register, '+page.server.js'), `export function load() { return { y: 2 }; }\n`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5383,7 +5383,7 @@ describe('SvelteKit load → page synthesizer', () => {
 
 describe('Nuxt nested auto-imported component resolution', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5407,7 +5407,7 @@ describe('Nuxt nested auto-imported component resolution', () => {
       `<template>\n  <div><MediaCard :item="i" /></div>\n</template>\n<script setup>const i = {}</script>\n`
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5420,7 +5420,7 @@ describe('Nuxt nested auto-imported component resolution', () => {
 
 describe('Swift property-wrapper attribute type references', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5443,7 +5443,7 @@ describe('Swift property-wrapper attribute type references', () => {
       `  @Siblings(through: AcronymCategoryPivot.self, from: \\.$acronym, to: \\.$category)\n` +
       `  var categories: [Category]\n}\n`);
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5456,7 +5456,7 @@ describe('Swift property-wrapper attribute type references', () => {
 
 describe('Objective-C messages, class receivers, and #import', () => {
   let tempDir: string;
-  let cg: CodeGraph;
+  let cg: HomeGraph;
 
   beforeEach(() => {
     tempDir = createTempDir();
@@ -5500,7 +5500,7 @@ describe('Objective-C messages, class receivers, and #import', () => {
 `
     );
 
-    cg = CodeGraph.initSync(tempDir);
+    cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.resolveReferences();
 
@@ -5557,7 +5557,7 @@ export function multiply(a: number, b: number): number {
     );
 
     // Initialize and index
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     const result = await cg.indexAll();
 
     expect(result.success).toBe(true);
@@ -5591,7 +5591,7 @@ export function multiply(a: number, b: number): number {
     );
 
     // Initialize and index
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     const result = await cg.indexAll();
 
     expect(result.success).toBe(true);
@@ -5610,7 +5610,7 @@ export function multiply(a: number, b: number): number {
     fs.writeFileSync(path.join(srcDir, 'main.ts'), `export const x = 1;`);
 
     // Initialize and index
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
 
     // Check file is tracked
@@ -5638,7 +5638,7 @@ export function multiply(a: number, b: number): number {
     );
 
     // Initialize and index
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     await cg.indexAll();
 
     const initialNodes = cg.getNodesInFile('src/main.ts');
@@ -5666,7 +5666,7 @@ export function multiply(a: number, b: number): number {
     fs.writeFileSync(path.join(tempDir, 'app.yaml'), 'name: test\n');
     fs.writeFileSync(path.join(tempDir, 'routes.yml'), 'route: value\n');
 
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     const result = await cg.indexAll();
 
     expect(result.success).toBe(true);
@@ -5681,7 +5681,7 @@ export function multiply(a: number, b: number): number {
     fs.writeFileSync(path.join(tempDir, 'app.yaml'), 'name: test\n');
     fs.writeFileSync(path.join(tempDir, 'view.twig'), '{{ title }}\n');
 
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     const result = await cg.indexFiles(['app.yaml', 'view.twig']);
 
     expect(result.success).toBe(true);
@@ -5698,7 +5698,7 @@ export function multiply(a: number, b: number): number {
     fs.writeFileSync(path.join(tempDir, 'application.properties'), 'server.port=8080\n');
     fs.writeFileSync(path.join(tempDir, 'log.properties'), 'log.level=INFO\n');
 
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     const result = await cg.indexAll();
 
     expect(result.success).toBe(true);
@@ -5713,7 +5713,7 @@ export function multiply(a: number, b: number): number {
     fs.writeFileSync(path.join(tempDir, 'view.twig'), '{{ title }}\n');
     fs.writeFileSync(path.join(tempDir, 'application.properties'), 'server.port=8080\n');
 
-    const cg = CodeGraph.initSync(tempDir);
+    const cg = HomeGraph.initSync(tempDir);
     const result = await cg.indexFiles(['app.yaml', 'view.twig', 'application.properties']);
 
     expect(result.success).toBe(true);
@@ -6012,7 +6012,7 @@ describe('Nested gitlink repos (#1031, #1033)', () => {
   // gitlink-discovery pass must honor that `.gitignore` the same way — otherwise a
   // gitignored reference/benchmark corpus full of `git add`ed clones gets pulled
   // into the index (the 138k-file blow-up the reporter hit). Respect it by default;
-  // re-include only via `codegraph.json` `includeIgnored`.
+  // re-include only via `homegraph.json` `includeIgnored`.
   it('does not index a gitlink under a gitignored directory by default (#1065)', async () => {
     const { execFileSync } = await import('child_process');
     const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -6037,7 +6037,7 @@ describe('Nested gitlink repos (#1031, #1033)', () => {
     expect(buildScopeIgnore(root).ignores('benchmark/repos/ref/ref.ts')).toBe(true);
   });
 
-  it('re-includes a gitignored gitlink when codegraph.json includeIgnored opts in (#1065)', async () => {
+  it('re-includes a gitignored gitlink when homegraph.json includeIgnored opts in (#1065)', async () => {
     const { execFileSync } = await import('child_process');
     const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
 
@@ -6046,8 +6046,8 @@ describe('Nested gitlink repos (#1031, #1033)', () => {
     await makeRepo(path.join(root, 'benchmark', 'repos', 'ref'), 'ref');
     git(root, 'add', 'benchmark/repos/ref');
     fs.writeFileSync(path.join(root, '.gitignore'), 'benchmark/repos/\n');
-    fs.writeFileSync(path.join(root, 'codegraph.json'), JSON.stringify({ includeIgnored: ['benchmark/repos/'] }));
-    git(root, 'add', '.gitignore', 'codegraph.json');
+    fs.writeFileSync(path.join(root, 'homegraph.json'), JSON.stringify({ includeIgnored: ['benchmark/repos/'] }));
+    git(root, 'add', '.gitignore', 'homegraph.json');
     git(root, 'commit', '-q', '-m', 'opt the gitignored gitlink back in');
 
     const files = scanDirectory(root);
@@ -7378,7 +7378,7 @@ export const registry = [widget];
         path.join(dir, 'src', 'bar.ts'),
         `import { widget } from './foo';\nexport { helper } from './foo';\nexport const registry = [widget];\n`
       );
-      const cg = CodeGraph.initSync(dir, { config: { include: ['src/**/*.ts'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['src/**/*.ts'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('src/foo.ts')).toContain('src/bar.ts');
@@ -7397,7 +7397,7 @@ export const registry = [widget];
       // (no call, no type) — `foo.helper()` would link on its own, but a bare
       // `foo.SOME_CONST` would not, so the module-import backstop must link it.
       fs.writeFileSync(path.join(dir, 'src', 'bar.ts'), `import * as foo from './foo';\nexport const x = foo.SOME_CONST;\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['src/**/*.ts'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['src/**/*.ts'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('src/foo.ts')).toContain('src/bar.ts');
@@ -7438,7 +7438,7 @@ describe('Python import dependency linking (blast-radius recall)', () => {
       // bar imports widget+helper but only stores widget in a list — nothing is
       // called, so before import-linking bar had no edge to foo.
       fs.writeFileSync(path.join(dir, 'pkg', 'bar.py'), `from foo import widget, helper\nregistry = [widget]\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['pkg/**/*.py'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['pkg/**/*.py'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('pkg/foo.py')).toContain('pkg/bar.py');
@@ -7458,7 +7458,7 @@ describe('Python import dependency linking (blast-radius recall)', () => {
       // call through it — the receiver isn't a symbol, so plain name-matching
       // can't link it. Also exercises the Python relative-dot path fix (`.certs`).
       fs.writeFileSync(path.join(dir, 'pkg', 'utils.py'), `from . import certs\ndef go():\n    return certs.where()\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['pkg/**/*.py'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['pkg/**/*.py'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('pkg/certs.py')).toContain('pkg/utils.py');
@@ -7478,7 +7478,7 @@ describe('Python import dependency linking (blast-radius recall)', () => {
       // record utils -> certs. (Mirrors requests' real `certs.where`.)
       fs.writeFileSync(path.join(dir, 'pkg', 'certs.py'), `from external_ca import where\n`);
       fs.writeFileSync(path.join(dir, 'pkg', 'utils.py'), `from . import certs\nCA = certs.where()\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['pkg/**/*.py'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['pkg/**/*.py'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('pkg/certs.py')).toContain('pkg/utils.py');
@@ -7501,7 +7501,7 @@ describe('Go cross-package composite literals (blast-radius recall)', () => {
       fs.mkdirSync(path.join(dir, 'render'), { recursive: true });
       fs.writeFileSync(path.join(dir, 'render', 'xml.go'), `package render\n\ntype XML struct { Data any }\n`);
       fs.writeFileSync(path.join(dir, 'app.go'), `package main\n\nimport "example.com/proj/render"\n\nfunc handle() any { return render.XML{} }\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('render/xml.go')).toContain('app.go');
@@ -7521,7 +7521,7 @@ describe('Go cross-package composite literals (blast-radius recall)', () => {
       // map literal — the body walker doesn't cover top-level declarations, so this
       // exercises the var-initializer walking added for Go.
       fs.writeFileSync(path.join(dir, 'reg.go'), `package main\n\nimport "example.com/proj/render"\n\ntype R interface { Render() }\n\nvar registry = map[string]R{ "xml": render.XML{} }\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('render/xml.go')).toContain('reg.go');
@@ -7544,7 +7544,7 @@ describe('Go cross-package composite literals (blast-radius recall)', () => {
         path.join(dir, 'root.go'),
         `package main\n\ntype Cmd struct{ RunE func() error }\n\nvar rootCmd = &Cmd{\n\tRunE: func() error { return Wire() },\n}\n`
       );
-      const cg = CodeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
 
@@ -7567,7 +7567,7 @@ describe('Go cross-package composite literals (blast-radius recall)', () => {
       // `(*Wrapped)(x)` parses as a call whose callee is the parenthesized type
       // `(*Wrapped)` — without normalization it dropped on the floor.
       fs.writeFileSync(path.join(dir, 'use.go'), `package main\n\nfunc run(x *int) { _ = (*Wrapped)(x) }\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('types.go')).toContain('use.go');
@@ -7587,7 +7587,7 @@ describe('Go cross-package composite literals (blast-radius recall)', () => {
       // reached ONLY through the interface (API.Marshal). Without implicit
       // interface satisfaction + dispatch, json.go shows 0 dependents.
       fs.writeFileSync(path.join(dir, 'codec', 'json.go'), `package codec\n\ntype jsonApi struct{}\n\nfunc (j jsonApi) Marshal(v any) ([]byte, error) { return nil, nil }\n\nfunc init() { API = jsonApi{} }\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['**/*.go'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('codec/json.go')).toContain('codec/api.go');
@@ -7619,7 +7619,7 @@ describe('C# records (blast-radius recall)', () => {
         path.join(dir, 'use.cs'),
         `using System.Collections.Generic;\nnamespace P;\npublic class User {\n    public IEnumerable<Box> Boxes { get; }\n    public Box Make() => new Box(1);\n}\n`
       );
-      const cg = CodeGraph.initSync(dir, { config: { include: ['**/*.cs'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['**/*.cs'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('types.cs')).toContain('use.cs');
@@ -7650,7 +7650,7 @@ describe('Rust cross-module recall', () => {
       'consumer.rs': 'use crate::types::Widget;\npub fn build() -> Widget { Widget { n: 1 } }\n',
     });
     try {
-      const cg = CodeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('src/types.rs')).toContain('src/consumer.rs');
@@ -7666,7 +7666,7 @@ describe('Rust cross-module recall', () => {
       'consumer.rs': 'use crate::types::Render;\npub struct Mine { pub x: i32 }\nimpl Render for Mine { fn render(&self) -> i32 { self.x } }\n',
     });
     try {
-      const cg = CodeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       // implements edge (Mine -> Render) makes types.rs a dependent of consumer.rs's struct.
@@ -7682,7 +7682,7 @@ describe('Rust cross-module recall', () => {
       'api/widget.rs': 'pub struct Widget { pub n: i32 }\n',
     });
     try {
-      const cg = CodeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       // The re-export hub depends on the module it re-exports from.
@@ -7701,7 +7701,7 @@ describe('Rust cross-module recall', () => {
       'hub.rs': 'pub use crate::fast::read;\n',
     });
     try {
-      const cg = CodeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['src/**/*.rs'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('src/fast.rs')).toContain('src/hub.rs');
@@ -7723,7 +7723,7 @@ describe('Java annotations (blast-radius recall)', () => {
         path.join(dir, 'p', 'User.java'),
         `package p;\n@MyAnno("c")\npublic class User {\n  @MyAnno("f") int field;\n  @MyAnno("m") void go() {}\n}\n`
       );
-      const cg = CodeGraph.initSync(dir, { config: { include: ['**/*.java'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['**/*.java'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('p/MyAnno.java')).toContain('p/User.java');
@@ -7742,7 +7742,7 @@ describe('Swift property wrappers / attributes (blast-radius recall)', () => {
       // property's `modifiers` and Swift doesn't extract instance properties as
       // their own nodes, so without the fix the wrapper type has no users.
       fs.writeFileSync(path.join(dir, 'Sources', 'M', 'Cmd.swift'), `public struct MyCommand {\n  @Argument var name: String\n  @Argument var count: Int\n}\n`);
-      const cg = CodeGraph.initSync(dir, { config: { include: ['Sources/**/*.swift'], exclude: [] } });
+      const cg = HomeGraph.initSync(dir, { config: { include: ['Sources/**/*.swift'], exclude: [] } });
       await cg.indexAll();
       cg.resolveReferences();
       expect(cg.getFileDependents('Sources/M/Wrap.swift')).toContain('Sources/M/Cmd.swift');

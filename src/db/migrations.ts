@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /**
  * Migration definition
@@ -97,6 +97,21 @@ const migrations: Migration[] = [
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity
           ON edges(source, target, kind, IFNULL(line, -1), IFNULL(col, -1));
+      `);
+    },
+  },
+  {
+    version: 7,
+    description: 'Add mcp_query_cache table for MCP tool response caching',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mcp_query_cache (
+          cache_key   TEXT PRIMARY KEY,
+          tool        TEXT NOT NULL,
+          response    TEXT NOT NULL,
+          created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mcp_query_cache_tool ON mcp_query_cache(tool);
       `);
     },
   },

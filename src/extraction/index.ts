@@ -20,14 +20,21 @@ import {
 import { QueryBuilder } from '../db/queries';
 import { extractFromSource } from './tree-sitter';
 import { ParseWorkerPool, resolveParsePoolSize } from './parse-pool';
-import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, initGrammars, loadGrammarsForLanguages } from './grammars';
+import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, requiresInProcessExtraction, initGrammars, loadGrammarsForLanguages } from './grammars';
 import { loadExtensionOverrides, loadIncludeIgnoredPatterns, loadExcludePatterns } from '../project-config';
-import { isCodeGraphDataDir } from '../directory';
+import { isHomeGraphDataDir } from '../directory';
 import { logDebug, logWarn } from '../errors';
 import { validatePathWithinRoot, normalizePath } from '../utils';
 import ignore, { Ignore } from 'ignore';
 import { detectFrameworks } from '../resolution/frameworks';
 import type { ResolutionContext } from '../resolution/types';
+import { setArkTSBatchProgressCallback, isArktsBatchRunning } from './context';
+import {
+  isArkTSBatchPersisted,
+  primeArkTSBatch,
+  resetArkTSBatch,
+  drainArkTSIndexNotices,
+} from './languages/arkts';
 
 /**
  * Number of files to read in parallel during indexing.
@@ -69,10 +76,12 @@ const WORKER_RECYCLE_INTERVAL = 250;
  * Progress callback for indexing operations
  */
 export interface IndexProgress {
-  phase: 'scanning' | 'parsing' | 'storing' | 'resolving';
+  phase: 'scanning' | 'parsing' | 'arkts-batch' | 'storing' | 'resolving';
   current: number;
   total: number;
   currentFile?: string;
+  /** ArkTS batch sub-step (scene build vs per-file persist). */
+  subphase?: 'scene' | 'persist';
 }
 
 /**
@@ -118,7 +127,7 @@ const MAX_FILE_SIZE = 1024 * 1024;
 
 /**
  * Directory names that are dependency, build, cache, or tooling output across the
- * languages/frameworks CodeGraph supports — curated from the canonical
+ * languages/frameworks HomeGraph supports — curated from the canonical
  * github/gitignore templates. Excluded by default so the graph reflects your code,
  * not third-party noise, without requiring a `.gitignore` (issue #407). The
  * exclusion applies uniformly (git or not, tracked or not); the only opt-in is an
@@ -127,7 +136,7 @@ const MAX_FILE_SIZE = 1024 * 1024;
  * `Library`) are deliberately NOT listed, to avoid ever hiding real source.
  *
  * Only dirs that actually contain *indexable source* (or are enormous) earn a slot
- * — IDE/state dirs like `.idea`/`.vs` are omitted because CodeGraph indexes only
+ * — IDE/state dirs like `.idea`/`.vs` are omitted because HomeGraph indexes only
  * recognized source extensions, so they produce no symbols regardless.
  */
 const DEFAULT_IGNORE_DIRS: ReadonlySet<string> = new Set([
@@ -247,7 +256,7 @@ function readGitignorePatterns(giPath: string): string {
   // Fast path: one `.ignores()` call forces the library to compile EVERY rule,
   // so if it doesn't throw, the whole file is safe to use verbatim.
   try {
-    ignore().add(content).ignores('.codegraph-probe');
+    ignore().add(content).ignores('.homegraph-probe');
     return content;
   } catch {
     // Fall through: a line is uncompilable — keep the good ones, drop the bad.
@@ -256,7 +265,7 @@ function readGitignorePatterns(giPath: string): string {
   let dropped = 0;
   for (const line of content.split(/\r?\n/)) {
     try {
-      ignore().add(line).ignores('.codegraph-probe');
+      ignore().add(line).ignores('.homegraph-probe');
       kept.push(line);
     } catch {
       dropped++;
@@ -295,7 +304,7 @@ function defaultsOnlyIgnore(): Ignore {
 }
 
 /**
- * Matcher for the project's `codegraph.json` `includeIgnored` patterns — the
+ * Matcher for the project's `homegraph.json` `includeIgnored` patterns — the
  * explicit opt-in to index embedded git repos living inside gitignored
  * directories (#622, #699). Returns `null` when the project opted in nothing,
  * which is the zero-config DEFAULT: `.gitignore` is then fully respected and a
@@ -369,7 +378,7 @@ const EMBEDDED_REPO_SEARCH_ENTRIES = 2000;
  *   super-repo merely hides from git; index it (#193, #514).
  * - A `.git` **file** is a pointer (`gitdir: …`). A git **worktree** points into
  *   the host repo's own `.git/worktrees/<name>`, so it is a second working view
- *   of a repo CodeGraph already indexes — indexing it just duplicates the whole
+ *   of a repo HomeGraph already indexes — indexing it just duplicates the whole
  *   graph N times; skip it (#848). A **submodule worktree** points into
  *   `.git/modules/<module>/worktrees/<name>` — same duplication, so skip it too
  *   (#945). A **submodule** checkout points into `.git/modules/<module>` (no
@@ -404,7 +413,7 @@ function classifyGitDir(absDir: string): 'embedded' | 'worktree' | 'none' {
  * Find git repositories nested under `absDir` (inclusive), shallow bounded BFS.
  * Stops descending at each repo root found — contents belong to that repo's own
  * enumeration. Skips default-ignored dirs (`node_modules` can contain `.git`
- * from npm git-dependencies — that never makes it project code) and CodeGraph
+ * from npm git-dependencies — that never makes it project code) and HomeGraph
  * data dirs. Depth- and entry-capped so a huge ignored tree can't stall the scan.
  */
 function findNestedGitRepos(absDir: string, relPrefix: string): string[] {
@@ -437,7 +446,7 @@ function findNestedGitRepos(absDir: string, relPrefix: string): string[] {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (entry.name === '.git' || isCodeGraphDataDir(entry.name)) continue;
+      if (entry.name === '.git' || isHomeGraphDataDir(entry.name)) continue;
       const childRel = rel + entry.name + '/';
       if (defaults.ignores(childRel)) continue;
       queue.push({ abs: path.join(abs, entry.name), rel: childRel, depth: depth + 1 });
@@ -548,7 +557,7 @@ function gitlinkEmbeddedRepoSkipped(
 /**
  * Standalone discovery of every embedded repo root under `rootDir` (relative,
  * trailing-slashed) — the untracked kind (#193) always, and the gitignored kind
- * (#514) only for directories the project opted in via `codegraph.json`
+ * (#514) only for directories the project opted in via `homegraph.json`
  * `includeIgnored` (#622, #699); otherwise `.gitignore` is respected and they
  * are not discovered (#970, #976). Recursive (an embedded repo can embed further
  * repos). Returns [] for non-git roots: the filesystem walk handles nested repos
@@ -583,17 +592,9 @@ export function discoverEmbeddedRepoRoots(rootDir: string): string[] {
     // same way collectGitFiles does, keeping watcher scope == indexer scope.
     // (#1031, #1033)
     try {
-      const staged = execFileSync(
-        'git',
-        ['ls-files', '-z', '-s', '--recurse-submodules'],
-        { cwd: repoAbs, encoding: 'utf-8', timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }
-      );
+      const gitOpts: GitLsFilesOpts = { cwd: repoAbs, encoding: 'utf-8', timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true };
       const repoIgnore = buildDefaultIgnore(repoAbs);
-      for (const entry of staged.split('\0')) {
-        if (!entry || entry.slice(0, 6) !== '160000') continue;
-        const tab = entry.indexOf('\t');
-        if (tab === -1) continue;
-        const rel = entry.slice(tab + 1);
+      for (const rel of listGitlinkRels(gitOpts)) {
         const relDir = rel.endsWith('/') ? rel : rel + '/';
         // A gitlink under a gitignored path is respected (not indexed) unless the
         // project opted it in — same rule as the untracked-ignored kind (#1065).
@@ -618,9 +619,9 @@ export function discoverEmbeddedRepoRoots(rootDir: string): string[] {
  * relative to `repoDir`, trailing-slashed.
  *
  * OPT-IN ONLY. Walking into a gitignored directory contradicts what every other
- * tool (and CodeGraph's own `git ls-files` foundation) does — `.gitignore`
+ * tool (and HomeGraph's own `git ls-files` foundation) does — `.gitignore`
  * excludes. So this returns `[]` unless the project opted the directory in via
- * `codegraph.json` `includeIgnored`; without that, a gitignored dir — including
+ * `homegraph.json` `includeIgnored`; without that, a gitignored dir — including
  * a huge reference/data dir full of nested clones — is left untouched (#970,
  * #976). When opted in, it restores the super-repo-of-clones behavior (#622,
  * #699). `prefix` is the scan-root-relative path of `repoDir`, so a pattern like
@@ -652,14 +653,83 @@ function findIgnoredEmbeddedRepos(repoDir: string, includeIgnored: Ignore | null
  * embedded repo is its own git boundary, so we re-run `git ls-files` inside it.
  * (See issue #193.) GITIGNORED embedded repos are invisible even to that; they
  * are discovered separately via `findIgnoredEmbeddedRepos` (#514) but ONLY for
- * directories the project opted in through `codegraph.json` `includeIgnored`
+ * directories the project opted in through `homegraph.json` `includeIgnored`
  * (`includeIgnored` here, threaded from the scan root) — by default `.gitignore`
  * is respected and they stay out (#970, #976). Every embedded repo root (however
  * found) is recorded in `embeddedRoots` so callers can exempt its files from the
  * parent's own gitignore rules.
  */
+type GitLsFilesOpts = {
+  cwd: string;
+  encoding: 'utf-8';
+  timeout: number;
+  maxBuffer: number;
+  stdio: ['pipe', 'pipe', 'pipe'];
+  windowsHide: boolean;
+};
+
+/**
+ * Collect tracked paths and unexpanded gitlinks (mode 160000) from `git ls-files`.
+ *
+ * Prefer one `-s --recurse-submodules` pass (git ≥2.38). Older git rejects that
+ * combo ("unsupported mode"), so fall back to `-c --recurse-submodules` for
+ * expanded submodule files plus a plain `-s` pass for gitlink detection (#1031).
+ */
+function listTrackedGitFiles(
+  gitOpts: GitLsFilesOpts,
+  prefix: string,
+  files: Set<string>,
+): string[] {
+  const gitlinkRels: string[] = [];
+  const ingestStaged = (tracked: string): void => {
+    for (const entry of tracked.split('\0')) {
+      if (!entry) continue;
+      const tab = entry.indexOf('\t');
+      if (tab === -1) continue; // --stage always emits "<mode> <object> <stage>\t<path>"
+      const rel = entry.slice(tab + 1);
+      if (entry.slice(0, 6) === '160000') {
+        gitlinkRels.push(rel); // an unexpanded gitlink — recursed into below, not a source file itself
+        continue;
+      }
+      files.add(normalizePath(prefix + rel));
+    }
+  };
+
+  try {
+    ingestStaged(execFileSync('git', ['ls-files', '-z', '-s', '--recurse-submodules'], gitOpts));
+    return gitlinkRels;
+  } catch {
+    // Older git: submodule expansion and gitlink mode detection need two passes.
+    const cached = execFileSync('git', ['ls-files', '-z', '-c', '--recurse-submodules'], gitOpts);
+    for (const rel of cached.split('\0')) {
+      if (rel) files.add(normalizePath(prefix + rel));
+    }
+    ingestStaged(execFileSync('git', ['ls-files', '-z', '-s'], gitOpts));
+    return gitlinkRels;
+  }
+}
+
+/** Unexpanded gitlink paths (mode 160000) from `git ls-files --stage`. */
+function listGitlinkRels(gitOpts: GitLsFilesOpts): string[] {
+  const rels: string[] = [];
+  const ingest = (staged: string): void => {
+    for (const entry of staged.split('\0')) {
+      if (!entry || entry.slice(0, 6) !== '160000') continue;
+      const tab = entry.indexOf('\t');
+      if (tab === -1) continue;
+      rels.push(entry.slice(tab + 1));
+    }
+  };
+  try {
+    ingest(execFileSync('git', ['ls-files', '-z', '-s', '--recurse-submodules'], gitOpts));
+  } catch {
+    ingest(execFileSync('git', ['ls-files', '-z', '-s'], gitOpts));
+  }
+  return rels;
+}
+
 function collectGitFiles(repoDir: string, prefix: string, files: Set<string>, embeddedRoots?: Set<string>, includeIgnored: Ignore | null = null): void {
-  const gitOpts = { cwd: repoDir, encoding: 'utf-8' as const, timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], windowsHide: true };
+  const gitOpts: GitLsFilesOpts = { cwd: repoDir, encoding: 'utf-8', timeout: 30000, maxBuffer: 50 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true };
 
   // Tracked files. --recurse-submodules pulls in files from active submodules,
   // which the index would otherwise represent only as a commit pointer.
@@ -683,19 +753,7 @@ function collectGitFiles(repoDir: string, prefix: string, files: Set<string>, em
   // (the core.quotepath default), and the quoted form never matches a real file
   // on disk → those files are silently dropped from the index. (#541) With -s the
   // path follows a TAB after the `<mode> <object> <stage>` prefix.
-  const gitlinkRels: string[] = [];
-  const tracked = execFileSync('git', ['ls-files', '-z', '-s', '--recurse-submodules'], gitOpts);
-  for (const entry of tracked.split('\0')) {
-    if (!entry) continue;
-    const tab = entry.indexOf('\t');
-    if (tab === -1) continue; // --stage always emits "<mode> <object> <stage>\t<path>"
-    const rel = entry.slice(tab + 1);
-    if (entry.slice(0, 6) === '160000') {
-      gitlinkRels.push(rel); // an unexpanded gitlink — recursed into below, not a source file itself
-      continue;
-    }
-    files.add(normalizePath(prefix + rel));
-  }
+  const gitlinkRels = listTrackedGitFiles(gitOpts, prefix, files);
 
   // Untracked files (submodules manage their own untracked state). Embedded git
   // repos surface here as a single "subdir/" entry that git refuses to descend
@@ -749,7 +807,7 @@ function collectGitFiles(repoDir: string, prefix: string, files: Set<string>, em
   // Embedded repos hidden by THIS repo's ignore rules (`/packages/` in a
   // super-repo .gitignore) never appear in any listing above. By default they
   // stay hidden — `.gitignore` is respected (#970, #976). They are recursed into
-  // only when the project opted the directory in via `codegraph.json`
+  // only when the project opted the directory in via `homegraph.json`
   // `includeIgnored` (#622, #699), which `findIgnoredEmbeddedRepos` enforces.
   for (const rel of findIgnoredEmbeddedRepos(repoDir, includeIgnored, prefix)) {
     embeddedRoots?.add(normalizePath(prefix + rel));
@@ -823,17 +881,17 @@ interface GitChanges {
  * Recurses into embedded repos — the untracked kind (#193: the parent's status
  * collapses them to an opaque `?? subdir/` entry) always, and the gitignored
  * kind (#514: they never appear in the parent's status at all) only for
- * directories opted in via `codegraph.json` `includeIgnored` (#622, #699) —
+ * directories opted in via `homegraph.json` `includeIgnored` (#622, #699) —
  * running `git status` inside each, so changes in a multi-repo workspace sync
  * without a full rescan. By default a gitignored dir is left alone, matching the
  * full-index scan (#970, #976). Deleting an ENTIRE embedded repo dir is the one
  * case this cannot see (the child status that would report the deletions is gone
- * with it); a full `codegraph index` reconciles that.
+ * with it); a full `homegraph index` reconciles that.
  */
 function getGitChangedFiles(rootDir: string): GitChanges | null {
   try {
     const changes: GitChanges = { modified: [], added: [], deleted: [] };
-    // Custom extension → language overrides from the project's codegraph.json,
+    // Custom extension → language overrides from the project's homegraph.json,
     // so change detection sees the same custom-extension files the full index does.
     const overrides = loadExtensionOverrides(rootDir);
     collectGitStatus(rootDir, '', changes, overrides, loadIncludeIgnoredMatcher(rootDir), loadExcludeMatcher(rootDir));
@@ -855,7 +913,7 @@ function collectGitStatus(repoDir: string, prefix: string, out: GitChanges, over
   // status hides neither: it ignores nothing for *tracked* paths, and the
   // built-in defaults aren't gitignore at all. Without this filter a committed
   // vendor/ dir, or a tracked file under a .gitignored dir, surfaces here as a
-  // change — so `codegraph status` (which reads getChangedFiles) reports a
+  // change — so `homegraph status` (which reads getChangedFiles) reports a
   // pending edit the full index never tracks and `sync` never clears. Matching
   // repo-relative `rel` at each recursion level mirrors getGitVisibleFiles'
   // ScopeIgnore: every embedded repo is judged by ITS OWN rules, never the
@@ -929,7 +987,7 @@ export function scanDirectory(
   rootDir: string,
   onProgress?: (current: number, file: string) => void
 ): string[] {
-  // Custom extension → language overrides from the project's codegraph.json.
+  // Custom extension → language overrides from the project's homegraph.json.
   const overrides = loadExtensionOverrides(rootDir);
 
   // Fast path: use git to get all visible files (respects .gitignore everywhere)
@@ -959,7 +1017,7 @@ export async function scanDirectoryAsync(
   rootDir: string,
   onProgress?: (current: number, file: string) => void
 ): Promise<string[]> {
-  // Custom extension → language overrides from the project's codegraph.json.
+  // Custom extension → language overrides from the project's homegraph.json.
   const overrides = loadExtensionOverrides(rootDir);
 
   const gitFiles = getGitVisibleFiles(rootDir);
@@ -993,7 +1051,7 @@ function scanDirectoryWalk(
   const files: string[] = [];
   let count = 0;
   const visitedDirs = new Set<string>();
-  // Custom extension → language overrides from the project's codegraph.json.
+  // Custom extension → language overrides from the project's homegraph.json.
   const overrides = loadExtensionOverrides(rootDir);
 
   // A .gitignore matcher scoped to the directory that declared it. Patterns in
@@ -1055,9 +1113,9 @@ function scanDirectoryWalk(
     }
 
     for (const entry of entries) {
-      // Never descend into git internals or any CodeGraph data directory
+      // Never descend into git internals or any HomeGraph data directory
       // (the active one or a sibling another environment created — #636).
-      if (entry.name === '.git' || isCodeGraphDataDir(entry.name)) continue;
+      if (entry.name === '.git' || isHomeGraphDataDir(entry.name)) continue;
 
       const fullPath = path.join(dir, entry.name);
       const relativePath = normalizePath(path.relative(rootDir, fullPath));
@@ -1214,7 +1272,7 @@ export class ExtractionOrchestrator {
     let totalNodes = 0;
     let totalEdges = 0;
 
-    // Custom extension → language overrides from the project's codegraph.json.
+    // Custom extension → language overrides from the project's homegraph.json.
     // Threaded into language detection so custom-extension files load the right
     // grammar and store under the mapped language.
     const overrides = loadExtensionOverrides(this.rootDir);
@@ -1246,6 +1304,19 @@ export class ExtractionOrchestrator {
     // between runs is picked up without restarting the process.
     this.detectedFrameworkNames = null;
     const frameworkNames = this.ensureDetectedFrameworks(files);
+
+    resetArkTSBatch();
+    setArkTSBatchProgressCallback((batchProgress) => {
+      onProgress?.({
+        phase: 'arkts-batch',
+        current: batchProgress.current,
+        total: batchProgress.total,
+        currentFile: batchProgress.currentFile,
+        subphase: batchProgress.subphase,
+      });
+    });
+
+    try {
 
     if (signal?.aborted) {
       return {
@@ -1314,7 +1385,9 @@ export class ExtractionOrchestrator {
      */
     const parseFile = (filePath: string, content: string): Promise<ExtractionResult> => {
       const language = detectLanguage(filePath, content, overrides);
-      if (!pool) return Promise.resolve(extractFromSource(filePath, content, language, frameworkNames));
+      if (!pool || requiresInProcessExtraction(language)) {
+        return Promise.resolve(extractFromSource(filePath, content, language, frameworkNames));
+      }
       return pool.requestParse({ filePath, content, language, frameworkNames });
     };
 
@@ -1428,6 +1501,12 @@ export class ExtractionOrchestrator {
       }
     };
 
+    const firstEtsFile = files.find((f) => detectLanguage(f, undefined, overrides) === 'arkts');
+    if (firstEtsFile) {
+      await primeArkTSBatch(this.rootDir, this.queries, firstEtsFile);
+      errors.push(...drainArkTSIndexNotices());
+    }
+
     for (let i = 0; i < files.length; i += FILE_IO_BATCH_SIZE) {
       if (signal?.aborted) { aborted = true; break; }
 
@@ -1436,6 +1515,15 @@ export class ExtractionOrchestrator {
       // Read files in parallel (with path validation before any I/O)
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
+          if (isArkTSBatchPersisted(fp)) {
+            return {
+              filePath: fp,
+              content: null as string | null,
+              stats: null as fs.Stats | null,
+              error: null as Error | null,
+              arktsBatchSkipped: true as const,
+            };
+          }
           try {
             // Indexing read: follow in-root symlinks the directory walk already
             // descended into (the `../` guard still applies) so files reached
@@ -1456,8 +1544,27 @@ export class ExtractionOrchestrator {
 
       // Dispatch each readable file into the bounded parse window; the window
       // stores results on the main thread as they arrive.
-      for (const { filePath, content, stats, error } of fileContents) {
+      for (const fileEntry of fileContents) {
+        const { filePath, content, stats, error } = fileEntry;
+        const arktsBatchSkipped = 'arktsBatchSkipped' in fileEntry && fileEntry.arktsBatchSkipped;
+
         if (signal?.aborted) { aborted = true; break; }
+
+        if (isArkTSBatchPersisted(filePath) || arktsBatchSkipped) {
+          processed++;
+          filesIndexed++;
+          onProgress?.({ phase: 'parsing', current: processed, total, currentFile: filePath });
+          continue;
+        }
+
+        if (!isArktsBatchRunning()) {
+          onProgress?.({
+            phase: 'parsing',
+            current: processed,
+            total,
+            currentFile: filePath,
+          });
+        }
 
         if (error || content === null || stats === null) {
           processed++;
@@ -1650,6 +1757,9 @@ export class ExtractionOrchestrator {
       errors,
       durationMs: Date.now() - startTime,
     };
+    } finally {
+      setArkTSBatchProgressCallback(null);
+    }
   }
 
   /**
@@ -1782,8 +1892,17 @@ export class ExtractionOrchestrator {
       };
     }
 
-    // Detect language (honoring the project's codegraph.json extension overrides)
+    // Detect language (honoring the project's homegraph.json extension overrides)
     const language = detectLanguage(relativePath, content, loadExtensionOverrides(this.rootDir));
+    if (isArkTSBatchPersisted(relativePath)) {
+      return {
+        nodes: [],
+        edges: [],
+        unresolvedReferences: [],
+        errors: [],
+        durationMs: 0,
+      };
+    }
     if (!isLanguageSupported(language)) {
       return {
         nodes: [],
@@ -2049,17 +2168,49 @@ export class ExtractionOrchestrator {
 
     // Index changed files
     const total = filesToIndex.length;
-    for (let i = 0; i < filesToIndex.length; i++) {
-      const filePath = filesToIndex[i]!;
-      onProgress?.({
-        phase: 'parsing',
-        current: i + 1,
-        total,
-        currentFile: filePath,
+    const overrides = loadExtensionOverrides(this.rootDir);
+    const needsArkTS = filesToIndex.some((f) => detectLanguage(f, undefined, overrides) === 'arkts');
+    if (needsArkTS) {
+      setArkTSBatchProgressCallback((batchProgress) => {
+        onProgress?.({
+          phase: 'arkts-batch',
+          current: batchProgress.current,
+          total: batchProgress.total,
+          currentFile: batchProgress.currentFile,
+          subphase: batchProgress.subphase,
+        });
       });
+      const firstEts = filesToIndex.find(
+        (f) => detectLanguage(f, undefined, overrides) === 'arkts'
+      )!;
+      await primeArkTSBatch(this.rootDir, this.queries, firstEts);
+    }
+    try {
+      for (let i = 0; i < filesToIndex.length; i++) {
+        const filePath = filesToIndex[i]!;
+        if (isArkTSBatchPersisted(filePath)) {
+          onProgress?.({
+            phase: 'parsing',
+            current: i + 1,
+            total,
+            currentFile: filePath,
+          });
+          continue;
+        }
+        onProgress?.({
+          phase: 'parsing',
+          current: i + 1,
+          total,
+          currentFile: filePath,
+        });
 
-      const result = await this.indexFile(filePath);
-      nodesUpdated += result.nodes.length;
+        const result = await this.indexFile(filePath);
+        nodesUpdated += result.nodes.length;
+      }
+    } finally {
+      if (needsArkTS) {
+        setArkTSBatchProgressCallback(null);
+      }
     }
 
     return {
