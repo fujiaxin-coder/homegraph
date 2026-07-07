@@ -1,9 +1,16 @@
 /**
- * MCP query cache — stores serialized tool responses in homegraph.db.
+ * MCP query cache — memory key index + serialized tool responses in homegraph.db.
+ *
+ * A per-project in-memory Set of cache keys gives O(1) negative lookup so misses
+ * skip the SQLite SELECT. Payloads stay in homegraph.db; the Set is warmed from
+ * DB on first use after daemon restart when the index stamp is still valid.
  *
  * Invalidated wholesale when the index stamp or cache format version changes.
  * Per-call staleness/worktree notices are applied AFTER cache lookup so hits
  * stay fresh.
+ *
+ * The key Set lives on the daemon main thread only (cache read/write runs there
+ * before/after worker-pool explore dispatch), so no cross-thread locking is needed.
  */
 
 import { createHash } from 'node:crypto';
@@ -26,6 +33,9 @@ const METADATA_FORMAT_VERSION = 'query_cache_format_version';
 /** Tools that must stay live — never cached. */
 const NON_CACHEABLE_TOOLS = new Set(['homegraph_status', 'homegraph_spec_match']);
 
+/** Per resolved project root — one index per homegraph.db. */
+const cacheIndices = new Map<string, McpQueryCacheIndex>();
+
 export function isMcpQueryCacheEnabled(): boolean {
   const raw = process.env.HOMEGRAPH_MCP_CACHE;
   return raw === '1' || raw === 'true';
@@ -33,6 +43,94 @@ export function isMcpQueryCacheEnabled(): boolean {
 
 export function isCacheableMcpTool(toolName: string): boolean {
   return !NON_CACHEABLE_TOOLS.has(toolName);
+}
+
+/**
+ * In-memory index of cache keys for one project. Negative lookup (key absent)
+ * returns immediately without touching SQLite; positive lookup fetches the
+ * JSON payload from mcp_query_cache.
+ */
+export class McpQueryCacheIndex {
+  private keys = new Set<string>();
+  /** Stamp/format this Set was last synchronized against (null = cold). */
+  private syncedStamp: string | null = null;
+  private syncedFormat: string | null = null;
+
+  /** Whether `cacheKey` is known to exist — O(1), no DB I/O. */
+  has(cacheKey: string): boolean {
+    return this.keys.has(cacheKey);
+  }
+
+  /**
+   * Align the in-memory key Set with DB metadata. Clears both layers when the
+   * index stamp or format version changed; otherwise warms keys from DB on first
+   * use after process restart.
+   */
+  ensureValid(queries: QueryBuilder, getIndexStamp: () => number | null): void {
+    const currentStamp = String(getIndexStamp() ?? 0);
+    const currentFormat = String(QUERY_CACHE_FORMAT_VERSION);
+    const storedStamp = queries.getMetadata(METADATA_INDEX_STAMP);
+    const storedFormat = queries.getMetadata(METADATA_FORMAT_VERSION);
+
+    if (storedStamp === currentStamp && storedFormat === currentFormat) {
+      if (this.syncedStamp !== currentStamp || this.syncedFormat !== currentFormat) {
+        this.loadKeysFromDb(queries);
+        this.syncedStamp = currentStamp;
+        this.syncedFormat = currentFormat;
+      }
+      return;
+    }
+
+    queries.clearMcpQueryCache();
+    queries.setMetadata(METADATA_INDEX_STAMP, currentStamp);
+    queries.setMetadata(METADATA_FORMAT_VERSION, currentFormat);
+    this.keys.clear();
+    this.syncedStamp = currentStamp;
+    this.syncedFormat = currentFormat;
+  }
+
+  /** Drop in-memory keys (e.g. after the DB file was replaced on disk). */
+  reset(): void {
+    this.keys.clear();
+    this.syncedStamp = null;
+    this.syncedFormat = null;
+  }
+
+  getEntry(queries: QueryBuilder, cacheKey: string): ToolResult | null {
+    if (!this.keys.has(cacheKey)) return null;
+    return readMcpQueryCachePayload(queries, cacheKey);
+  }
+
+  setEntry(
+    queries: QueryBuilder,
+    cacheKey: string,
+    toolName: string,
+    result: ToolResult,
+  ): void {
+    writeMcpQueryCachePayload(queries, cacheKey, toolName, result);
+    this.keys.add(cacheKey);
+  }
+
+  private loadKeysFromDb(queries: QueryBuilder): void {
+    this.keys.clear();
+    for (const key of queries.listMcpQueryCacheKeys()) {
+      this.keys.add(key);
+    }
+  }
+}
+
+export function getMcpQueryCacheIndex(projectRoot: string): McpQueryCacheIndex {
+  let index = cacheIndices.get(projectRoot);
+  if (!index) {
+    index = new McpQueryCacheIndex();
+    cacheIndices.set(projectRoot, index);
+  }
+  return index;
+}
+
+/** Test helper — drop all per-project indices between cases. */
+export function resetMcpQueryCacheIndices(): void {
+  cacheIndices.clear();
 }
 
 /**
@@ -164,25 +262,7 @@ export function buildMcpQueryCacheKey(
   return createHash('sha256').update(fingerprint, 'utf8').digest('hex');
 }
 
-export function ensureMcpQueryCacheValid(
-  queries: QueryBuilder,
-  getIndexStamp: () => number | null,
-): void {
-  const currentStamp = String(getIndexStamp() ?? 0);
-  const storedStamp = queries.getMetadata(METADATA_INDEX_STAMP);
-  const storedFormat = queries.getMetadata(METADATA_FORMAT_VERSION);
-  const currentFormat = String(QUERY_CACHE_FORMAT_VERSION);
-
-  if (storedStamp === currentStamp && storedFormat === currentFormat) {
-    return;
-  }
-
-  queries.clearMcpQueryCache();
-  queries.setMetadata(METADATA_INDEX_STAMP, currentStamp);
-  queries.setMetadata(METADATA_FORMAT_VERSION, currentFormat);
-}
-
-export function getMcpQueryCacheEntry(
+function readMcpQueryCachePayload(
   queries: QueryBuilder,
   cacheKey: string,
 ): ToolResult | null {
@@ -197,7 +277,7 @@ export function getMcpQueryCacheEntry(
   }
 }
 
-export function setMcpQueryCacheEntry(
+function writeMcpQueryCachePayload(
   queries: QueryBuilder,
   cacheKey: string,
   toolName: string,
