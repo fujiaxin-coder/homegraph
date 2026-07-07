@@ -11,15 +11,13 @@
  *   - Reinforce "explore instead of Read/Grep" for indexed code
  *   - Anti-patterns (don't re-verify with grep; don't hand-reconstruct flows)
  *
- * Keep it tight. The agent reads this every session — long instructions
- * burn tokens. The DEFAULT MCP surface is `homegraph_explore` ALONE (see
- * DEFAULT_MCP_TOOLS in tools.ts) — reference only that tool here. The other
- * tools (node/search/callers/…) stay defined and are re-enablable via
- * HOMEGRAPH_MCP_TOOLS, but they are NOT listed to agents, so don't name them.
+ * HomeGraph exposes the full tool surface by default (search, node, explore,
+ * spec tools, …). Lead with homegraph_explore for structural questions; the
+ * other tools are available when a narrower step helps.
  */
-export const SERVER_INSTRUCTIONS = `# Codegraph — code intelligence over an indexed knowledge graph
+export const SERVER_INSTRUCTIONS = `# HomeGraph — code intelligence over an indexed knowledge graph
 
-Codegraph is a SQLite knowledge graph of every symbol, edge, and file in
+HomeGraph is a SQLite knowledge graph of every symbol, edge, and file in
 the workspace — pre-computed structure you would otherwise re-derive by
 reading files (cached intelligence: thousands of parse/trace decisions you
 don't pay to re-reason each run). Reads are sub-millisecond; the index lags
@@ -29,9 +27,9 @@ verbatim source PLUS who calls it and what it affects, so you edit with the
 blast radius in view. More accurate context, in far fewer tokens and
 round-trips than reading files yourself.
 
-## One tool: homegraph_explore — use it instead of reading files
+## Primary tool: homegraph_explore — use it instead of reading files
 
-There is a single tool, \`homegraph_explore\`, and it is Read-equivalent. It
+For structural and flow questions, \`homegraph_explore\` is Read-equivalent. It
 takes either a natural-language question or a bag of symbol/file names and
 returns the **verbatim, line-numbered source** of the relevant symbols
 grouped by file — the same \`<n>\\t<line>\` shape \`Read\` gives you, safe to
@@ -41,7 +39,7 @@ a blast-radius summary of what depends on them.
 
 Whether you're answering "how does X work" or implementing a change (fixing a
 bug, adding a feature), call \`homegraph_explore\` before you Read. ONE call
-usually answers the whole question. Codegraph IS the pre-built search index —
+usually answers the whole question. HomeGraph IS the pre-built search index —
 so running your own grep + read loop, or delegating the lookup to a separate
 file-reading sub-task/agent, repeats work homegraph already did and costs more
 for the same answer. A direct homegraph answer is typically one to a few
@@ -66,7 +64,7 @@ calls; a grep/read exploration is dozens.
 - If a tool reports a project isn't indexed (no \`.homegraph/\`), stop calling homegraph tools for that project for the rest of the session and use your built-in tools there instead. Indexing is the user's decision — mention they can run \`homegraph init\` if it comes up, but don't run it yourself.
 - Index lags file writes by ~1 second.
 - Cross-file resolution is best-effort name matching; ambiguous calls may return multiple candidates.
-- No live correctness validation — that's still the TypeScript compiler / test suite / linter's job. Codegraph supplements those with structural context they don't have.
+- No live correctness validation — that's still the TypeScript compiler / test suite / linter's job. HomeGraph supplements those with structural context they don't have.
 `;
 
 /**
@@ -81,9 +79,9 @@ calls; a grep/read exploration is dozens.
  * project playbook ({@link SERVER_INSTRUCTIONS}) is sent instead when the root
  * IS indexed, so the common case stays tight.
  */
-export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# Codegraph — available (per-project; pass projectPath)
+export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — available (per-project; pass projectPath)
 
-Codegraph is a SQLite knowledge graph of a codebase's symbols, edges, and
+HomeGraph is a SQLite knowledge graph of a codebase's symbols, edges, and
 files: one \`homegraph_explore\` call returns the verbatim, line-numbered source
 of the relevant symbols PLUS the call paths between them and a blast-radius
 summary — replacing a grep + Read loop with one round-trip.
@@ -93,7 +91,7 @@ default project — but the tools are available and work **per project**:
 
 - To query a project that HAS a \`.homegraph/\` index (e.g. a service inside a
   monorepo, or a second repo), pass its path as \`projectPath\` to
-  \`homegraph_explore\` (and any other homegraph tool). Codegraph resolves the
+  \`homegraph_explore\` (and any other homegraph tool). HomeGraph resolves the
   nearest \`.homegraph/\` at or above that path and answers from it — for as many
   projects as you like in one session.
 - For a project with no \`.homegraph/\`, use your built-in tools (Read/Grep/Glob)

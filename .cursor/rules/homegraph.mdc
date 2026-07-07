@@ -1,11 +1,11 @@
 ---
-description: HomeGraph MCP usage guide — one tool, homegraph_explore
+description: HomeGraph MCP usage guide — homegraph_explore primary, full tool surface
 alwaysApply: true
 ---
 <!-- HOMEGRAPH_START -->
 ## HomeGraph
 
-This project has a HomeGraph MCP server configured, exposing a single tool: `homegraph_explore`. HomeGraph is a tree-sitter-parsed knowledge graph of every symbol, edge, and file. Reads are sub-millisecond and return structural information grep cannot.
+This project has a HomeGraph MCP server configured with the full tool surface (search, node, explore, spec tools, …). For structural questions, reach for `homegraph_explore` first. HomeGraph is a tree-sitter-parsed knowledge graph of every symbol, edge, and file. Reads are sub-millisecond and return structural information grep cannot.
 
 ### Use homegraph_explore instead of reading files
 
@@ -13,7 +13,7 @@ Reach for `homegraph_explore` before grep/find or Read for any **structural** qu
 
 ### Rules of thumb
 
-- **Answer directly — don't delegate exploration.** ONE `homegraph_explore` usually answers the whole question; follow up with another `homegraph_explore` naming more specific symbols if you need more. Codegraph IS the pre-built index, so spawning a separate file-reading sub-task/agent — or running a grep + read loop — repeats work homegraph already did and costs more for the same answer.
+- **Answer directly — don't delegate exploration.** ONE `homegraph_explore` usually answers the whole question; follow up with another `homegraph_explore` naming more specific symbols if you need more. HomeGraph IS the pre-built index, so spawning a separate file-reading sub-task/agent — or running a grep + read loop — repeats work homegraph already did and costs more for the same answer.
 - **Trust homegraph results.** They come from a full AST parse. Do NOT re-verify them with grep — that's slower, less accurate, and wastes context.
 - **Don't grep or Read first** to find or understand indexed code — one `homegraph_explore` returns the relevant source in a single round-trip. Reach for raw Read/Grep only to confirm a specific detail homegraph didn't cover, or for what it doesn't index (configs, docs).
 - **Index lag — check the staleness banner, don't guess a wait.** When a homegraph response starts with "⚠️ Some files referenced below were edited since the last index sync…", the listed files are pending re-index — Read those specific files for accurate content. Files NOT in that banner are fresh and homegraph is authoritative for them.

@@ -68,7 +68,7 @@ def find_homegraph_bin(explicit: str | None = None) -> str:
             return str(p.resolve())
         raise FileNotFoundError(f"homegraph binary not found: {explicit}")
 
-    # Prefer local dev build (npm global homegraph often misses optional deps like arkanalyzer)
+    # Prefer local dev build when testing unreleased changes
     repo_root = Path(__file__).resolve().parents[2]
     for local in (
         repo_root / "dist" / "bin" / "homegraph.js",

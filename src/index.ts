@@ -350,14 +350,14 @@ export class HomeGraph {
    * files is O(1) regardless of size, reclaims the disk, and sidesteps opening
    * (and running migrations against) the poisoned database entirely.
    */
-  static async recreate(projectRoot: string): Promise<CodeGraph> {
+  static async recreate(projectRoot: string): Promise<HomeGraph> {
     await initGrammars();
     const resolvedRoot = path.resolve(projectRoot);
 
     // Check if initialized — recreate REBUILDS an existing project; it is not a
     // first-time `init`.
     if (!isInitialized(resolvedRoot)) {
-      throw new Error(`CodeGraph not initialized in ${resolvedRoot}. Run init() first.`);
+      throw new Error(`HomeGraph not initialized in ${resolvedRoot}. Run init() first.`);
     }
 
     const dbPath = getDatabasePath(resolvedRoot);
@@ -370,8 +370,8 @@ export class HomeGraph {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(
         `Could not rebuild the index — the database file is in use (${reason}). ` +
-          `Stop any running CodeGraph MCP server/daemon for this project and retry, ` +
-          `or remove the ${getCodeGraphDir(resolvedRoot)} directory and run "codegraph init".`
+          `Stop any running HomeGraph MCP server/daemon for this project and retry, ` +
+          `or remove the ${getHomeGraphDir(resolvedRoot)} directory and run "homegraph init".`
       );
     }
 
@@ -379,7 +379,7 @@ export class HomeGraph {
     const db = DatabaseConnection.initialize(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    return new CodeGraph(db, queries, resolvedRoot);
+    return new HomeGraph(db, queries, resolvedRoot);
   }
 
   /**
