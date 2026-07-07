@@ -1,13 +1,13 @@
 /**
- * Mining pipeline orchestrator — main entry point for reverse-mining spec
+ * Build pipeline orchestrator — main entry point for building spec
  * knowledge from Git history.
  *
  * Replaces `commit4spec/reverse_engineer/pipeline.py`.  Discovers spec↔commit
  * pairs via `scan()`, persists them into the SQLite knowledge graph, and
  * writes a `.homegraph/commit4spec/meta.json` anchor so the self-evolve pipeline can
- * pick up where mining left off.
+ * pick up where build left off.
  *
- * @module spec/mining/pipeline
+ * @module spec/build/pipeline
  */
 
 import { SqliteDatabase } from '../../db/sqlite-adapter';
@@ -30,7 +30,7 @@ import { logDebug, logWarn } from '../../errors';
 // Types
 // ---------------------------------------------------------------------------
 
-export interface MiningResult {
+export interface BuildResult {
   specsFound: number;
   commitsFound: number;
   fragmentsFound: number;
@@ -40,11 +40,11 @@ export interface MiningResult {
 }
 
 // ---------------------------------------------------------------------------
-// runMiningPipeline
+// runBuildPipeline
 // ---------------------------------------------------------------------------
 
 /**
- * Run the full reverse-mining pipeline.
+ * Run the full build pipeline.
  *
  * Steps (ported from `pipeline.py:49-151`):
  *
@@ -60,7 +60,7 @@ export interface MiningResult {
  *    - Parse the commit diff into code fragments and persist them.
  * 6. Build a list of specs discovered on disk but never matched to a commit.
  * 7. Write `.homegraph/commit4spec/meta.json`.
- * 8. Return the `MiningResult` with all counts.
+ * 8. Return the `BuildResult` with all counts.
  *
  * Edge cases:
  * - Empty pairs → zero counts, write meta anyway, return result.
@@ -70,12 +70,12 @@ export interface MiningResult {
  * - Same spec in multiple pairs → only counted once in `specsFound`, but
  *   every commit relation is created.
  */
-export function runMiningPipeline(
+export function runBuildPipeline(
   repoPath: string,
   specStoragePath: string,
   db: SqliteDatabase,
   config?: SpecConfig,
-): MiningResult {
+): BuildResult {
   // Resolve config once — guarantee a valid SpecConfig for downstream consumers.
   const resolvedConfig = config ?? loadSpecConfig(repoPath);
 

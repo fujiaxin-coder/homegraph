@@ -38,7 +38,8 @@ export class OpenAiLlmClient implements LlmClient {
    * Send a chat completion request and return the message content string.
    *
    * Calls the OpenAI-compatible chat completions API and returns
-   * `choices[0].message.content`. On any error, returns an empty string.
+   * `choices[0].message.content`.  Throws on API or network errors so
+   * callers (e.g. the spec mine generator) can count failures reliably.
    */
   async chat(systemPrompt: string, userPrompt: string): Promise<string> {
     const baseURL = this.config.baseUrl
@@ -52,22 +53,18 @@ export class OpenAiLlmClient implements LlmClient {
       baseURL,
     });
 
-    try {
-      const completion = await client.chat.completions.create({
-        model: this.config.model,
-        temperature: this.config.temperature,
-        max_tokens: this.config.maxTokens,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-      });
+    const completion = await client.chat.completions.create({
+      model: this.config.model,
+      temperature: this.config.temperature,
+      max_tokens: this.config.maxTokens,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    });
 
-      const content = completion.choices[0]?.message?.content;
-      return content ?? '';
-    } catch {
-      return '';
-    }
+    const content = completion.choices[0]?.message?.content;
+    return content ?? '';
   }
 
   // ===========================================================================

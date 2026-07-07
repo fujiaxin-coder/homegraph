@@ -333,11 +333,12 @@ describe('writeMeta', () => {
     expect(typeof result.updatedAt).toBe('string');
   });
 
-  it('should set updatedAt but leave createdAt undefined on first write', () => {
-    // On first write there is no existing meta.json, so createdAt is not
-    // carried forward from a previous write — it remains undefined.
+  it('should set both createdAt and updatedAt on first write', () => {
+    // On first write there is no existing meta.json, so createdAt is
+    // assigned the current timestamp (same as updatedAt).
     const result = writeMeta(tmpDir, '/some/repo/specs');
-    expect(result.createdAt).toBeUndefined();
+    expect(result.createdAt).toBeTruthy();
+    expect(typeof result.createdAt).toBe('string');
     expect(result.updatedAt).toBeTruthy();
     expect(typeof result.updatedAt).toBe('string');
   });

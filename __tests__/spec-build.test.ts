@@ -17,7 +17,7 @@ import { writeMeta } from '../src/spec/utils';
 // ---------------------------------------------------------------------------
 // Module under test
 // ---------------------------------------------------------------------------
-import { analyzeCommitDiff, DiffFragment } from '../src/spec/mining/diff-parser';
+import { analyzeCommitDiff, DiffFragment } from '../src/spec/build/diff-parser';
 import {
   scan,
   getCommitInfo,
@@ -26,18 +26,18 @@ import {
   isGitRepo,
   SpecCommitPair,
   CommitInfo,
-} from '../src/spec/mining/git-scanner';
+} from '../src/spec/build/git-scanner';
 import {
   extractSpecMetadata,
   extractMarkdownHeadings,
   SpecMetadata,
-} from '../src/spec/mining/spec-extractor';
+} from '../src/spec/build/spec-extractor';
 import {
   extractScope,
   normalizeScope,
   resolveScopeToSpec,
-} from '../src/spec/mining/scope-resolver';
-import { runMiningPipeline, MiningResult } from '../src/spec/mining/pipeline';
+} from '../src/spec/build/scope-resolver';
+import { runBuildPipeline, BuildResult } from '../src/spec/build/pipeline';
 
 // Silence logger during tests
 setLogger(silentLogger);
@@ -564,10 +564,10 @@ describe('spec-extractor — extractSpecMetadata', () => {
 });
 
 // ---------------------------------------------------------------------------
-// D. pipeline.ts — runMiningPipeline
+// D. pipeline.ts — runBuildPipeline
 // ---------------------------------------------------------------------------
 
-describe('mining pipeline — runMiningPipeline', () => {
+describe('build pipeline — runBuildPipeline', () => {
   let repo: string;
   let specStorage: string;
   let db: SqliteDatabase;
@@ -590,7 +590,7 @@ describe('mining pipeline — runMiningPipeline', () => {
   });
 
   it('empty pairs returns zero counts', () => {
-    const result = runMiningPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
     expect(result.specsFound).toBe(0);
     expect(result.commitsFound).toBe(0);
     expect(result.fragmentsFound).toBe(0);
@@ -605,7 +605,7 @@ describe('mining pipeline — runMiningPipeline', () => {
     // Make a commit with matching scope
     commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): add');
 
-    const result = runMiningPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
     // There should be findings
     expect(result.specsFound).toBeGreaterThanOrEqual(0);
 
@@ -627,7 +627,7 @@ describe('mining pipeline — runMiningPipeline', () => {
 
     const hash = commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): initial');
 
-    const result = runMiningPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
 
     expect(result.specsFound).toBe(1);
     expect(result.commitsFound).toBe(1);
@@ -649,7 +649,7 @@ describe('mining pipeline — runMiningPipeline', () => {
     // Commit without matching scope but spec on disk
     commitFile(repo, 'src/lib.ts', 'lib\n', 'docs: some docs');
 
-    const result = runMiningPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
     expect(result.commitsFound).toBeGreaterThanOrEqual(0);
     // With no matching pairs, specsFound should be 0
     expect(result.specsFound).toBe(0);
@@ -660,7 +660,7 @@ describe('mining pipeline — runMiningPipeline', () => {
     commitFile(repo, 'src/v1.ts', 'v1\n', 'feat(spec10): first');
     commitFile(repo, 'src/v2.ts', 'v2\n', 'feat(spec10): second');
 
-    const result = runMiningPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
     expect(result.specsFound).toBe(1);
     expect(result.commitsFound).toBe(2);
     // relationsCreated should include 2 spec-commit relations + fragment relations

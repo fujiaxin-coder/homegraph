@@ -290,9 +290,10 @@ export function readMeta(repoPath: string): SpecMeta | null {
 /**
  * Write `${SPEC_DATA_DIR}/meta.json` to `repoPath`.
  *
- * If existing meta has a `createdAt` field it is preserved; otherwise a new
- * ISO-8601 timestamp is generated. `updatedAt` is always set to the current
- * time. The `${SPEC_DATA_DIR}` directory is created if it does not exist.
+ * If existing meta has a `createdAt` field it is preserved; otherwise the
+ * current time is used as the creation timestamp. `updatedAt` is always set
+ * to the current time. The `${SPEC_DATA_DIR}` directory is created if it does
+ * not exist.
  *
  * Returns the full `SpecMeta` that was written.
  */
@@ -306,12 +307,9 @@ export function writeMeta(
 
   const now = new Date().toISOString();
 
-  // Preserve createdAt from existing meta if available
-  let createdAt: string | undefined;
+  // Preserve createdAt from existing meta; use now for new files
   const existing = readMeta(repoPath);
-  if (existing && existing.createdAt) {
-    createdAt = existing.createdAt;
-  }
+  const createdAt = (existing?.createdAt) || now;
 
   const meta: SpecMeta = {
     repoPath,

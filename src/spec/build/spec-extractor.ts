@@ -5,7 +5,7 @@
  * Discovers spec files in a storage directory and extracts structured
  * metadata (title, subtitles, commit hash from commit-info.md).
  *
- * @module spec/mining/spec-extractor
+ * @module spec/build/spec-extractor
  */
 
 import * as fs from 'fs';

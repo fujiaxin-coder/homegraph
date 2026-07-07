@@ -20,10 +20,10 @@ import {
   insertSpecCommitRelation,
   insertCommitFragmentRelation,
 } from '../db/relations';
-import { getCommitInfo, getCommitDiff, getCommitRange } from '../mining/git-scanner';
-import { resolveScopeToSpec } from '../mining/scope-resolver';
-import { extractSpecMetadata, SpecMetadata } from '../mining/spec-extractor';
-import { analyzeCommitDiff } from '../mining/diff-parser';
+import { getCommitInfo, getCommitDiff, getCommitRange } from '../build/git-scanner';
+import { resolveScopeToSpec } from '../build/scope-resolver';
+import { extractSpecMetadata, SpecMetadata } from '../build/spec-extractor';
+import { analyzeCommitDiff } from '../build/diff-parser';
 import { LlmClient, OpenAiLlmClient } from '../llm/client';
 import { isLogicChange } from './logic-checker';
 import { locateAffectedSpecs } from './impact-locator';
@@ -470,7 +470,7 @@ export interface BatchEvolveResult {
  * evolved via `runEvolvePipeline`.  On full success, `meta.json` is refreshed
  * with the new HEAD as `currentCommitID` and `updatedAt` set to now.
  *
- * When `currentCommitID` is missing (first evolve after an older mine, or
+ * When `currentCommitID` is missing (first evolve after an older build, or
  * corrupt meta), the function falls back to processing only HEAD.
  *
  * **Partial failure:** If any commit fails, the failing commit is logged but
@@ -481,7 +481,7 @@ export interface BatchEvolveResult {
  * Edge cases:
  * - `currentCommitID` equals HEAD → 0 new commits, `metaUpdated: false`.
  * - `currentCommitID` is not an ancestor of HEAD (rebase / force-push) →
- *   throws an error asking the user to re-mine.
+ *   throws an error asking the user to re-build.
  */
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -515,7 +515,7 @@ export async function runBatchEvolvePipeline(
 ): Promise<BatchEvolveResult> {
   const meta = readMeta(repoPath);
   if (!meta) {
-    throw new Error("No meta.json found. Run 'homegraph spec mine' first.");
+    throw new Error("No meta.json found. Run 'homegraph spec build' first.");
   }
 
   // Ensure only one evolve instance runs at a time (post-commit hook may
@@ -625,7 +625,7 @@ async function runBatchEvolvePipelineImpl(
     throw new Error(
       `The last evolved commit (${lastEvolved.slice(0, 7)}) is not an ancestor of ` +
       `HEAD (${headHash.slice(0, 7)}). This usually happens after a rebase ` +
-      `or force-push. Please re-run 'homegraph spec mine' to rebuild the ` +
+      `or force-push. Please re-run 'homegraph spec build' to rebuild the ` +
       `knowledge graph, then run 'homegraph spec evolve' again.`,
     );
   }

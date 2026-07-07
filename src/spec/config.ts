@@ -1,7 +1,7 @@
 /**
  * Spec configuration module — replaces `commit4spec/utils/config.py`.
  *
- * Loads spec mining/evolve configuration from `${SPEC_DATA_DIR}/configs.json`
+ * Loads spec build/evolve configuration from `${SPEC_DATA_DIR}/configs.json`
  * within a repository. Discovery and commitScope sections fall back to code
  * defaults; the `llm` section must be explicitly configured by the user —
  * there are no hard-coded LLM defaults.
@@ -63,6 +63,53 @@ export interface SpecConfig {
   discovery: SpecDiscoveryConfig;
   commitScope: CommitScopeConfig;
   llm: LLMConfig | null;
+}
+
+export interface MineConfig {
+  /** Maximum commits to scan (default: 100). */
+  limit: number;
+  /** Clustering similarity threshold (0-1, default: 0.5). */
+  threshold: number;
+  /** Maximum number of clusters to produce (default: 10). */
+  maxCluster: number;
+  /** Output directory for generated spec files (default: '.spec'). */
+  outputDir: string;
+  /** Optional path to a spec template markdown file. */
+  template?: string;
+  /** Skip LLM generation — only output clusters (default: false). */
+  skipLlm: boolean;
+  /** Include all commit types (default: false — feat-only for conventional commits). */
+  allCommits: boolean;
+}
+
+/**
+ * Build a MineConfig from raw option values (typically from CLI parsing).
+ *
+ * @param options - Raw option values from the CLI action handler.
+ * @param llmConfigured - Whether a valid LLM config was loaded. When false,
+ *   skipLlm is forced to true regardless of the option value.
+ */
+export function createMineConfig(
+  options: {
+    limit: number;
+    threshold: number;
+    maxCluster: number;
+    outputDir: string;
+    template?: string;
+    skipLlm: boolean;
+    allCommits: boolean;
+  },
+  llmConfigured: boolean,
+): MineConfig {
+  return {
+    limit: options.limit,
+    threshold: options.threshold,
+    maxCluster: options.maxCluster,
+    outputDir: options.outputDir,
+    template: options.template,
+    skipLlm: options.skipLlm || !llmConfigured,
+    allCommits: options.allCommits,
+  };
 }
 
 // ---------------------------------------------------------------------------

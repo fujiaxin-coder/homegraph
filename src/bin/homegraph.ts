@@ -27,6 +27,7 @@ import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SPEC_DATA_DIR } from '../spec/utils';
+import { createMineConfig } from '../spec/config';
 import { getHomeGraphDir, isInitialized, unsafeIndexRootReason, findNearestHomeGraphRoot, planFrontload } from '../directory';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
@@ -2128,14 +2129,14 @@ program
 
 const specCommand = program
   .command('spec')
-  .description('Manage spec knowledge graph (reverse-mining, search, self-evolve)');
+  .description('Manage spec knowledge graph (build, mine, search, self-evolve)');
 
 /**
- * homegraph spec mine
+ * homegraph spec build
  */
 specCommand
-  .command('mine')
-  .description('Reverse-mine spec knowledge from Git history')
+  .command('build')
+  .description('Build spec knowledge graph from scanned Git history')
   .option('-p, --path <path>', 'Path to the repository')
   .option('--spec-storage-path <path>', 'Path to the .spec directory')
   .option('--db-path <path>', 'Path to the SQLite database file')
@@ -2153,8 +2154,8 @@ specCommand
       const specStoragePath = options.specStoragePath ?? path.join(repoPath, '.spec');
 
       const { createDatabase } = await import('../db/sqlite-adapter');
-      const { runMiningPipeline } = await import('../spec/mining/pipeline');
-      const { isGitRepo } = await import('../spec/mining/git-scanner');
+      const { runBuildPipeline } = await import('../spec/build/pipeline');
+      const { isGitRepo } = await import('../spec/build/git-scanner');
       const { resolveDbPath } = await import('../spec/utils');
 
       const dbPath = resolveDbPath(repoPath, options.dbPath);
@@ -2171,7 +2172,7 @@ specCommand
       }
 
       const { db } = createDatabase(dbPath);
-      const result = runMiningPipeline(repoPath, specStoragePath, db);
+      const result = runBuildPipeline(repoPath, specStoragePath, db);
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -2191,6 +2192,167 @@ specCommand
       }
     } catch (err) {
       error(`Mining failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * homegraph spec mine
+ *
+ * Mine design specs from Git history using AST analysis and LLM
+ */
+specCommand
+  .command('mine')
+  .description('Mine design specs from Git history using AST analysis and LLM')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--repo <path>', 'Path to the repository (alias for --path)')
+  .option('--limit <number>', 'Maximum commits to scan', '100')
+  .option('--output <path>', 'Output directory for generated specs', '.spec')
+  .option('--threshold <number>', 'Clustering similarity threshold (0-1)', '0.5')
+  .option('--max-cluster <number>', 'Maximum number of clusters', '10')
+  .option('--template <path>', 'Path to a spec template markdown file')
+  .option('--skip-llm', 'Skip LLM generation — only output clusters')
+  .option('--all-commits', 'Include all commit types (default: feat-only for conventional commits)')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: {
+    path?: string;
+    repo?: string;
+    limit?: string;
+    output?: string;
+    threshold?: string;
+    maxCluster?: string;
+    template?: string;
+    skipLlm?: boolean;
+    allCommits?: boolean;
+    verbose?: boolean;
+    json?: boolean;
+  }) => {
+    try {
+      const repoPath = path.resolve(options.repo || options.path || process.cwd());
+
+      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { loadSpecConfig } = await import('../spec/config');
+      const { runMinePipeline } = await import('../spec/mine/pipeline');
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+
+      if (!isGitRepo(repoPath)) {
+        error(`Not a git repository: ${repoPath}`);
+        process.exit(1);
+      }
+
+      // Parse numeric options
+      const limit = parseInt(options.limit || '100', 10);
+      if (isNaN(limit) || limit < 1 || limit > 1000) {
+        error('--limit must be an integer between 1 and 1000');
+        process.exit(1);
+      }
+
+      const threshold = parseFloat(options.threshold || '0.5');
+      if (isNaN(threshold) || threshold < 0 || threshold > 1) {
+        error('--threshold must be a number between 0 and 1');
+        process.exit(1);
+      }
+
+      const maxCluster = parseInt(options.maxCluster || '10', 10);
+      if (isNaN(maxCluster) || maxCluster < 1 || maxCluster > 50) {
+        error('--max-cluster must be an integer between 1 and 50');
+        process.exit(1);
+      }
+
+      const outputDir = path.resolve(options.output || '.spec');
+
+      // Load spec config for LLM setup
+      const specConfig = loadSpecConfig(repoPath);
+      const llmConfig = specConfig.llm;
+
+      if (!options.skipLlm && !llmConfig) {
+        info(
+          'No LLM configuration found. Set up "llm" in .homegraph/commit4spec/configs.json.\n' +
+          'Example:\n' +
+          '{\n' +
+          '  "llm": {\n' +
+          '    "provider": "openai",\n' +
+          '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
+          '    "model": "gpt-4o"\n' +
+          '  }\n' +
+          '}\n\n' +
+          'Continuing with --skip-llm (clustering only).',
+        );
+      }
+
+      const mineConfig = createMineConfig(
+        {
+          limit,
+          threshold,
+          maxCluster,
+          outputDir,
+          template: options.template,
+          skipLlm: !!options.skipLlm,
+          allCommits: !!options.allCommits,
+        },
+        !!llmConfig,
+      );
+
+      if (options.verbose) {
+        info(`Repository: ${repoPath}`);
+        info(`Limit: ${limit === 100 ? '100 (default)' : limit}`);
+        info(`Threshold: ${threshold}`);
+        info(`Max clusters: ${maxCluster}`);
+        info(`Output: ${outputDir}`);
+        info(`Skip LLM: ${mineConfig.skipLlm}`);
+        info(`All commits: ${mineConfig.allCommits}`);
+        if (options.template) {
+          info(`Template: ${options.template}`);
+        }
+      }
+
+      // Open knowledge graph database for persistence
+      let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+      try {
+        const dbPath = resolveDbPath(repoPath);
+        const created = createDatabase(dbPath);
+        db = created.db;
+      } catch (err) {
+        // Non-fatal — spec generation and file output still work without DB
+        if (options.verbose) {
+          warn(`Failed to open commit4spec.db: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      let result: any;
+      try {
+        result = await runMinePipeline(repoPath, mineConfig, llmConfig, db);
+      } finally {
+        // Close database even if pipeline throws
+        try { db?.close(); } catch { /* best effort */ }
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        success(
+          `Scanned ${result.commitsScanned} commits, ` +
+          `${result.changesFound} with structural changes, ` +
+          `${result.clusters} clusters found.`,
+        );
+        if (result.specsGenerated > 0) {
+          success(
+            `${result.specsGenerated} specs generated in ${outputDir}/`,
+          );
+        }
+        if (result.specsWritten > 0) {
+          info(`${result.specsWritten} spec(s), ${result.commitsWritten} commit(s), ${result.fragmentsWritten} fragment(s) written to commit4spec.db`);
+        }
+        if (result.errors.length > 0) {
+          for (const err of result.errors) {
+            warn(err);
+          }
+        }
+      }
+    } catch (err) {
+      error(`Reverse pipeline failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
@@ -2224,7 +2386,7 @@ specCommand
       const dbPath = resolveDbPath(repoPath, options.dbPath);
 
       if (!fs.existsSync(dbPath)) {
-        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        error(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`);
         process.exit(1);
       }
 
@@ -2315,7 +2477,7 @@ specCommand
       const dbPath = resolveDbPath(repoPath, options.dbPath);
 
       if (!fs.existsSync(dbPath)) {
-        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        error(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`);
         process.exit(1);
       }
 
@@ -2464,7 +2626,7 @@ specCommand
 
       const dbPath = resolveDbPath(repoPath, options.dbPath);
       if (!fs.existsSync(dbPath)) {
-        console.log(chalk.yellow(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`));
+        console.log(chalk.yellow(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`));
         return;
       }
 
@@ -2569,7 +2731,7 @@ specCommand
       const dbPath = resolveDbPath(repoPath, options.dbPath);
 
       if (!fs.existsSync(dbPath)) {
-        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        error(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`);
         process.exit(1);
       }
 
@@ -2590,7 +2752,7 @@ specCommand
         console.log(`  Relations:   ${stats.relationCount}`);
         console.log();
         if (stats.specCount === 0) {
-          info("No specs yet. Run 'homegraph spec mine' to build the knowledge graph.");
+          info("No specs yet. Run 'homegraph spec build' to build the knowledge graph.");
         }
       }
     } catch (err) {
@@ -2620,7 +2782,7 @@ evolveCommand
     try {
       const repoPath = resolveSpecProjectPath(options.path);
 
-      const { isGitRepo } = await import('../spec/mining/git-scanner');
+      const { isGitRepo } = await import('../spec/build/git-scanner');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2746,7 +2908,7 @@ evolveCommand
     try {
       const repoPath = resolveSpecProjectPath(options.path);
 
-      const { isGitRepo } = await import('../spec/mining/git-scanner');
+      const { isGitRepo } = await import('../spec/build/git-scanner');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2832,7 +2994,7 @@ evolveCommand
       const { initSpecSchema } = await import('../spec/db/schema');
       const { loadSpecConfig } = await import('../spec/config');
       const { runBatchEvolvePipeline } = await import('../spec/evolve/pipeline');
-      const { isGitRepo } = await import('../spec/mining/git-scanner');
+      const { isGitRepo } = await import('../spec/build/git-scanner');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2928,7 +3090,7 @@ evolveCommand
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('No meta.json found')) {
-        error("No meta.json found. Run 'homegraph spec mine' first.");
+        error("No meta.json found. Run 'homegraph spec build' first.");
       } else {
         error(`Evolve failed: ${message}`);
       }

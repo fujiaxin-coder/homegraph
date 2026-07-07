@@ -14,15 +14,16 @@
  * strings) to avoid shell injection risks — matching the HomeGraph convention
  * in `src/sync/git-hooks.ts` and `src/sync/worktree.ts`.
  *
- * @module spec/mining/git-scanner
+ * @module spec/build/git-scanner
  */
 
-import { execFileSync, type StdioOptions } from 'child_process';
+import { execFileSync } from 'child_process';
 import { SpecConfig } from '../config';
 import { discoverSpecs } from '../utils';
 import { resolveScopeToSpec } from './scope-resolver';
 import { extractSpecMetadata, SpecMetadata } from './spec-extractor';
 import { logDebug, logWarn } from '../../errors';
+import { gitExecOptions } from '../git-utils';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,17 +50,6 @@ export interface SpecCommitPair {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Shared options for all `execFileSync` Git calls. */
-function gitExecOptions(repoPath: string) {
-  const stdio: StdioOptions = ['ignore', 'pipe', 'ignore'];
-  return {
-    cwd: repoPath,
-    encoding: 'utf8' as const,
-    stdio,
-    windowsHide: true,
-  };
-}
 
 /**
  * Convert an ISO-8601 string to Unix epoch milliseconds.
@@ -107,23 +97,22 @@ export function getAllCommits(repoPath: string): CommitInfo[] {
   try {
     stdout = execFileSync(
       'git',
-      ['log', "--format=%H%n%aI%n%an%n%s%n---END---"],
+      ['log', "--format=%H%x00%aI%x00%an%x00%s%x00"],
       gitExecOptions(repoPath),
     );
   } catch {
     return [];
   }
 
-  const lines = stdout.trim().split('\n');
+  const parts = stdout.replace(/\0+$/, '').trim().split('\0');
   const commits: CommitInfo[] = [];
 
-  // Each commit occupies 5 lines: hash, ISO timestamp, author, subject, separator.
-  for (let i = 0; i + 4 < lines.length; i += 5) {
-    const hash = lines[i]!.trim();
-    const isoString = lines[i + 1]!.trim();
-    const author = lines[i + 2]!.trim();
-    const message = lines[i + 3]!.trim();
-    // lines[i+4] is the ---END--- separator — skip it.
+  // Each commit occupies 4 NUL-separated fields: hash, timestamp, author, message
+  for (let i = 0; i + 3 < parts.length; i += 4) {
+    const hash = parts[i]!.trim();
+    const isoString = parts[i + 1]!.trim();
+    const author = parts[i + 2]!.trim();
+    const message = parts[i + 3]!.trim();
 
     if (!hash) continue;
 
@@ -214,12 +203,21 @@ export function getCommitDiff(repoPath: string, commitHash: string): string {
   // Step 2 & 3 — run the appropriate diff.
   try {
     if (parents.length > 0) {
-      const parent = parents[0]!;
-      return execFileSync(
-        'git',
-        ['diff', parent, commitHash],
-        gitExecOptions(repoPath),
-      );
+      const diffs: string[] = [];
+      for (const parent of parents) {
+        try {
+          diffs.push(
+            execFileSync(
+              'git',
+              ['diff', parent, commitHash],
+              gitExecOptions(repoPath),
+            ),
+          );
+        } catch {
+          // Skip diffs that fail for an individual parent
+        }
+      }
+      return diffs.join('\n');
     }
 
     // Initial commit — no parent.
@@ -257,21 +255,22 @@ export function getCommitRange(
   try {
     stdout = execFileSync(
       'git',
-      ['log', '--reverse', `--format=%H%n%aI%n%an%n%s%n---END---`, `${fromHash}..${toHash}`],
+      ['log', '--reverse', `--format=%H%x00%aI%x00%an%x00%s%x00`, `${fromHash}..${toHash}`],
       gitExecOptions(repoPath),
     );
   } catch {
     return [];
   }
 
-  const lines = stdout.trim().split('\n');
+  const parts = stdout.replace(/\0+$/, '').trim().split('\0');
   const commits: CommitInfo[] = [];
 
-  for (let i = 0; i + 4 < lines.length; i += 5) {
-    const hash = lines[i]!.trim();
-    const isoString = lines[i + 1]!.trim();
-    const author = lines[i + 2]!.trim();
-    const message = lines[i + 3]!.trim();
+  // Each commit occupies 4 NUL-separated fields: hash, timestamp, author, message
+  for (let i = 0; i + 3 < parts.length; i += 4) {
+    const hash = parts[i]!.trim();
+    const isoString = parts[i + 1]!.trim();
+    const author = parts[i + 2]!.trim();
+    const message = parts[i + 3]!.trim();
 
     if (!hash) continue;
 

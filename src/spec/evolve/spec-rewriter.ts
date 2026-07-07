@@ -22,7 +22,7 @@ import {
   transferSpecSpecRelations,
   deleteSimilarToRelations,
 } from '../db/relations';
-import { extractSpecMetadata } from '../mining/spec-extractor';
+import { extractSpecMetadata } from '../build/spec-extractor';
 import { LlmClient } from '../llm/client';
 import {
   SPEC_EVALUATION_SYSTEM_PROMPT,

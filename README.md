@@ -147,9 +147,15 @@ homegraph callers <符号>        # 谁调用了它
 homegraph callees <符号>        # 它调用了谁
 homegraph impact <符号>         # 修改该符号的影响范围
 homegraph affected [files...]  # 根据变更文件查找受影响的测试（支持 --stdin）
-homegraph spec mine            # 从 Git 历史挖掘规格知识图谱（Commit4Spec）
-homegraph spec match <文本>     # 搜索相似历史规格
+homegraph spec build           # 从已有 .spec 目录（或用户指定目录）构建规格知识图谱（Commit4Spec）
+homegraph spec mine            # 从 Git 历史挖掘设计规格文档（AST 分析 + LLM 聚类生成）
+homegraph spec match <文本>     # 全文搜索相似历史规格
+homegraph spec find <文件>      # 查找与指定文件关联的规格
+homegraph spec trace <符号>     # 追溯代码符号关联的设计规格
+homegraph spec stats           # 查看规格知识图谱统计
 homegraph spec evolve install  # 安装 post-commit 钩子，提交后自动演化规格
+homegraph spec evolve uninstall# 移除 post-commit 钩子
+homegraph spec evolve process  # 手动触发一次规格演化
 homegraph serve --mcp           # 启动 MCP 服务（一般由 Agent 自动拉起）
 ```
 
@@ -175,15 +181,29 @@ Agent 侧工具名前缀为 `homegraph_`。
 | `homegraph_files` | 已索引的文件树（支持 glob 过滤、按语言分组） |
 | `homegraph_status` | 索引健康状态（调试用） |
 | `homegraph_spec_match` | 将新需求描述与 Commit4Spec 规格知识图谱做全文匹配，返回相似历史规格及关联提交与代码片段 |
+| `homegraph_spec_find` | 根据文件路径反向查找关联的规格（哪些规格涉及该文件） |
+| `homegraph_spec_trace` | 将代码符号追溯回关联的设计规格（五维打分：路径、内容、名称、时间、行号） |
 
 ### Commit4Spec（规格知识图谱）
 
-`homegraph_spec_match` 与 `homegraph spec` 子命令基于 Commit4Spec：从 Git 历史中的 `.spec` 目录反向挖掘规格、提交与代码片段，存入 `.homegraph/commit4spec/commit4spec.db`。典型流程：
+Commit4Spec 提供两条互补路径将设计规格与 Git 历史关联，存入 `.homegraph/commit4spec/commit4spec.db`：
+
+**路径 1：`spec build`（已有规格导入）**
+
+从项目已有的 `.spec` 目录（或用户指定目录）读取规格文档，解析其中的 Git 引用和变更片段，直接构建知识图谱节点与关系。
+
+**路径 2：`spec mine`（AI 逆向挖掘）**
+
+从 Git 历史中自动提取设计规格，基于模型生成对应 `.spec` 文档，进而构建知识图谱节点与关系。
+
+支持增量模式（`meta.json` 记录已处理范围）、常规提交过滤（默认仅 `feat`）和集群输出模式（`--skip-llm`）。
+
+**查询与分析：**
 
 ```bash
-homegraph spec mine              # 首次挖掘
-homegraph spec match "用户登录"   # CLI 侧搜索（与 MCP spec_match 相同能力）
-homegraph spec evolve install    # 可选：每次 commit 后自动更新规格图谱
+homegraph spec match "用户登录"    # CLI/MCP 全文搜索
+homegraph spec find src/auth.ts   # 哪些规格涉及该文件
+homegraph spec trace UserService  # 追溯符号关联的设计规格
 ```
 
 ---
