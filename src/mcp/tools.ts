@@ -33,11 +33,9 @@ import { isOhosApiFilePath, OHOS_API_FILE_PREFIX } from '../extraction/languages
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import {
   buildMcpQueryCacheKey,
-  ensureMcpQueryCacheValid,
-  getMcpQueryCacheEntry,
+  getMcpQueryCacheIndex,
   isCacheableMcpTool,
   isMcpQueryCacheEnabled,
-  setMcpQueryCacheEntry,
 } from './query-cache';
 
 /** ViewTree structural `references` vias — not UI event bindings. */
@@ -1228,6 +1226,7 @@ export class ToolHandler {
   private freshen(cg: HomeGraph): HomeGraph {
     try {
       if (cg.reopenIfReplaced()) {
+        getMcpQueryCacheIndex(cg.getProjectRoot()).reset();
         process.stderr.write(
           '[HomeGraph MCP] The index was replaced on disk (e.g. a git worktree ' +
           'recreated at the same path); reopened the live database in place.\n'
@@ -1505,12 +1504,14 @@ export class ToolHandler {
       const cacheEnabled = isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
       let cacheKey: string | undefined;
       let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
+      let cacheIndex: ReturnType<typeof getMcpQueryCacheIndex> | undefined;
 
       if (cacheEnabled) {
         try {
           const cacheCg = this.getHomeGraph(projectPath);
           cacheQueries = cacheCg.getQueryBuilder();
-          ensureMcpQueryCacheValid(cacheQueries, () => cacheCg.getLastIndexedAt());
+          cacheIndex = getMcpQueryCacheIndex(cacheCg.getProjectRoot());
+          cacheIndex.ensureValid(cacheQueries, () => cacheCg.getLastIndexedAt());
           let fileCount: number | undefined;
           try {
             fileCount = cacheCg.getStats().fileCount;
@@ -1518,7 +1519,7 @@ export class ToolHandler {
             fileCount = undefined;
           }
           cacheKey = buildMcpQueryCacheKey(toolName, args, fileCount);
-          const cached = getMcpQueryCacheEntry(cacheQueries, cacheKey);
+          const cached = cacheIndex.getEntry(cacheQueries, cacheKey);
           if (cached) {
             const withWorktree = this.withWorktreeNotice(cached, projectPath);
             return this.withStalenessNotice(withWorktree, projectPath);
@@ -1549,8 +1550,8 @@ export class ToolHandler {
       const result = (this.queryPool && this.queryPool.healthy)
         ? await this.queryPool.run(toolName, args)
         : await this.executeReadTool(toolName, args);
-      if (cacheEnabled && cacheKey && cacheQueries && !result.isError) {
-        setMcpQueryCacheEntry(cacheQueries, cacheKey, toolName, result);
+      if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !result.isError) {
+        cacheIndex.setEntry(cacheQueries, cacheKey, toolName, result);
       }
       const withWorktree = this.withWorktreeNotice(result, projectPath);
       return this.withStalenessNotice(withWorktree, projectPath);

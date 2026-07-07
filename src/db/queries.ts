@@ -2010,6 +2010,14 @@ export class QueryBuilder {
     return row ?? null;
   }
 
+  /** All cache keys — used to warm the in-memory key index after daemon restart. */
+  listMcpQueryCacheKeys(): string[] {
+    const rows = this.db
+      .prepare('SELECT cache_key FROM mcp_query_cache')
+      .all() as { cache_key: string }[];
+    return rows.map((r) => r.cache_key);
+  }
+
   setMcpQueryCache(cacheKey: string, tool: string, response: string, createdAt: number): void {
     this.db
       .prepare(
