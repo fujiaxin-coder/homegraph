@@ -2024,6 +2024,104 @@ program
     }
   });
 
+/**
+ * homegraph install
+ */
+program
+  .command('install')
+  .description('Install homegraph MCP server into one or more agents (Claude Code, Cursor, Codex CLI, opencode, DevEco Code, CodeBuddy, Hermes Agent)')
+  .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Default: prompt')
+  .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
+  .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=auto, auto-allow on')
+  .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code only)')
+  .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
+  .action(async (opts: {
+    target?: string;
+    location?: string;
+    yes?: boolean;
+    permissions?: boolean;
+    printConfig?: string;
+  }) => {
+    if (opts.printConfig) {
+      const { getTarget, listTargetIds } = await import('../installer/targets/registry');
+      const target = getTarget(opts.printConfig);
+      if (!target) {
+        const known = listTargetIds().join(', ');
+        error(`Unknown target "${opts.printConfig}". Known: ${known}.`);
+        process.exit(1);
+      }
+      const loc = (opts.location === 'local' ? 'local' : 'global') as 'global' | 'local';
+      process.stdout.write(target.printConfig(loc));
+      return;
+    }
+
+    const { runInstallerWithOptions } = await import('../installer');
+    if (opts.location && opts.location !== 'global' && opts.location !== 'local') {
+      error(`--location must be "global" or "local" (got "${opts.location}").`);
+      process.exit(1);
+    }
+    try {
+      // Commander's `--no-permissions` makes `opts.permissions === false`;
+      // omitting the flag leaves it `true` (the positive-form default).
+      // We MUST treat the default-true as "user did not override — let
+      // the orchestrator prompt" and only forward an explicit `false`
+      // (or `true` when --yes implies it). Otherwise the auto-allow
+      // prompt is silently skipped on every interactive run.
+      const explicitNoPermissions = opts.permissions === false;
+      const autoAllow: boolean | undefined = explicitNoPermissions
+        ? false
+        : opts.yes
+          ? true
+          : undefined;
+
+      await runInstallerWithOptions({
+        target: opts.target,
+        location: opts.location as 'global' | 'local' | undefined,
+        autoAllow,
+        yes: opts.yes,
+      });
+    } catch (err) {
+      error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+/**
+ * homegraph uninstall
+ *
+ * Inverse of `install`. Removes the homegraph MCP server entry,
+ * instructions block, and permissions from every agent (or a
+ * `--target` subset). Prompts global-vs-local when not given. Does NOT
+ * delete the `.homegraph/` index — that's `homegraph uninit`.
+ */
+program
+  .command('uninstall')
+  .description('Remove homegraph from your agents (Claude Code, Cursor, Codex CLI, opencode, DevEco Code, CodeBuddy, Hermes Agent)')
+  .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "all". Default: all')
+  .option('-l, --location <where>', 'Uninstall location: "global" or "local". Default: prompt')
+  .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=all')
+  .action(async (opts: {
+    target?: string;
+    location?: string;
+    yes?: boolean;
+  }) => {
+    const { runUninstaller } = await import('../installer');
+    if (opts.location && opts.location !== 'global' && opts.location !== 'local') {
+      error(`--location must be "global" or "local" (got "${opts.location}").`);
+      process.exit(1);
+    }
+    try {
+      await runUninstaller({
+        target: opts.target,
+        location: opts.location as 'global' | 'local' | undefined,
+        yes: opts.yes,
+      });
+    } catch (err) {
+      error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
 // =============================================================================
 // Spec commands (Commit4Spec knowledge graph)
 // =============================================================================
@@ -2258,63 +2356,6 @@ specCommand
   });
 
 /**
- * homegraph spec stats
- */
-specCommand
-  .command('stats')
-  .description('Show statistics about the spec knowledge graph')
-  .option('-p, --path <path>', 'Path to the repository')
-  .option('--db-path <path>', 'Path to the SQLite database file')
-  .option('-j, --json', 'Output as JSON')
-  .action(async (options: {
-    path?: string;
-    dbPath?: string;
-    json?: boolean;
-  }) => {
-    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
-    try {
-      const repoPath = resolveSpecProjectPath(options.path);
-
-      const { createDatabase } = await import('../db/sqlite-adapter');
-      const { resolveDbPath } = await import('../spec/utils');
-      const { getSpecStats } = await import('../spec/graph/queries');
-
-      const dbPath = resolveDbPath(repoPath, options.dbPath);
-
-      if (!fs.existsSync(dbPath)) {
-        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
-        process.exit(1);
-      }
-
-      const created = createDatabase(dbPath);
-      db = created.db;
-
-      const stats = getSpecStats(db);
-
-      if (options.json) {
-        console.log(JSON.stringify(stats, null, 2));
-      } else {
-        console.log(chalk.bold('\nSpec Knowledge Graph Stats\n'));
-        console.log(`  Specs:       ${chalk.cyan(String(stats.specCount))}`);
-        console.log(`    Active:     ${chalk.green(String(stats.activeSpecCount))}`);
-        console.log(`    Deprecated: ${chalk.yellow(String(stats.deprecatedSpecCount))}`);
-        console.log(`  Commits:     ${stats.commitCount}`);
-        console.log(`  Fragments:   ${stats.fragmentCount}`);
-        console.log(`  Relations:   ${stats.relationCount}`);
-        console.log();
-        if (stats.specCount === 0) {
-          info("No specs yet. Run 'homegraph spec mine' to build the knowledge graph.");
-        }
-      }
-    } catch (err) {
-      error(`Stats failed: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    } finally {
-      try { db?.close(); } catch { /* best effort */ }
-    }
-  });
-
-/**
  * homegraph spec trace <symbol>
  */
 specCommand
@@ -2499,6 +2540,63 @@ specCommand
       process.exit(1);
     } finally {
       try { await cg?.close(); } catch { /* best effort */ }
+      try { db?.close(); } catch { /* best effort */ }
+    }
+  });
+
+/**
+ * homegraph spec stats
+ */
+specCommand
+  .command('stats')
+  .description('Show statistics about the spec knowledge graph')
+  .option('-p, --path <path>', 'Path to the repository')
+  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('-j, --json', 'Output as JSON')
+  .action(async (options: {
+    path?: string;
+    dbPath?: string;
+    json?: boolean;
+  }) => {
+    let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
+    try {
+      const repoPath = resolveSpecProjectPath(options.path);
+
+      const { createDatabase } = await import('../db/sqlite-adapter');
+      const { resolveDbPath } = await import('../spec/utils');
+      const { getSpecStats } = await import('../spec/graph/queries');
+
+      const dbPath = resolveDbPath(repoPath, options.dbPath);
+
+      if (!fs.existsSync(dbPath)) {
+        error(`Database not found at ${dbPath}. Run 'homegraph spec mine' first.`);
+        process.exit(1);
+      }
+
+      const created = createDatabase(dbPath);
+      db = created.db;
+
+      const stats = getSpecStats(db);
+
+      if (options.json) {
+        console.log(JSON.stringify(stats, null, 2));
+      } else {
+        console.log(chalk.bold('\nSpec Knowledge Graph Stats\n'));
+        console.log(`  Specs:       ${chalk.cyan(String(stats.specCount))}`);
+        console.log(`    Active:     ${chalk.green(String(stats.activeSpecCount))}`);
+        console.log(`    Deprecated: ${chalk.yellow(String(stats.deprecatedSpecCount))}`);
+        console.log(`  Commits:     ${stats.commitCount}`);
+        console.log(`  Fragments:   ${stats.fragmentCount}`);
+        console.log(`  Relations:   ${stats.relationCount}`);
+        console.log();
+        if (stats.specCount === 0) {
+          info("No specs yet. Run 'homegraph spec mine' to build the knowledge graph.");
+        }
+      }
+    } catch (err) {
+      error(`Stats failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    } finally {
       try { db?.close(); } catch { /* best effort */ }
     }
   });
@@ -2837,104 +2935,6 @@ evolveCommand
       process.exit(1);
     } finally {
       try { db?.close(); } catch { /* best effort */ }
-    }
-  });
-
-/**
- * homegraph install
- */
-program
-  .command('install')
-  .description('Install homegraph MCP server into one or more agents (Claude Code, Cursor, Codex CLI, opencode, DevEco Code, CodeBuddy, Hermes Agent)')
-  .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Default: prompt')
-  .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
-  .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=auto, auto-allow on')
-  .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code only)')
-  .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
-  .action(async (opts: {
-    target?: string;
-    location?: string;
-    yes?: boolean;
-    permissions?: boolean;
-    printConfig?: string;
-  }) => {
-    if (opts.printConfig) {
-      const { getTarget, listTargetIds } = await import('../installer/targets/registry');
-      const target = getTarget(opts.printConfig);
-      if (!target) {
-        const known = listTargetIds().join(', ');
-        error(`Unknown target "${opts.printConfig}". Known: ${known}.`);
-        process.exit(1);
-      }
-      const loc = (opts.location === 'local' ? 'local' : 'global') as 'global' | 'local';
-      process.stdout.write(target.printConfig(loc));
-      return;
-    }
-
-    const { runInstallerWithOptions } = await import('../installer');
-    if (opts.location && opts.location !== 'global' && opts.location !== 'local') {
-      error(`--location must be "global" or "local" (got "${opts.location}").`);
-      process.exit(1);
-    }
-    try {
-      // Commander's `--no-permissions` makes `opts.permissions === false`;
-      // omitting the flag leaves it `true` (the positive-form default).
-      // We MUST treat the default-true as "user did not override — let
-      // the orchestrator prompt" and only forward an explicit `false`
-      // (or `true` when --yes implies it). Otherwise the auto-allow
-      // prompt is silently skipped on every interactive run.
-      const explicitNoPermissions = opts.permissions === false;
-      const autoAllow: boolean | undefined = explicitNoPermissions
-        ? false
-        : opts.yes
-          ? true
-          : undefined;
-
-      await runInstallerWithOptions({
-        target: opts.target,
-        location: opts.location as 'global' | 'local' | undefined,
-        autoAllow,
-        yes: opts.yes,
-      });
-    } catch (err) {
-      error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-/**
- * homegraph uninstall
- *
- * Inverse of `install`. Removes the homegraph MCP server entry,
- * instructions block, and permissions from every agent (or a
- * `--target` subset). Prompts global-vs-local when not given. Does NOT
- * delete the `.homegraph/` index — that's `homegraph uninit`.
- */
-program
-  .command('uninstall')
-  .description('Remove homegraph from your agents (Claude Code, Cursor, Codex CLI, opencode, DevEco Code, CodeBuddy, Hermes Agent)')
-  .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "all". Default: all')
-  .option('-l, --location <where>', 'Uninstall location: "global" or "local". Default: prompt')
-  .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=all')
-  .action(async (opts: {
-    target?: string;
-    location?: string;
-    yes?: boolean;
-  }) => {
-    const { runUninstaller } = await import('../installer');
-    if (opts.location && opts.location !== 'global' && opts.location !== 'local') {
-      error(`--location must be "global" or "local" (got "${opts.location}").`);
-      process.exit(1);
-    }
-    try {
-      await runUninstaller({
-        target: opts.target,
-        location: opts.location as 'global' | 'local' | undefined,
-        yes: opts.yes,
-      });
-    } catch (err) {
-      error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
     }
   });
 
