@@ -9,20 +9,17 @@ HomeGraph runs as a [Model Context Protocol](https://modelcontextprotocol.io/) s
 homegraph serve --mcp
 ```
 
-When a `.homegraph/` index exists, the agent gets the tool below. In a workspace with **no** index, the server announces itself inactive and lists **no** tools — the agent works normally with its built-in tools, and indexing stays your decision.
+When a `.homegraph/` index exists, the agent gets the tools below. In a workspace with **no** index, tools stay available — pass `projectPath` to a project that has an index.
 
-## One tool by default: `homegraph_explore`
+## Tools (full surface by default)
 
-By default the server exposes a **single tool**, `homegraph_explore`. It's Read-equivalent: give it a natural-language question or a bag of symbol and file names, and it returns the **verbatim, line-numbered source** of the relevant symbols grouped by file — the same shape the `Read` tool gives you — plus the call paths between them (including dynamic-dispatch hops like callbacks, React re-render, and JSX children that grep can't follow) and a blast-radius summary of what depends on them. One call usually answers the whole question.
+HomeGraph exposes **all MCP tools by default** — search, callers, callees, impact, node, explore, status, files, and spec tools. For structural and flow questions, **`homegraph_explore`** is the primary entry point: give it a natural-language question or a bag of symbol and file names, and it returns the **verbatim, line-numbered source** of the relevant symbols grouped by file — the same shape the `Read` tool gives you — plus the call paths between them (including dynamic-dispatch hops like callbacks, React re-render, and JSX children that grep can't follow) and a blast-radius summary of what depends on them. One call usually answers the whole question.
 
-Exposing a single strong tool is deliberate. Measured agent behavior showed that one well-aimed tool steers agents to a direct answer better than a menu of narrower ones — fewer mis-picks — and agents reach for it both when answering questions and while editing code.
-
-## The other tools
-
-Seven more tools exist and stay fully functional, but are **unlisted by default** — everything they return already arrives inline on a `homegraph_explore` response (its blast-radius section, the relationship map, a symbol's body and its callee list):
+## Tool reference
 
 | Tool | Purpose |
 |---|---|
+| `homegraph_explore` | Primary: natural-language or symbol-bag query with source, flow paths, and blast radius |
 | `homegraph_node` | One symbol's source + caller/callee trail, or a whole file read with line numbers (Read-parity). Returns every overload's body for an ambiguous name. |
 | `homegraph_search` | Find symbols by name across the codebase (locations only) |
 | `homegraph_callers` | Find what calls a function |
@@ -30,8 +27,9 @@ Seven more tools exist and stay fully functional, but are **unlisted by default*
 | `homegraph_impact` | Analyze what code is affected by changing a symbol |
 | `homegraph_files` | Get the indexed file structure (faster than filesystem scanning) |
 | `homegraph_status` | Check index health and statistics |
+| `homegraph_spec_match` / `homegraph_spec_find` / `homegraph_spec_trace` | Commit4Spec knowledge-graph queries |
 
-Re-enable any of them with the `HOMEGRAPH_MCP_TOOLS` environment variable — a comma-separated allowlist of short names that replaces the default:
+Trim the surface with the `HOMEGRAPH_MCP_TOOLS` environment variable — a comma-separated allowlist of short names:
 
 ```bash
 HOMEGRAPH_MCP_TOOLS=explore,node,search,callers

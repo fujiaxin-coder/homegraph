@@ -1,5 +1,5 @@
 /**
- * Provider-agnostic LLM client for spec self-evolution.
+ * Provider-agnostic LLM client for spec
  *
  * Supports OpenAI-compatible chat completions API. No mock mode — callers
  * that need test doubles inject their own stubs implementing the interface.

@@ -52,7 +52,7 @@ Optionally auto-allow HomeGraph's tools in `~/.claude/settings.json`:
 }
 ```
 
-One wildcard auto-approves every HomeGraph tool. The server lists a single tool by default — `homegraph_explore` — but if you re-enable others via the `HOMEGRAPH_MCP_TOOLS` environment variable, they're already permitted with no prompt.
+One wildcard auto-approves every HomeGraph tool. The server lists the full tool surface by default; trim it with the `HOMEGRAPH_MCP_TOOLS` environment variable if needed.
 
 :::tip
 Cursor launches MCP subprocesses with the wrong working directory. The installer handles this for you by injecting a `--path` argument; if you wire Cursor up by hand, pass the project path explicitly.

@@ -28,7 +28,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { SPEC_DATA_DIR } from '../spec/utils';
 import { createMineConfig } from '../spec/config';
-import { getHomeGraphDir, isInitialized, unsafeIndexRootReason, findNearestHomeGraphRoot, planFrontload } from '../directory';
+import { getHomeGraphDir, isInitialized, unsafeIndexRootReason, findNearestHomeGraphRoot, planFrontload, hasStructuralKeyword, extractCodeTokens } from '../directory';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -36,6 +36,7 @@ import { getGlyphs } from '../ui/glyphs';
 import { buildNode25BlockBanner, buildNodeTooOldBanner, MIN_NODE_MAJOR } from './node-version-check';
 import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
+import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
 
@@ -561,19 +562,25 @@ program
       // Indexing runs by default now. The legacy -i/--index flag is still
       // accepted (so existing muscle memory and scripts don't break) but is a
       // no-op — initializing always builds the initial index.
+      // Supervise the index: self-terminate if orphaned or wedged (#999).
+      const supervision = installCommandSupervision('init');
       let result: IndexResult;
-      if (options.verbose) {
-        result = await cg.indexAll({
-          onProgress: createVerboseProgress(),
-          verbose: true,
-        });
-      } else {
-        process.stdout.write(`${colors.dim}${getGlyphs().rail}${colors.reset}\n`);
-        const progress = createShimmerProgress();
-        result = await cg.indexAll({
-          onProgress: progress.onProgress,
-        });
-        await progress.stop();
+      try {
+        if (options.verbose) {
+          result = await cg.indexAll({
+            onProgress: createVerboseProgress(),
+            verbose: true,
+          });
+        } else {
+          process.stdout.write(`${colors.dim}${getGlyphs().rail}${colors.reset}\n`);
+          const progress = createShimmerProgress();
+          result = await cg.indexAll({
+            onProgress: progress.onProgress,
+          });
+          await progress.stop();
+        }
+      } finally {
+        supervision.stop();
       }
       printIndexResult(clack, result, projectPath);
       await recordIndexTelemetry(cg, result);
@@ -680,53 +687,60 @@ program
       }
 
       const { default: HomeGraph } = await loadHomeGraph();
-      const cg = await HomeGraph.open(projectPath);
+      // `index` is a FULL re-index — identical to a fresh `init`. RECREATE the
+      // database from scratch (discard .homegraph/homegraph.db + its WAL) rather
+      // than opening the old graph and DELETE-ing every row. The clear-then-index
+      // approach reported "0 nodes" without the clear (#874); the recreate keeps
+      // that fixed AND avoids the failure mode where, on a large or pre-fix
+      // poisoned index, the per-row FTS delete churn wedged the main thread long
+      // enough to trip the liveness watchdog before scanning even began (#1067).
+      // recreate() hands back a fresh, empty instance — no clear() needed. For
+      // fast incremental updates use `sync`.
+      const cg = await HomeGraph.recreate(projectPath);
 
-      if (options.quiet) {
-        // Quiet mode: no UI, just run. `index` is a full re-index, so clear the
-        // existing graph and rebuild from scratch (see the note below — #874).
-        cg.clear();
-        const result = await cg.indexAll();
-        if (!result.success) process.exit(1);
+      // Supervise the indexer: self-terminate if orphaned (parent shim killed)
+      // or if the main thread wedges — neither was guarded on this path (#999).
+      const supervision = installCommandSupervision('index');
+      try {
+        if (options.quiet) {
+          // Quiet mode: no UI, just run against the freshly-recreated graph.
+          const result = await cg.indexAll();
+          if (!result.success) process.exit(1);
+          cg.destroy();
+          return;
+        }
+
+        const clack = await importESM('@clack/prompts');
+        clack.intro('Indexing project');
+
+        let result: IndexResult;
+
+        if (options.verbose) {
+          result = await cg.indexAll({
+            onProgress: createVerboseProgress(),
+            verbose: true,
+          });
+        } else {
+          process.stdout.write(`${colors.dim}${getGlyphs().rail}${colors.reset}\n`);
+          const progress = createShimmerProgress();
+          result = await cg.indexAll({
+            onProgress: progress.onProgress,
+          });
+          await progress.stop();
+        }
+
+        printIndexResult(clack, result, projectPath);
+        await recordIndexTelemetry(cg, result);
+
+        if (!result.success) {
+          process.exit(1);
+        }
+
+        clack.outro('Done');
         cg.destroy();
-        return;
+      } finally {
+        supervision.stop();
       }
-
-      const clack = await importESM('@clack/prompts');
-      clack.intro('Indexing project');
-
-      // `index` is a FULL re-index: clear the existing graph and rebuild it from
-      // scratch so the result is identical to a fresh `init`. Without the clear,
-      // indexAll() skips every unchanged file by its content hash and reports
-      // "0 nodes, 0 edges" against the already-populated graph — which reads as
-      // "index wiped my index" (#874). For fast incremental updates use `sync`.
-      cg.clear();
-
-      let result: IndexResult;
-
-      if (options.verbose) {
-        result = await cg.indexAll({
-          onProgress: createVerboseProgress(),
-          verbose: true,
-        });
-      } else {
-        process.stdout.write(`${colors.dim}${getGlyphs().rail}${colors.reset}\n`);
-        const progress = createShimmerProgress();
-        result = await cg.indexAll({
-          onProgress: progress.onProgress,
-        });
-        await progress.stop();
-      }
-
-      printIndexResult(clack, result, projectPath);
-      await recordIndexTelemetry(cg, result);
-
-      if (!result.success) {
-        process.exit(1);
-      }
-
-      clack.outro('Done');
-      cg.destroy();
     } catch (err) {
       error(`Failed to index: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
@@ -1017,15 +1031,18 @@ program
         } else {
           console.log(chalk.bold(`\nSearch Results for "${search}":\n`));
 
+          // Results arrive already ranked by relevance, so the order conveys
+          // it. We don't print the raw score: it's an unbounded BM25/FTS value
+          // (relative-ranking only), and the old `(score * 100)%` rendered it
+          // as nonsensical percentages like "12042%" (#1045). The MCP search
+          // tool likewise shows no score. Raw `score` stays in --json output.
           for (const result of results) {
             const node = result.node;
             const location = `${node.filePath}:${node.startLine}`;
-            const score = chalk.dim(`(${(result.score * 100).toFixed(0)}%)`);
 
             console.log(
               chalk.cyan(node.kind.padEnd(12)) +
-              chalk.white(node.name) +
-              ' ' + score
+              chalk.white(node.name)
             );
             console.log(chalk.dim(`  ${location}`));
             if (node.signature) {
@@ -1120,11 +1137,15 @@ program
       try { input = JSON.parse(raw); } catch { return; }
       const prompt = String(input.prompt || '');
 
-      // Gate: only structural / flow / impact / where-how prompts get context.
-      // A cheap regex keeps every other prompt ("fix this typo") a zero-cost
-      // no-op so we never add latency where there's no structural answer to give.
-      const STRUCTURAL = /\b(how|where|trace|flow|path|reach(?:es|ed)?|call(?:s|ed|er|ers|ee)?|depend|impact|affect|wired?|connect|implement|architect|structure|breaks?|what calls|why does)\b/i;
-      if (!prompt || !STRUCTURAL.test(prompt)) return;
+      // Gate: only structural / flow / impact / where-how prompts get context, so
+      // every other prompt ("fix this typo") stays a zero-cost no-op. Language-aware
+      // (English + CJK keywords, plus code-shaped tokens) so it fires for non-English
+      // prompts too (issue #994). A keyword fires on its own; a code-token is only a
+      // CANDIDATE — verified against the graph below, so a tech brand ("JavaScript")
+      // that looks like a symbol but isn't one here doesn't inject spurious context.
+      const keyworded = hasStructuralKeyword(prompt);
+      const codeTokens = keyworded ? [] : extractCodeTokens(prompt);
+      if (!keyworded && codeTokens.length === 0) return;
 
       // Decide what to inject, shaped by WHERE the index(es) are: the nearest
       // indexed ancestor of cwd, or — when cwd is an un-indexed workspace root
@@ -1146,6 +1167,12 @@ program
         const { default: HomeGraph } = await loadHomeGraph();
         const cg = await HomeGraph.open(plan.exploreRoot);
         try {
+          // Code-token-only prompt: require that at least one token is a REAL symbol
+          // in THIS index before front-loading. Without it, a brand name or common
+          // word that merely looks like code ("JavaScript", "GitHub") would run
+          // explore and inject ~16KB of low-relevance context (issue #994 follow-up).
+          // A keyword-bearing prompt skips this — the keyword is signal enough.
+          if (!keyworded && !codeTokens.some((t) => cg.getNodesByName(t).length > 0)) return;
           const { ToolHandler } = await import('../mcp/tools');
           const handler = new ToolHandler(cg);
           const result = await handler.execute('homegraph_explore', { query: prompt });
@@ -1183,21 +1210,32 @@ program
   });
 
 /**
- * homegraph node <name>
+ * homegraph node [name]
  *
  * The CLI face of the MCP homegraph_node tool: one symbol's source +
  * caller/callee trail, or a whole file with line numbers + dependents
  * (Read-parity). Same subagent/non-MCP rationale as `explore`.
+ *
+ * `name` is OPTIONAL because `--file` (file-read mode) carries no symbol —
+ * a required `<name>` made `codegraph node -f <file>` unreachable (#1044).
  */
 program
-  .command('node <name>')
+  .command('node [name]')
   .description('One symbol\'s source + caller/callee trail, or read a file with line numbers + dependents (same output as the homegraph_node MCP tool)')
   .option('-p, --path <path>', 'Project path')
   .option('-f, --file <file>', 'Treat as file mode (or disambiguate a symbol to this file)')
   .option('--offset <number>', 'File mode: 1-based start line')
   .option('--limit <number>', 'File mode: maximum lines')
   .option('--symbols-only', 'File mode: just the symbol map + dependents')
-  .action(async (name: string, options: { path?: string; file?: string; offset?: string; limit?: string; symbolsOnly?: boolean }) => {
+  .action(async (name: string | undefined, options: { path?: string; file?: string; offset?: string; limit?: string; symbolsOnly?: boolean }) => {
+    // Need a symbol (positional) OR a file (--file / a path-like positional).
+    // With [name] optional, a bare `codegraph node` reaches here with neither
+    // and must be told what to pass, rather than crashing downstream.
+    if (!name && !options.file) {
+      error("Pass a symbol name (e.g. 'codegraph node parseToken') or a file (e.g. 'codegraph node -f src/auth.ts', or 'codegraph node src/auth.ts').");
+      process.exit(1);
+    }
+
     const projectPath = resolveProjectPath(options.path);
 
     try {
@@ -1220,9 +1258,9 @@ program
       if (options.file) {
         args.file = options.file;
         if (name && name !== options.file) args.symbol = name;
-      } else if (name.includes('/') || name.includes('\\')) {
+      } else if (name && (name.includes('/') || name.includes('\\'))) {
         args.file = name.replace(/\\/g, '/');
-      } else {
+      } else if (name) {
         args.symbol = name;
         args.includeCode = true;
       }
@@ -2386,7 +2424,7 @@ specCommand
       const dbPath = resolveDbPath(repoPath, options.dbPath);
 
       if (!fs.existsSync(dbPath)) {
-        error(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`);
+        error(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`);
         process.exit(1);
       }
 
@@ -2477,7 +2515,7 @@ specCommand
       const dbPath = resolveDbPath(repoPath, options.dbPath);
 
       if (!fs.existsSync(dbPath)) {
-        error(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`);
+        error(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`);
         process.exit(1);
       }
 
@@ -2626,7 +2664,7 @@ specCommand
 
       const dbPath = resolveDbPath(repoPath, options.dbPath);
       if (!fs.existsSync(dbPath)) {
-        console.log(chalk.yellow(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`));
+        console.log(chalk.yellow(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`));
         return;
       }
 
@@ -2731,7 +2769,7 @@ specCommand
       const dbPath = resolveDbPath(repoPath, options.dbPath);
 
       if (!fs.existsSync(dbPath)) {
-        error(`Database not found at ${dbPath}. Run 'homegraph spec build' first.`);
+        error(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`);
         process.exit(1);
       }
 
@@ -2752,7 +2790,7 @@ specCommand
         console.log(`  Relations:   ${stats.relationCount}`);
         console.log();
         if (stats.specCount === 0) {
-          info("No specs yet. Run 'homegraph spec build' to build the knowledge graph.");
+          info("No specs yet. Run 'homegraph spec build/mine' to build the knowledge graph.");
         }
       }
     } catch (err) {
@@ -3090,7 +3128,7 @@ evolveCommand
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('No meta.json found')) {
-        error("No meta.json found. Run 'homegraph spec build' first.");
+        error("No meta.json found. Run 'homegraph spec build/mine' first.");
       } else {
         error(`Evolve failed: ${message}`);
       }

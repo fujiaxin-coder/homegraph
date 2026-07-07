@@ -389,7 +389,7 @@ python scripts/qa_eval/run_pipeline.py ab --no-agent -r /path/to/repo
 | DevEco `ServeError` / 端口占用 | `netstat -ano \| findstr :4096` 后结束进程，或不加 `--deveco-attach` |
 | DevEco 凭证损坏 | `deveco providers reset` 后重新 login |
 | `401` / Judge 全失败 | 检查 Key；智谱用 `--provider zhipu`，Key 格式 `id.secret` |
-| `Cannot find module 'arkanalyzer'` | `npm run build`，用 `node dist/bin/homegraph.js sync` |
+| `Cannot find module 'arkanalyzer'` | 发布包 < 下一版时未打进 bundle；升级 homegraph，或源码路径 `npm install && npm run build` 后用 `node dist/bin/homegraph.js sync` |
 | `rg not found on PATH` | 安装 ripgrep（without 臂 builtin 需要） |
 | 日志解析 0 条任务 | 确认 log 含 `Evaluate N:` 行 |
 | 内存全为 N/A | Windows 原生无 `/proc`；用 WSL/Linux 测内存，或忽略该列 |
