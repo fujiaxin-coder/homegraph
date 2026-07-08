@@ -189,13 +189,68 @@ def find_claude_cli() -> str:
     return found
 
 
+def _is_wsl() -> bool:
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _deveco_cli_works(exe: str) -> bool:
+    try:
+        r = subprocess.run(
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    combined = f"{r.stdout or ''}{r.stderr or ''}".lower()
+    if r.returncode != 0 or "package manager failed" in combined:
+        return False
+    return True
+
+
 def find_deveco_cli() -> str:
+    explicit = os.environ.get("DEVECO_BIN") or os.environ.get("QA_EVAL_DEVECO_BIN")
+    if explicit:
+        if _deveco_cli_works(explicit):
+            return explicit
+        raise FileNotFoundError(f"DEVECO_BIN 不可用（deveco --version 失败）: {explicit}")
+
+    candidates: list[str] = []
+    npm_global = Path.home() / ".npm-global" / "bin" / "deveco"
+    if npm_global.is_file():
+        candidates.append(str(npm_global))
     for name in ("deveco", "opencode"):
         found = shutil.which(name)
-        if found:
-            return found
+        if not found:
+            continue
+        # WSL PATH 常把 Windows npm 的 deveco 排在前面，在 Linux 下必失败
+        if name == "deveco" and _is_wsl() and found.startswith("/mnt/"):
+            continue
+        candidates.append(found)
+
+    for exe in candidates:
+        if _deveco_cli_works(exe):
+            return exe
+
+    if _is_wsl():
+        raise FileNotFoundError(
+            "DevEco Code 没有 Linux 原生版。WSL 里 which deveco 指向 /mnt/c/.../npm/deveco，"
+            "在 Linux 下会报 package manager failed。\n"
+            "请在 Windows PowerShell 里跑 qa_eval pipeline，例如：\n"
+            "  cd D:\\code\\homegraph\\scripts\\qa_eval\n"
+            "  python run_pipeline.py ab -r D:\\code\\scene_board_ext -d D:\\code\\dataSet10.xlsx "
+            "--agent-host deveco-code --provider zhipu --skip-index\n"
+            "或在 WSL 里安装可用的 opencode 并设置 DEVECO_BIN=opencode 的路径。"
+        )
     raise FileNotFoundError(
-        "未找到 DevEco Code / opencode CLI。请安装 DevEco Code 或 opencode 并加入 PATH。"
+        "未找到可用的 DevEco Code / opencode CLI。请安装并加入 PATH，或设置 DEVECO_BIN。"
     )
 
 
@@ -222,8 +277,8 @@ def write_mcp_config(path: Path, *, hg_command: str, hg_args: list[str]) -> None
 
 def _split_hg_bin(hg_bin: str) -> tuple[str, list[str]]:
     if hg_bin.startswith("node "):
-        parts = hg_bin.split(" ", 1)
-        return parts[0], parts[1].split() + ["serve", "--mcp"]
+        node, script = hg_bin.split(" ", 1)
+        return node, [script.strip(), "serve", "--mcp"]
     return hg_bin, ["serve", "--mcp"]
 
 
@@ -693,6 +748,10 @@ def _write_deveco_project_mcp(repo: Path, *, arm: str, hg_bin: str) -> Path:
                 "type": "local",
                 "command": [cmd, *base_args, "--path", str(repo.resolve())],
                 "enabled": True,
+                "environment": {
+                    "HOMEGRAPH_NO_WATCHDOG": "1",
+                    "HOMEGRAPH_WASM_RELAUNCHED": "1",
+                },
             }
         }
         body["agent"] = {
@@ -868,10 +927,8 @@ def run_external_dataset(
     if host not in SUPPORTED_HOSTS:
         raise ValueError(f"unknown agent host: {host}")
 
-    from agent_runner import find_homegraph_bin, print_agent_progress, require_index, _arm_short
+    from agent_runner import find_homegraph_bin, print_agent_progress, _arm_short
 
-    if arm == "with":
-        require_index(repo)
     hg = find_homegraph_bin(hg_bin) if arm == "with" else ""
 
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -38,8 +38,9 @@ DEFAULT_MODEL = "qwen3-235b-a22b-instruct-2507"
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from agent_runner import run_agent_dataset  # noqa: E402
-from external_agent import HOST_CLAUDE, HOST_DEVECO, SUPPORTED_HOSTS, run_external_dataset, verify_claude_login  # noqa: E402
+from agent_runner import ensure_homegraph_bin, ensure_index, run_agent_dataset  # noqa: E402
+from dataset_loader import load_dataset  # noqa: E402
+from external_agent import HOST_CLAUDE, HOST_DEVECO, SUPPORTED_HOSTS, find_deveco_cli, run_external_dataset, verify_claude_login  # noqa: E402
 from llm_config import PROVIDER_DASHSCOPE, PROVIDER_ZHIPU, provider_help, resolve_llm_config  # noqa: E402
 from my_answer_accuracy import extract_json_blocks_answerbyCOT, remove_tool_calls  # noqa: E402
 from stats_efficiency import parse_agent_log, summarize_jsonl_usage, summarize_tasks  # noqa: E402
@@ -544,7 +545,11 @@ def cmd_ab(args: argparse.Namespace) -> int:
             print(f"错误: 测试集不存在: {dataset_path}")
             return 1
 
-        dataset = load_jsonl(dataset_path)
+        try:
+            dataset = load_dataset(dataset_path)
+        except (FileNotFoundError, ValueError, RuntimeError) as e:
+            print(f"错误: {e}")
+            return 1
         if not getattr(args, "keep_log", False):
             removed, skipped = clear_log_dir(LOG_DIR)
             print(f"已清空 log 目录: {LOG_DIR} ({removed} 项)", flush=True)
@@ -561,6 +566,20 @@ def cmd_ab(args: argparse.Namespace) -> int:
         print("=" * 60)
 
         assert repo is not None
+        try:
+            hg_bin_resolved = ensure_homegraph_bin(getattr(args, "homegraph_bin", None))
+            ensure_index(
+                repo,
+                hg_bin_resolved,
+                skip=getattr(args, "skip_index", False),
+            )
+            if agent_host == HOST_DEVECO:
+                cli = find_deveco_cli()
+                print(f"  DevEco CLI: {cli}", flush=True)
+        except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as e:
+            print(f"错误: {e}")
+            return 1
+
         run_agent_stage(
             agent_host=agent_host,
             repo=repo,
@@ -570,7 +589,7 @@ def cmd_ab(args: argparse.Namespace) -> int:
             with_log=with_log,
             without_log=without_log,
             llm=llm,
-            hg_bin=args.homegraph_bin,
+            hg_bin=hg_bin_resolved,
             max_turns=args.max_turns,
             deveco_model=getattr(args, "deveco_model", None),
             deveco_attach=getattr(args, "deveco_attach", None),
@@ -709,7 +728,12 @@ def main() -> int:
         default=None,
         help="被测仓库绝对路径（跑 Agent 时必填；仅 --no-agent 重打报告时可省略）",
     )
-    p_ab.add_argument("--dataset", "-d", default=str(DEFAULT_DATASET))
+    p_ab.add_argument(
+        "--dataset",
+        "-d",
+        default=str(DEFAULT_DATASET),
+        help="测试集路径（.jsonl 或 .xlsx）",
+    )
     p_ab.add_argument(
         "--agent-host",
         default=AGENT_HOST_BUILTIN,
@@ -732,6 +756,11 @@ def main() -> int:
     p_ab.add_argument("--model", "-m", default=None, help="LLM 模型（默认随 provider）")
     p_ab.add_argument("--base-url", default=None, help="OpenAI 兼容 API 端点（默认随 provider）")
     p_ab.add_argument("--homegraph-bin", default=None)
+    p_ab.add_argument(
+        "--skip-index",
+        action="store_true",
+        help="跳过 homegraph init/index（仓库已手动 init 时用）",
+    )
     p_ab.add_argument("--max-turns", type=int, default=8, help="Agent 最多工具轮次")
     p_ab.add_argument(
         "--deveco-model",
@@ -764,12 +793,22 @@ def main() -> int:
         default=None,
         help="被测仓库绝对路径（跑 Agent 时必填；仅 --no-agent 重打报告时可省略）",
     )
-    p_hosts.add_argument("--dataset", "-d", default=str(DEFAULT_DATASET))
+    p_hosts.add_argument(
+        "--dataset",
+        "-d",
+        default=str(DEFAULT_DATASET),
+        help="测试集路径（.jsonl 或 .xlsx）",
+    )
     p_hosts.add_argument("--workers", "-w", type=int, default=1)
     p_hosts.add_argument("--provider", choices=[PROVIDER_DASHSCOPE, PROVIDER_ZHIPU], default=None)
     p_hosts.add_argument("--model", "-m", default=None)
     p_hosts.add_argument("--base-url", default=None)
     p_hosts.add_argument("--homegraph-bin", default=None)
+    p_hosts.add_argument(
+        "--skip-index",
+        action="store_true",
+        help="跳过 homegraph init/index",
+    )
     p_hosts.add_argument("--max-turns", type=int, default=8)
     p_hosts.add_argument("--deveco-model", default=None)
     p_hosts.add_argument(
