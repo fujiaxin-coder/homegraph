@@ -9,7 +9,9 @@
 
 ## 测试输入
 
-**格式**：JSONL，一行一条，UTF-8。
+**格式**：JSONL 或 Excel（`.xlsx`），一行/一行一条，UTF-8。
+
+`run_pipeline.py` 的 `-d` / `--dataset` **直接支持 `.xlsx`**（读取 `query`、`reference_answer` 及分类列，无需手动转 JSONL）。
 
 ```json
 {
@@ -237,13 +239,16 @@ export DASHSCOPE_API_KEY="sk-xxxxxxxx"
 # 或智谱（Key 格式 id.secret，不要加 sk- 前缀）：
 # export ZHIPU_API_KEY="xxxxxxxx.yyyyyyyy"
 
-cd /path/to/homegraph && npm run build
-node dist/bin/homegraph.js sync /path/to/your/repo
+cd /path/to/homegraph
 
-python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo
-# 智谱：
-# python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo --provider zhipu
+python scripts/qa_eval/run_pipeline.py ab \
+  -r /path/to/scene_board_ext \
+  -d /path/to/dataSet10.xlsx \
+  --agent-host deveco-code \
+  --provider zhipu
 ```
+
+无需手动转 JSONL、无需手动 `homegraph init`：pipeline 会自动读取 xlsx、构建本地 homegraph（若需要）、并对仓库建索引。
 
 ### 三种宿主示例
 
@@ -338,7 +343,7 @@ python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo [选项]
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--repo`, `-r` | — | **被测仓库**（跑 Agent 时必填） |
-| `--dataset`, `-d` | `data/test-set.jsonl` | 测试集 |
+| `--dataset`, `-d` | `data/test-set.jsonl` | 测试集（`.jsonl` 或 `.xlsx`） |
 | `--with-jsonl` / `--without-jsonl` | `log/result-*.jsonl` | Agent 产出 |
 | `--with-scored` / `--without-scored` | `log/result-*-scored.jsonl` | Judge 产出 |
 | `--with-log` / `--without-log` | `log/agent-*.log` | Agent 日志 |
