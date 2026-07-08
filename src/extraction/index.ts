@@ -1507,16 +1507,6 @@ export class ExtractionOrchestrator {
       errors.push(...drainArkTSIndexNotices());
     }
 
-    if (WorkerClass) {
-      await ensureWorker();
-    }
-
-    const firstEtsFile = files.find((f) => detectLanguage(f, undefined, overrides) === 'arkts');
-    if (firstEtsFile) {
-      await primeArkTSBatch(this.rootDir, this.queries, firstEtsFile);
-      errors.push(...drainArkTSIndexNotices());
-    }
-
     for (let i = 0; i < files.length; i += FILE_IO_BATCH_SIZE) {
       if (signal?.aborted) { aborted = true; break; }
 
