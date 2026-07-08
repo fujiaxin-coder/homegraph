@@ -9,7 +9,9 @@
 
 ## 测试输入
 
-**格式**：JSONL，一行一条，UTF-8。
+**格式**：JSONL 或 Excel（`.xlsx`），一行/一行一条，UTF-8。
+
+`run_pipeline.py` 的 `-d` / `--dataset` **直接支持 `.xlsx`**（读取 `query`、`reference_answer` 及分类列，无需手动转 JSONL）。
 
 ```json
 {
@@ -42,7 +44,7 @@ scripts/qa_eval/
 ├── eval_metrics.py         # Stage 2：对 JSONL 批量打分
 ├── stats_scores.py         # Stage 3：answer_accuracy_score 汇总
 ├── stats_efficiency.py     # Stage 4：解析 Agent 日志（首响应/轮次/耗时/Token/内存）
-├── memory_monitor.py       # 进程树 RSS 采样（Linux /proc；WSL 可用）
+├── memory_monitor.py       # 进程树 RSS 采样（Linux /proc；Windows/macOS 用 psutil）
 ├── llm_config.py           # DashScope / 智谱 provider 预设
 ├── run_pipeline.py         # 编排 Stage 1–4 + A/B 报告
 ├── _test_deveco_probe.py   # DevEco 单题探测脚本（开发调试用）
@@ -124,7 +126,7 @@ run_pipeline.py ab           → data/report-{host}.txt
 | 平均耗时 (秒) | 每题从 `Evaluate N:` 到下一题开始的端到端时间再平均 | **越短越好** |
 | 平均 Token (k) | 每题 `totalTokenCount` 累加再平均，单位 k | **越少越好** |
 | 平均首响应 (秒) | 每题从 `Evaluate N:` 到第一次 LLM 返回再平均 | 参考项 |
-| 平均峰值内存 (MB) | Agent + MCP 子进程树 RSS 峰值再平均 | **越低越好**；Linux/WSL 才有数 |
+| 平均峰值内存 (MB) | Agent + MCP 子进程树 RSS 峰值再平均 | **越低越好**；需 `psutil`（Windows/macOS）或 Linux `/proc` |
 | 最大峰值内存 (MB) | 单题 RSS 峰值最大值 | 观察 OOM 风险 |
 
 Δ 列均为 **with − without**。
@@ -198,9 +200,9 @@ Judge 追加：`answer_accuracy_score`（0–1）、`evaluation_status`（`succe
 
 ## 内存采样
 
-- **实现**：`memory_monitor.py` 在 Agent 子进程存活期间每 0.25s 采样进程树 RSS（Linux `/proc`）。
+- **实现**：`memory_monitor.py` 在 Agent 子进程存活期间每 0.25s 采样进程树 RSS（Linux `/proc`；Windows/macOS 用 `psutil`）。
 - **写入**：JSONL `agent_memory_mb`；日志 `peakRssMb` / `avgRssMb`；报告「平均/最大峰值内存」。
-- **平台**：**Linux 原生 / WSL** 有数据；**Windows 原生** 无 `/proc`，显示 `N/A`，不影响跑题与准确率/耗时/Token 指标。
+- **平台**：Linux / WSL / **Windows 原生** 均有数据（需 `pip install psutil`）；未安装 psutil 且非 Linux 时显示 `N/A`。
 - **采样范围**：builtin / 外部 CLI 的 **子进程树**（含 homegraph MCP 子进程）。
 
 ## Agent 宿主（`--agent-host`）
@@ -220,7 +222,7 @@ deveco providers login    # 选 Zhipu AI，输入 API Key
 # 凭证目录（Windows）: C:\Users\<你>\.config\deveco
 ```
 
-- pipeline 会在被测仓库写入 `.deveco/deveco.jsonc`（with 臂挂 homegraph MCP + agent prompt；without 臂 deny homegraph 工具）。
+- pipeline 会在被测仓库写入 `.deveco/deveco.jsonc`（with 臂挂 homegraph MCP + **工具选用 prompt** + deny `homegraph_files`；without 臂 deny 全部 homegraph 工具）。
 - TUI 若提示 **DEVECO_HOME**，那是 DevEco **Studio** 安装路径（编译用）；**跑 qa_eval 可跳过**。
 - 可选 `--deveco-model zhipuai/glm-4.5-flash`（格式 `provider/model`，用 `deveco models` 查看）。
 - 可选 `--deveco-attach http://127.0.0.1:4096` 或 `QA_EVAL_DEVECO_ATTACH` 复用已运行的 `deveco serve`，减少冷启动。
@@ -237,13 +239,16 @@ export DASHSCOPE_API_KEY="sk-xxxxxxxx"
 # 或智谱（Key 格式 id.secret，不要加 sk- 前缀）：
 # export ZHIPU_API_KEY="xxxxxxxx.yyyyyyyy"
 
-cd /path/to/homegraph && npm run build
-node dist/bin/homegraph.js sync /path/to/your/repo
+cd /path/to/homegraph
 
-python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo
-# 智谱：
-# python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo --provider zhipu
+python scripts/qa_eval/run_pipeline.py ab \
+  -r /path/to/scene_board_ext \
+  -d /path/to/dataSet10.xlsx \
+  --agent-host deveco-code \
+  --provider zhipu
 ```
+
+无需手动转 JSONL、无需手动 `homegraph init`：pipeline 会自动读取 xlsx、构建本地 homegraph（若需要）、并对仓库建索引。
 
 ### 三种宿主示例
 
@@ -338,7 +343,7 @@ python scripts/qa_eval/run_pipeline.py ab -r /path/to/your/repo [选项]
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--repo`, `-r` | — | **被测仓库**（跑 Agent 时必填） |
-| `--dataset`, `-d` | `data/test-set.jsonl` | 测试集 |
+| `--dataset`, `-d` | `data/test-set.jsonl` | 测试集（`.jsonl` 或 `.xlsx`） |
 | `--with-jsonl` / `--without-jsonl` | `log/result-*.jsonl` | Agent 产出 |
 | `--with-scored` / `--without-scored` | `log/result-*-scored.jsonl` | Judge 产出 |
 | `--with-log` / `--without-log` | `log/agent-*.log` | Agent 日志 |
@@ -392,7 +397,7 @@ python scripts/qa_eval/run_pipeline.py ab --no-agent -r /path/to/repo
 | `Cannot find module 'arkanalyzer'` | 发布包 < 下一版时未打进 bundle；升级 homegraph，或源码路径 `npm install && npm run build` 后用 `node dist/bin/homegraph.js sync` |
 | `rg not found on PATH` | 安装 ripgrep（without 臂 builtin 需要） |
 | 日志解析 0 条任务 | 确认 log 含 `Evaluate N:` 行 |
-| 内存全为 N/A | Windows 原生无 `/proc`；用 WSL/Linux 测内存，或忽略该列 |
+| 内存全为 N/A | 执行 `pip install -r scripts/qa_eval/requirements.txt` 安装 `psutil`；Linux 无需 psutil |
 | with 臂未用 homegraph | 看报告轨迹表 `HG` 列或 `agent_used_homegraph`；DevEco with 臂有专用 prompt |
 | 分数偏低但答案看起来对 | 检查 `output_answer` 是否只剩工具块、无最终自然语言答案 |
 | pip 慢 | 清华镜像（见快速开始） |

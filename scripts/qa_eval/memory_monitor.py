@@ -1,25 +1,31 @@
-"""Sample RSS for a process tree (Linux /proc). Used by qa_eval Agent runs."""
+"""Sample RSS for a process tree. Linux uses /proc; other platforms use psutil."""
 
 from __future__ import annotations
 
 import os
 import sys
 import threading
-import time
 from contextlib import contextmanager
 from statistics import mean
 
+try:
+    import psutil
+
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None  # type: ignore[assignment]
+    _PSUTIL_AVAILABLE = False
+
 _PROC_AVAILABLE = sys.platform == "linux" and os.path.isdir("/proc")
+_SAMPLING_AVAILABLE = _PROC_AVAILABLE or _PSUTIL_AVAILABLE
 
 
 def memory_sampling_supported() -> bool:
-    """True when process-tree RSS sampling is available (Linux /proc)."""
-    return _PROC_AVAILABLE
+    """True when process-tree RSS sampling is available."""
+    return _SAMPLING_AVAILABLE
 
 
-def _read_rss_kb(pid: int) -> int:
-    if not _PROC_AVAILABLE:
-        return 0
+def _read_rss_kb_proc(pid: int) -> int:
     try:
         with open(f"/proc/{pid}/status", encoding="utf-8") as f:
             for line in f:
@@ -54,9 +60,7 @@ def _build_ppid_map() -> dict[int, list[int]]:
     return children
 
 
-def process_tree_pids(root_pid: int) -> set[int]:
-    if root_pid <= 0:
-        return set()
+def _process_tree_pids_proc(root_pid: int) -> set[int]:
     children = _build_ppid_map()
     seen: set[int] = set()
     stack = [root_pid]
@@ -69,8 +73,44 @@ def process_tree_pids(root_pid: int) -> set[int]:
     return seen
 
 
+def _process_tree_pids_psutil(root_pid: int) -> set[int]:
+    if not _PSUTIL_AVAILABLE or psutil is None:
+        return set()
+    try:
+        root = psutil.Process(root_pid)
+    except psutil.NoSuchProcess:
+        return set()
+    pids = {root_pid}
+    for child in root.children(recursive=True):
+        pids.add(child.pid)
+    return pids
+
+
+def process_tree_pids(root_pid: int) -> set[int]:
+    if root_pid <= 0:
+        return set()
+    if _PROC_AVAILABLE:
+        return _process_tree_pids_proc(root_pid)
+    if _PSUTIL_AVAILABLE:
+        return _process_tree_pids_psutil(root_pid)
+    return set()
+
+
+def _read_rss_kb_psutil(pid: int) -> int:
+    if not _PSUTIL_AVAILABLE or psutil is None:
+        return 0
+    try:
+        return psutil.Process(pid).memory_info().rss // 1024
+    except psutil.NoSuchProcess:
+        return 0
+
+
 def tree_rss_kb(root_pid: int) -> int:
-    return sum(_read_rss_kb(pid) for pid in process_tree_pids(root_pid))
+    if _PROC_AVAILABLE:
+        return sum(_read_rss_kb_proc(pid) for pid in process_tree_pids(root_pid))
+    if _PSUTIL_AVAILABLE:
+        return sum(_read_rss_kb_psutil(pid) for pid in process_tree_pids(root_pid))
+    return 0
 
 
 class MemorySampler:
@@ -87,7 +127,7 @@ class MemorySampler:
         self._root_pid = root_pid if root_pid is not None else os.getpid()
         self._samples_kb = []
         self._stop.clear()
-        if not _PROC_AVAILABLE:
+        if not _SAMPLING_AVAILABLE:
             self._thread = None
             return
         self._thread = threading.Thread(target=self._loop, daemon=True)

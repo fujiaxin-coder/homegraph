@@ -67,25 +67,24 @@ def _tools_from_session_export(raw: str) -> list[str]:
     return tools
 
 
-def _deveco_with_query(query: str) -> str:
-    return (
-        "【homegraph 评测臂】请优先用 MCP 工具 homegraph_explore（query 用原问题里的符号名，"
-        "如 getColorString）；只回答题目问的那一个定义所在文件，不要列举其它同名函数。"
-        "若 homegraph 结果不足，再用 grep/read 补充。"
-        f"问题：{query}"
-    )
-
+_DEVECO_HOMEGRAPH_TOOL_GUIDE = """\
+本环境已接入 HomeGraph MCP，与 grep、read、glob 并列可选；按题目需要自行选择工具。
+若本题使用 HomeGraph，请遵守：
+- homegraph_explore：结构/定位/「与 X 相关的实现有哪些」的首选；query 写类名、函数名或文件名（如 PreferenceStore、statfs），避免空泛关键词。
+- explore 返回的源码视为已 Read；不要对同一符号反复调用 node/search。
+- homegraph_node / homegraph_search：仅 explore 之后仍缺一条调用链、或完全不知符号名时各用一次。
+- 不要用 homegraph_files 拉全仓或通配目录树；列举文件用 explore（带具体名称）或 grep/glob。
+- 架构、流程、对比类题目：explore 定位关键文件后，用 read 补充仍缺的细节，再归纳作答。"""
 
 _DEVECO_WITH_AGENT_PROMPT = (
-    "你是鸿蒙 ArkTS 代码仓库问答 Agent（homegraph 评测臂）。"
-    "回答代码定位/理解问题时，优先调用 MCP 工具 homegraph_explore；"
-    "仅当 homegraph 查不到或信息不够时，再用 grep/read/glob。"
+    "你是鸿蒙 ArkTS 代码仓库问答 Agent。\n"
+    f"{_DEVECO_HOMEGRAPH_TOOL_GUIDE}\n"
     "基于仓库事实作答，中文简洁准确。"
 )
 
 _DEVECO_WITHOUT_AGENT_PROMPT = (
-    "你是鸿蒙 ArkTS 代码仓库问答 Agent（baseline 臂，无 homegraph）。"
-    "用 grep、read 等内置工具探索仓库后作答，中文简洁准确。"
+    "你是鸿蒙 ArkTS 代码仓库问答 Agent。"
+    "用 grep、read、glob 等内置工具探索仓库后作答，中文简洁准确。"
 )
 
 
@@ -189,13 +188,68 @@ def find_claude_cli() -> str:
     return found
 
 
+def _is_wsl() -> bool:
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _deveco_cli_works(exe: str) -> bool:
+    try:
+        r = subprocess.run(
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    combined = f"{r.stdout or ''}{r.stderr or ''}".lower()
+    if r.returncode != 0 or "package manager failed" in combined:
+        return False
+    return True
+
+
 def find_deveco_cli() -> str:
+    explicit = os.environ.get("DEVECO_BIN") or os.environ.get("QA_EVAL_DEVECO_BIN")
+    if explicit:
+        if _deveco_cli_works(explicit):
+            return explicit
+        raise FileNotFoundError(f"DEVECO_BIN 不可用（deveco --version 失败）: {explicit}")
+
+    candidates: list[str] = []
+    npm_global = Path.home() / ".npm-global" / "bin" / "deveco"
+    if npm_global.is_file():
+        candidates.append(str(npm_global))
     for name in ("deveco", "opencode"):
         found = shutil.which(name)
-        if found:
-            return found
+        if not found:
+            continue
+        # WSL PATH 常把 Windows npm 的 deveco 排在前面，在 Linux 下必失败
+        if name == "deveco" and _is_wsl() and found.startswith("/mnt/"):
+            continue
+        candidates.append(found)
+
+    for exe in candidates:
+        if _deveco_cli_works(exe):
+            return exe
+
+    if _is_wsl():
+        raise FileNotFoundError(
+            "DevEco Code 没有 Linux 原生版。WSL 里 which deveco 指向 /mnt/c/.../npm/deveco，"
+            "在 Linux 下会报 package manager failed。\n"
+            "请在 Windows PowerShell 里跑 qa_eval pipeline，例如：\n"
+            "  cd D:\\code\\homegraph\\scripts\\qa_eval\n"
+            "  python run_pipeline.py ab -r D:\\code\\scene_board_ext -d D:\\code\\dataSet10.xlsx "
+            "--agent-host deveco-code --provider zhipu --skip-index\n"
+            "或在 WSL 里安装可用的 opencode 并设置 DEVECO_BIN=opencode 的路径。"
+        )
     raise FileNotFoundError(
-        "未找到 DevEco Code / opencode CLI。请安装 DevEco Code 或 opencode 并加入 PATH。"
+        "未找到可用的 DevEco Code / opencode CLI。请安装并加入 PATH，或设置 DEVECO_BIN。"
     )
 
 
@@ -222,8 +276,8 @@ def write_mcp_config(path: Path, *, hg_command: str, hg_args: list[str]) -> None
 
 def _split_hg_bin(hg_bin: str) -> tuple[str, list[str]]:
     if hg_bin.startswith("node "):
-        parts = hg_bin.split(" ", 1)
-        return parts[0], parts[1].split() + ["serve", "--mcp"]
+        node, script = hg_bin.split(" ", 1)
+        return node, [script.strip(), "serve", "--mcp"]
     return hg_bin, ["serve", "--mcp"]
 
 
@@ -693,11 +747,22 @@ def _write_deveco_project_mcp(repo: Path, *, arm: str, hg_bin: str) -> Path:
                 "type": "local",
                 "command": [cmd, *base_args, "--path", str(repo.resolve())],
                 "enabled": True,
+                "environment": {
+                    "HOMEGRAPH_NO_WATCHDOG": "1",
+                    "HOMEGRAPH_WASM_RELAUNCHED": "1",
+                },
             }
+        }
+        body["permission"] = {
+            # files 在大仓上易返回整棵目录树，Token 高且对答题帮助小（qa_eval 实测主要劣化源）
+            "homegraph_homegraph_files": "deny",
         }
         body["agent"] = {
             "build": {
                 "prompt": _DEVECO_WITH_AGENT_PROMPT,
+                "permission": {
+                    "homegraph_homegraph_files": "deny",
+                },
             }
         }
     else:
@@ -740,7 +805,7 @@ def run_deveco_query(
     backend = f"deveco-code-{'with' if arm == 'with' else 'without'}-homegraph"
     qid = item_id or str(task_id)
     title = f"qa-eval-{arm}-{qid}"
-    prompt = _deveco_with_query(query) if arm == "with" else query
+    prompt = query
 
     run_cmd = [
         cli,
@@ -868,10 +933,8 @@ def run_external_dataset(
     if host not in SUPPORTED_HOSTS:
         raise ValueError(f"unknown agent host: {host}")
 
-    from agent_runner import find_homegraph_bin, print_agent_progress, require_index, _arm_short
+    from agent_runner import find_homegraph_bin, print_agent_progress, _arm_short
 
-    if arm == "with":
-        require_index(repo)
     hg = find_homegraph_bin(hg_bin) if arm == "with" else ""
 
     output.parent.mkdir(parents=True, exist_ok=True)

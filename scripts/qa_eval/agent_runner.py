@@ -61,28 +61,45 @@ def _log_memory(log_file: Path | None, mem: dict[str, float | None]) -> None:
         _log_line(log_file, f"avgRssMb = {mem['avg_rss_mb']}")
 
 
+MIN_INDEX_DB_BYTES = 64 * 1024  # empty/crashed init leaves a ~4KB sqlite header
+
+
+def _index_db_path(repo: Path) -> Path:
+    return repo / ".homegraph" / "homegraph.db"
+
+
+def _normalize_node_hg_bin(node: str, script: str) -> str:
+    script_path = Path(script).expanduser().resolve()
+    if not script_path.is_file():
+        raise FileNotFoundError(f"homegraph script not found: {script_path}")
+    return f"{node} {script_path}"
+
+
 def find_homegraph_bin(explicit: str | None = None) -> str:
     if explicit:
-        p = Path(explicit)
-        if p.is_file() and os.access(p, os.X_OK):
-            return str(p.resolve())
+        explicit = explicit.strip()
+        if explicit.startswith("node "):
+            node, script = explicit.split(" ", 1)
+            return _normalize_node_hg_bin(node, script.strip())
+        p = Path(explicit).expanduser()
+        if p.is_file():
+            if os.access(p, os.X_OK) and p.suffix != ".js":
+                return str(p.resolve())
+            return _normalize_node_hg_bin("node", str(p))
         raise FileNotFoundError(f"homegraph binary not found: {explicit}")
 
     # Prefer local dev build when testing unreleased changes
     repo_root = Path(__file__).resolve().parents[2]
-    for local in (
-        repo_root / "dist" / "bin" / "homegraph.js",
-        repo_root / "dist" / "bin" / "homegraph.js",
-    ):
-        if local.is_file():
-            return f"node {local.resolve()}"
+    local = repo_root / "dist" / "bin" / "homegraph.js"
+    if local.is_file():
+        return _normalize_node_hg_bin("node", str(local))
 
-    for name in ("homegraph", "homegraph"):
+    for name in ("homegraph",):
         found = shutil.which(name)
         if found:
             return found
     raise FileNotFoundError(
-        "homegraph/homegraph not on PATH.\n"
+        "homegraph not on PATH.\n"
         "  在 homegraph 仓库里: npm run build\n"
         "  或: python scripts/qa_eval/run_pipeline.py ab --homegraph-bin 'node /path/to/dist/bin/homegraph.js'"
     )
@@ -94,12 +111,99 @@ def _hg_cmd(hg_bin: str, args: list[str]) -> list[str]:
     return [hg_bin, *args]
 
 
+def is_indexed(repo: Path) -> bool:
+    db = _index_db_path(repo)
+    return db.is_file() and db.stat().st_size >= MIN_INDEX_DB_BYTES
+
+
+def _clear_broken_index(repo: Path) -> None:
+    hg_dir = repo / ".homegraph"
+    db = _index_db_path(repo)
+    if db.is_file() and db.stat().st_size < MIN_INDEX_DB_BYTES:
+        print(
+            f"→ 检测到不完整索引 ({db.stat().st_size} bytes)，清理 {hg_dir} 后重新 init …",
+            flush=True,
+        )
+        shutil.rmtree(hg_dir)
+
+
+def _homegraph_subprocess_env() -> dict[str, str]:
+    """Env for homegraph CLI subprocesses (init, index)."""
+    env = os.environ.copy()
+    opts = env.get("NODE_OPTIONS", "")
+    if "max-old-space-size" not in opts:
+        extra = "--max-old-space-size=16384"
+        env["NODE_OPTIONS"] = f"{opts} {extra}".strip()
+    # Large ArkTS repos can block the main thread for minutes during scene build (#850).
+    env.setdefault("HOMEGRAPH_NO_WATCHDOG", "1")
+    return env
+
+
+def ensure_index(
+    repo: Path, hg_bin: str, *, timeout_sec: int = 7200, skip: bool = False
+) -> None:
+    """Ensure homegraph index exists. Skips init when db is already present."""
+    repo = repo.resolve()
+    if skip:
+        if not is_indexed(repo):
+            raise RuntimeError(
+                f"--skip-index 已指定，但仓库未索引: {repo}/.homegraph/homegraph.db"
+            )
+        db_mb = _index_db_path(repo).stat().st_size // (1024 * 1024)
+        print(f"→ 仓库已索引 ({db_mb} MB)，跳过 init/index (--skip-index)", flush=True)
+        return
+    _clear_broken_index(repo)
+    if is_indexed(repo):
+        db_mb = _index_db_path(repo).stat().st_size // (1024 * 1024)
+        print(f"→ 仓库已索引 ({db_mb} MB)，跳过 init", flush=True)
+        return
+    print(f"→ 仓库未索引，正在 homegraph init {repo} …", flush=True)
+    print(
+        "  （大型仓库可能需要较长时间；已默认 NODE_OPTIONS=--max-old-space-size=16384、"
+        "HOMEGRAPH_NO_WATCHDOG=1）",
+        flush=True,
+    )
+    proc = subprocess.run(
+        _hg_cmd(hg_bin, ["init", str(repo)]),
+        timeout=timeout_sec,
+        env=_homegraph_subprocess_env(),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"homegraph init 失败 (exit {proc.returncode})")
+    if not is_indexed(repo):
+        raise RuntimeError(
+            f"homegraph init 完成但索引过小或缺失: {repo}/.homegraph/homegraph.db\n"
+            "可能是内存不足 (OOM)，请增大 NODE_OPTIONS 后重试"
+        )
+    print("→ homegraph 索引完成", flush=True)
+
+
 def require_index(repo: Path) -> None:
-    for name in (".homegraph", ".homegraph"):
-        d = repo / name
-        if (d / "homegraph.db").exists() or (d / "homegraph.db").exists():
-            return
-    raise RuntimeError(f"仓库未索引: {repo}\n请先运行: homegraph sync {repo}")
+    if not is_indexed(repo):
+        raise RuntimeError(
+            f"仓库未索引: {repo}\n"
+            "请通过 run_pipeline.py 自动索引，或手动运行: homegraph init <repo>"
+        )
+
+
+def ensure_homegraph_bin(explicit: str | None = None) -> str:
+    """Resolve homegraph binary; build local dist if missing."""
+    try:
+        return find_homegraph_bin(explicit)
+    except FileNotFoundError:
+        if explicit:
+            raise
+        repo_root = Path(__file__).resolve().parents[2]
+        dist = repo_root / "dist" / "bin" / "homegraph.js"
+        if dist.is_file():
+            return find_homegraph_bin(None)
+        print("→ 未找到 homegraph 可执行文件，正在 npm run build …", flush=True)
+        subprocess.run(
+            ["npm", "run", "build"],
+            cwd=repo_root,
+            check=True,
+        )
+        return find_homegraph_bin(None)
 
 
 def tool_block(name: str, body: str) -> str:
@@ -458,8 +562,6 @@ def run_agent_dataset(
     max_turns: int = 8,
     extra_body: dict | None = None,
 ) -> list[dict[str, Any]]:
-    if arm == "with":
-        require_index(repo)
     hg = find_homegraph_bin(hg_bin) if arm == "with" else ""
     output.parent.mkdir(parents=True, exist_ok=True)
     if log_file:
