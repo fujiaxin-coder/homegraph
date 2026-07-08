@@ -153,7 +153,7 @@ homegraph spec match <文本>     # 全文搜索相似历史规格
 homegraph spec find <文件>      # 查找与指定文件关联的规格
 homegraph spec trace <符号>     # 追溯代码符号关联的设计规格
 homegraph spec stats           # 查看规格知识图谱统计
-homegraph spec evolve install  # 安装 post-commit 钩子，提交后自动演化规格
+homegraph spec evolve install  # 安装 post-commit 钩子（默认累计 3 次提交后触发演进）
 homegraph spec evolve uninstall# 移除 post-commit 钩子
 homegraph spec evolve process  # 手动触发一次规格演化
 homegraph serve --mcp           # 启动 MCP 服务（一般由 Agent 自动拉起）

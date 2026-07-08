@@ -26,7 +26,7 @@
 import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
-import { SPEC_DATA_DIR } from '../spec/utils';
+import { SPEC_DATA_DIR, readMeta } from '../spec/utils';
 import { createMineConfig } from '../spec/config';
 import { getHomeGraphDir, isInitialized, unsafeIndexRootReason, findNearestHomeGraphRoot, planFrontload, hasStructuralKeyword, extractCodeTokens } from '../directory';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
@@ -2189,7 +2189,7 @@ specCommand
   }) => {
     try {
       const repoPath = path.resolve(options.path || process.cwd());
-      const specStoragePath = options.specStoragePath ?? path.join(repoPath, '.spec');
+      const specStoragePath = path.resolve(repoPath, options.specStoragePath || '.spec');
 
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { runBuildPipeline } = await import('../spec/build/pipeline');
@@ -2299,7 +2299,15 @@ specCommand
         process.exit(1);
       }
 
-      const outputDir = path.resolve(options.output || '.spec');
+      // Resolve output directory: if meta.json exists, reuse its specStoragePath;
+      // otherwise fall back to --output option, then default '.spec'.
+      // All paths are resolved relative to repoPath so that relative values
+      // (e.g. '.spec', or a relative specStoragePath from meta.json) are
+      // anchored correctly regardless of cwd; absolute paths pass through unchanged.
+      const existingMeta = readMeta(repoPath);
+      const outputDir = existingMeta
+        ? path.resolve(repoPath, existingMeta.specStoragePath)
+        : path.resolve(repoPath, options.output || '.spec');
 
       // Load spec config for LLM setup
       const specConfig = loadSpecConfig(repoPath);
@@ -2816,9 +2824,23 @@ evolveCommand
   .description('Install a git post-commit hook that triggers spec evolution')
   .option('-p, --path <path>', 'Path to the repository')
   .option('-f, --force', 'Overwrite existing hook without prompting')
-  .action(async (options: { path?: string; force?: boolean }) => {
+  .option(
+    '-t, --commit-threshold <n>',
+    'Number of pending commits to accumulate before triggering evolve (default: 3)',
+    (v: string) => {
+      const n = parseInt(v, 10);
+      if (isNaN(n) || n < 1) {
+        error('--commit-threshold must be a positive integer');
+        process.exit(1);
+      }
+      return n;
+    },
+    3
+  )
+  .action(async (options: { path?: string; force?: boolean; commitThreshold?: number }) => {
     try {
       const repoPath = resolveSpecProjectPath(options.path);
+      const commitThreshold = options.commitThreshold ?? 3;
 
       const { isGitRepo } = await import('../spec/build/git-scanner');
 
@@ -2890,14 +2912,45 @@ evolveCommand
 
       const hookBlock = [
         MARKER_BEGIN,
-        '# Triggers spec self-evolution after each commit. Runs in background.',
+        '# Triggers spec self-evolution after N commits have accumulated.',
+        '# Default threshold: 3 commits (configurable via --commit-threshold).',
         '# Installed by: homegraph spec evolve install',
         `# Logs: ${SPEC_DATA_DIR}/logs/evolve-hook.log`,
+        '',
+        `THRESHOLD=${commitThreshold}`,
+        `LOGS_DIR="${SPEC_DATA_DIR}/logs"`,
+        `META_FILE="${SPEC_DATA_DIR}/meta.json"`,
+        '',
+        '# Ensure logs directory exists',
+        'mkdir -p "$LOGS_DIR"',
+        '',
+        '# Read currentCommitID from meta.json',
+        'if [ -f "$META_FILE" ]; then',
+        '  CURRENT=$(sed -n \'s/.*"currentCommitID"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p\' "$META_FILE")',
+        'else',
+        '  CURRENT=""',
+        'fi',
+        '',
+        '# Count pending commits since last evolved commit',
+        'if [ -z "$CURRENT" ] || ! git rev-parse --quiet --verify "$CURRENT^{commit}" >/dev/null 2>&1; then',
+        '  # First run or anchor commit no longer exists — trigger immediately',
+        '  PENDING=$THRESHOLD',
+        'else',
+        '  PENDING=$(git rev-list --count "${CURRENT}..HEAD" 2>/dev/null || echo 0)',
+        'fi',
+        '',
+        'if [ "$PENDING" -lt "$THRESHOLD" ]; then',
+        '  echo "[$(date -Iseconds)] Pending: $PENDING/$THRESHOLD — skipping" \\',
+        '      >> "$LOGS_DIR"/evolve-hook.log',
+        '  exit 0',
+        'fi',
+        '',
+        '# Threshold reached — trigger evolution (async, non-blocking)',
         '# Runtime guard: skip if homegraph is not available',
         `HOMEGRAPH_BIN="${homegraphBin}"`,
         'if [ -x "$HOMEGRAPH_BIN" ] || command -v homegraph >/dev/null 2>&1; then',
         '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" --json \\',
-        `      >> ${SPEC_DATA_DIR}/logs/evolve-hook.log 2>&1 &`,
+        `      >> "$LOGS_DIR"/evolve-hook.log 2>&1 &`,
         'fi',
         MARKER_END,
       ].join('\n');
@@ -2928,6 +2981,7 @@ evolveCommand
       fs.chmodSync(hookPath, 0o755);
 
       success(`Post-commit hook installed at ${hookPath}`);
+      info(`Threshold: ${commitThreshold} commit(s) — evolution triggers when pending commits reach this count`);
       info(`Logs written to ${SPEC_DATA_DIR}/logs/evolve-hook.log`);
     } catch (err) {
       error(`Hook install failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3071,7 +3125,7 @@ evolveCommand
           console.log(`Current HEAD: ${result.toCommit.slice(0, 7)}`);
         } else {
           console.log(chalk.bold(`Evolve complete: ${result.commitsProcessed} commit(s) processed`));
-          console.log(`Range: ${result.fromCommit ? result.fromCommit.slice(0, 7) : 'none'} → ${result.toCommit.slice(0, 7)}`);
+          console.log(`Evolved to: ${result.toCommit.slice(0, 7)}`);
           if (result.metaUpdated) {
             console.log(chalk.green(`meta.json updated (currentCommitID = ${result.toCommit.slice(0, 7)})`));
           } else if (result.failures > 0) {

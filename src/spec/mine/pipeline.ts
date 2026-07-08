@@ -20,7 +20,6 @@ import { scanCommits } from './scanner';
 import { clusterCommits } from './clusterer';
 import { generateSpecs } from './generator';
 import { logDebug, logWarn } from '../../errors';
-import { SPEC_DATA_DIR } from '../utils';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { persistToGraph } from './persist';
 
@@ -277,7 +276,7 @@ export async function runMinePipeline(
   //    same commits are re-scanned when LLM is available.
   if (shouldAdvanceMeta) {
     try {
-      writeMeta(repoPath, SPEC_DATA_DIR, headHash);
+      writeMeta(repoPath, config.outputDir, headHash);
       logDebug('Mine pipeline: updated meta.json', {
         currentCommitID: headHash.slice(0, 7),
       });

@@ -444,7 +444,7 @@ async function runEvolvePipeline(
 export interface BatchEvolveResult {
   /** The last evolved commit hash from meta.json (null if never evolved). */
   fromCommit: string | null;
-  /** The commit hash that was just evolved up to (usually HEAD). */
+  /** The last successfully processed commit hash, or HEAD if none were processed. */
   toCommit: string;
   /** Number of commits in the range (including skipped). */
   commitsProcessed: number;
@@ -467,21 +467,25 @@ export interface BatchEvolveResult {
  *
  * Reads `currentCommitID` from `meta.json` and processes every commit between
  * that hash and `HEAD` in chronological order.  Each commit is independently
- * evolved via `runEvolvePipeline`.  On full success, `meta.json` is refreshed
- * with the new HEAD as `currentCommitID` and `updatedAt` set to now.
+ * evolved via `runEvolvePipeline`.  `meta.json` is updated so that
+ * `currentCommitID` points to the last commit that was **successfully**
+ * processed (neither skipped nor failed).
  *
  * When `currentCommitID` is missing (first evolve after an older build, or
  * corrupt meta), the function falls back to processing only HEAD.
  *
- * **Partial failure:** If any commit fails, the failing commit is logged but
- * processing continues to the next one. `meta.json` is **only** updated when
- * **all** commits succeed — this preserves the invariant that
- * `currentCommitID` always points to the last *successfully* evolved commit.
+ * **Skipped / failed commits trailing the batch:** If the last N commits in
+ * the range are skipped or fail, `meta.json` is NOT advanced past the last
+ * successful commit.  Those trailing commits will be retried on the next
+ * evolve run.  Skipped or failed commits that appear *before* a successful
+ * commit in the range are implicitly marked as processed (their mutations are
+ * subsumed by the successful ancestor).
  *
  * Edge cases:
  * - `currentCommitID` equals HEAD → 0 new commits, `metaUpdated: false`.
  * - `currentCommitID` is not an ancestor of HEAD (rebase / force-push) →
  *   throws an error asking the user to re-build.
+ * - All commits in the range are skipped / failed → `metaUpdated: false`.
  */
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -655,10 +659,13 @@ async function runBatchEvolvePipelineImpl(
     to: headHash.slice(0, 7),
   });
 
-  // Process each commit independently
+  // Process each commit independently.  Track the last commit hash that
+  // was successfully processed (neither skipped nor failed), so we can
+  // advance meta.json only as far as was safe.
   const perCommitResults: EvolveResult[] = [];
   let failures = 0;
   let skippedCount = 0;
+  let lastProcessedHash: string | null = null;
 
   for (const commit of commits) {
     try {
@@ -666,7 +673,11 @@ async function runBatchEvolvePipelineImpl(
         repoPath, db, meta.specStoragePath, commit.hash, llmConfig,
       );
       perCommitResults.push(result);
-      if (result.skipped) skippedCount++;
+      if (result.skipped) {
+        skippedCount++;
+      } else {
+        lastProcessedHash = commit.hash;
+      }
     } catch (err) {
       failures++;
       logWarn('runBatchEvolvePipeline: commit evolve failed, continuing', {
@@ -688,17 +699,17 @@ async function runBatchEvolvePipelineImpl(
     }
   }
 
-  // Refresh meta.json as long as at least one commit was actually
-  // processed (neither skipped nor failed).
-  const processedCount = commits.length - failures - skippedCount;
-  const metaUpdated = processedCount > 0;
+  // Advance meta.json only up to the last successfully processed commit.
+  // Trailing skipped / failed commits stay in the pending range and will
+  // be retried on the next evolve run.
+  const metaUpdated = lastProcessedHash !== null;
   if (metaUpdated) {
-    writeMeta(repoPath, meta.specStoragePath, headHash);
+    writeMeta(repoPath, meta.specStoragePath, lastProcessedHash!);
   }
 
   return {
     fromCommit: lastEvolved,
-    toCommit: headHash,
+    toCommit: lastProcessedHash || headHash,
     commitsProcessed: commits.length,
     perCommitResults,
     metaUpdated,
