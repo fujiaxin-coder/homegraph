@@ -424,7 +424,7 @@ async function runEvolvePipeline(
         codeDiff: frag.codeDiff,
       });
       evolveResult.fragmentsCount++;
-      insertCommitFragmentRelation(db, commitInfo.hash, inserted.id);
+      insertCommitFragmentRelation(db, commitInfo.hash, inserted.id, 'CONTAINS');
       evolveResult.relationsCreated++;
     }
 

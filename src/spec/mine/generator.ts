@@ -209,7 +209,7 @@ export async function generateSpecs(
   let errors = 0;
 
   for (const cluster of clusters) {
-    const specId = `spec${cluster.id}`;
+    const specId = `spec_${cluster.timeRange.end}`;
     logDebug('Generating spec for cluster', {
       specId,
       commitCount: cluster.commits.length,

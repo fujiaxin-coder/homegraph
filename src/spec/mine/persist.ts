@@ -147,7 +147,7 @@ export function persistToGraph(
       }
 
       // Spec → Commit relation
-      insertSpecCommitRelation(db, spec.specId, cc.commitHash, 'GENERATE');
+      insertSpecCommitRelation(db, spec.specId, cc.commitHash, 'SUMMARIZED_FROM');
       relationsWritten++;
 
       // Diff fragments — only files that appear in this commit's AST changes.
@@ -156,7 +156,7 @@ export function persistToGraph(
       if (existingFragments.length > 0) {
         for (const frag of existingFragments) {
           if (!relevantFiles.has(frag.filePath)) continue;
-          insertCommitFragmentRelation(db, cc.commitHash, frag.id);
+          insertCommitFragmentRelation(db, cc.commitHash, frag.id, 'CONTAINS');
           relationsWritten++;
         }
       } else {
@@ -183,7 +183,7 @@ export function persistToGraph(
           const inserted = insertCodeFragment(db, fragmentNode);
           fragmentsWritten++;
 
-          insertCommitFragmentRelation(db, cc.commitHash, inserted.id);
+          insertCommitFragmentRelation(db, cc.commitHash, inserted.id, 'CONTAINS');
           relationsWritten++;
         }
       }

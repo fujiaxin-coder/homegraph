@@ -118,6 +118,7 @@ export interface SpecCommitRelation {
 export interface CommitFragmentRelation {
   commitHash: string;
   fragmentId: string;
+  relationType: RelationType;
 }
 
 /**

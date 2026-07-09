@@ -388,7 +388,7 @@ function validateLLM(val: any, file: string): LLMConfig | null {
     maxTokens:
       typeof val.maxTokens === 'number' && Number.isInteger(val.maxTokens) && val.maxTokens > 0
         ? val.maxTokens
-        : 4096,
+        : 20000,
   };
 }
 

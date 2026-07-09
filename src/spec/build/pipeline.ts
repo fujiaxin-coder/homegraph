@@ -172,7 +172,7 @@ export function runBuildPipeline(
         codeDiff: frag.codeDiff,
       });
       fragmentsFound++;
-      insertCommitFragmentRelation(db, cm.hash, inserted.id);
+      insertCommitFragmentRelation(db, cm.hash, inserted.id, 'CONTAINS');
       relationsCreated++;
     }
   }
