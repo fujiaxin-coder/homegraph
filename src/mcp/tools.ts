@@ -22,7 +22,7 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { isTestFile, normalizeNameToken } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, fileMatchesQueryBasename } from '../search/query-utils';
 import {
   existsSync,
   readFileSync,
@@ -2527,6 +2527,49 @@ export class ToolHandler {
   }
 
   /**
+   * Import sites for @kit.* / *Kit module names — surfaces `import … from '@kit.FooKit'`
+   * lines that FTS would otherwise miss when unrelated symbols share a substring
+   * (ServiceCollaborationKit vs CollaborationRegisterManager).
+   */
+  private buildImportSitesSection(cg: HomeGraph, query: string): string {
+    const terms = extractImportSearchTerms(query);
+    if (terms.length === 0) return '';
+
+    const seen = new Set<string>();
+    const sites: Array<{ file: string; line: number; sig: string }> = [];
+
+    for (const term of terms) {
+      const termLc = term.toLowerCase().replace(/^@kit\./, '');
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(term, { kinds: ['import'], limit: 15 });
+      } catch {
+        continue;
+      }
+      for (const r of hits) {
+        const sig = (r.node.signature || r.node.name || '').trim();
+        if (!sig.toLowerCase().includes(termLc)) continue;
+        const key = `${r.node.filePath}:${r.node.startLine}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        sites.push({ file: r.node.filePath, line: r.node.startLine, sig });
+      }
+    }
+
+    if (sites.length === 0) return '';
+
+    const lines = ['**Import sites**', ''];
+    for (const s of sites.slice(0, 12)) {
+      lines.push(`- \`${s.file}:${s.line}\` — \`${s.sig}\``);
+    }
+    if (sites.length > 12) {
+      lines.push(`- … and ${sites.length - 12} more import site(s)`);
+    }
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  /**
    * Compact "blast radius" for the entry symbols of an explore result: who
    * depends on each (callers) and which test files cover it — LOCATIONS ONLY,
    * no source, so the agent knows what to update / re-verify before editing
@@ -2701,6 +2744,26 @@ export class ToolHandler {
       return this.textResult(`No relevant code found for "${query}"`);
     }
 
+    // Seed import nodes for @kit.* / *Kit names so their files enter the render set.
+    const importTerms = extractImportSearchTerms(query);
+    for (const term of importTerms) {
+      const termLc = term.toLowerCase().replace(/^@kit\./, '');
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(term, { kinds: ['import'], limit: 12 });
+      } catch {
+        continue;
+      }
+      for (const r of hits) {
+        const sig = (r.node.signature || r.node.name || '').toLowerCase();
+        if (!sig.includes(termLc)) continue;
+        if (!subgraph.nodes.has(r.node.id)) {
+          subgraph.nodes.set(r.node.id, r.node);
+          subgraph.roots.push(r.node.id);
+        }
+      }
+    }
+
     // Graph-aware glue: findRelevantContext builds the subgraph from name/text
     // search, so a method that BRIDGES named symbols — e.g. App.tsx's
     // triggerRender, which calls the named triggerUpdate — is never a search hit
@@ -2757,13 +2820,11 @@ export class ToolHandler {
       const bodyLines = (n: Node) => Math.max(0, (n.endLine ?? n.startLine) - n.startLine);
       const callerCount = (n: Node) => { try { return cg.getCallers(n.id).length; } catch { return 0; } };
       const namedParts: string[] = [];
-      for (const m of query.matchAll(/@kit\.([A-Za-z][A-Za-z0-9]*)/g)) {
-        if (m[1]) namedParts.push(m[1]);
-      }
-      for (const m of query.matchAll(
-        /\b([A-Za-z][A-Za-z0-9_-]*)\.(?:ets|ts|tsx|js|jsx|json5?|ya?ml|hpp|cpp|c)\b/gi,
-      )) {
-        if (m[1]) namedParts.push(m[1]);
+      for (const kit of extractKitModuleNamesFromQuery(query)) namedParts.push(kit);
+      for (const base of extractFileBasenamesFromQuery(query)) namedParts.push(base);
+      for (const ma of extractMemberAccessFromQuery(query)) {
+        namedParts.push(ma.member);
+        if (ma.receiver) namedParts.push(ma.receiver);
       }
       for (const m of query.matchAll(/\b([A-Za-z_][\w]*)(::)([A-Za-z_][\w]*)\b/g)) {
         if (m[1]) namedParts.push(m[1]);
@@ -3098,9 +3159,18 @@ export class ToolHandler {
       !MULTITERM_OFF &&
       (fileTermHits.get(fp) ?? 0) >= 2 &&
       (entryFiles.has(fp) || centralFiles.has(fp));
+    const queryFileBasenames = extractFileBasenamesFromQuery(query);
+    const queryMemberAccesses = extractMemberAccessFromQuery(query);
+
     const sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
+
+      // Query-named file (LocationController.ets in the question) before partial
+      // substring matches (control.ets matching "Controller" inside LocationController).
+      const aExactBase = fileMatchesQueryBasename(a[0], queryFileBasenames) ? 1 : 0;
+      const bExactBase = fileMatchesQueryBasename(b[0], queryFileBasenames) ? 1 : 0;
+      if (aExactBase !== bExactBase) return bExactBase - aExactBase;
 
       // Agent-named files first (it asked for a symbol defined here by name).
       const aNamed = namedSeedFiles.has(a[0]) ? 1 : 0;
@@ -3160,6 +3230,9 @@ export class ToolHandler {
     // knows what to update/verify before editing without a separate call.
     const blastRadius = this.buildBlastRadiusSection(cg, subgraph);
     if (blastRadius) lines.push(blastRadius);
+
+    const importSites = this.buildImportSitesSection(cg, query);
+    if (importSites) lines.push(importSites);
 
     // Relationship map — show how symbols connect
     const significantEdges = subgraph.edges.filter(e =>
@@ -3545,6 +3618,38 @@ export class ToolHandler {
           const targetNode = subgraph.nodes.get(edge.target);
           const targetName = targetNode?.name ?? edge.kind;
           ranges.push({ start: edge.line, end: edge.line, name: targetName, kind: edge.kind, importance: 2, spine: false });
+        }
+      }
+
+      // Query member-access anchors: pin lines the question names (locationManager.on,
+      // .drawModifier) so per-file budget gaps don't hide the exact call site.
+      if (queryMemberAccesses.length > 0) {
+        const anchorLines = new Set<number>();
+        for (const ma of queryMemberAccesses) {
+          const patterns: RegExp[] = [];
+          if (ma.receiver) {
+            const recv = ma.receiver.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const mem = ma.member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            patterns.push(new RegExp(`${recv}\\.${mem}\\s*\\(`));
+            patterns.push(new RegExp(`${recv}\\.${mem}\\b`));
+          } else if (ma.dotted.startsWith('.')) {
+            const lit = ma.dotted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            patterns.push(new RegExp(`${lit}\\b`));
+          }
+          for (let i = 0; i < fileLines.length; i++) {
+            const line = fileLines[i] ?? '';
+            if (patterns.some((p) => p.test(line))) anchorLines.add(i + 1);
+          }
+        }
+        for (const lineNo of anchorLines) {
+          ranges.push({
+            start: lineNo,
+            end: lineNo,
+            name: 'query-anchor',
+            kind: 'anchor',
+            importance: 11,
+            spine: false,
+          });
         }
       }
 

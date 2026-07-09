@@ -13,6 +13,104 @@ export function normalizeNameToken(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+/** Source/config extensions recognized in natural-language queries. */
+export const QUERY_SOURCE_FILE_EXT =
+  'ets|ts|tsx|js|jsx|mjs|cjs|json5?|ya?ml|toml|hpp|h|cpp|c';
+
+/** Member-access anchor extracted from a query (e.g. locationManager.on, .drawModifier). */
+export interface QueryMemberAccess {
+  receiver?: string;
+  member: string;
+  /** Dotted form as written in the query. */
+  dotted: string;
+}
+
+/**
+ * File basenames from queries — supports `Foo.ets` and path-style `common\\constants.ets`.
+ */
+export function extractFileBasenamesFromQuery(query: string): string[] {
+  const basenames = new Set<string>();
+  const ext = QUERY_SOURCE_FILE_EXT;
+  const pathStyle = new RegExp(`(?:^|[/\\\\])([A-Za-z][A-Za-z0-9_-]*)\\.(?:${ext})\\b`, 'gi');
+  const wordStyle = new RegExp(`\\b([A-Za-z][A-Za-z0-9_-]*)\\.(?:${ext})\\b`, 'gi');
+  for (const re of [pathStyle, wordStyle]) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(query)) !== null) {
+      if (m[1] && m[1].length >= 2) basenames.add(m[1]);
+    }
+  }
+  return [...basenames];
+}
+
+/**
+ * HarmonyOS @kit module names — from `@kit.ArkTS` literals or PascalCase `*Kit` tokens
+ * (e.g. ServiceCollaborationKit in "调用 ServiceCollaborationKit 需要…").
+ */
+export function extractKitModuleNamesFromQuery(query: string): string[] {
+  const names = new Set<string>();
+  for (const m of query.matchAll(/@kit\.([A-Za-z][A-Za-z0-9]*)/gi)) {
+    if (m[1]) names.add(m[1]);
+  }
+  for (const m of query.matchAll(/\b([A-Z][A-Za-z0-9]*Kit)\b/g)) {
+    if (m[1] && m[1].length >= 5) names.add(m[1]);
+  }
+  return [...names];
+}
+
+/**
+ * Member-access patterns from a query — `obj.method`, `Type.method`, or `.member`.
+ */
+export function extractMemberAccessFromQuery(query: string): QueryMemberAccess[] {
+  const results: QueryMemberAccess[] = [];
+  const seen = new Set<string>();
+
+  for (const m of query.matchAll(/\b([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)+)\b/g)) {
+    const dotted = m[1];
+    if (!dotted || seen.has(dotted)) continue;
+    const parts = dotted.split('.');
+    if (parts.length < 2) continue;
+    const member = parts[parts.length - 1]!;
+    if (member.length < 2) continue;
+    seen.add(dotted);
+    results.push({
+      receiver: parts.slice(0, -1).join('.'),
+      member,
+      dotted,
+    });
+  }
+
+  for (const m of query.matchAll(/\.([A-Za-z_][\w]*)\b/g)) {
+    const member = m[1]!;
+    const dotted = `.${member}`;
+    if (seen.has(dotted)) continue;
+    seen.add(dotted);
+    results.push({ member, dotted });
+  }
+
+  return results;
+}
+
+/** Terms for targeted import-node FTS (kit modules and their @kit.* paths). */
+export function extractImportSearchTerms(query: string): string[] {
+  const terms = new Set<string>();
+  for (const kit of extractKitModuleNamesFromQuery(query)) {
+    terms.add(kit);
+    terms.add(`@kit.${kit}`);
+  }
+  return [...terms];
+}
+
+/** True when the file's basename matches a basename named in the query (LocationController.ets). */
+export function fileMatchesQueryBasename(filePath: string, basenames: string[]): boolean {
+  if (basenames.length === 0) return false;
+  const base = path.basename(filePath).toLowerCase();
+  return basenames.some((b) => {
+    const stem = b.toLowerCase();
+    return base === `${stem}.ets`
+      || base.startsWith(`${stem}.`);
+  });
+}
+
 /**
  * Tokens that name the PROJECT as a whole — its `go.mod` module, `package.json`
  * name, or repo root directory — rather than any specific symbol. A user
@@ -158,21 +256,17 @@ export function extractSearchTerms(query: string, options?: { stems?: boolean })
   const tokens = new Set<string>();
   let match: RegExpExecArray | null;
 
-  // @kit.ArkTS / @kit.FormKit — index the kit module name for FTS
-  const kitPattern = /@kit\.([A-Za-z][A-Za-z0-9]*)/gi;
-  while ((match = kitPattern.exec(query)) !== null) {
-    if (match[1]) {
-      tokens.add(match[1].toLowerCase());
-    }
+  for (const kit of extractKitModuleNamesFromQuery(query)) {
+    tokens.add(kit.toLowerCase());
   }
 
-  // File basenames before extension splitting
-  const fileBasePattern =
-    /\b([A-Za-z][A-Za-z0-9_-]*)\.(?:ets|ts|tsx|js|jsx|json5?|ya?ml|toml|hpp|h|cpp|c)\b/gi;
-  while ((match = fileBasePattern.exec(query)) !== null) {
-    if (match[1] && match[1].length >= 3) {
-      tokens.add(match[1].toLowerCase());
-    }
+  for (const base of extractFileBasenamesFromQuery(query)) {
+    if (base.length >= 2) tokens.add(base.toLowerCase());
+  }
+
+  for (const ma of extractMemberAccessFromQuery(query)) {
+    if (ma.member.length >= 3) tokens.add(ma.member.toLowerCase());
+    if (ma.receiver && ma.receiver.length >= 3) tokens.add(ma.receiver.toLowerCase());
   }
 
   // C++ qualified names
