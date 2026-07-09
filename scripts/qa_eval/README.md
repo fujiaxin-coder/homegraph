@@ -222,7 +222,7 @@ deveco providers login    # 选 Zhipu AI，输入 API Key
 # 凭证目录（Windows）: C:\Users\<你>\.config\deveco
 ```
 
-- pipeline 会在被测仓库写入 `.deveco/deveco.jsonc`（with 臂挂 homegraph MCP + **工具选用 prompt** + deny `homegraph_files`；without 臂 deny 全部 homegraph 工具）。
+- pipeline 会在被测仓库写入 `.deveco/deveco.jsonc`（with 臂挂 homegraph MCP + 一句能力说明；without 臂 deny 全部 homegraph 工具）。
 - TUI 若提示 **DEVECO_HOME**，那是 DevEco **Studio** 安装路径（编译用）；**跑 qa_eval 可跳过**。
 - 可选 `--deveco-model zhipuai/glm-4.5-flash`（格式 `provider/model`，用 `deveco models` 查看）。
 - 可选 `--deveco-attach http://127.0.0.1:4096` 或 `QA_EVAL_DEVECO_ATTACH` 复用已运行的 `deveco serve`，减少冷启动。
@@ -298,10 +298,23 @@ python scripts/qa_eval/run_pipeline.py ab -r /path/to/repo --keep-log
 【WITHOUT homegraph】效率明细
 【WITH / WITHOUT homegraph】准确率统计
 按类别准确率                        ← category_l1 分组 with/without 均分与 Δ
-逐题对比                            ← 得分、答案摘要；with 赢/平/输 计数
+逐题对比                            ← 准确率、轮次/耗时/Token/首响/峰值内存、答案摘要；with 赢/平/输 计数
 【Agent 轨迹 / DevEco Session】      ← deveco-code 专有（session_id + 轨迹路径）
 【A/B 汇总表】                      ← 两臂核心指标并排 + Δ
 ```
+
+### HomeGraph 使用分析 HTML（`report_homegraph_html.py`）
+
+跑完 A/B 后一次性生成领导汇报用 HTML（默认 `data/report-deveco-homegraph.html`）：
+
+```bash
+python scripts/qa_eval/report_homegraph_html.py
+python scripts/qa_eval/report_homegraph_html.py --agent-host deveco-code
+```
+
+- **概览**：总题数、WITH 臂中实际使用 / 未使用 HomeGraph 题数
+- **正文**：使用了 HomeGraph 的子集 — 汇总表 + 逐题对比（准确率、轮次、耗时、Token、首响、峰值内存、答案）
+- **附录**：未使用 HomeGraph 的子集（相同条件下方差说明）
 
 ## Stage 2 — Judge（`eval_metrics.py`）
 

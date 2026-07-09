@@ -76,13 +76,22 @@ def _process_tree_pids_proc(root_pid: int) -> set[int]:
 def _process_tree_pids_psutil(root_pid: int) -> set[int]:
     if not _PSUTIL_AVAILABLE or psutil is None:
         return set()
-    try:
-        root = psutil.Process(root_pid)
-    except psutil.NoSuchProcess:
-        return set()
-    pids = {root_pid}
-    for child in root.children(recursive=True):
-        pids.add(child.pid)
+    pids: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        pid = stack.pop()
+        if pid in pids:
+            continue
+        try:
+            proc = psutil.Process(pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        pids.add(pid)
+        try:
+            for child in proc.children(recursive=False):
+                stack.append(child.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
     return pids
 
 
@@ -101,7 +110,7 @@ def _read_rss_kb_psutil(pid: int) -> int:
         return 0
     try:
         return psutil.Process(pid).memory_info().rss // 1024
-    except psutil.NoSuchProcess:
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         return 0
 
 
@@ -137,7 +146,7 @@ class MemorySampler:
         while not self._stop.is_set():
             try:
                 self._samples_kb.append(tree_rss_kb(self._root_pid))
-            except OSError:
+            except Exception:
                 break
             self._stop.wait(self.interval_sec)
 

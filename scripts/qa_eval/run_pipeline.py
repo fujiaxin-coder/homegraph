@@ -43,7 +43,12 @@ from dataset_loader import load_dataset  # noqa: E402
 from external_agent import HOST_CLAUDE, HOST_DEVECO, SUPPORTED_HOSTS, find_deveco_cli, run_external_dataset, verify_claude_login  # noqa: E402
 from llm_config import PROVIDER_DASHSCOPE, PROVIDER_ZHIPU, provider_help, resolve_llm_config  # noqa: E402
 from my_answer_accuracy import extract_json_blocks_answerbyCOT, remove_tool_calls  # noqa: E402
-from stats_efficiency import parse_agent_log, summarize_jsonl_usage, summarize_tasks  # noqa: E402
+from stats_efficiency import (  # noqa: E402
+    parse_agent_log,
+    per_item_efficiency_by_id,
+    summarize_jsonl_usage,
+    summarize_tasks,
+)
 from stats_scores import compute_stats_from_rows, print_statistics  # noqa: E402
 
 AGENT_HOST_BUILTIN = "builtin"
@@ -256,17 +261,31 @@ def print_category_table(rows_with: list[dict], rows_without: list[dict]) -> Non
     print("=" * 88)
 
 
-def print_per_item_table(rows_with: list[dict], rows_without: list[dict]) -> None:
+def fmt_metric_cell(value: float | int | None, *, suffix: str = "", digits: int = 0) -> str:
+    if value is None:
+        return "N/A"
+    if isinstance(value, float):
+        if digits == 0:
+            return f"{value:.0f}{suffix}"
+        return f"{value:.{digits}f}{suffix}"
+    return f"{value}{suffix}"
+
+
+def print_per_item_table(
+    rows_with: list[dict],
+    rows_without: list[dict],
+    *,
+    with_log: Path | None = None,
+    without_log: Path | None = None,
+) -> None:
     wo = index_by_id(rows_without)
+    eff_with = per_item_efficiency_by_id(rows_with, with_log)
+    eff_wo = per_item_efficiency_by_id(rows_without, without_log)
     wins = ties = losses = 0
 
     print("\n" + "=" * 120)
-    print("逐题对比（query → with / without 得分与答案摘要）")
+    print("逐题对比（准确率 + 效率指标 + 答案摘要）")
     print("=" * 120)
-    print(
-        f"{'ID':<5}{'类':<6}{'with':>6}{'wo':>6}{'Δ':>7} {'问题':<28} {'with答案':<32} {'without答案'}"
-    )
-    print("-" * 120)
 
     for r in rows_with:
         rid = str(r.get("id", ""))
@@ -280,17 +299,47 @@ def print_per_item_table(rows_with: list[dict], rows_without: list[dict]) -> Non
                 losses += 1
             else:
                 ties += 1
-        cat = str(r.get("category_l1") or "")[:4]
-        q = clip(str(r.get("query", "")), 26)
-        aw = clip(clean_answer(str(r.get("output_answer", ""))), 30)
-        awo = clip(clean_answer(str(w.get("output_answer", ""))), 30)
+
+        cat = str(r.get("category_l1") or "")
+        q = str(r.get("query", ""))
+        aw = clip(clean_answer(str(r.get("output_answer", ""))), 80)
+        awo = clip(clean_answer(str(w.get("output_answer", ""))), 80)
+        m_with = eff_with.get(rid, {})
+        m_wo = eff_wo.get(rid, {})
+
+        print("-" * 120)
         print(
-            f"{rid:<5}{cat:<6}"
-            f"{fmt_num(sw, digits=2):>6}"
-            f"{fmt_num(swo, digits=2):>6}"
-            f"{fmt_delta(sw, swo, digits=2):>7} "
-            f"{q:<28} {aw:<32} {awo}"
+            f"{rid} [{cat}]  准确率  with={fmt_num(sw, digits=2)}  without={fmt_num(swo, digits=2)}  "
+            f"Δ={fmt_delta(sw, swo, digits=2)}"
         )
+        print(
+            f"  轮次       with={fmt_metric_cell(m_with.get('turns')):<8} "
+            f"without={fmt_metric_cell(m_wo.get('turns')):<8} "
+            f"Δ={fmt_delta(m_with.get('turns'), m_wo.get('turns'), digits=0)}"
+        )
+        print(
+            f"  耗时(s)    with={fmt_metric_cell(m_with.get('duration_s'), digits=1):<8} "
+            f"without={fmt_metric_cell(m_wo.get('duration_s'), digits=1):<8} "
+            f"Δ={fmt_delta(m_with.get('duration_s'), m_wo.get('duration_s'), digits=1)}"
+        )
+        print(
+            f"  Token      with={fmt_metric_cell(m_with.get('tokens')):<8} "
+            f"without={fmt_metric_cell(m_wo.get('tokens')):<8} "
+            f"Δ={fmt_delta(m_with.get('tokens'), m_wo.get('tokens'), digits=0)}"
+        )
+        print(
+            f"  首响应(s)  with={fmt_metric_cell(m_with.get('first_token_s'), digits=1):<8} "
+            f"without={fmt_metric_cell(m_wo.get('first_token_s'), digits=1):<8} "
+            f"Δ={fmt_delta(m_with.get('first_token_s'), m_wo.get('first_token_s'), digits=1)}"
+        )
+        print(
+            f"  峰值内存   with={fmt_metric_cell(m_with.get('peak_rss_mb'), suffix='MB', digits=0):<10} "
+            f"without={fmt_metric_cell(m_wo.get('peak_rss_mb'), suffix='MB', digits=0):<10} "
+            f"Δ={fmt_delta(m_with.get('peak_rss_mb'), m_wo.get('peak_rss_mb'), digits=0)}"
+        )
+        print(f"  问题: {q}")
+        print(f"  with答案:    {aw}")
+        print(f"  without答案: {awo}")
 
     print("-" * 120)
     print(f"with 更高: {wins}  |  持平: {ties}  |  without 更高: {losses}")
@@ -368,7 +417,7 @@ def print_full_ab_report(
     print_statistics(stats_without, without_scored, title="【WITHOUT homegraph】准确率统计")
 
     print_category_table(rows_with, rows_without)
-    print_per_item_table(rows_with, rows_without)
+    print_per_item_table(rows_with, rows_without, with_log=with_log, without_log=without_log)
     print_trajectory_section(rows_with, rows_without)
 
     w = 22

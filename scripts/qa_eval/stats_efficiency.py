@@ -159,6 +159,59 @@ def effective_first_response_time(task: dict) -> datetime | None:
     return task.get("first_api_response_time") or ft
 
 
+def item_efficiency_metrics(row: dict, log_task: dict | None = None) -> dict[str, float | int | None]:
+    """Per-question efficiency: merge agent log task with JSONL row fallbacks."""
+    metrics: dict[str, float | int | None] = {
+        "turns": None,
+        "duration_s": None,
+        "first_token_s": None,
+        "tokens": None,
+        "peak_rss_mb": None,
+    }
+
+    if log_task:
+        if log_task.get("max_turn"):
+            metrics["turns"] = int(log_task["max_turn"])
+        if log_task.get("start_time") and log_task.get("end_time"):
+            metrics["duration_s"] = (log_task["end_time"] - log_task["start_time"]).total_seconds()
+        response_time = effective_first_response_time(log_task)
+        if response_time and log_task.get("start_time"):
+            metrics["first_token_s"] = (response_time - log_task["start_time"]).total_seconds()
+        if log_task.get("total_tokens"):
+            metrics["tokens"] = int(log_task["total_tokens"])
+        if log_task.get("peak_rss_mb") is not None:
+            metrics["peak_rss_mb"] = float(log_task["peak_rss_mb"])
+
+    if metrics["turns"] is None and row.get("agent_turns") is not None:
+        metrics["turns"] = int(row["agent_turns"])
+    if metrics["duration_s"] is None and row.get("agent_duration_ms") is not None:
+        metrics["duration_s"] = float(row["agent_duration_ms"]) / 1000.0
+    if metrics["tokens"] is None:
+        usage = row.get("agent_usage") or {}
+        if usage.get("total_tokens") is not None:
+            metrics["tokens"] = int(usage["total_tokens"])
+    if metrics["peak_rss_mb"] is None:
+        mem = row.get("agent_memory_mb") or {}
+        if mem.get("peak_rss_mb") is not None:
+            metrics["peak_rss_mb"] = float(mem["peak_rss_mb"])
+
+    return metrics
+
+
+def per_item_efficiency_by_id(rows: list[dict], log_path: Path | None) -> dict[str, dict[str, float | int | None]]:
+    """Map dataset id (e.g. D01) → efficiency metrics; log task N aligns with rows[N-1]."""
+    tasks_by_seq: dict[int, dict] = {}
+    if log_path and log_path.is_file():
+        for task in parse_agent_log(log_path):
+            tasks_by_seq[int(task["id"])] = task
+
+    out: dict[str, dict[str, float | int | None]] = {}
+    for i, row in enumerate(rows):
+        rid = str(row.get("id", i))
+        out[rid] = item_efficiency_metrics(row, tasks_by_seq.get(i + 1))
+    return out
+
+
 def summarize_tasks(tasks: list[dict], *, print_report: bool = True) -> dict:
     first_token_costs: list[float] = []
     turns: list[int] = []

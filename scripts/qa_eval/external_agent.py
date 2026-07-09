@@ -67,18 +67,10 @@ def _tools_from_session_export(raw: str) -> list[str]:
     return tools
 
 
-_DEVECO_HOMEGRAPH_TOOL_GUIDE = """\
-本环境已接入 HomeGraph MCP，与 grep、read、glob 并列可选；按题目需要自行选择工具。
-若本题使用 HomeGraph，请遵守：
-- homegraph_explore：结构/定位/「与 X 相关的实现有哪些」的首选；query 写类名、函数名或文件名（如 PreferenceStore、statfs），避免空泛关键词。
-- explore 返回的源码视为已 Read；不要对同一符号反复调用 node/search。
-- homegraph_node / homegraph_search：仅 explore 之后仍缺一条调用链、或完全不知符号名时各用一次。
-- 不要用 homegraph_files 拉全仓或通配目录树；列举文件用 explore（带具体名称）或 grep/glob。
-- 架构、流程、对比类题目：explore 定位关键文件后，用 read 补充仍缺的细节，再归纳作答。"""
-
 _DEVECO_WITH_AGENT_PROMPT = (
-    "你是鸿蒙 ArkTS 代码仓库问答 Agent。\n"
-    f"{_DEVECO_HOMEGRAPH_TOOL_GUIDE}\n"
+    "你是鸿蒙 ArkTS 代码仓库问答 Agent。"
+    "本环境已接入 HomeGraph MCP，可对代码库做符号检索、调用链与源码查询；"
+    "也可用 grep、read、glob 等内置工具，按题目自行选择。"
     "基于仓库事实作答，中文简洁准确。"
 )
 
@@ -753,16 +745,9 @@ def _write_deveco_project_mcp(repo: Path, *, arm: str, hg_bin: str) -> Path:
                 },
             }
         }
-        body["permission"] = {
-            # files 在大仓上易返回整棵目录树，Token 高且对答题帮助小（qa_eval 实测主要劣化源）
-            "homegraph_homegraph_files": "deny",
-        }
         body["agent"] = {
             "build": {
                 "prompt": _DEVECO_WITH_AGENT_PROMPT,
-                "permission": {
-                    "homegraph_homegraph_files": "deny",
-                },
             }
         }
     else:
