@@ -18,7 +18,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { createDatabase, SqliteDatabase } from '../src/db/sqlite-adapter';
 import { silentLogger, setLogger } from '../src/errors';
-import { DEFAULT_CONFIG, LLMConfig, SpecConfig } from '../src/spec/config';
+import { DEFAULT_CONFIG, SpecConfig } from '../src/spec/config';
 import { writeMeta, readMeta, SPEC_DATA_DIR } from '../src/spec/utils';
 import { initSpecSchema, insertSpecNode, findSpecById } from '../src/spec/db';
 import {
@@ -300,8 +300,6 @@ describe('impact-locator — locateAffectedSpecsWithCommits', () => {
 
 function makeClusterContext(overrides: Partial<ClusterContext> = {}): ClusterContext {
   return {
-    specId: 'test-spec',
-    planContent: '# Test Spec',
     commitCount: 1,
     commitSummaries: [{
       shortHash: 'abc1234',
@@ -311,7 +309,6 @@ function makeClusterContext(overrides: Partial<ClusterContext> = {}): ClusterCon
       truncatedDiff: '+console.log("test");',
     }],
     primaryFiles: ['src/test.ts'],
-    totalChars: 500,
     ...overrides,
   };
 }
@@ -387,17 +384,15 @@ describe('spec-rewriter — evaluateSpecWithCluster', () => {
     expect(result.action).toBe('UNCHANGED');
   });
 
-  it('scheduleNextSpecs context is passed through', async () => {
+  it('cluster context is passed through to prompt', async () => {
     const planPath = createSpecOnDisk(specStorage, 'spec07', '# Spec 07\nContent.\n');
     const client = createMockLlmClient(async () => ({ action: 'UNCHANGED' }));
 
-    // Should not crash with next specs listed
     const result = await evaluateSpecWithCluster(
-      'spec07', specStorage, planPath,
-      'feat: context', '+code', ['spec08', 'spec09'], client,
-    makeClusterContext(),
+      'spec07', planPath,
+      makeClusterContext({ commitCount: 3, primaryFiles: ['src/a.ts', 'src/b.ts'] }),
+      client,
     );
-    makeClusterContext(),
     expect(result.action).toBe('UNCHANGED');
   });
 });
@@ -566,12 +561,15 @@ describe('evolve pipeline — runEvolvePipeline', () => {
   let specStorage: string;
   let db: SqliteDatabase;
 
-  const llmConfig: LLMConfig = {
-    provider: 'openai',
-    apiKey: '',
-    model: 'mock-model',
-    temperature: 0,
-    maxTokens: 100,
+  const evolveConfig: SpecConfig = {
+    ...DEFAULT_CONFIG,
+    llm: {
+      provider: 'openai',
+      apiKey: '',
+      model: 'mock-model',
+      temperature: 0,
+      maxTokens: 100,
+    },
   };
 
   beforeEach(() => {
@@ -595,7 +593,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
 
   it('no meta.json → throws', async () => {
     await expect(
-      runEvolvePipeline(repo, db, llmConfig),
+      runEvolvePipeline(repo, db, evolveConfig),
     ).rejects.toThrow(/No meta.json found/);
   });
 
@@ -607,7 +605,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     const hash = commitFile(repo, 'README.md', '# hello', 'docs: init');
 
     // Mock: not a logic change (no LLM needed)
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.fromCommit).toBeNull();
     expect(result.toCommit).toBe(hash);
@@ -629,7 +627,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     const originalMeta = readMeta(repo);
     expect(originalMeta).not.toBeNull();
 
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.commitsScanned).toBe(0);
     expect(result.perCommitResults).toEqual([]);
@@ -653,7 +651,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     const newHash = commitFile(repo, 'src/main.ts', 'const x = 1;', 'feat: new feature');
 
     // Mock: not a logic change
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.fromCommit).toBe(baselineHash);
     expect(result.toCommit).toBe(newHash);
@@ -675,7 +673,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     const hash3 = commitFile(repo, 'c.ts', 'c', 'feat: C');
 
     // Mock: not logic changes
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.fromCommit).toBe(baselineHash);
     expect(result.toCommit).toBe(hash3);
@@ -698,7 +696,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     writeMeta(repo, specStorage, '0000000000000000000000000000000000000000');
 
     await expect(
-      runEvolvePipeline(repo, db, llmConfig),
+      runEvolvePipeline(repo, db, evolveConfig),
     ).rejects.toThrow(/not an ancestor/);
   });
 
@@ -714,7 +712,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     const newHash = commitFile(repo, 'src/main.ts', 'const x = 1;', 'feat(spec01): add feature');
 
     // Mock: not a logic change (Path A only)
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.commitsScanned).toBe(1);
     expect(result.perCommitResults[0]!.matchedSpecId).toBe('spec01');
@@ -737,7 +735,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     const hash3 = commitFile(repo, 'c.ts', 'c', 'chore: task C');
 
     // Mock: not logic changes
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     // All 3 scanned, none matched (no spec matches, no logic changes)
     // → mine fallback: empty perCommitResults, meta not updated
@@ -756,7 +754,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
 
     const hash = commitFile(repo, 'README.md', '# hello', 'docs: init');
 
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     // Verify BatchEvolveResult shape
     expect(result).toHaveProperty('fromCommit');
@@ -822,7 +820,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
       plan_content: '# Updated Spec 02\nNew content.\n',
     });
 
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.commitsScanned).toBe(1);
     const r = result.perCommitResults[0]!;
@@ -838,7 +836,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
 
     const newHash = commitFile(repo, 'src/other.ts', 'unrelated\n', 'feat: unrelated');
 
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.commitsScanned).toBe(1);
     // No DB entries → phase 1 produces no matches → mine fallback
@@ -870,7 +868,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
     );
 
     // No LLM mock — testing that Path A works without it
-    const result = await runEvolvePipeline(repo, db, undefined);
+    const result = await runEvolvePipeline(repo, db, { ...DEFAULT_CONFIG, llm: null });
 
     expect(result.commitsScanned).toBe(1);
     const r = result.perCommitResults[0]!;
@@ -895,7 +893,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
       'chore: update utils',
     );
 
-    const result = await runEvolvePipeline(repo, db, undefined);
+    const result = await runEvolvePipeline(repo, db, { ...DEFAULT_CONFIG, llm: null });
 
     expect(result.commitsScanned).toBe(1);
     // No spec match + no LLM → mine fallback with empty perCommitResults
@@ -936,7 +934,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
       'feat(spec05): add c',
     );
 
-    const result = await runEvolvePipeline(repo, db, undefined);
+    const result = await runEvolvePipeline(repo, db, { ...DEFAULT_CONFIG, llm: null });
 
     expect(result.commitsScanned).toBe(3);
     expect(result.phaseOneSkipped).toBe(1);
@@ -1009,7 +1007,7 @@ describe('evolve pipeline — runEvolvePipeline', () => {
       .mockResolvedValueOnce({ action: 'UNCHANGED' as const })
       .mockRejectedValueOnce(new Error('LLM timeout'));
 
-    const result = await runEvolvePipeline(repo, db, llmConfig);
+    const result = await runEvolvePipeline(repo, db, evolveConfig);
 
     expect(result.commitsScanned).toBe(2);
     expect(result.phaseOneMatched).toBe(2);

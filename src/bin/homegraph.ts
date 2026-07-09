@@ -2824,6 +2824,7 @@ evolveCommand
   .description('Install a git post-commit hook that triggers spec evolution')
   .option('-p, --path <path>', 'Path to the repository')
   .option('-f, --force', 'Overwrite existing hook without prompting')
+  .option('--db-path <path>', 'Custom path to the SQLite database (default: .homegraph/commit4spec/commit4spec.db in repo)')
   .option(
     '-t, --commit-threshold <n>',
     'Number of pending commits to accumulate before triggering evolve (default: 3)',
@@ -2837,7 +2838,7 @@ evolveCommand
     },
     3
   )
-  .action(async (options: { path?: string; force?: boolean; commitThreshold?: number }) => {
+  .action(async (options: { path?: string; force?: boolean; dbPath?: string; commitThreshold?: number }) => {
     try {
       const repoPath = resolveSpecProjectPath(options.path);
       const commitThreshold = options.commitThreshold ?? 3;
@@ -2920,6 +2921,7 @@ evolveCommand
         `THRESHOLD=${commitThreshold}`,
         `LOGS_DIR="${SPEC_DATA_DIR}/logs"`,
         `META_FILE="${SPEC_DATA_DIR}/meta.json"`,
+        `DB_PATH=${options.dbPath ? JSON.stringify(options.dbPath) : '""'}`,
         '',
         '# Ensure logs directory exists',
         'mkdir -p "$LOGS_DIR"',
@@ -2928,7 +2930,9 @@ evolveCommand
         'if [ -f "$META_FILE" ]; then',
         '  CURRENT=$(sed -n \'s/.*"currentCommitID"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p\' "$META_FILE")',
         'else',
-        '  CURRENT=""',
+        '  echo "[$(date -Iseconds)] meta.json not found — run \'homegraph spec build\' or \'homegraph spec mine\' first" \\',
+        '      >> "$LOGS_DIR"/evolve-hook.log',
+        '  exit 0',
         'fi',
         '',
         '# Count pending commits since last evolved commit',
@@ -2948,8 +2952,10 @@ evolveCommand
         '# Threshold reached — trigger evolution (async, non-blocking)',
         '# Runtime guard: skip if homegraph is not available',
         `HOMEGRAPH_BIN="${homegraphBin}"`,
+        'DB_ARGS=""',
+        'if [ -n "$DB_PATH" ]; then DB_ARGS="--db-path $DB_PATH"; fi',
         'if [ -x "$HOMEGRAPH_BIN" ] || command -v homegraph >/dev/null 2>&1; then',
-        '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" --json \\',
+        '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" $DB_ARGS --json \\',
         `      >> "$LOGS_DIR"/evolve-hook.log 2>&1 &`,
         'fi',
         MARKER_END,
@@ -3100,8 +3106,7 @@ evolveCommand
       initSpecSchema(db);
 
       const config = loadSpecConfig(repoPath);
-      const llmConfig = config.llm;
-      if (!llmConfig) {
+      if (!config.llm) {
         warn('LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
         warn('Phase 1 (commit-spec graph construction) will still run.');
         warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
@@ -3114,7 +3119,7 @@ evolveCommand
           '}');
       }
 
-      const result = await runEvolvePipeline(repoPath, db, llmConfig ?? undefined);
+      const result = await runEvolvePipeline(repoPath, db, config);
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));

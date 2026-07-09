@@ -18,7 +18,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
-import { createMineConfig, LLMConfig, loadSpecConfig } from '../config';
+import { createMineConfig, LLMConfig, SpecConfig } from '../config';
 import { readMeta, writeMeta, SPEC_DATA_DIR } from '../utils';
 import { initSpecSchema } from '../db/schema';
 import { findSpecById } from '../db/spec-node';
@@ -194,7 +194,7 @@ function runPhaseOne(
   db: SqliteDatabase,
   specStoragePath: string,
   commits: CommitInfo[],
-  config: ReturnType<typeof loadSpecConfig>,
+  config: SpecConfig,
 ): PhaseOneResult {
   // ---- Stage 1a: Batch analysis ----
   const analyses = analyzeIncrementalCommits(repoPath, specStoragePath, commits, config);
@@ -245,13 +245,12 @@ async function processSingleCommit(
   db: SqliteDatabase,
   specStoragePath: string,
   headHash: string,
-  llmConfig?: LLMConfig,
+  config: SpecConfig,
 ): Promise<BatchEvolveResult> {
   logDebug('runEvolvePipeline: no currentCommitID in meta.json — processing HEAD only', {
     headHash: headHash.slice(0, 7),
   });
 
-  const config = loadSpecConfig(repoPath);
   const info = getCommitInfo(repoPath, headHash);
   if (!info) {
     throw new Error(`Commit ${headHash.slice(0, 7)} not found.`);
@@ -274,7 +273,7 @@ async function processSingleCommit(
   }
 
   // Phase 3
-  const client = llmConfig ? new OpenAiLlmClient(llmConfig) : undefined;
+  const client = config.llm ? new OpenAiLlmClient(config.llm) : undefined;
   const evolvedSpecsByCommit = await evaluateAndApply(
     db, repoPath, specStoragePath, affectedEntries, phaseOneResults, client,
   );
@@ -338,11 +337,7 @@ async function evaluateAndApply(
     }
 
     // Build cluster context
-    const clusterCtx = buildClusterContext({
-      specId: entry.specId,
-      planFilePath: specNode.filePath,
-      affectingCommits: commitInputs,
-    });
+    const clusterCtx = buildClusterContext(commitInputs);
 
     // Populate actual diffs into cluster context
     for (const cs of clusterCtx.commitSummaries) {
@@ -636,13 +631,13 @@ function buildBatchResult(params: {
  *
  * @param repoPath  - Absolute path to the git repository.
  * @param db        - Active SQLite database handle.
- * @param llmConfig - Optional LLM configuration; when absent, phase 3 is skipped
+ * @param config     - Spec configuration (loaded from configs.json); when config.llm is absent, phase 3 is skipped
  *                     (phase 1 graph construction still runs).
  */
 export async function runEvolvePipeline(
   repoPath: string,
   db: SqliteDatabase,
-  llmConfig?: LLMConfig,
+  config: SpecConfig,
 ): Promise<BatchEvolveResult> {
   // ---- Stage 0: Preparation ----
   const meta = readMeta(repoPath);
@@ -668,7 +663,7 @@ export async function runEvolvePipeline(
     // No currentCommitID → process HEAD only
     if (!lastEvolved) {
       return await processSingleCommit(
-        repoPath, db, meta.specStoragePath, headHash, llmConfig,
+        repoPath, db, meta.specStoragePath, headHash, config,
       );
     }
 
@@ -696,7 +691,6 @@ export async function runEvolvePipeline(
     });
 
     // ---- Stage 1a + 1b: Batch analysis + per-commit persistence ----
-    const config = loadSpecConfig(repoPath);
 
     logDebug('runEvolvePipeline: phase 1 — batch analysis + persistence', {
       commitCount: newCommits.length,
@@ -711,7 +705,7 @@ export async function runEvolvePipeline(
     if (phaseOneSpecIds.size === 0) {
       return await mineStyleFallback(
         repoPath, db, meta.specStoragePath, newCommits,
-        lastEvolved, headHash, llmConfig,
+        lastEvolved, headHash, config.llm ?? undefined,
       );
     }
 
@@ -725,7 +719,7 @@ export async function runEvolvePipeline(
     });
 
     // ---- Stage 3: LLM evaluation + apply ----
-    const client = llmConfig ? new OpenAiLlmClient(llmConfig) : undefined;
+    const client = config.llm ? new OpenAiLlmClient(config.llm) : undefined;
     const evolvedSpecsByCommit = await evaluateAndApply(
       db, repoPath, meta.specStoragePath,
       affectedEntries, phaseOneResults, client,
