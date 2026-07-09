@@ -101,6 +101,30 @@ function extractSymbolsFromQuery(query: string): string[] {
     }
   }
 
+  // HarmonyOS / OpenHarmony @kit.* imports (@kit.ArkTS, @kit.FormKit)
+  const kitPattern = /@kit\.([A-Za-z][A-Za-z0-9]*)/g;
+  while ((match = kitPattern.exec(query)) !== null) {
+    if (match[1]) {
+      symbols.add(match[1]);
+    }
+  }
+
+  // C++ qualified names: EGLCore::Release → both parts
+  const cppQualPattern = /\b([A-Za-z_][\w]*)(::)([A-Za-z_][\w]*)\b/g;
+  while ((match = cppQualPattern.exec(query)) !== null) {
+    if (match[1]) symbols.add(match[1]);
+    if (match[3]) symbols.add(match[3]);
+  }
+
+  // Source / config file basenames: Component.ets, build-profile.json5, Foo.hpp
+  const fileBasePattern =
+    /\b([A-Za-z][A-Za-z0-9_-]*)\.(?:ets|ts|tsx|js|jsx|mjs|cjs|json5?|ya?ml|toml|hpp|h|cpp|c)\b/gi;
+  while ((match = fileBasePattern.exec(query)) !== null) {
+    if (match[1]) {
+      symbols.add(match[1]);
+    }
+  }
+
   // Filter out common English words that aren't likely symbol names
   const commonWords = new Set([
     'the', 'and', 'for', 'with', 'from', 'this', 'that', 'have', 'been',

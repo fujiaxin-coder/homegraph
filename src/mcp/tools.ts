@@ -695,13 +695,15 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_explore',
-    description: 'PRIMARY TOOL for indexed code — call FIRST when the user asks about code in a project with `.homegraph/`: where/what/how, symbol or file lookup, related implementations, call paths, or reading a named symbol. Returns verbatim source grouped by file in ONE call (Read-equivalent — treat shown source as already Read) plus call paths among the symbols. Query = symbol/file names or a short question (e.g. "PreferenceStore LauncherCardInfo", "how does backup restore work"). Prefer this over grep+read/glob for indexed source.',
+    description:
+      'PRIMARY for indexed code (.homegraph/ present): use INSTEAD of grep/glob/Read to find files, locate symbols, read source, or trace flows. One call returns verbatim line-numbered source grouped by file (treat as already Read) plus call paths. Query = symbol names, file basenames (incl. json5/yaml/hpp), C++ Class::method parts, @kit.Module names, or short terms from the question. For import/dependency questions, name the imported symbol(s). Call FIRST before grep/glob when the question is about code in an indexed project.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Symbol names, file names, or short code terms to explore (e.g., "AuthService loginUser session-manager", "GraphTraverser BFS impact traversal.ts"). For a flow question, name the symbols spanning the flow (e.g. "mutateElement renderScene"). A natural-language question works too — no prior homegraph_search needed.',
+          description:
+            'Symbols, file basenames, or short terms from the question. For flows, name both endpoints. For import/dependency questions, name the imported symbol(s) — explore returns import sites and usage with source. Prefer concrete names from the question over vague paraphrase.',
         },
         maxFiles: {
           type: 'number',
@@ -2754,11 +2756,25 @@ export class ToolHandler {
       const isTestPath = (p: string) => /(^|\/)(tests?|specs?|__tests__|testdata|mocks?|fixtures?)\//i.test(p) || /\.(test|spec)\.[a-z]+$/i.test(p);
       const bodyLines = (n: Node) => Math.max(0, (n.endLine ?? n.startLine) - n.startLine);
       const callerCount = (n: Node) => { try { return cg.getCallers(n.id).length; } catch { return 0; } };
-      const tokens = [...new Set(
-        query.split(/[\s,()[\]]+/)
+      const namedParts: string[] = [];
+      for (const m of query.matchAll(/@kit\.([A-Za-z][A-Za-z0-9]*)/g)) {
+        if (m[1]) namedParts.push(m[1]);
+      }
+      for (const m of query.matchAll(
+        /\b([A-Za-z][A-Za-z0-9_-]*)\.(?:ets|ts|tsx|js|jsx|json5?|ya?ml|hpp|cpp|c)\b/gi,
+      )) {
+        if (m[1]) namedParts.push(m[1]);
+      }
+      for (const m of query.matchAll(/\b([A-Za-z_][\w]*)(::)([A-Za-z_][\w]*)\b/g)) {
+        if (m[1]) namedParts.push(m[1]);
+        if (m[3]) namedParts.push(m[3]);
+      }
+      const tokens = [...new Set([
+        ...namedParts,
+        ...query.split(/[\s,()[\]]+/)
           .map((t) => t.replace(FILE_EXT, '').trim())
-          .filter((t) => t.length >= 3 && /^[A-Za-z_$][\w$]*(?:(?:::|\.)[\w$]+)*$/.test(t))
-      )].slice(0, 16);
+          .filter((t) => t.length >= 3 && /^[A-Za-z_$][\w$]*(?:(?:::|\.)[\w$]+)*$/.test(t)),
+      ])].slice(0, 16);
       // PascalCase tokens in the query are type/file disambiguators — when the
       // agent writes "DataRequest task validate", the `task`/`validate` it wants
       // are DataRequest's, NOT the same-named overloads in Validation.swift /

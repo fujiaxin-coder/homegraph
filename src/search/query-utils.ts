@@ -156,11 +156,35 @@ export function getStemVariants(term: string): string[] {
 export function extractSearchTerms(query: string, options?: { stems?: boolean }): string[] {
   const includeStems = options?.stems !== false;
   const tokens = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  // @kit.ArkTS / @kit.FormKit — index the kit module name for FTS
+  const kitPattern = /@kit\.([A-Za-z][A-Za-z0-9]*)/gi;
+  while ((match = kitPattern.exec(query)) !== null) {
+    if (match[1]) {
+      tokens.add(match[1].toLowerCase());
+    }
+  }
+
+  // File basenames before extension splitting
+  const fileBasePattern =
+    /\b([A-Za-z][A-Za-z0-9_-]*)\.(?:ets|ts|tsx|js|jsx|json5?|ya?ml|toml|hpp|h|cpp|c)\b/gi;
+  while ((match = fileBasePattern.exec(query)) !== null) {
+    if (match[1] && match[1].length >= 3) {
+      tokens.add(match[1].toLowerCase());
+    }
+  }
+
+  // C++ qualified names
+  const cppQualPattern = /\b([A-Za-z_][\w]*)(::)([A-Za-z_][\w]*)\b/g;
+  while ((match = cppQualPattern.exec(query)) !== null) {
+    if (match[1] && match[1].length >= 3) tokens.add(match[1].toLowerCase());
+    if (match[3] && match[3].length >= 3) tokens.add(match[3].toLowerCase());
+  }
 
   // First, extract and preserve compound identifiers before splitting
   // CamelCase: scrapeLoop, UserService, getCallGraph
   const compoundPattern = /\b([a-zA-Z][a-zA-Z0-9]*(?:[A-Z][a-z]+)+|[A-Z][a-z]+(?:[A-Z][a-z]*)+)\b/g;
-  let match;
   while ((match = compoundPattern.exec(query)) !== null) {
     if (match[1] && match[1].length >= 3) {
       tokens.add(match[1].toLowerCase()); // preserve full compound: "scrapeloop"

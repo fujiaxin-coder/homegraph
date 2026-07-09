@@ -1,118 +1,62 @@
 /**
  * Server-level instructions emitted in the MCP `initialize` response.
  *
- * MCP clients (Claude Code, Cursor, opencode, LangChain, OpenAI Agent
- * SDK, …) surface this text in the agent's system prompt automatically,
- * giving the agent a high-level playbook for the homegraph toolset
- * before it sees individual tool descriptions.
- *
- * Goals when editing this:
- *   - Lead the agent to homegraph_explore for any structural/flow question
- *   - Reinforce "explore instead of Read/Grep" for indexed code
- *   - Anti-patterns (don't re-verify with grep; don't hand-reconstruct flows)
- *
- * HomeGraph exposes the full tool surface by default (search, node, explore,
- * spec tools, …). Lead with homegraph_explore for structural questions; the
- * other tools are available when a narrower step helps.
+ * Single source of truth for agent-facing tool guidance (issue #529).
+ * Edit here — not installer prompts or eval harness prompts.
  */
-export const SERVER_INSTRUCTIONS = `# HomeGraph — code intelligence over an indexed knowledge graph
+export const SERVER_INSTRUCTIONS = `# HomeGraph — indexed code: explore instead of grep/read
 
-HomeGraph is a SQLite knowledge graph of every symbol, edge, and file in
-the workspace — pre-computed structure you would otherwise re-derive by
-reading files (cached intelligence: thousands of parse/trace decisions you
-don't pay to re-reason each run). Reads are sub-millisecond; the index lags
-writes by ~1s through the file watcher. Reach for it BEFORE *and* while
-writing or editing code — not just for questions: one call returns the
-verbatim source PLUS who calls it and what it affects, so you edit with the
-blast radius in view. More accurate context, in far fewer tokens and
-round-trips than reading files yourself.
+When a project has a \`.homegraph/\` index, **\`homegraph_explore\` is the default way to find and read code there** — before grep, glob, or Read. One call returns **verbatim, line-numbered source** (\`<n>\\t<line>\`, safe to Edit from) plus call paths and blast radius. Treat returned source as **already Read**; do not grep/read the same symbols again.
 
-## Use HomeGraph on code questions (indexed projects)
+## When to call homegraph_explore (indexed code only)
 
-When this workspace has a \`.homegraph/\` index, **call \`homegraph_explore\` first** for questions
-about code in that project — before grep, glob, or Read:
+Use **first** for:
 
-- **Where / what** — where a function or class is defined; which files relate to a topic or symbol
-- **How / flow** — how A calls B, request handlers, state → UI, backup/restore paths
-- **Read by name** — you know a file or symbol name and need its current source + who uses it
-- **Survey** — "what files touch preferences", "who uses taskpool", "implementations of X"
+- **Find related files** — put symbol names or domain terms from the question in \`query\`
+- **Where is X used / defined** — \`query\` = the symbol or API name from the question
+- **Imports / dependencies in this repo** — \`query\` = the imported symbol(s); answers from indexed source, not external docs
+- **A named source file** — \`query\` = file basename (no directory) plus any symbol named in the question
+- **Config / manifest filenames** — include the filename (e.g. \`*.json5\`, \`*.yaml\`) in \`query\`
+- **\`@kit.*\` imports (HarmonyOS/OpenHarmony)** — \`query\` = kit module + API/symbol from the question
+- **How A reaches B** — name symbols on the path in one \`query\`
+- **Read a symbol or file** — put the path or symbol in \`query\`; overloads return every body in one call
 
-\`homegraph_explore\` is the indexed search layer: one call returns line-numbered source and
-relationships that would otherwise take many grep/read round-trips. If explore does not cover
-something (configs, docs, files outside the index), use your built-in tools for that gap only.
+Query = **symbol names, file basenames, or a short question**. No prior \`homegraph_search\` needed.
 
-## Primary tool: homegraph_explore — use it instead of reading files
+**After explore:** need another area? Call \`homegraph_explore\` again with more names — not grep/read for indexed source.
 
-For structural and flow questions, \`homegraph_explore\` is Read-equivalent. It
-takes either a natural-language question or a bag of symbol/file names and
-returns the **verbatim, line-numbered source** of the relevant symbols
-grouped by file — the same \`<n>\\t<line>\` shape \`Read\` gives you, safe to
-\`Edit\` from — PLUS the call path among them (including dynamic-dispatch hops
-like callbacks, React re-render, and JSX children that grep can't follow) and
-a blast-radius summary of what depends on them.
+**Not indexed** (configs, docs, no \`.homegraph/\`): use built-in Read/Grep/Glob for that gap only.
 
-Whether you're answering "how does X work" or implementing a change (fixing a
-bug, adding a feature), call \`homegraph_explore\` before you Read. ONE call
-usually answers the whole question. HomeGraph IS the pre-built search index —
-so running your own grep + read loop, or delegating the lookup to a separate
-file-reading sub-task/agent, repeats work homegraph already did and costs more
-for the same answer. A direct homegraph answer is typically one to a few
-calls; a grep/read exploration is dozens.
+## Tool roles
 
-## How to query
-
-- **Almost any question — "how does X work", architecture, a bug, "what/where is X", or surveying an area** → \`homegraph_explore\` with a natural-language question or the relevant names. ONE capped call returns the verbatim source grouped by file; most often the ONLY call you need.
-- **"How does X reach/become Y? / the flow / the path from X to Y"** → \`homegraph_explore\`, naming the symbols that span the flow (e.g. \`mutateElement renderScene\`) — it surfaces the call path among them, riding dynamic-dispatch hops, and returns their source.
-- **Reading or editing a file/symbol you can name** → put its name or file path in the \`homegraph_explore\` query — it returns that current line-numbered source (safe to \`Edit\` from) with the call path and blast radius attached, so you don't Read it separately. For an overloaded name it returns every matching definition's body in one call.
-- **Need more?** Call \`homegraph_explore\` again with more specific names — treat the source it returns as already Read.
+| Tool | Role |
+|------|------|
+| **homegraph_explore** | **Primary** — find + read + flow in one call |
+| homegraph_node | One symbol or file depth after explore |
+| homegraph_search | Name hint only — then explore |
+| homegraph_files | Folder tree only — not for code Q&A |
 
 ## Anti-patterns
 
-- **Trust homegraph's results — don't re-verify them with grep.** They come from a full AST parse; re-checking with grep is slower, less accurate, and wastes context.
-- **Don't grep or Read first** to find or understand indexed code — ONE \`homegraph_explore\` returns the relevant symbols' source together in a single round-trip. Reach for raw \`Read\`/\`Grep\` only to confirm a specific detail homegraph didn't cover, or for what homegraph doesn't index (configs, docs).
-- **Don't reconstruct a flow by hand** — name the endpoints in one \`homegraph_explore\` and it surfaces the path between them, dynamic-dispatch hops included.
-- **After editing, check the staleness banner.** When a tool response starts with "⚠️ Some files referenced below were edited since the last index sync…", the listed files are pending re-index — Read those specific files for accurate content. Every file NOT in that banner is fresh, so still trust homegraph. A different, rarer banner — "⚠️ HomeGraph auto-sync is DISABLED…" — means live watching stopped entirely (the whole index is frozen, not just a few files); until it's resolved, Read files directly to confirm anything that may have changed.
+- **Don't grep/glob first** to discover or read indexed source — explore already returns paths and bodies.
+- **Don't fetch external SDK docs first** when the question is about code **in this repo** (imports, usages, dependencies) — explore the imported symbol names from the index.
+- **Don't re-verify explore output with grep** — it is AST-derived; trust it unless the staleness banner lists a file.
+- **Don't hand-reconstruct flows** — name endpoints in one explore query.
+- **Pure literal text patterns** (exact string chains with no symbol names) — explore may not enumerate every match; use grep only after explore does not cover the question.
+- **Staleness banner** — if listed files were edited since sync, Read those files only; others stay authoritative.
 
-## Limitations
+## Limits
 
-- If a tool reports a project isn't indexed (no \`.homegraph/\`), stop calling homegraph tools for that project for the rest of the session and use your built-in tools there instead. Indexing is the user's decision — mention they can run \`homegraph init\` if it comes up, but don't run it yourself.
-- Index lags file writes by ~1 second.
-- Cross-file resolution is best-effort name matching; ambiguous calls may return multiple candidates.
-- No live correctness validation — that's still the TypeScript compiler / test suite / linter's job. HomeGraph supplements those with structural context they don't have.
+- Index lags writes ~1s. Ambiguous symbols may return multiple candidates.
+- If a project isn't indexed, use built-in tools there; mention \`homegraph init\` if relevant — don't run it yourself.
 `;
 
-/**
- * Instructions variant sent when the server's own root has NO homegraph index.
- *
- * The tools are still exposed (gating tool availability on whether `./` has an
- * index is the bug behind #964: it breaks monorepos where only sub-projects are
- * indexed, and a server that started before `homegraph init` never surfaces the
- * tools afterward). Instead of an "inactive" note, this variant tells the agent
- * homegraph works **per project**: there's no default project to query, so pass
- * a `projectPath` to any project that HAS a `.homegraph/`. The full single-
- * project playbook ({@link SERVER_INSTRUCTIONS}) is sent instead when the root
- * IS indexed, so the common case stays tight.
- */
-export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — available (per-project; pass projectPath)
+export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — per-project (pass projectPath)
 
-HomeGraph is a SQLite knowledge graph of a codebase's symbols, edges, and
-files: one \`homegraph_explore\` call returns the verbatim, line-numbered source
-of the relevant symbols PLUS the call paths between them and a blast-radius
-summary — replacing a grep + Read loop with one round-trip.
+HomeGraph indexes a codebase into a symbol graph. **\`homegraph_explore\`** returns line-numbered source + call paths in one call — use it **instead of grep/read/glob** for any project that has a \`.homegraph/\` index.
 
-This server started somewhere with no \`.homegraph/\` of its own, so there is no
-default project — but the tools are available and work **per project**:
+This server root has no index. For a project **with** \`.homegraph/\`, pass its path as \`projectPath\` on \`homegraph_explore\` (and other homegraph tools).
 
-- To query a project that HAS a \`.homegraph/\` index (e.g. a service inside a
-  monorepo, or a second repo), pass its path as \`projectPath\` to
-  \`homegraph_explore\` (and any other homegraph tool). HomeGraph resolves the
-  nearest \`.homegraph/\` at or above that path and answers from it — for as many
-  projects as you like in one session.
-- When a project **has** a \`.homegraph/\` index, call \`homegraph_explore\` first for
-  code questions in that project (where/what/how, symbol lookup, related files) before
-  grep/read/glob.
-- For a project with no \`.homegraph/\`, use your built-in tools (Read/Grep/Glob)
-  for that project. Indexing is the user's decision — don't run it yourself, but
-  if it comes up they can run \`homegraph init\` in a project to enable homegraph
-  there (a new index is picked up live, no restart).
+- **Indexed project** → \`homegraph_explore\` first for where/what/how and file/symbol lookup.
+- **No index** → Read/Grep/Glob. User runs \`homegraph init\` if they want indexing (picked up live).
 `;
