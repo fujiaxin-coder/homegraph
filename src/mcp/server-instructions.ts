@@ -27,6 +27,20 @@ verbatim source PLUS who calls it and what it affects, so you edit with the
 blast radius in view. More accurate context, in far fewer tokens and
 round-trips than reading files yourself.
 
+## Use HomeGraph on code questions (indexed projects)
+
+When this workspace has a \`.homegraph/\` index, **call \`homegraph_explore\` first** for questions
+about code in that project — before grep, glob, or Read:
+
+- **Where / what** — where a function or class is defined; which files relate to a topic or symbol
+- **How / flow** — how A calls B, request handlers, state → UI, backup/restore paths
+- **Read by name** — you know a file or symbol name and need its current source + who uses it
+- **Survey** — "what files touch preferences", "who uses taskpool", "implementations of X"
+
+\`homegraph_explore\` is the indexed search layer: one call returns line-numbered source and
+relationships that would otherwise take many grep/read round-trips. If explore does not cover
+something (configs, docs, files outside the index), use your built-in tools for that gap only.
+
 ## Primary tool: homegraph_explore — use it instead of reading files
 
 For structural and flow questions, \`homegraph_explore\` is Read-equivalent. It
@@ -94,6 +108,9 @@ default project — but the tools are available and work **per project**:
   \`homegraph_explore\` (and any other homegraph tool). HomeGraph resolves the
   nearest \`.homegraph/\` at or above that path and answers from it — for as many
   projects as you like in one session.
+- When a project **has** a \`.homegraph/\` index, call \`homegraph_explore\` first for
+  code questions in that project (where/what/how, symbol lookup, related files) before
+  grep/read/glob.
 - For a project with no \`.homegraph/\`, use your built-in tools (Read/Grep/Glob)
   for that project. Indexing is the user's decision — don't run it yourself, but
   if it comes up they can run \`homegraph init\` in a project to enable homegraph
