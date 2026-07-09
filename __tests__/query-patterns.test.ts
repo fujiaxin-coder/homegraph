@@ -8,6 +8,7 @@ import {
   queryNamesConfigFile,
   shouldCompactImportListing,
   shouldOmitSourceBodies,
+  queryNamesMultipleExploreAnchors,
   shouldBuildCallerInventory,
   shouldBuildMemberSurvey,
   shouldBuildConfigSection,
@@ -86,7 +87,7 @@ describe('shouldCompactImportListing', () => {
 });
 
 describe('shouldOmitSourceBodies', () => {
-  it('omits source for inventory output when graph has no flow path', () => {
+  it('omits source for import inventory when graph has no flow path', () => {
     expect(
       shouldOmitSourceBodies({
         importSiteCount: 4,
@@ -94,7 +95,7 @@ describe('shouldOmitSourceBodies', () => {
         callerBulletCount: 0,
         memberFileCount: 0,
         configRendered: false,
-      }, false),
+      }, false, false),
     ).toBe(true);
     expect(
       shouldOmitSourceBodies({
@@ -103,7 +104,16 @@ describe('shouldOmitSourceBodies', () => {
         callerBulletCount: 0,
         memberFileCount: 0,
         configRendered: false,
-      }, true),
+      }, true, false),
+    ).toBe(false);
+    expect(
+      shouldOmitSourceBodies({
+        importSiteCount: 4,
+        hasFilteredImports: true,
+        callerBulletCount: 5,
+        memberFileCount: 0,
+        configRendered: false,
+      }, false, true),
     ).toBe(false);
   });
 });

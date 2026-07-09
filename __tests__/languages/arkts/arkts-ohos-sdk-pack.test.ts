@@ -87,8 +87,9 @@ describe('languages/arkts ohos-sdk-pack', () => {
     const { sdkHome } = makeToolsTree('6.1.1.290', { includeHms: true });
     const roots = listOhosApiEtsRoots(sdkHome);
     expect(roots).toHaveLength(2);
-    expect(roots[0]!.endsWith('openharmony/ets')).toBe(true);
-    expect(roots[1]!.endsWith('hms/ets')).toBe(true);
+    const norm = (p: string) => p.replace(/\\/g, '/');
+    expect(norm(roots[0]!)).toMatch(/openharmony\/ets$/);
+    expect(norm(roots[1]!)).toMatch(/hms\/ets$/);
   });
 
   it('resolves version override ahead of filename parsing', () => {

@@ -1261,7 +1261,7 @@ describe('spec evolve — install / uninstall', () => {
     }
   }
 
-  it('install creates post-commit hook with marker block', () => {
+  it.runIf(process.platform !== 'win32')('install creates post-commit hook with marker block', () => {
     const hookPath = installSpecEvolveHook(repo);
 
     expect(fs.existsSync(hookPath)).toBe(true);

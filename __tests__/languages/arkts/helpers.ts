@@ -18,7 +18,12 @@ export function makeArktsProject(files: Record<string, string>): string {
 
 export function cleanupArktsProjects(): void {
   for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EPERM' && code !== 'EBUSY') throw err;
+    }
   }
 }
 

@@ -22,8 +22,7 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { hasStructuralKeyword } from '../directory';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, hasSymbolFilterInQuery, shouldBuildCallerInventory, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldCompactImportListing, shouldOmitSourceBodies, extractTypeNamesFromQuery, fileMatchesQueryBasename, resolveImportLineFromNode } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldCompactImportListing, shouldOmitSourceBodies, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, fileMatchesQueryBasename, resolveImportLineFromNode } from '../search/query-utils';
 import {
   existsSync,
   readFileSync,
@@ -2606,8 +2605,8 @@ export class ToolHandler {
 
     sites.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 
-    const symbolFilter = hasSymbolFilterInQuery(query);
-    const compactListing = shouldCompactImportListing(sites.length, symbolFilter);
+    const importInventoryFilter = hasImportInventoryFilter(query);
+    const compactListing = shouldCompactImportListing(sites.length, importInventoryFilter);
     const cap = compactListing ? 40 : 15;
     const lines = compactListing
       ? ['**Dependency list**', '', `Files importing the queried symbol(s) (${sites.length} total):`, '']
@@ -3502,24 +3501,23 @@ export class ToolHandler {
     // Blast radius (always-on, compact): for the entry symbols, who depends on
     // them + which tests cover them — locations only, no source — so the agent
     // knows what to update/verify before editing without a separate call.
-    const blastRadius = hasStructuralKeyword(query)
-      ? this.buildBlastRadiusSection(cg, subgraph)
-      : '';
+    const blastRadius = this.buildBlastRadiusSection(cg, subgraph);
     if (blastRadius) lines.push(blastRadius);
 
     const importResult = this.buildImportSitesSection(cg, query, projectRoot);
     if (importResult.section) lines.push(importResult.section);
 
-    const symbolFilter = hasSymbolFilterInQuery(query);
+    const importInventoryFilter = hasImportInventoryFilter(query);
+    const multiAnchor = queryNamesMultipleExploreAnchors(query);
 
     // Flow path — computed before omit-source so graph connectivity drives the decision,
     // not question-text keyword matching.
     const flow = this.buildFlowFromNamedSymbols(cg, query);
     const hasFlowPath = flow.pathNodeIds.size > 0;
 
-    const callerSection = !hasFlowPath && shouldBuildCallerInventory(query)
+    const callerSection = !hasFlowPath && !multiAnchor && shouldBuildCallerInventory(query)
       ? this.buildCallerListingSection(cg, query) : '';
-    const memberSection = !hasFlowPath && shouldBuildMemberSurvey(query)
+    const memberSection = !hasFlowPath && !multiAnchor && shouldBuildMemberSurvey(query)
       ? this.buildMemberSurveySection(cg, query, projectRoot) : '';
     const configSection = shouldBuildConfigSection(query)
       ? this.buildConfigFileSection(cg, query, projectRoot) : '';
@@ -3541,11 +3539,11 @@ export class ToolHandler {
       : 0;
     const omitSource = shouldOmitSourceBodies({
       importSiteCount: importResult.siteCount,
-      hasFilteredImports: symbolFilter && importResult.siteCount > 0,
+      hasFilteredImports: importInventoryFilter && importResult.siteCount > 0,
       callerBulletCount,
       memberFileCount,
       configRendered: !!configSection,
-    }, hasFlowPath);
+    }, hasFlowPath, multiAnchor);
 
     if (omitSource) {
       if (configSection) {

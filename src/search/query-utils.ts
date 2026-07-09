@@ -236,6 +236,12 @@ export function hasSymbolFilterInQuery(query: string): boolean {
   );
 }
 
+/** Import-inventory omit/compact — @kit.* or distinctive symbol; not generic terms like "item". */
+export function hasImportInventoryFilter(query: string): boolean {
+  if (extractKitModuleNamesFromQuery(query).length > 0) return true;
+  return extractDependencySymbolsFromQuery(query).some((d) => isDistinctiveIdentifier(d));
+}
+
 export function shouldBuildCallerInventory(query: string): boolean {
   return extractTypeNamesFromQuery(query).length > 0;
 }
@@ -265,13 +271,26 @@ export interface ExploreInventorySignals {
   configRendered: boolean;
 }
 
+/** Multiple named anchors in one query → trace/connect intent, not flat inventory. */
+export function queryNamesMultipleExploreAnchors(query: string): boolean {
+  const typeCount = extractTypeNamesFromQuery(query).length;
+  const memberCount = extractMemberAccessFromQuery(query).length;
+  const fileCount = extractFileBasenamesFromQuery(query).length;
+  if (typeCount >= 2 || memberCount >= 2) return true;
+  return typeCount + memberCount + fileCount >= 2;
+}
+
 /** Omit source bodies when inventory sections suffice and the graph found no flow path. */
-export function shouldOmitSourceBodies(inv: ExploreInventorySignals, hasFlowPath: boolean): boolean {
-  if (hasFlowPath) return false;
+export function shouldOmitSourceBodies(
+  inv: ExploreInventorySignals,
+  hasFlowPath: boolean,
+  multiAnchorQuery: boolean,
+): boolean {
+  if (hasFlowPath || multiAnchorQuery) return false;
   if (inv.configRendered) return true;
+  // Import dependency lists are self-contained answers; caller/member inventories
+  // supplement explore but must not hide source/flow on their own.
   if (inv.hasFilteredImports && inv.importSiteCount >= 2) return true;
-  if (inv.callerBulletCount >= 2) return true;
-  if (inv.memberFileCount >= 2) return true;
   return false;
 }
 

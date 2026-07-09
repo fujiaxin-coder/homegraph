@@ -127,15 +127,19 @@ describe('languages/arkts state dependency graph', () => {
   it('connects parent @State field to child @Prop in explore Flow', async () => {
     const root = makeArktsProject(PROP_FIXTURE);
     const cg = HomeGraph.initSync(root);
-    await cg.indexAll();
+    try {
+      await cg.indexAll();
 
-    const handler = new ToolHandler(cg);
-    const res = await handler.execute('homegraph_explore', {
-      query: 'ParentPage.count CountDownComponent.count build',
-    });
-    const text = res.content[0]!.text as string;
+      const handler = new ToolHandler(cg);
+      const res = await handler.execute('homegraph_explore', {
+        query: 'ParentPage.count CountDownComponent.count build',
+      });
+      const text = res.content[0]!.text as string;
 
-    expect(text).toContain('**Dynamic-dispatch links among your symbols**');
-    expect(text).toMatch(/count → count.*state: @Prop one-way/);
+      expect(text).toContain('**Dynamic-dispatch links among your symbols**');
+      expect(text).toMatch(/count → count.*state: @Prop one-way/);
+    } finally {
+      cg.close();
+    }
   });
 });

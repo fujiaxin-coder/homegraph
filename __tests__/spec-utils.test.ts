@@ -94,7 +94,7 @@ describe('readFileContent', () => {
     expect(readFileContent(dirPath)).toBeNull();
   });
 
-  it('should return null for EACCES (permission denied)', () => {
+  it.runIf(process.platform !== 'win32')('should return null for EACCES (permission denied)', () => {
     const filePath = path.join(tmpDir, 'noperm.txt');
     fs.writeFileSync(filePath, 'secret', 'utf-8');
     fs.chmodSync(filePath, 0o000); // remove all permissions

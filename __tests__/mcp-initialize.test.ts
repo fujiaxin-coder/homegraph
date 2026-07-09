@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { HomeGraph } from '../src';
+import { killMcpChild, removeTempDir } from './helpers/fs';
 
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
@@ -107,12 +108,10 @@ describe('MCP initialize handshake (issue #172)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-mcp-init-'));
   });
 
-  afterEach(() => {
-    if (child && !child.killed) {
-      child.kill('SIGKILL');
-      child = null;
-    }
-    fs.rmSync(tempDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await killMcpChild(child);
+    child = null;
+    removeTempDir(tempDir);
   });
 
   it('responds to initialize quickly when no .homegraph exists in cwd', async () => {
