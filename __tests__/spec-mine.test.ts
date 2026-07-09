@@ -937,7 +937,8 @@ describe('mine pipeline — runMinePipeline', () => {
 
   it('meta.json is updated after successful LLM + persist', async () => {
     commitFile(repo, 'README.md', '# Project\n', 'chore: base');
-    commitFile(repo, 'src/a.ts', 'export const a = 1;\n', 'feat: add a');
+    commitFile(repo, 'src/app.ts', 'export function init() {}\nexport function setup() {}\n', 'feat: add init');
+    commitFile(repo, 'src/app.ts', 'export function init() { return true; }\nexport function run() {}\n', 'feat: update init and add run');
 
     // Override the LLM mock for this test
     vi.mocked(OpenAiLlmClient).mockImplementation(() => ({

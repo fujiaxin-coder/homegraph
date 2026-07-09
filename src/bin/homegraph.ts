@@ -3085,7 +3085,7 @@ evolveCommand
       const { resolveDbPath } = await import('../spec/utils');
       const { initSpecSchema } = await import('../spec/db/schema');
       const { loadSpecConfig } = await import('../spec/config');
-      const { runBatchEvolvePipeline } = await import('../spec/evolve/pipeline');
+      const { runEvolvePipeline } = await import('../spec/evolve/pipeline');
       const { isGitRepo } = await import('../spec/build/git-scanner');
 
       if (!isGitRepo(repoPath)) {
@@ -3102,8 +3102,8 @@ evolveCommand
       const config = loadSpecConfig(repoPath);
       const llmConfig = config.llm;
       if (!llmConfig) {
-        warn('LLM not configured — Path B (LLM-based spec evolution) will be skipped.');
-        warn('Only Path A (commit message scope → GENERATE) will be processed.');
+        warn('LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
+        warn('Phase 1 (commit-spec graph construction) will still run.');
         warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
           '{\n' +
           '  "llm": {\n' +
@@ -3114,23 +3114,23 @@ evolveCommand
           '}');
       }
 
-      const result = await runBatchEvolvePipeline(repoPath, db, llmConfig ?? undefined);
+      const result = await runEvolvePipeline(repoPath, db, llmConfig ?? undefined);
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
-        if (result.commitsProcessed === 0) {
+        if (result.commitsScanned === 0) {
           console.log(chalk.green('No new commits to evolve.'));
           console.log(`Last evolved commit: ${result.fromCommit ? result.fromCommit.slice(0, 7) : 'none'}`);
           console.log(`Current HEAD: ${result.toCommit.slice(0, 7)}`);
         } else {
-          console.log(chalk.bold(`Evolve complete: ${result.commitsProcessed} commit(s) processed`));
+          console.log(chalk.bold(`Evolve complete: ${result.commitsScanned} commit(s) processed`));
           console.log(`Evolved to: ${result.toCommit.slice(0, 7)}`);
           if (result.metaUpdated) {
             console.log(chalk.green(`meta.json updated (currentCommitID = ${result.toCommit.slice(0, 7)})`));
-          } else if (result.failures > 0) {
-            console.log(chalk.yellow(`⚠ meta.json NOT updated — ${result.failures} commit(s) failed`));
-          } else if (result.skippedCommits > 0) {
+          } else if (result.phaseOneFailures > 0) {
+            console.log(chalk.yellow(`⚠ meta.json NOT updated — ${result.phaseOneFailures} commit(s) failed`));
+          } else if (result.phaseOneSkipped > 0) {
             console.log(chalk.yellow('⚠ meta.json NOT updated — all commits were skipped (no Path A match, no LLM)'));
           } else {
             console.log(chalk.yellow('⚠ meta.json NOT updated'));
@@ -3139,20 +3139,17 @@ evolveCommand
           // Show per-commit summary
           for (const r of result.perCommitResults) {
             let prefix: string;
-            if (r.skipped) {
+            if (r.phaseOneSkipped) {
               prefix = chalk.yellow('  ⚠');
             } else {
-              prefix = r.persisted ? chalk.green('  ✓') : chalk.red('  ✗');
+              prefix = r.matched ? chalk.green('  ✓') : chalk.red('  ✗');
             }
             console.log(`${prefix} ${r.commitHash.slice(0, 7)}`);
-            if (r.skipped) {
-              console.log(`    skipped: ${r.skipReason}`);
+            if (r.phaseOneSkipped) {
+              console.log(`    skipped: ${r.phaseOneSkipReason}`);
             }
-            if (r.isLogicChange) {
-              console.log(`    logic change: ${r.logicCheckReason}`);
-            }
-            if (r.generateSpecId) {
-              console.log(`    Path A - GENERATE ${r.generateSpecId}`);
+            if (r.matchedSpecId) {
+              console.log(`    Path A - GENERATE ${r.matchedSpecId}`);
             }
             for (const ev of r.evolvedSpecs) {
               console.log(`    ${ev.specId}: ${ev.action}`);
@@ -3160,19 +3157,19 @@ evolveCommand
           }
 
           // Aggregate summary
-          const totalFragments = result.perCommitResults.reduce((s, r) => s + r.fragmentsCount, 0);
+          const totalFragments = result.perCommitResults.reduce((s, r) => s + r.fragmentsInserted, 0);
           const totalRelations = result.perCommitResults.reduce((s, r) => s + r.relationsCreated, 0);
-          if (result.skippedCommits > 0) {
+          if (result.phaseOneSkipped > 0) {
             console.log(
               chalk.yellow(
-                `${result.skippedCommits} commit(s) skipped — no LLM configured, did not match Path A`,
+                `${result.phaseOneSkipped} commit(s) skipped — no LLM configured, did not match Path A`,
               ),
             );
           }
-          if (result.failures > 0) {
+          if (result.phaseOneFailures > 0) {
             console.log(
               chalk.red(
-                `${result.failures} commit(s) failed — see details above`,
+                `${result.phaseOneFailures} commit(s) failed — see details above`,
               ),
             );
           }

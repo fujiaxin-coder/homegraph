@@ -261,8 +261,9 @@ export async function runMinePipeline(
       }
     }
 
-    // Advance meta.json only when LLM ran and persistence did not fail.
-    if (!persistFailed) {
+    // Advance meta.json only when LLM ran, persistence did not fail,
+    // and at least one spec document was generated.
+    if (!persistFailed && genResult.specs.length > 0) {
       shouldAdvanceMeta = true;
     }
   } else if (!config.skipLlm && !llmConfig) {

@@ -1,59 +1,26 @@
 /**
  * LLM prompt templates for spec self-evolution.
  *
- * Extracted from logic-checker.ts and spec-rewriter.ts so evolve modules
- * don't contain prompt strings directly.
- *
  * @module spec/llm/prompts
  */
 
-// =============================================================================
-// Logic check prompt
-// =============================================================================
-
-export const LOGIC_CHECK_SYSTEM_PROMPT = `You are a code review assistant. Your task is to determine whether a git commit represents a business-logic change (as opposed to purely cosmetic, formatting, comment-only, or test-only changes).
-
-A business-logic change includes:
-- Changes to algorithms, data structures, or control flow
-- Changes to business rules, validation logic, or domain behavior
-- Adding or removing functionality
-- Bug fixes that change behavior
-
-NOT business-logic changes:
-- Whitespace, formatting, or code style changes
-- Comment-only changes
-- Test-only changes (adding tests without changing production code)
-- Configuration changes that don't alter behavior
-- Package/dependency version bumps
-
-Respond with a JSON object:
-{
-  "is_logic_change": true/false,
-  "reason": "Brief explanation of why this is or is not a logic change"
-}`;
-
-export function buildLogicCheckUserPrompt(
-  commitMessage: string,
-  truncatedDiff: string,
-): string {
-  return `Analyze this commit:
-
-Commit Message: ${commitMessage}
-
-Diff:
-${truncatedDiff}`;
-}
+import { ClusterContext } from '../evolve/cluster-context';
 
 // =============================================================================
-// Spec evaluation prompt
+// Cluster spec evaluation prompt
 // =============================================================================
 
-export const SPEC_EVALUATION_SYSTEM_PROMPT = `You are a technical documentation maintainer. Your task is to evaluate whether a git commit requires updating a software design specification (plan.md).
+export const SPEC_EVALUATION_CLUSTER_SYSTEM_PROMPT = `You are a technical documentation maintainer. Your task is to evaluate whether a GROUP of related git commits requires updating a software design specification (plan.md).
 
-Given the current plan content, the commit message, and the code diff, determine:
+Given the current plan content and a summary of multiple commits that affect this spec, determine:
 1. Whether the plan needs to be updated (UPDATE), deprecated (DEPRECATE), or left unchanged (UNCHANGED).
-2. If UPDATE: provide the new title, subtitles (as an array of heading-preview strings), and full rewritten plan_content.
+2. If UPDATE: provide the new title, subtitles (as an array of heading-preview strings), and full rewritten plan_content that incorporates the changes from all commits.
 3. If DEPRECATE: provide a brief explanation in the plan_content field.
+
+Key considerations for batch evaluation:
+- Multiple commits may partially overlap in their changes — synthesize the combined impact.
+- Some commits may be bug fixes that revert earlier changes — look for the net effect.
+- If the combined changes fundamentally alter the spec's scope, prefer DEPRECATE over UPDATE.
 
 Response format (JSON):
 {
@@ -63,23 +30,56 @@ Response format (JSON):
   "plan_content": "Full rewritten markdown content (for UPDATE) or deprecation reason (for DEPRECATE)"
 }`;
 
-export function buildSpecEvaluationUserPrompt(
+/**
+ * Build the user prompt for cluster-based spec evaluation.
+ *
+ * Presents:
+ * 1. The current plan content.
+ * 2. A cluster overview (commit count, primary files).
+ * 3. Per-commit summaries (short hash, message, changed files, truncated diff).
+ *
+ * The prompt is designed to fit within a reasonable token budget for a
+ * single LLM call even with 5-10 commits in the cluster.
+ *
+ * @param planContent    - Full current plan.md content.
+ * @param clusterContext - Pre-built cluster context from buildClusterContext.
+ * @returns Formatted user prompt string.
+ */
+export function buildClusterSpecEvaluationUserPrompt(
   planContent: string,
-  commitMessage: string,
-  truncatedDiff: string,
-  scheduleNextSpecs: string[],
+  clusterContext: ClusterContext,
 ): string {
-  const scheduleStr =
-    scheduleNextSpecs.length > 0 ? scheduleNextSpecs.join(', ') : 'none';
+  const parts: string[] = [];
 
-  return `Current Plan Content:
-${planContent}
+  // 1. Current plan
+  parts.push('## Current Plan Content');
+  parts.push('');
+  parts.push(planContent);
+  parts.push('');
 
-Commit Message:
-${commitMessage}
+  // 2. Cluster overview
+  parts.push('## Commit Cluster');
+  parts.push('');
+  parts.push(`- **Commits**: ${clusterContext.commitCount}`);
+  parts.push(
+    `- **Primary files**: ${clusterContext.primaryFiles.join(', ') || '(none)'}`,
+  );
+  parts.push('');
 
-Code Diff:
-${truncatedDiff}
+  // 3. Per-commit summaries
+  parts.push('## Commit Summaries');
+  parts.push('');
+  for (const cs of clusterContext.commitSummaries) {
+    parts.push(`### ${cs.shortHash} — ${cs.message}`);
+    parts.push(`Files: ${cs.changedFiles.join(', ')}`);
+    if (cs.truncatedDiff && cs.truncatedDiff.length > 0) {
+      parts.push('');
+      parts.push('```diff');
+      parts.push(cs.truncatedDiff);
+      parts.push('```');
+    }
+    parts.push('');
+  }
 
-Scheduled specs to be processed next (for context): ${scheduleStr}`;
+  return parts.join('\n');
 }

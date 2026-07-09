@@ -1,8 +1,16 @@
 /**
- * Self-evolve pipeline orchestrator — evaluates new commits against existing
- * specs and rewrites / deprecates them as needed.
+ * Batch spec evolve pipeline — replaces the old per-commit approach with
+ * a unified batch pipeline optimised for the post-commit hook's cumulative
+ * commit threshold trigger.
  *
- * Replaces `commit4spec/self_evolve/pipeline.py` (lines 79-289).
+ * Flow:
+ *   0. Prep (meta, lock, schema, discover specs)
+ *   1a. Batch analysis (scope + metadata + diff, no DB writes)
+ *   1b. Per-commit persistence (independent transactions)
+ *   2. Impact location (find old specs affected by new commits)
+ *   3. LLM evaluation per spec cluster (only if LLM configured)
+ *   ↓ or: mine-style fallback (if phase 1 produced zero matches)
+ *   4. Advance meta.json to last phase-1 success
  *
  * @module spec/evolve/pipeline
  */
@@ -10,496 +18,129 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
-import { LLMConfig, loadSpecConfig } from '../config';
+import { createMineConfig, LLMConfig, loadSpecConfig } from '../config';
 import { readMeta, writeMeta, SPEC_DATA_DIR } from '../utils';
 import { initSpecSchema } from '../db/schema';
-import { insertSpecNode, findSpecById } from '../db/spec-node';
-import { insertCommitNode } from '../db/commit-node';
-import { insertCodeFragment } from '../db/fragment-node';
+import { findSpecById } from '../db/spec-node';
+import { getCommitRange, getCommitDiff, getCommitInfo, CommitInfo } from '../build/git-scanner';
+import { OpenAiLlmClient } from '../llm/client';
+import { analyzeIncrementalCommits, CommitSpecAnalysis } from './commit-spec-analyzer';
+import { persistCommitSpecGraph, PersistResult } from './commit-spec-persister';
+import { locateAffectedSpecsWithCommits, AffectedSpecEntry } from './impact-locator';
+import { buildClusterContext, CommitContextInput } from './cluster-context';
 import {
-  insertSpecCommitRelation,
-  insertCommitFragmentRelation,
-} from '../db/relations';
-import { getCommitInfo, getCommitDiff, getCommitRange } from '../build/git-scanner';
-import { resolveScopeToSpec } from '../build/scope-resolver';
-import { extractSpecMetadata, SpecMetadata } from '../build/spec-extractor';
-import { analyzeCommitDiff } from '../build/diff-parser';
-import { LlmClient, OpenAiLlmClient } from '../llm/client';
-import { isLogicChange } from './logic-checker';
-import { locateAffectedSpecs } from './impact-locator';
-import {
-  evaluateSpec,
+  evaluateSpecWithCluster,
   applyUpdate,
   applyDeprecate,
   EvolveDecision,
 } from './spec-rewriter';
+import { runMinePipeline } from '../mine/pipeline';
 import { logDebug, logWarn } from '../../errors';
+import { truncateText } from '../utils';
 
 // =============================================================================
 // Types
 // =============================================================================
 
-export interface EvolvedSpec {
+interface EvolvedSpec {
   specId: string;
   action: 'UPDATE' | 'DEPRECATE' | 'UNCHANGED';
   newVersion?: number;
   newSpecId?: string;
 }
 
-export interface EvolveResult {
+interface EvolveResult {
   commitHash: string;
-  generateSpecId?: string;
-  generateRelationCreated: boolean;
-  isLogicChange: boolean;
-  logicCheckReason: string;
-  affectedSpecCount: number;
+  /** Whether phase 1 analysis matched a spec. */
+  matched: boolean;
+  /** Matched spec ID (only when matched). */
+  matchedSpecId?: string;
+  /** Whether phase 1 persistence was skipped. */
+  phaseOneSkipped: boolean;
+  /** Reason for skipping (only when phaseOneSkipped). */
+  phaseOneSkipReason?: string;
+  /** Spec evolution decisions from phase 3 (may be empty). */
   evolvedSpecs: EvolvedSpec[];
-  fragmentsCount: number;
+  /** Counts from phase 1 persistence. */
+  fragmentsInserted: number;
   relationsCreated: number;
-  persisted: boolean;
-  /** True when the commit was skipped because LLM is not available. */
-  skipped: boolean;
-  /** Human-readable reason for skipping, if skipped is true. */
-  skipReason?: string;
 }
+
+export interface BatchEvolveResult {
+  /** Last evolved commit from meta.json (null if never evolved). */
+  fromCommit: string | null;
+  /** Last successfully processed commit, or HEAD. */
+  toCommit: string;
+  /** Total commits in the range. */
+  commitsScanned: number;
+  /** Commits where phase 1 analysis matched a spec. */
+  phaseOneMatched: number;
+  /** Commits where phase 1 analysis did NOT match a spec. */
+  phaseOneSkipped: number;
+  /** Commits where phase 1 persistence failed. */
+  phaseOneFailures: number;
+  /** Number of historical specs evaluated in phase 3. */
+  historicalSpecsEvaluated: number;
+  /** Phase 3 action counts. */
+  specsUpdated: number;
+  specsDeprecated: number;
+  specsUnchanged: number;
+  /** Per-commit results, for detailed CLI output. */
+  perCommitResults: EvolveResult[];
+  /** Whether meta.json was updated. */
+  metaUpdated: boolean;
+  /** True when the entire run performed no useful work. */
+  skipped: boolean;
+  /** Reason when skipped = true. */
+  skipReason?: string;
+  /** True when mine pipeline was invoked as a fallback. */
+  mineFallback: boolean;
+}
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 // =============================================================================
 // Helpers
 // =============================================================================
 
-/**
- * Look up a spec from the DB and return its version and filePath.
- * Falls back to constructing a plan.md path when the spec is not found.
- */
-function getSpecPathInfo(
-  db: SqliteDatabase,
-  specStoragePath: string,
-  specId: string,
-): { version: number; filePath: string } {
-  const node = findSpecById(db, specId);
-  if (node) {
-    return { version: node.version, filePath: node.filePath };
-  }
-  return { version: 0, filePath: path.join(specStoragePath, specId, 'plan.md') };
-}
-
-// =============================================================================
-// runEvolvePipeline  (internal — only called by runBatchEvolvePipeline)
-// =============================================================================
-
-/**
- * Run the full self-evolve pipeline for a single commit.
- *
- * **Internal.**  Not exported — the public entry point is
- * {@link runBatchEvolvePipeline}, which reads meta.json, initialises the
- * schema, and calls this function for each commit in the range.
- *
- * Flow (ported from pipeline.py:79-289):
- *
- * 1. Load context (commit info, diff, LLM client, config).
- * 2. **Path A (GENERATE):** resolve scope from commit message.
- * 3. **LLM logic check:** determine if the commit is a business-logic change.
- * 4. **Path B (impact + rewrite):** if logic change, find affected active
- *    specs and evaluate each one.
- * 5. If neither Path A nor Path B produced candidates, return early.
- * 6. Persist everything in a single DB transaction.
- *
- * @param repoPath        - Absolute path to the git repository.
- * @param db              - Active SQLite database handle (schema already initialised).
- * @param specStoragePath - Path to the spec storage directory (from meta.json).
- * @param commitHash      - Commit hash to process.
- * @param llmConfig       - Optional LLM config override; falls back to spec config.
- */
-async function runEvolvePipeline(
-  repoPath: string,
-  db: SqliteDatabase,
-  specStoragePath: string,
-  commitHash?: string,
-  llmConfig?: LLMConfig,
-): Promise<EvolveResult> {
-  // ------------------------------------------------------------------
-  // 1. Context loading
-  // ------------------------------------------------------------------
-
-  // meta.json and schema already handled by runBatchEvolvePipeline
-
-  // Resolve commit hash
-  const resolvedHash =
-    commitHash ||
-    (() => {
-      try {
-        return execFileSync('git', ['rev-parse', 'HEAD'], {
-          cwd: repoPath,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'] as const,
-          windowsHide: true,
-        }).trim();
-      } catch {
-        return '';
-      }
-    })();
-  if (!resolvedHash) {
-    throw new Error('No commits found in repository.');
-  }
-
-  // Get commit info and diff
-  const commitInfo = getCommitInfo(repoPath, resolvedHash);
-  if (!commitInfo) {
-    throw new Error(`Commit ${resolvedHash} not found in repository.`);
-  }
-
-  const diff = getCommitDiff(repoPath, resolvedHash);
-
-  // Parse diff into fragments once — reused for file paths and persistence.
-  const diffFragments = analyzeCommitDiff(repoPath, resolvedHash, diff);
-
-  // Load spec config and optionally create LLM client.
-  // When LLM is not available we still run Path A (scope-based GENERATE).
-  const specConfig = loadSpecConfig(repoPath);
-  const resolvedLLMConfig = llmConfig || specConfig.llm;
-  const client: LlmClient | undefined = resolvedLLMConfig
-    ? new OpenAiLlmClient(resolvedLLMConfig)
-    : undefined;
-
-  // ------------------------------------------------------------------
-  // 2. Path A (GENERATE) — commit message scope resolution
-  // ------------------------------------------------------------------
-
-  const pathASpecId = resolveScopeToSpec(
-    commitInfo.message,
-    specStoragePath,
-    specConfig,
-  );
-  let pathASpecMetadata: SpecMetadata | null = null;
-  if (pathASpecId) {
-    pathASpecMetadata = extractSpecMetadata(
-      specStoragePath,
-      pathASpecId,
-      specConfig,
-    );
-  }
-
-  // ------------------------------------------------------------------
-  // 2.5 Early skip: Path A didn't match and no LLM client is available.
-  //     Non-Path-A commits cannot be processed without LLM for logic
-  //     checking and spec evaluation.
-  // ------------------------------------------------------------------
-  if (!pathASpecId && !client) {
-    logWarn('Skipping commit — no LLM configured and commit does not match Path A', {
-      commitHash: resolvedHash.slice(0, 7),
-    });
-    return {
-      commitHash: resolvedHash,
-      generateRelationCreated: false,
-      isLogicChange: false,
-      logicCheckReason: '',
-      affectedSpecCount: 0,
-      evolvedSpecs: [],
-      fragmentsCount: 0,
-      relationsCreated: 0,
-      persisted: false,
-      skipped: true,
-      skipReason:
-        'LLM not configured — commit message does not contain a spec scope (Path A)',
-    };
-  }
-
-  // ------------------------------------------------------------------
-  // 3. LLM logic check
-  // ------------------------------------------------------------------
-
-  let logicResult = { isLogic: false, reason: '' };
-  if (client) {
-    try {
-      logicResult = await isLogicChange(commitInfo.message, diff, client);
-    } catch {
-      logWarn('LLM logic check failed, treating as non-logic change', {
-        commitHash: resolvedHash.slice(0, 7),
-      });
-      logicResult = { isLogic: false, reason: 'LLM call failed' };
-    }
-  }
-
-  // ------------------------------------------------------------------
-  // 4. Path B (impact + rewrite) — only when the commit is a logic change
-  // ------------------------------------------------------------------
-
-  let pathBSpecIds: string[] = [];
-  if (logicResult.isLogic) {
-    // Extract file paths from diff fragments
-    const filePaths = diffFragments.map(f => f.filePath);
-
-    // Locate affected specs
-    const affectedSpecIds = locateAffectedSpecs(db, filePaths);
-
-    if (affectedSpecIds.length > 0) {
-      // Filter to active specs only
-      const placeholders = affectedSpecIds.map(() => '?').join(',');
-      const activeRows = db
-        .prepare(
-          `SELECT id FROM spec_nodes WHERE status = 'active' AND id IN (${placeholders})`,
-        )
-        .all(...affectedSpecIds) as Array<{ id: string }>;
-      pathBSpecIds = activeRows.map((r) => r.id);
-
-      // Remove Path A spec from Path B list (if present)
-      if (pathASpecId) {
-        pathBSpecIds = pathBSpecIds.filter((id) => id !== pathASpecId);
-      }
-    }
-
-    logDebug('Path B: affected active specs', {
-      count: pathBSpecIds.length,
-      specIds: pathBSpecIds,
-    });
-  }
-
-  // ------------------------------------------------------------------
-  // 5. Decide relevance
-  // ------------------------------------------------------------------
-
-  const hasPathA = pathASpecId !== null;
-  const hasPathB = pathBSpecIds.length > 0;
-
-  if (!hasPathA && !hasPathB) {
-    logDebug('runEvolvePipeline: no relevant spec found, returning early', {
-      commitHash: resolvedHash.slice(0, 7),
-    });
-    return {
-      commitHash: resolvedHash,
-      generateRelationCreated: false,
-      isLogicChange: logicResult.isLogic,
-      logicCheckReason: logicResult.reason,
-      affectedSpecCount: 0,
-      evolvedSpecs: [],
-      fragmentsCount: 0,
-      relationsCreated: 0,
-      persisted: false,
-      skipped: false,
-    };
-  }
-
-  // ------------------------------------------------------------------
-  // 6. Evaluate all specs BEFORE opening the transaction.  This keeps
-  //    async LLM calls (which may take seconds) outside the SQLite
-  //    write-lock window, avoiding SQLITE_BUSY for concurrent writers.
-  // ------------------------------------------------------------------
-
-  interface PendingDecision {
-    specId: string;
-    decision: EvolveDecision;
-    version: number;
-    filePath: string;
-  }
-
-  const pendingDecisions: PendingDecision[] = [];
-
-  for (let idx = 0; idx < pathBSpecIds.length; idx++) {
-    const specId = pathBSpecIds[idx]!;
-    const scheduleNextSpecs = pathBSpecIds.slice(idx + 1);
-    const { version, filePath } = getSpecPathInfo(
-      db,
-      specStoragePath,
-      specId,
-    );
-
-    const decision: EvolveDecision = await evaluateSpec(
-      specId,
-      specStoragePath,
-      filePath,
-      commitInfo.message,
-      diff,
-      scheduleNextSpecs,
-      client,
-    );
-
-    pendingDecisions.push({ specId, decision, version, filePath });
-  }
-
-  // ------------------------------------------------------------------
-  // 7. Persist (atomic via explicit BEGIN/COMMIT/ROLLBACK)
-  //    All LLM evaluation is complete; only fast DB writes remain.
-  // ------------------------------------------------------------------
-
-  const evolveResult: EvolveResult = {
-    commitHash: resolvedHash,
-    generateSpecId: pathASpecId ?? undefined,
-    generateRelationCreated: false,
-    isLogicChange: logicResult.isLogic,
-    logicCheckReason: logicResult.reason,
-    affectedSpecCount: pathBSpecIds.length,
-    evolvedSpecs: [],
-    fragmentsCount: 0,
-    relationsCreated: 0,
-    persisted: true,
-    skipped: false,
-  };
-
-  db.exec('BEGIN');
+/** Resolve HEAD hash. */
+function resolveHead(repoPath: string): string {
   try {
-    // ---- Insert CommitNode ----
-    insertCommitNode(db, {
-      hash: commitInfo.hash,
-      message: commitInfo.message,
-      author: commitInfo.author,
-      timestamp: commitInfo.timestamp,
-    });
-
-    // ---- Path A: Insert SpecNode + GENERATE relation ----
-    if (pathASpecId && pathASpecMetadata) {
-      insertSpecNode(db, {
-        id: pathASpecMetadata.specId,
-        title: pathASpecMetadata.title,
-        subtitles: pathASpecMetadata.subtitles,
-        status: 'active',
-        version: 1,
-        filePath: pathASpecMetadata.filePath,
-        timestamp: commitInfo.timestamp,
-      });
-
-      insertSpecCommitRelation(
-        db,
-        pathASpecMetadata.specId,
-        commitInfo.hash,
-        'GENERATE',
-      );
-      evolveResult.generateRelationCreated = true;
-      evolveResult.relationsCreated++;
-    } else if (pathASpecId) {
-      logWarn('Path A: specId resolved but no metadata extracted, skipping insert', {
-        specId: pathASpecId,
-      });
-    }
-
-    // ---- Path B: Apply pre-evaluated decisions ----
-    const evolvedSpecs: EvolvedSpec[] = [];
-
-    for (const pending of pendingDecisions) {
-      const { specId, decision, version, filePath } = pending;
-
-      if (decision.action === 'UPDATE') {
-        const updateResult = applyUpdate(
-          db,
-          specStoragePath,
-          specId,
-          filePath,
-          version,
-          decision,
-          commitInfo.hash,
-        );
-        evolvedSpecs.push({
-          specId,
-          action: 'UPDATE',
-          newVersion: updateResult.newVersion,
-          newSpecId: updateResult.newSpecId,
-        });
-        evolveResult.relationsCreated += 2; // EVOLVED_FROM + GENERATE
-      } else if (decision.action === 'DEPRECATE') {
-        applyDeprecate(db, specId);
-        evolvedSpecs.push({
-          specId,
-          action: 'DEPRECATE',
-        });
-        // applyDeprecate creates one EVOLVED_FROM relation
-        evolveResult.relationsCreated += 1;
-      } else {
-        // UNCHANGED
-        evolvedSpecs.push({
-          specId,
-          action: 'UNCHANGED',
-        });
-      }
-    }
-
-    evolveResult.evolvedSpecs = evolvedSpecs;
-
-    // ---- Common: Persist pre-parsed fragments and create CONTAINS relations ----
-    for (const frag of diffFragments) {
-      const inserted = insertCodeFragment(db, {
-        id: '',
-        changeType: frag.changeType,
-        filePath: frag.filePath,
-        startLine: frag.startLine,
-        endLine: frag.endLine,
-        codeDiff: frag.codeDiff,
-      });
-      evolveResult.fragmentsCount++;
-      insertCommitFragmentRelation(db, commitInfo.hash, inserted.id, 'CONTAINS');
-      evolveResult.relationsCreated++;
-    }
-
-    db.exec('COMMIT');
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoPath, encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'] as const, windowsHide: true,
+    }).trim();
+  } catch {
+    throw new Error('Failed to resolve HEAD. Not a valid git repository?');
   }
-
-  return evolveResult;
 }
 
-// =============================================================================
-// BatchEvolveResult
-// =============================================================================
-
-export interface BatchEvolveResult {
-  /** The last evolved commit hash from meta.json (null if never evolved). */
-  fromCommit: string | null;
-  /** The last successfully processed commit hash, or HEAD if none were processed. */
-  toCommit: string;
-  /** Number of commits in the range (including skipped). */
-  commitsProcessed: number;
-  /** Per-commit results. */
-  perCommitResults: EvolveResult[];
-  /** Whether meta.json was updated at the end. */
-  metaUpdated: boolean;
-  /** Number of commits skipped (no LLM, did not match Path A). */
-  skippedCommits: number;
-  /** Number of commits that threw an error during evolve. */
-  failures: number;
+/** Validate that lastEvolved is an ancestor of HEAD (detect rebase). */
+function validateAncestry(repoPath: string, lastEvolved: string, headHash: string): void {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', lastEvolved, headHash], {
+      cwd: repoPath, stdio: 'ignore', windowsHide: true,
+    });
+  } catch {
+    throw new Error(
+      `The last evolved commit (${lastEvolved.slice(0, 7)}) is not an ancestor of ` +
+      `HEAD (${headHash.slice(0, 7)}). This usually happens after a rebase ` +
+      `or force-push. Please re-run 'homegraph spec build' to rebuild the ` +
+      `knowledge graph, then run evolve again.`,
+    );
+  }
 }
 
-// =============================================================================
-// runBatchEvolvePipeline
-// =============================================================================
-
-/**
- * Run the self-evolve pipeline for all NEW commits since the last evolve.
- *
- * Reads `currentCommitID` from `meta.json` and processes every commit between
- * that hash and `HEAD` in chronological order.  Each commit is independently
- * evolved via `runEvolvePipeline`.  `meta.json` is updated so that
- * `currentCommitID` points to the last commit that was **successfully**
- * processed (neither skipped nor failed).
- *
- * When `currentCommitID` is missing (first evolve after an older build, or
- * corrupt meta), the function falls back to processing only HEAD.
- *
- * **Skipped / failed commits trailing the batch:** If the last N commits in
- * the range are skipped or fail, `meta.json` is NOT advanced past the last
- * successful commit.  Those trailing commits will be retried on the next
- * evolve run.  Skipped or failed commits that appear *before* a successful
- * commit in the range are implicitly marked as processed (their mutations are
- * subsumed by the successful ancestor).
- *
- * Edge cases:
- * - `currentCommitID` equals HEAD → 0 new commits, `metaUpdated: false`.
- * - `currentCommitID` is not an ancestor of HEAD (rebase / force-push) →
- *   throws an error asking the user to re-build.
- * - All commits in the range are skipped / failed → `metaUpdated: false`.
- */
-const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-
-/**
- * Acquire a file-based advisory lock to prevent concurrent evolve runs.
- * Returns true if the lock was acquired (or the existing lock is stale).
- * Returns false if another evolve instance holds the lock.
- */
+/** Acquire a file-based advisory lock. */
 function acquireEvolveLock(lockFile: string): boolean {
   try {
     if (fs.existsSync(lockFile)) {
       const stat = fs.statSync(lockFile);
       if (Date.now() - stat.mtimeMs > LOCK_TIMEOUT_MS) {
-        // Stale lock — previous process may have crashed
         fs.unlinkSync(lockFile);
       } else {
         return false;
@@ -512,208 +153,604 @@ function acquireEvolveLock(lockFile: string): boolean {
   }
 }
 
-export async function runBatchEvolvePipeline(
+/** Build an empty BatchEvolveResult for no-op runs. */
+function emptyBatchResult(
+  fromCommit: string | null,
+  toCommit: string,
+  commitsScanned: number,
+): BatchEvolveResult {
+  return {
+    fromCommit,
+    toCommit,
+    commitsScanned,
+    phaseOneMatched: 0,
+    phaseOneSkipped: 0,
+    phaseOneFailures: 0,
+    historicalSpecsEvaluated: 0,
+    specsUpdated: 0,
+    specsDeprecated: 0,
+    specsUnchanged: 0,
+    perCommitResults: [],
+    metaUpdated: false,
+    skipped: false,
+    mineFallback: false,
+  };
+}
+
+// =============================================================================
+// runPhaseOne — shared phase 1a (analysis) + 1b (persistence) logic
+// =============================================================================
+
+interface PhaseOneResult {
+  phaseOneResults: Map<string, PersistResult | { skipped: true; reason: string }>;
+  phaseOneSpecIds: Set<string>;
+  commitFilePaths: Map<string, string[]>;
+  lastPhaseOneSuccess: string | null;
+  analyses: CommitSpecAnalysis[];
+}
+
+function runPhaseOne(
+  repoPath: string,
+  db: SqliteDatabase,
+  specStoragePath: string,
+  commits: CommitInfo[],
+  config: ReturnType<typeof loadSpecConfig>,
+): PhaseOneResult {
+  // ---- Stage 1a: Batch analysis ----
+  const analyses = analyzeIncrementalCommits(repoPath, specStoragePath, commits, config);
+
+  // ---- Stage 1b: Per-commit persistence ----
+  const phaseOneResults = new Map<string, PersistResult | { skipped: true; reason: string }>();
+  const phaseOneSpecIds = new Set<string>();
+  const commitFilePaths = new Map<string, string[]>();
+  let lastPhaseOneSuccess: string | null = null;
+
+  for (const analysis of analyses) {
+    if (!analysis.matched) {
+      phaseOneResults.set(analysis.commit.hash, {
+        skipped: true,
+        reason: analysis.skipReason ?? 'Scope not matched',
+      });
+      continue;
+    }
+
+    try {
+      const result = persistCommitSpecGraph(
+        db,
+        analysis as CommitSpecAnalysis & { matched: true },
+      );
+      phaseOneResults.set(analysis.commit.hash, result);
+      phaseOneSpecIds.add(result.specId);
+      commitFilePaths.set(analysis.commit.hash, result.filePaths);
+      lastPhaseOneSuccess = analysis.commit.hash;
+    } catch {
+      // Persistence failed — stop advancing but don't roll back prior commits
+      phaseOneResults.set(analysis.commit.hash, {
+        skipped: true,
+        reason: 'Persistence transaction failed',
+      });
+      break;
+    }
+  }
+
+  return { phaseOneResults, phaseOneSpecIds, commitFilePaths, lastPhaseOneSuccess, analyses };
+}
+
+// =============================================================================
+// processSingleCommit — fallback for first-ever evolve (no meta.json anchor)
+// =============================================================================
+
+async function processSingleCommit(
+  repoPath: string,
+  db: SqliteDatabase,
+  specStoragePath: string,
+  headHash: string,
+  llmConfig?: LLMConfig,
+): Promise<BatchEvolveResult> {
+  logDebug('runEvolvePipeline: no currentCommitID in meta.json — processing HEAD only', {
+    headHash: headHash.slice(0, 7),
+  });
+
+  const config = loadSpecConfig(repoPath);
+  const info = getCommitInfo(repoPath, headHash);
+  if (!info) {
+    throw new Error(`Commit ${headHash.slice(0, 7)} not found.`);
+  }
+
+  const { phaseOneResults, phaseOneSpecIds, commitFilePaths,
+    lastPhaseOneSuccess, analyses } = runPhaseOne(
+    repoPath, db, specStoragePath, [info], config,
+  );
+
+  const metaUpdated = !!(lastPhaseOneSuccess);
+  if (metaUpdated) {
+    writeMeta(repoPath, specStoragePath, lastPhaseOneSuccess!);
+  }
+
+  // Phase 2 — only if phase 1 matched something
+  let affectedEntries: AffectedSpecEntry[] = [];
+  if (phaseOneSpecIds.size > 0) {
+    affectedEntries = locateAffectedSpecsWithCommits(db, commitFilePaths, phaseOneSpecIds);
+  }
+
+  // Phase 3
+  const client = llmConfig ? new OpenAiLlmClient(llmConfig) : undefined;
+  const evolvedSpecsByCommit = await evaluateAndApply(
+    db, repoPath, specStoragePath, affectedEntries, phaseOneResults, client,
+  );
+
+  return buildBatchResult({
+    fromCommit: null,
+    toCommit: headHash,
+    commitsScanned: 1,
+    analyses,
+    phaseOneResults,
+    affectedEntries,
+    evolvedSpecs: evolvedSpecsByCommit,
+    metaUpdated,
+    mineFallback: false,
+  });
+}
+
+// =============================================================================
+// evaluateAndApply — phase 3: evaluate each affected spec + apply decisions
+// =============================================================================
+
+async function evaluateAndApply(
+  db: SqliteDatabase,
+  repoPath: string,
+  specStoragePath: string,
+  affectedEntries: AffectedSpecEntry[],
+  phaseOneResults: Map<string, PersistResult | { skipped: true; reason: string }>,
+  client?: OpenAiLlmClient,
+): Promise<Map<string, EvolvedSpec[]>> {
+  const evolvedSpecsByCommit = new Map<string, EvolvedSpec[]>();
+
+  if (!client || affectedEntries.length === 0) {
+    return evolvedSpecsByCommit;
+  }
+
+  for (const entry of affectedEntries) {
+    // Get spec info from DB
+    const specNode = findSpecById(db, entry.specId);
+    if (!specNode) continue;
+
+    // Collect affecting PersistResults
+    const affectingResults = entry.affectingCommits
+      .map((h) => phaseOneResults.get(h))
+      .filter((r): r is PersistResult => r !== undefined && 'filePaths' in r);
+
+    if (affectingResults.length === 0) continue;
+
+    // Build CommitContextInput list
+    const commitInputs: CommitContextInput[] = [];
+    for (const pr of affectingResults) {
+      let message = pr.commitHash.slice(0, 7);
+      try {
+        const info = getCommitInfo(repoPath, pr.commitHash);
+        if (info) message = info.message;
+      } catch { /* use short hash */ }
+      commitInputs.push({
+        commitHash: pr.commitHash,
+        message,
+        filePaths: pr.filePaths,
+      });
+    }
+
+    // Build cluster context
+    const clusterCtx = buildClusterContext({
+      specId: entry.specId,
+      planFilePath: specNode.filePath,
+      affectingCommits: commitInputs,
+    });
+
+    // Populate actual diffs into cluster context
+    for (const cs of clusterCtx.commitSummaries) {
+      try {
+        const diff = getCommitDiff(repoPath, cs.fullHash);
+        cs.truncatedDiff = truncateText(diff, 4000);
+      } catch {
+        cs.truncatedDiff = '(diff unavailable)';
+      }
+    }
+
+    // LLM evaluation (outside transaction)
+    let decision: EvolveDecision;
+    try {
+      decision = await evaluateSpecWithCluster(
+        entry.specId, specNode.filePath, clusterCtx, client,
+      );
+    } catch {
+      decision = { action: 'UNCHANGED' };
+    }
+
+    // The last commit in affectingCommits is the one that triggered this evaluation.
+    const lastAffectingCommit = entry.affectingCommits[entry.affectingCommits.length - 1]!;
+
+    // Apply decision (inside transaction)
+    db.exec('BEGIN');
+    try {
+      if (decision.action === 'UPDATE') {
+        const result = applyUpdate(
+          db, specStoragePath, entry.specId, specNode.filePath,
+          specNode.version, decision,
+          lastAffectingCommit,
+        );
+        const evolved: EvolvedSpec = {
+          specId: entry.specId, action: 'UPDATE',
+          newVersion: result.newVersion, newSpecId: result.newSpecId,
+        };
+        if (!evolvedSpecsByCommit.has(lastAffectingCommit)) {
+          evolvedSpecsByCommit.set(lastAffectingCommit, []);
+        }
+        evolvedSpecsByCommit.get(lastAffectingCommit)!.push(evolved);
+      } else if (decision.action === 'DEPRECATE') {
+        applyDeprecate(db, entry.specId);
+        const evolved: EvolvedSpec = { specId: entry.specId, action: 'DEPRECATE' };
+        if (!evolvedSpecsByCommit.has(lastAffectingCommit)) {
+          evolvedSpecsByCommit.set(lastAffectingCommit, []);
+        }
+        evolvedSpecsByCommit.get(lastAffectingCommit)!.push(evolved);
+      } else {
+        const evolved: EvolvedSpec = { specId: entry.specId, action: 'UNCHANGED' };
+        if (!evolvedSpecsByCommit.has(lastAffectingCommit)) {
+          evolvedSpecsByCommit.set(lastAffectingCommit, []);
+        }
+        evolvedSpecsByCommit.get(lastAffectingCommit)!.push(evolved);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      logWarn('evaluateAndApply: apply failed', {
+        specId: entry.specId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return evolvedSpecsByCommit;
+}
+
+// =============================================================================
+// mineStyleFallback
+// =============================================================================
+
+async function mineStyleFallback(
+  repoPath: string,
+  db: SqliteDatabase,
+  specStoragePath: string,
+  newCommits: { hash: string }[],
+  lastEvolved: string | null,
+  headHash: string,
+  llmConfig: LLMConfig | undefined,
+): Promise<BatchEvolveResult> {
+  if (!llmConfig) {
+    logWarn(
+      'Phase 1 produced no spec matches and no LLM is configured. ' +
+      'No evolution can be performed. ' +
+      'Consider running "homegraph spec build/mine" first, ' +
+      'or configure an LLM in .homegraph/commit4spec/configs.json.',
+    );
+    return {
+      fromCommit: lastEvolved,
+      toCommit: headHash,
+      commitsScanned: newCommits.length,
+      phaseOneMatched: 0,
+      phaseOneSkipped: newCommits.length,
+      phaseOneFailures: 0,
+      historicalSpecsEvaluated: 0,
+      specsUpdated: 0,
+      specsDeprecated: 0,
+      specsUnchanged: 0,
+      perCommitResults: [],
+      metaUpdated: false,
+      skipped: true,
+      skipReason: 'Phase 1 produced no matches and no LLM configured',
+      mineFallback: false,
+    };
+  }
+
+  // Invoke mine pipeline for the unmatched commit range
+  logWarn(
+    'Phase 1 produced no spec matches. Falling back to mine-style spec generation ' +
+    `for ${newCommits.length} commit(s).`,
+  );
+
+  try {
+    const mineConfig = createMineConfig({
+      limit: 200,
+      threshold: 0.5,
+      maxCluster: 10,
+      outputDir: specStoragePath,
+      skipLlm: false,
+      allCommits: true,
+    }, true);
+
+    const mineResult = await runMinePipeline(repoPath, mineConfig, llmConfig, db);
+
+    // runMinePipeline already writes to meta.json and the same DB
+    logDebug('mineStyleFallback: mine pipeline completed', { ...mineResult });
+
+    const hadResults = mineResult.specsGenerated > 0 || mineResult.specsWritten > 0;
+
+    return {
+      fromCommit: lastEvolved,
+      toCommit: headHash,
+      commitsScanned: newCommits.length,
+      phaseOneMatched: 0,
+      phaseOneSkipped: newCommits.length,
+      phaseOneFailures: 0,
+      historicalSpecsEvaluated: 0,
+      specsUpdated: 0,
+      specsDeprecated: 0,
+      specsUnchanged: 0,
+      perCommitResults: [],
+      metaUpdated: hadResults,
+      skipped: !hadResults,
+      skipReason: hadResults ? undefined : 'Mine pipeline produced no specs',
+      mineFallback: true,
+    };
+  } catch (err) {
+    logWarn('mineStyleFallback: mine pipeline failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      fromCommit: lastEvolved,
+      toCommit: headHash,
+      commitsScanned: newCommits.length,
+      phaseOneMatched: 0,
+      phaseOneSkipped: newCommits.length,
+      phaseOneFailures: 0,
+      historicalSpecsEvaluated: 0,
+      specsUpdated: 0,
+      specsDeprecated: 0,
+      specsUnchanged: 0,
+      perCommitResults: [],
+      metaUpdated: false,
+      skipped: true,
+      skipReason: `Mine pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
+      mineFallback: true,
+    };
+  }
+}
+
+// =============================================================================
+// buildBatchResult — assemble the final BatchEvolveResult
+// =============================================================================
+
+function buildBatchResult(params: {
+  fromCommit: string | null;
+  toCommit: string;
+  commitsScanned: number;
+  analyses: CommitSpecAnalysis[];
+  phaseOneResults: Map<string, PersistResult | { skipped: true; reason: string }>;
+  affectedEntries: AffectedSpecEntry[];
+  evolvedSpecs: Map<string, EvolvedSpec[]>;
+  metaUpdated: boolean;
+  mineFallback: boolean;
+}): BatchEvolveResult {
+  const { fromCommit, toCommit, commitsScanned, analyses, phaseOneResults,
+    affectedEntries, evolvedSpecs, metaUpdated, mineFallback } = params;
+
+  let phaseOneMatched = 0;
+  let phaseOneSkipped = 0;
+  let phaseOneFailures = 0;
+
+  const perCommitResults: EvolveResult[] = [];
+
+  for (const analysis of analyses) {
+    const pr = phaseOneResults.get(analysis.commit.hash);
+    if (!pr) {
+      // Should not happen, but defensive
+      perCommitResults.push({
+        commitHash: analysis.commit.hash,
+        matched: false,
+        phaseOneSkipped: true,
+        phaseOneSkipReason: 'Result not found',
+        evolvedSpecs: [],
+        fragmentsInserted: 0,
+        relationsCreated: 0,
+      });
+      phaseOneSkipped++;
+      continue;
+    }
+
+    if ('skipped' in pr) {
+      perCommitResults.push({
+        commitHash: analysis.commit.hash,
+        matched: false,
+        phaseOneSkipped: true,
+        phaseOneSkipReason: pr.reason,
+        evolvedSpecs: [],
+        fragmentsInserted: 0,
+        relationsCreated: 0,
+      });
+      analysis.matched ? phaseOneFailures++ : phaseOneSkipped++;
+    } else {
+      perCommitResults.push({
+        commitHash: analysis.commit.hash,
+        matched: true,
+        matchedSpecId: pr.specId,
+        phaseOneSkipped: false,
+        evolvedSpecs: evolvedSpecs.get(analysis.commit.hash) || [],
+        fragmentsInserted: pr.stats.fragmentsInserted,
+        relationsCreated: pr.stats.relationsCreated,
+      });
+      phaseOneMatched++;
+    }
+  }
+
+  // Count phase 3 results
+  let specsUpdated = 0;
+  let specsDeprecated = 0;
+  let specsUnchanged = 0;
+  for (const [, specs] of evolvedSpecs) {
+    for (const es of specs) {
+      if (es.action === 'UPDATE') specsUpdated++;
+      else if (es.action === 'DEPRECATE') specsDeprecated++;
+      else specsUnchanged++;
+    }
+  }
+
+  return {
+    fromCommit,
+    toCommit,
+    commitsScanned,
+    phaseOneMatched,
+    phaseOneSkipped,
+    phaseOneFailures,
+    historicalSpecsEvaluated: affectedEntries.length,
+    specsUpdated,
+    specsDeprecated,
+    specsUnchanged,
+    perCommitResults,
+    metaUpdated,
+    skipped: !metaUpdated && !mineFallback && phaseOneMatched === 0,
+    skipReason: !metaUpdated && !mineFallback && phaseOneMatched === 0
+      ? 'All phase-1 persistence failed'
+      : undefined,
+    mineFallback,
+  };
+}
+
+// =============================================================================
+// Public API — runEvolvePipeline
+// =============================================================================
+
+/**
+ * Run the spec self-evolve pipeline for all new commits since the last evolve.
+ *
+ * This is the ONLY public entry point.  It replaces both the old
+ * ``runEvolvePipeline`` (per-commit) and ``runBatchEvolvePipeline`` (batch
+ * wrapper) with a unified batch pipeline that aligns with the post-commit
+ * hook's cumulative commit threshold trigger.
+ *
+ * Flow:
+ *   0. Prep: meta.json → lock → schema → resolve HEAD + range.
+ *   1a. Batch analysis of all incremental commits (no DB writes).
+ *   1b. Per-commit persistence with independent transactions.
+ *   2. Impact location: find old specs affected by new commits.
+ *   3. LLM evaluation per spec cluster (only if LLM configured).
+ *   ↓ or: mine-style fallback (if phase 1 produced zero matches + LLM).
+ *   4. Advance meta.json to last phase-1 success.
+ *
+ * @param repoPath  - Absolute path to the git repository.
+ * @param db        - Active SQLite database handle.
+ * @param llmConfig - Optional LLM configuration; when absent, phase 3 is skipped
+ *                     (phase 1 graph construction still runs).
+ */
+export async function runEvolvePipeline(
   repoPath: string,
   db: SqliteDatabase,
   llmConfig?: LLMConfig,
 ): Promise<BatchEvolveResult> {
+  // ---- Stage 0: Preparation ----
   const meta = readMeta(repoPath);
   if (!meta) {
     throw new Error("No meta.json found. Run 'homegraph spec build' first.");
   }
 
-  // Ensure only one evolve instance runs at a time (post-commit hook may
-  // fire multiple times in quick succession).
+  // File lock
   const lockFile = path.join(repoPath, SPEC_DATA_DIR, 'logs', 'evolve.lock');
   fs.mkdirSync(path.dirname(lockFile), { recursive: true });
   if (!acquireEvolveLock(lockFile)) {
-    logDebug('runBatchEvolvePipeline: another evolve instance is running, skipping');
-    return {
-      fromCommit: meta.currentCommitID || null,
-      toCommit: '',
-      commitsProcessed: 0,
-      perCommitResults: [],
-      metaUpdated: false,
-      skippedCommits: 0,
-      failures: 0,
-    };
+    logDebug('runEvolvePipeline: another instance is running, skipping');
+    return emptyBatchResult(meta.currentCommitID || null, '', 0);
   }
 
   initSpecSchema(db);
 
   try {
-    return await runBatchEvolvePipelineImpl(repoPath, db, meta, llmConfig);
-  } finally {
-    try { fs.unlinkSync(lockFile); } catch { /* may already be deleted */ }
-  }
-}
+    // Resolve HEAD and commit range
+    const headHash = resolveHead(repoPath);
+    const lastEvolved = meta.currentCommitID || null;
 
-/**
- * Inner implementation — split out so the lock clean-up in the outer function
- * only needs one try/finally block.
- */
-async function runBatchEvolvePipelineImpl(
-  repoPath: string,
-  db: SqliteDatabase,
-  meta: { specStoragePath: string; currentCommitID?: string },
-  llmConfig: LLMConfig | undefined,
-): Promise<BatchEvolveResult> {
-  // Resolve HEAD
-  let headHash: string;
-  try {
-    headHash = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: repoPath,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'] as const,
-      windowsHide: true,
-    }).trim();
-  } catch {
-    throw new Error('Failed to resolve HEAD. Not a valid git repository?');
-  }
-  if (!headHash) {
-    throw new Error('No commits found in repository.');
-  }
-
-  const lastEvolved = meta.currentCommitID || null;
-
-  // Fallback: no currentCommitID → process just HEAD
-  if (!lastEvolved) {
-    logDebug('runBatchEvolvePipeline: no currentCommitID in meta.json — processing HEAD only', {
-      headHash: headHash.slice(0, 7),
-    });
-
-    const result = await runEvolvePipeline(repoPath, db, meta.specStoragePath, headHash, llmConfig);
-
-    // Only refresh meta.json when the commit was actually processed (not skipped).
-    const metaUpdated = !result.skipped;
-    if (metaUpdated) {
-      writeMeta(repoPath, meta.specStoragePath, headHash);
+    // No currentCommitID → process HEAD only
+    if (!lastEvolved) {
+      return await processSingleCommit(
+        repoPath, db, meta.specStoragePath, headHash, llmConfig,
+      );
     }
 
-    return {
-      fromCommit: null,
-      toCommit: headHash,
-      commitsProcessed: 1,
-      perCommitResults: [result],
-      metaUpdated,
-      skippedCommits: result.skipped ? 1 : 0,
-      failures: 0,
-    };
-  }
+    // No new commits
+    if (lastEvolved === headHash) {
+      logDebug('runEvolvePipeline: no new commits to evolve', {
+        currentCommitID: lastEvolved.slice(0, 7),
+      });
+      return emptyBatchResult(lastEvolved, headHash, 0);
+    }
 
-  // No new commits
-  if (lastEvolved === headHash) {
-    logDebug('runBatchEvolvePipeline: no new commits to evolve', {
-      currentCommitID: lastEvolved.slice(0, 7),
-    });
+    // Rebase detection
+    validateAncestry(repoPath, lastEvolved, headHash);
 
-    return {
-      fromCommit: lastEvolved,
-      toCommit: headHash,
-      commitsProcessed: 0,
-      perCommitResults: [],
-      metaUpdated: false,
-      skippedCommits: 0,
-      failures: 0,
-    };
-  }
+    // Get commit range in chronological order
+    const newCommits = getCommitRange(repoPath, lastEvolved, headHash);
+    if (newCommits.length === 0) {
+      return emptyBatchResult(lastEvolved, headHash, 0);
+    }
 
-  // Validate ancestry: lastEvolved must be an ancestor of HEAD
-  try {
-    execFileSync('git', ['merge-base', '--is-ancestor', lastEvolved, headHash], {
-      cwd: repoPath,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-  } catch {
-    throw new Error(
-      `The last evolved commit (${lastEvolved.slice(0, 7)}) is not an ancestor of ` +
-      `HEAD (${headHash.slice(0, 7)}). This usually happens after a rebase ` +
-      `or force-push. Please re-run 'homegraph spec build' to rebuild the ` +
-      `knowledge graph, then run 'homegraph spec evolve' again.`,
-    );
-  }
-
-  // Get commit range in chronological order (oldest first)
-  const commits = getCommitRange(repoPath, lastEvolved, headHash);
-  if (commits.length === 0) {
-    logDebug('runBatchEvolvePipeline: range query returned 0 commits', {
+    logDebug('runEvolvePipeline: processing commit range', {
+      count: newCommits.length,
       from: lastEvolved.slice(0, 7),
       to: headHash.slice(0, 7),
     });
 
-    return {
-      fromCommit: lastEvolved,
-      toCommit: headHash,
-      commitsProcessed: 0,
-      perCommitResults: [],
-      metaUpdated: false,
-      skippedCommits: 0,
-      failures: 0,
-    };
-  }
+    // ---- Stage 1a + 1b: Batch analysis + per-commit persistence ----
+    const config = loadSpecConfig(repoPath);
 
-  logDebug('runBatchEvolvePipeline: processing commit range', {
-    count: commits.length,
-    from: lastEvolved.slice(0, 7),
-    to: headHash.slice(0, 7),
-  });
+    logDebug('runEvolvePipeline: phase 1 — batch analysis + persistence', {
+      commitCount: newCommits.length,
+    });
 
-  // Process each commit independently.  Track the last commit hash that
-  // was successfully processed (neither skipped nor failed), so we can
-  // advance meta.json only as far as was safe.
-  const perCommitResults: EvolveResult[] = [];
-  let failures = 0;
-  let skippedCount = 0;
-  let lastProcessedHash: string | null = null;
+    const { phaseOneResults, phaseOneSpecIds, commitFilePaths,
+      lastPhaseOneSuccess, analyses } = runPhaseOne(
+      repoPath, db, meta.specStoragePath, newCommits, config,
+    );
 
-  for (const commit of commits) {
-    try {
-      const result = await runEvolvePipeline(
-        repoPath, db, meta.specStoragePath, commit.hash, llmConfig,
+    // ---- Decision: phase 1 produced matches? ----
+    if (phaseOneSpecIds.size === 0) {
+      return await mineStyleFallback(
+        repoPath, db, meta.specStoragePath, newCommits,
+        lastEvolved, headHash, llmConfig,
       );
-      perCommitResults.push(result);
-      if (result.skipped) {
-        skippedCount++;
-      } else {
-        lastProcessedHash = commit.hash;
-      }
-    } catch (err) {
-      failures++;
-      logWarn('runBatchEvolvePipeline: commit evolve failed, continuing', {
-        commitHash: commit.hash.slice(0, 7),
-        error: err instanceof Error ? err.message : String(err),
-      });
-      perCommitResults.push({
-        commitHash: commit.hash,
-        generateRelationCreated: false,
-        isLogicChange: false,
-        logicCheckReason: `Evolve failed: ${err instanceof Error ? err.message : String(err)}`,
-        affectedSpecCount: 0,
-        evolvedSpecs: [],
-        fragmentsCount: 0,
-        relationsCreated: 0,
-        persisted: false,
-        skipped: false,
-      });
     }
-  }
 
-  // Advance meta.json only up to the last successfully processed commit.
-  // Trailing skipped / failed commits stay in the pending range and will
-  // be retried on the next evolve run.
-  const metaUpdated = lastProcessedHash !== null;
-  if (metaUpdated) {
-    writeMeta(repoPath, meta.specStoragePath, lastProcessedHash!);
-  }
+    // ---- Stage 2: Impact location ----
+    const affectedEntries = locateAffectedSpecsWithCommits(
+      db, commitFilePaths, phaseOneSpecIds,
+    );
 
-  return {
-    fromCommit: lastEvolved,
-    toCommit: lastProcessedHash || headHash,
-    commitsProcessed: commits.length,
-    perCommitResults,
-    metaUpdated,
-    skippedCommits: skippedCount,
-    failures,
-  };
+    logDebug('runEvolvePipeline: phase 2 — impact location', {
+      affectedSpecs: affectedEntries.length,
+    });
+
+    // ---- Stage 3: LLM evaluation + apply ----
+    const client = llmConfig ? new OpenAiLlmClient(llmConfig) : undefined;
+    const evolvedSpecsByCommit = await evaluateAndApply(
+      db, repoPath, meta.specStoragePath,
+      affectedEntries, phaseOneResults, client,
+    );
+
+    // ---- Stage 4: Advance meta.json ----
+    const metaUpdated = lastPhaseOneSuccess !== null;
+    if (metaUpdated) {
+      writeMeta(repoPath, meta.specStoragePath, lastPhaseOneSuccess!);
+    }
+
+    const result = buildBatchResult({
+      fromCommit: lastEvolved,
+      toCommit: lastPhaseOneSuccess || headHash,
+      commitsScanned: newCommits.length,
+      analyses,
+      phaseOneResults,
+      affectedEntries,
+      evolvedSpecs: evolvedSpecsByCommit,
+      metaUpdated,
+      mineFallback: false,
+    });
+
+    return result;
+  } finally {
+    try { fs.unlinkSync(lockFile); } catch { /* may already be deleted */ }
+  }
 }
