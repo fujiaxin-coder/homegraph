@@ -1,4 +1,0 @@
-# test-set.jsonl tracked; reports + other artifacts stay local.
-*
-!.gitignore
-!test-set.jsonl

@@ -552,7 +552,7 @@ const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
 export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_search',
-    description: 'Quick symbol search by name. Returns locations only (no code). Use homegraph_explore instead to get the actual source / understand an area in one call.',
+    description: 'Quick symbol search by name — locations only, no source. Prefer homegraph_explore (returns source + relationships in one call). Use search only when you need a name hint before explore.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -695,7 +695,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_explore',
-    description: 'PRIMARY TOOL — call FIRST for almost any question OR before an edit: how does X work, architecture, a bug, where/what is X, surveying an area, or the symbols you are about to change. Returns the verbatim source of the relevant symbols grouped by file in ONE capped call (Read-equivalent — treat the shown source as already Read; do NOT re-open those files), plus the call path among them. Query can be a natural-language question OR a bag of symbol/file names. Usually the ONLY call you need — more accurate context, in far fewer tokens and round-trips than a search/Read/Grep loop.',
+    description: 'PRIMARY TOOL for indexed code — call FIRST when the user asks about code in a project with `.homegraph/`: where/what/how, symbol or file lookup, related implementations, call paths, or reading a named symbol. Returns verbatim source grouped by file in ONE call (Read-equivalent — treat shown source as already Read) plus call paths among the symbols. Query = symbol/file names or a short question (e.g. "PreferenceStore LauncherCardInfo", "how does backup restore work"). Prefer this over grep+read/glob for indexed source.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -727,7 +727,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_files',
-    description: 'Indexed file tree with language + symbol counts. Faster than Glob for project layout.',
+    description: 'Indexed directory tree (paths and symbol counts only — NO source code). Do NOT use to answer where/what/how code questions; use homegraph_explore. Only for coarse folder layout when explore cannot help.',
     inputSchema: {
       type: 'object',
       properties: {
