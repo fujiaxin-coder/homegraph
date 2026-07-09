@@ -25,7 +25,7 @@ import { GraphTraverser } from '../graph';
 import { formatContextAsMarkdown, formatContextAsJson } from './formatter';
 import { logDebug } from '../errors';
 import { validatePathWithinRoot, isConfigLeafNode } from '../utils';
-import { isTestFile, extractSearchTerms, scorePathRelevance, getStemVariants, isDistinctiveIdentifier, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms } from '../search/query-utils';
+import { isTestFile, extractSearchTerms, scorePathRelevance, getStemVariants, isDistinctiveIdentifier, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, resolveImportLineFromNode } from '../search/query-utils';
 import { LOW_CONFIDENCE_MARKER } from './markers';
 
 /**
@@ -565,7 +565,40 @@ export class ContextBuilder {
     // need the files that `import … from '@kit.FooKit'` — not unrelated *Collaboration*
     // classes that share a substring.
     const importSearchTerms = extractImportSearchTerms(query);
-    if (importSearchTerms.length > 0) {
+    const depSymbols = extractDependencySymbolsFromQuery(query);
+    if (importSearchTerms.length > 0 || depSymbols.length > 0) {
+      const tryBoostImport = (r: SearchResult, lineText: string): void => {
+        const lineLc = lineText.toLowerCase();
+        if (importSearchTerms.length > 0) {
+          const kitNames = extractKitModuleNamesFromQuery(query);
+          if (kitNames.length > 0 && !kitNames.some((k) => lineLc.includes(`@kit.${k.toLowerCase()}`))) {
+            return;
+          }
+        }
+        if (depSymbols.length > 0 && !depSymbols.some((s) => lineLc.includes(s.toLowerCase()))) {
+          return;
+        }
+        const boosted: SearchResult = { ...r, score: r.score + 45 };
+        const existing = exactMatches.find((e) => e.node.id === boosted.node.id);
+        if (existing) {
+          existing.score = Math.max(existing.score, boosted.score);
+        } else {
+          exactMatches.push(boosted);
+        }
+      };
+      for (const sym of depSymbols) {
+        try {
+          const importHits = this.queries.searchNodes(sym, {
+            limit: opts.searchLimit * 5,
+            kinds: ['import'],
+          });
+          for (const r of importHits) {
+            tryBoostImport(r, resolveImportLineFromNode(r.node, this.projectRoot));
+          }
+        } catch (error) {
+          logDebug('Import symbol search failed', { sym, error: String(error) });
+        }
+      }
       for (const term of importSearchTerms) {
         try {
           const termLc = term.toLowerCase().replace(/^@kit\./, '');
@@ -574,15 +607,9 @@ export class ContextBuilder {
             kinds: ['import'],
           });
           for (const r of importHits) {
-            const sig = (r.node.signature || r.node.name || '').toLowerCase();
-            if (!sig.includes(termLc)) continue;
-            const boosted: SearchResult = { ...r, score: r.score + 45 };
-            const existing = exactMatches.find((e) => e.node.id === boosted.node.id);
-            if (existing) {
-              existing.score = Math.max(existing.score, boosted.score);
-            } else {
-              exactMatches.push(boosted);
-            }
+            const lineText = resolveImportLineFromNode(r.node, this.projectRoot);
+            if (!lineText.toLowerCase().includes(termLc)) continue;
+            tryBoostImport(r, lineText);
           }
         } catch (error) {
           logDebug('Import signature search failed', { term, error: String(error) });

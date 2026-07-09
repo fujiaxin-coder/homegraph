@@ -44,6 +44,7 @@ Query = **symbol names, file basenames, or a short question**. No prior \`homegr
 - **Don't hand-reconstruct flows** — name endpoints in one explore query.
 - **Pure literal text patterns** (exact string chains with no symbol names) — explore may not enumerate every match; use grep only after explore does not cover the question.
 - **Staleness banner** — if listed files were edited since sync, Read those files only; others stay authoritative.
+- **Inventory sections** (dependency list, caller paths, config file) may omit full source when the graph has no flow path — answer from those sections directly.
 
 ## Limits
 

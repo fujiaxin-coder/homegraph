@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Node } from '../types';
+import { validatePathWithinRoot } from '../utils';
 
 /** Normalize a name to a comparable token: lowercase, alphanumerics only. */
 export function normalizeNameToken(raw: string): string {
@@ -100,15 +101,34 @@ export function extractImportSearchTerms(query: string): string[] {
   return [...terms];
 }
 
-/** True when the file's basename matches a basename named in the query (LocationController.ets). */
+/** True when the file's basename matches a basename named in the query (Foo.ets, bar.ts, …). */
 export function fileMatchesQueryBasename(filePath: string, basenames: string[]): boolean {
   if (basenames.length === 0) return false;
   const base = path.basename(filePath).toLowerCase();
   return basenames.some((b) => {
     const stem = b.toLowerCase();
-    return base === `${stem}.ets`
-      || base.startsWith(`${stem}.`);
+    return base === stem || base.startsWith(`${stem}.`);
   });
+}
+
+/**
+ * Full `import … from '…'` line for an import node — reads from disk when the
+ * stored signature is module-only (common for @kit.* extraction).
+ */
+export function resolveImportLineFromNode(node: Node, projectRoot: string): string {
+  const fromSig = (node.signature || '').trim();
+  if (/import\b|from\s+['"]/.test(fromSig)) return fromSig;
+  if (node.startLine > 0) {
+    try {
+      const abs = validatePathWithinRoot(projectRoot, node.filePath);
+      if (abs) {
+        const lines = fs.readFileSync(abs, 'utf-8').split('\n');
+        const raw = (lines[node.startLine - 1] || '').trim();
+        if (raw) return raw;
+      }
+    } catch { /* fall through */ }
+  }
+  return fromSig || node.name;
 }
 
 /**
@@ -174,6 +194,98 @@ export const STOP_WORDS = new Set([
   'code', 'file', 'files', 'function', 'method', 'class', 'type',
   'fix', 'bug', 'called',
 ]);
+
+/**
+ * Lowercase API / import symbol names in a dependency question (taskpool, formInfo).
+ * Used to filter import sites to the symbol actually asked about, not every @kit.ArkTS import.
+ */
+export function extractDependencySymbolsFromQuery(query: string): string[] {
+  const symbols = new Set<string>();
+  for (const ma of extractMemberAccessFromQuery(query)) {
+    if (ma.member.length >= 3 && !STOP_WORDS.has(ma.member.toLowerCase())) {
+      symbols.add(ma.member);
+    }
+  }
+  for (const m of query.matchAll(/\b([a-z][a-zA-Z0-9]{3,})\b/g)) {
+    const sym = m[1]!;
+    if (!STOP_WORDS.has(sym.toLowerCase())) symbols.add(sym);
+  }
+  for (const kit of extractKitModuleNamesFromQuery(query)) {
+    symbols.delete(kit);
+    symbols.delete(kit.charAt(0).toLowerCase() + kit.slice(1));
+  }
+  return [...symbols];
+}
+
+/**
+ * Query text names a config/manifest file by basename + extension (structural, not a hardcoded whitelist).
+ */
+export function queryNamesConfigFile(query: string): boolean {
+  if (/\b[\w./\\-]+\.(?:json5?|ya?ml|toml|xml|ini|properties)\b/i.test(query)) return true;
+  const basenames = extractFileBasenamesFromQuery(query);
+  if (basenames.length === 0) return false;
+  return /\.(?:json5?|ya?ml|toml)/i.test(query);
+}
+
+/** Query names concrete import/kit/symbol tokens usable to filter dependency sites. */
+export function hasSymbolFilterInQuery(query: string): boolean {
+  return (
+    extractDependencySymbolsFromQuery(query).length > 0
+    || extractKitModuleNamesFromQuery(query).length > 0
+    || extractImportSearchTerms(query).length > 0
+  );
+}
+
+export function shouldBuildCallerInventory(query: string): boolean {
+  return extractTypeNamesFromQuery(query).length > 0;
+}
+
+export function shouldBuildMemberSurvey(query: string): boolean {
+  return extractMemberAccessFromQuery(query).length > 0;
+}
+
+export function shouldBuildConfigSection(query: string): boolean {
+  return queryNamesConfigFile(query);
+}
+
+/** Compact import list when query filters symbols and multiple sites match. */
+export function shouldCompactImportListing(
+  siteCount: number,
+  hasSymbolFilter: boolean,
+): boolean {
+  if (!hasSymbolFilter) return false;
+  return siteCount >= 2;
+}
+
+export interface ExploreInventorySignals {
+  importSiteCount: number;
+  hasFilteredImports: boolean;
+  callerBulletCount: number;
+  memberFileCount: number;
+  configRendered: boolean;
+}
+
+/** Omit source bodies when inventory sections suffice and the graph found no flow path. */
+export function shouldOmitSourceBodies(inv: ExploreInventorySignals, hasFlowPath: boolean): boolean {
+  if (hasFlowPath) return false;
+  if (inv.configRendered) return true;
+  if (inv.hasFilteredImports && inv.importSiteCount >= 2) return true;
+  if (inv.callerBulletCount >= 2) return true;
+  if (inv.memberFileCount >= 2) return true;
+  return false;
+}
+
+/** PascalCase type / class names mentioned in the query (Configuration, BadgeManager). */
+export function extractTypeNamesFromQuery(query: string): string[] {
+  const names = new Set<string>();
+  for (const m of query.matchAll(/\b([A-Z][A-Za-z0-9]*(?:[A-Z][a-z]+)+|[A-Z][a-z][A-Za-z0-9]*)\b/g)) {
+    if (m[1] && m[1].length >= 3) names.add(m[1]);
+  }
+  for (const base of extractFileBasenamesFromQuery(query)) {
+    if (/^[A-Z]/.test(base)) names.add(base);
+  }
+  return [...names];
+}
 
 /**
  * Generate stem variants of a search term by removing common English suffixes.

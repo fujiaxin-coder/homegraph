@@ -4,6 +4,13 @@ import {
   extractKitModuleNamesFromQuery,
   extractMemberAccessFromQuery,
   extractImportSearchTerms,
+  extractDependencySymbolsFromQuery,
+  queryNamesConfigFile,
+  shouldCompactImportListing,
+  shouldOmitSourceBodies,
+  shouldBuildCallerInventory,
+  shouldBuildMemberSurvey,
+  shouldBuildConfigSection,
   fileMatchesQueryBasename,
 } from '../src/search/query-utils';
 
@@ -52,12 +59,88 @@ describe('extractImportSearchTerms', () => {
   });
 });
 
+describe('extractDependencySymbolsFromQuery', () => {
+  it('extracts camelCase API symbols but not kit module names', () => {
+    expect(extractDependencySymbolsFromQuery('files importing taskpool from @kit.ArkTS')).toContain(
+      'taskpool',
+    );
+    expect(extractDependencySymbolsFromQuery('files importing taskpool from @kit.ArkTS')).not.toContain(
+      'ArkTS',
+    );
+  });
+});
+
+describe('queryNamesConfigFile', () => {
+  it('detects config files by extension in query text', () => {
+    expect(queryNamesConfigFile('show build-profile.json5 strictMode value')).toBe(true);
+    expect(queryNamesConfigFile('what calls BadgeManager')).toBe(false);
+  });
+});
+
+describe('shouldCompactImportListing', () => {
+  it('compacts when symbol filter matches multiple sites', () => {
+    expect(shouldCompactImportListing(5, true)).toBe(true);
+    expect(shouldCompactImportListing(1, true)).toBe(false);
+    expect(shouldCompactImportListing(5, false)).toBe(false);
+  });
+});
+
+describe('shouldOmitSourceBodies', () => {
+  it('omits source for inventory output when graph has no flow path', () => {
+    expect(
+      shouldOmitSourceBodies({
+        importSiteCount: 4,
+        hasFilteredImports: true,
+        callerBulletCount: 0,
+        memberFileCount: 0,
+        configRendered: false,
+      }, false),
+    ).toBe(true);
+    expect(
+      shouldOmitSourceBodies({
+        importSiteCount: 4,
+        hasFilteredImports: true,
+        callerBulletCount: 0,
+        memberFileCount: 0,
+        configRendered: false,
+      }, true),
+    ).toBe(false);
+  });
+});
+
+describe('shouldBuildCallerInventory', () => {
+  it('builds when a type name is named in the query', () => {
+    expect(shouldBuildCallerInventory('external callers of BadgeManager')).toBe(true);
+    expect(shouldBuildCallerInventory('how BadgeManager notifies listeners')).toBe(true);
+  });
+});
+
+describe('shouldBuildMemberSurvey', () => {
+  it('builds only when member-access syntax is present', () => {
+    expect(shouldBuildMemberSurvey('files using .drawModifier')).toBe(true);
+    expect(shouldBuildMemberSurvey('list all UI components')).toBe(false);
+  });
+});
+
+describe('shouldBuildConfigSection', () => {
+  it('builds when query names a config file by extension', () => {
+    expect(shouldBuildConfigSection('read app.json5 dependencies')).toBe(true);
+    expect(shouldBuildConfigSection('how routing works')).toBe(false);
+  });
+});
+
 describe('fileMatchesQueryBasename', () => {
-  it('matches exact basename only', () => {
+  it('matches exact basename for any source extension', () => {
     expect(
       fileMatchesQueryBasename(
         'feature/foo/LocationController.ets',
         ['LocationController'],
+      ),
+    ).toBe(true);
+    expect(
+      fileMatchesQueryBasename(
+        'src/auth/UserService.ts',
+        ['UserService'],
       ),
     ).toBe(true);
     expect(

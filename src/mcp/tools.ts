@@ -22,7 +22,8 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, fileMatchesQueryBasename } from '../search/query-utils';
+import { hasStructuralKeyword } from '../directory';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, hasSymbolFilterInQuery, shouldBuildCallerInventory, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldCompactImportListing, shouldOmitSourceBodies, extractTypeNamesFromQuery, fileMatchesQueryBasename, resolveImportLineFromNode } from '../search/query-utils';
 import {
   existsSync,
   readFileSync,
@@ -2527,44 +2528,291 @@ export class ToolHandler {
   }
 
   /**
-   * Import sites for @kit.* / *Kit module names — surfaces `import … from '@kit.FooKit'`
-   * lines that FTS would otherwise miss when unrelated symbols share a substring
-   * (ServiceCollaborationKit vs CollaborationRegisterManager).
+   * Import sites for @kit.* / *Kit module names — surfaces full `import { … } from '@kit.X'`
+   * lines. When the query also names a symbol (taskpool), only matching imports are listed.
    */
-  private buildImportSitesSection(cg: HomeGraph, query: string): string {
-    const terms = extractImportSearchTerms(query);
-    if (terms.length === 0) return '';
+  private buildImportSitesSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; siteCount: number; compactListing: boolean } {
+    const kitTerms = extractKitModuleNamesFromQuery(query);
+    const depSymbols = extractDependencySymbolsFromQuery(query);
+    const kitSearchTerms = extractImportSearchTerms(query);
 
     const seen = new Set<string>();
-    const sites: Array<{ file: string; line: number; sig: string }> = [];
+    const sites: Array<{ file: string; line: number; lineText: string }> = [];
 
-    for (const term of terms) {
-      const termLc = term.toLowerCase().replace(/^@kit\./, '');
+    const tryAdd = (node: Node, lineText: string): void => {
+      const lineLc = lineText.toLowerCase();
+      if (kitTerms.length > 0) {
+        const matchesKit = kitTerms.some(
+          (k) => lineLc.includes(`@kit.${k.toLowerCase()}`),
+        );
+        if (!matchesKit) return;
+      }
+      if (depSymbols.length > 0) {
+        const matchesSym = depSymbols.some((s) => lineLc.includes(s.toLowerCase()));
+        if (!matchesSym) return;
+      }
+      const key = `${node.filePath}:${node.startLine}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      sites.push({ file: node.filePath, line: node.startLine, lineText });
+    };
+
+    const resolveImportLine = (node: Node): string => resolveImportLineFromNode(node, projectRoot);
+
+    const importLimit = depSymbols.length > 0 ? 60 : 20;
+
+    // Symbol-first search: "taskpool" hits `import { taskpool } from '@kit.ArkTS'`.
+    for (const sym of depSymbols) {
       let hits: SearchResult[] = [];
       try {
-        hits = cg.searchNodes(term, { kinds: ['import'], limit: 15 });
+        hits = cg.searchNodes(sym, { kinds: ['import'], limit: importLimit });
       } catch {
         continue;
       }
       for (const r of hits) {
-        const sig = (r.node.signature || r.node.name || '').trim();
-        if (!sig.toLowerCase().includes(termLc)) continue;
-        const key = `${r.node.filePath}:${r.node.startLine}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        sites.push({ file: r.node.filePath, line: r.node.startLine, sig });
+        tryAdd(r.node, resolveImportLine(r.node));
       }
     }
 
-    if (sites.length === 0) return '';
+    // Kit-module search (when no symbol filter, or to catch re-exports).
+    if (sites.length === 0 || depSymbols.length === 0) {
+      for (const term of kitSearchTerms) {
+        const termLc = term.toLowerCase().replace(/^@kit\./, '');
+        let hits: SearchResult[] = [];
+        try {
+          hits = cg.searchNodes(term, { kinds: ['import'], limit: importLimit });
+        } catch {
+          continue;
+        }
+        for (const r of hits) {
+          const lineText = resolveImportLine(r.node);
+          if (!lineText.toLowerCase().includes(termLc)) continue;
+          if (depSymbols.length > 0) {
+            const matchesSym = depSymbols.some((s) => lineText.toLowerCase().includes(s.toLowerCase()));
+            if (!matchesSym) continue;
+          }
+          tryAdd(r.node, lineText);
+        }
+      }
+    }
 
-    const lines = ['**Import sites**', ''];
-    for (const s of sites.slice(0, 12)) {
-      lines.push(`- \`${s.file}:${s.line}\` — \`${s.sig}\``);
+    if (sites.length === 0) {
+      return { section: '', siteCount: 0, compactListing: false };
     }
-    if (sites.length > 12) {
-      lines.push(`- … and ${sites.length - 12} more import site(s)`);
+
+    sites.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+
+    const symbolFilter = hasSymbolFilterInQuery(query);
+    const compactListing = shouldCompactImportListing(sites.length, symbolFilter);
+    const cap = compactListing ? 40 : 15;
+    const lines = compactListing
+      ? ['**Dependency list**', '', `Files importing the queried symbol(s) (${sites.length} total):`, '']
+      : ['**Import sites**', ''];
+
+    for (const s of sites.slice(0, cap)) {
+      if (compactListing) {
+        lines.push(`- \`${s.file}\` (line ${s.line})`);
+      } else {
+        lines.push(`- \`${s.file}:${s.line}\` — \`${s.lineText}\``);
+      }
     }
+    if (sites.length > cap) {
+      lines.push(`- … and ${sites.length - cap} more`);
+    }
+    if (compactListing) {
+      lines.push('');
+      lines.push('> Full import lines for the first sites:');
+      for (const s of sites.slice(0, 8)) {
+        lines.push(`> \`${s.lineText}\` — \`${s.file}:${s.line}\``);
+      }
+      lines.push('');
+      lines.push('> Listing complete — answer from this section; no grep/read needed for the dependency set.');
+    }
+    lines.push('');
+    return { section: lines.join('\n'), siteCount: sites.length, compactListing };
+  }
+
+  /**
+   * External-caller inventory for a named class — methods → who calls them (paths only).
+   */
+  private buildCallerListingSection(cg: HomeGraph, query: string): string {
+    const typeNames = extractTypeNamesFromQuery(query);
+    if (typeNames.length === 0) return '';
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const externalOnly = /\bexternal\b/i.test(query) || /外部/.test(query);
+    const lines: string[] = ['**Caller inventory**', ''];
+    let substantive = 0;
+
+    for (const typeName of typeNames.slice(0, 3)) {
+      const classes = cg.getNodesByName(typeName)
+        .filter((n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'component') && !isTestFile(n.filePath));
+      for (const cls of classes.slice(0, 2)) {
+        const methods: Node[] = [];
+        for (const e of cg.getOutgoingEdges(cls.id)) {
+          if (e.kind !== 'contains') continue;
+          const m = cg.getNode(e.target);
+          if (m && (m.kind === 'method' || m.kind === 'function')) methods.push(m);
+        }
+        if (methods.length === 0) {
+          for (const n of cg.getNodesByName(typeName)) {
+            if (n.filePath === cls.filePath && (n.kind === 'method' || n.kind === 'function')) {
+              methods.push(n);
+            }
+          }
+        }
+        const methodLines: string[] = [];
+        for (const method of methods.slice(0, 25)) {
+          let callers: Array<{ node: Node }> = [];
+          try { callers = cg.getCallers(method.id) as Array<{ node: Node }>; } catch { continue; }
+          const uniq = new Map<string, Node>();
+          for (const c of callers) {
+            if (!c?.node) continue;
+            if (externalOnly && c.node.filePath === cls.filePath) continue;
+            if (isTestFile(c.node.filePath)) continue;
+            uniq.set(c.node.id, c.node);
+          }
+          if (uniq.size === 0) continue;
+          const callerList = [...uniq.values()].slice(0, 8)
+            .map((n) => `\`${rel(n.filePath)}:${n.startLine}\` (\`${n.name}\`)`)
+            .join(', ');
+          const more = uniq.size > 8 ? ` +${uniq.size - 8} more` : '';
+          methodLines.push(`- \`${method.name}\` ← ${callerList}${more}`);
+          substantive++;
+        }
+        if (methodLines.length === 0) continue;
+        lines.push(`### \`${cls.name}\` (\`${rel(cls.filePath)}\`)`);
+        lines.push(...methodLines);
+        lines.push('');
+      }
+    }
+    if (substantive === 0) return '';
+    lines.push('> Caller inventory complete — answer from this section; no homegraph_search/grep/read needed.');
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  /**
+   * Files/lines using a member or literal pattern (.drawModifier, .width('100%')).
+   */
+  private buildMemberSurveySection(cg: HomeGraph, query: string, projectRoot: string): string {
+    const members = extractMemberAccessFromQuery(query);
+    const patterns: string[] = [];
+    for (const ma of members) {
+      if (ma.dotted.startsWith('.')) patterns.push(ma.dotted);
+      else patterns.push(ma.dotted);
+    }
+    // Literal chains in quotes: .width('100%')
+    for (const m of query.matchAll(/(\.[a-zA-Z_][\w]*\s*\([^)]*\))/g)) {
+      patterns.push(m[1]!.replace(/\s+/g, ''));
+    }
+    if (patterns.length === 0) return '';
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const hits = new Map<string, number[]>();
+
+    const addHit = (file: string, line: number): void => {
+      const arr = hits.get(file) ?? [];
+      if (!arr.includes(line)) arr.push(line);
+      hits.set(file, arr);
+    };
+
+    for (const pat of patterns) {
+      const bare = pat.replace(/^\./, '');
+      let nodes: SearchResult[] = [];
+      try {
+        nodes = cg.searchNodes(bare, { limit: 30 });
+      } catch { /* skip */ }
+      for (const r of nodes) {
+        if (isTestFile(r.node.filePath)) continue;
+        addHit(rel(r.node.filePath), r.node.startLine);
+      }
+    }
+
+    // Scan top FTS files for literal pattern in source
+    for (const pat of patterns.slice(0, 3)) {
+      const literal = pat.startsWith('.') ? pat : `.${pat}`;
+      const re = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      let files: SearchResult[] = [];
+      try {
+        files = cg.searchNodes(patterns[0]!.replace(/^\./, ''), { limit: 25 });
+      } catch { continue; }
+      for (const r of files) {
+        if (isTestFile(r.node.filePath)) continue;
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs) continue;
+        let content: string;
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          if (re.test(fileLines[i] ?? '')) addHit(rel(r.node.filePath), i + 1);
+        }
+      }
+    }
+
+    if (hits.size === 0) return '';
+
+    const lines = ['**Member / pattern usage**', ''];
+    let fileCount = 0;
+    for (const [fp, lineNos] of [...hits.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (fileCount >= 40) break;
+      const sorted = lineNos.sort((a, b) => a - b).slice(0, 6);
+      const lineStr = sorted.join(', ');
+      const more = lineNos.length > 6 ? ` +${lineNos.length - 6} lines` : '';
+      lines.push(`- \`${fp}\` — lines ${lineStr}${more}`);
+      fileCount++;
+    }
+    if (hits.size > 40) lines.push(`- … and ${hits.size - 40} more file(s)`);
+    lines.push('');
+    lines.push('> Pattern survey complete — answer from this list; use grep only if a file is missing.');
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  /**
+   * Render a small config/manifest file named in the query (build-profile.json5, …).
+   */
+  private buildConfigFileSection(cg: HomeGraph, query: string, projectRoot: string): string {
+    const basenames = extractFileBasenamesFromQuery(query);
+    if (basenames.length === 0) return '';
+
+    const CONFIG_EXT = /\.(?:json5?|ya?ml|toml|xml|ini|properties)$/i;
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const lines: string[] = ['**Config / manifest**', ''];
+    let any = false;
+
+    for (const name of basenames.slice(0, 3)) {
+      let files: SearchResult[] = [];
+      try {
+        files = cg.searchNodes(name, { kinds: ['file'], limit: 15 });
+      } catch {
+        continue;
+      }
+      for (const r of files) {
+        const base = rel(r.node.filePath).split('/').pop() ?? '';
+        if (!base.toLowerCase().includes(name.toLowerCase())) continue;
+        if (!CONFIG_EXT.test(base)) continue;
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs) continue;
+        let content: string;
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        if (content.length > 12000) continue;
+        any = true;
+        lines.push(`**\`${rel(r.node.filePath)}\`**`);
+        lines.push('');
+        lines.push('```json5');
+        lines.push(content.replace(/\n+$/, ''));
+        lines.push('```');
+        lines.push('');
+      }
+    }
+    if (!any) return '';
+    lines.push('> Config content above is verbatim — answer from it; no broad grep needed.');
     lines.push('');
     return lines.join('\n');
   }
@@ -2744,8 +2992,37 @@ export class ToolHandler {
       return this.textResult(`No relevant code found for "${query}"`);
     }
 
-    // Seed import nodes for @kit.* / *Kit names so their files enter the render set.
+    // Seed import nodes for @kit.* / *Kit names (and named symbols like taskpool).
     const importTerms = extractImportSearchTerms(query);
+    const depSymbols = extractDependencySymbolsFromQuery(query);
+    const seedImport = (r: SearchResult, lineText: string): void => {
+      const lineLc = lineText.toLowerCase();
+      if (importTerms.length > 0) {
+        const kitNames = extractKitModuleNamesFromQuery(query);
+        if (kitNames.length > 0 && !kitNames.some((k) => lineLc.includes(`@kit.${k.toLowerCase()}`))) {
+          return;
+        }
+      }
+      if (depSymbols.length > 0 && !depSymbols.some((s) => lineLc.includes(s.toLowerCase()))) {
+        return;
+      }
+      if (!subgraph.nodes.has(r.node.id)) {
+        subgraph.nodes.set(r.node.id, r.node);
+        subgraph.roots.push(r.node.id);
+      }
+    };
+    for (const sym of depSymbols) {
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(sym, { kinds: ['import'], limit: 40 });
+      } catch {
+        continue;
+      }
+      for (const r of hits) {
+        const sig = (r.node.signature || r.node.name || '').trim();
+        seedImport(r, sig);
+      }
+    }
     for (const term of importTerms) {
       const termLc = term.toLowerCase().replace(/^@kit\./, '');
       let hits: SearchResult[] = [];
@@ -2755,12 +3032,9 @@ export class ToolHandler {
         continue;
       }
       for (const r of hits) {
-        const sig = (r.node.signature || r.node.name || '').toLowerCase();
-        if (!sig.includes(termLc)) continue;
-        if (!subgraph.nodes.has(r.node.id)) {
-          subgraph.nodes.set(r.node.id, r.node);
-          subgraph.roots.push(r.node.id);
-        }
+        const sig = (r.node.signature || r.node.name || '').trim();
+        if (!sig.toLowerCase().includes(termLc)) continue;
+        seedImport(r, sig);
       }
     }
 
@@ -3228,18 +3502,78 @@ export class ToolHandler {
     // Blast radius (always-on, compact): for the entry symbols, who depends on
     // them + which tests cover them — locations only, no source — so the agent
     // knows what to update/verify before editing without a separate call.
-    const blastRadius = this.buildBlastRadiusSection(cg, subgraph);
+    const blastRadius = hasStructuralKeyword(query)
+      ? this.buildBlastRadiusSection(cg, subgraph)
+      : '';
     if (blastRadius) lines.push(blastRadius);
 
-    const importSites = this.buildImportSitesSection(cg, query);
-    if (importSites) lines.push(importSites);
+    const importResult = this.buildImportSitesSection(cg, query, projectRoot);
+    if (importResult.section) lines.push(importResult.section);
 
-    // Relationship map — show how symbols connect
+    const symbolFilter = hasSymbolFilterInQuery(query);
+
+    // Flow path — computed before omit-source so graph connectivity drives the decision,
+    // not question-text keyword matching.
+    const flow = this.buildFlowFromNamedSymbols(cg, query);
+    const hasFlowPath = flow.pathNodeIds.size > 0;
+
+    const callerSection = !hasFlowPath && shouldBuildCallerInventory(query)
+      ? this.buildCallerListingSection(cg, query) : '';
+    const memberSection = !hasFlowPath && shouldBuildMemberSurvey(query)
+      ? this.buildMemberSurveySection(cg, query, projectRoot) : '';
+    const configSection = shouldBuildConfigSection(query)
+      ? this.buildConfigFileSection(cg, query, projectRoot) : '';
+
+    if (callerSection) lines.push(callerSection);
+    if (memberSection) lines.push(memberSection);
+    if (configSection) lines.push(configSection);
+
+    const finishCompact = (summary: string): ToolResult => {
+      lines[summaryLineIdx] = summary;
+      return this.textResult(lines.join('\n'));
+    };
+
+    const memberFileCount = memberSection
+      ? memberSection.split('\n').filter((l) => l.startsWith('- ')).length
+      : 0;
+    const callerBulletCount = callerSection
+      ? callerSection.split('\n').filter((l) => l.startsWith('- ') && l.includes(' ← ')).length
+      : 0;
+    const omitSource = shouldOmitSourceBodies({
+      importSiteCount: importResult.siteCount,
+      hasFilteredImports: symbolFilter && importResult.siteCount > 0,
+      callerBulletCount,
+      memberFileCount,
+      configRendered: !!configSection,
+    }, hasFlowPath);
+
+    if (omitSource) {
+      if (configSection) {
+        return finishCompact('Config/manifest content above — answer from it directly.');
+      }
+      if (importResult.compactListing) {
+        return finishCompact(
+          `Listed **${importResult.siteCount}** import site(s) for the queried symbol(s). Source bodies omitted — answer from the dependency list above.`,
+        );
+      }
+      if (callerSection && callerBulletCount >= 2) {
+        return finishCompact('Caller inventory above — source bodies omitted to save tokens.');
+      }
+      if (memberSection && memberFileCount >= 2) {
+        return finishCompact(
+          `Member/pattern usage in **${memberFileCount}** file(s) — source bodies omitted.`,
+        );
+      }
+    }
+
+    // Relationship map — show how symbols connect (skip when no flow path: saves
+    // tokens on survey/dependency/how-to questions that don't need call graphs).
     const significantEdges = subgraph.edges.filter(e =>
       e.kind !== 'contains' // skip contains — it's implied by file grouping
     );
 
-    if (budget.includeRelationships && significantEdges.length > 0) {
+    if (budget.includeRelationships && hasFlowPath && !importResult.compactListing
+        && significantEdges.length > 0) {
       lines.push('**Relationships**');
       lines.push('');
 
@@ -3270,11 +3604,7 @@ export class ToolHandler {
     }
 
     // Step 4: Read contiguous file sections
-    // Compute the flow spine once — used both to prepend the Flow section (below)
-    // and to gate adaptive source sizing: files on the spine get full source,
-    // off-spine peers skeletonize.
-    const flow = this.buildFlowFromNamedSymbols(cg, query);
-
+    // (flow already computed above for relationship gating and adaptive sizing)
     // Polymorphic-sibling detector for adaptive sizing. A class that implements/
     // extends a supertype shared by >= MIN_SIBLINGS classes is one of many
     // INTERCHANGEABLE implementations (OkHttp's 14 `: Interceptor` classes —
