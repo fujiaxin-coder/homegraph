@@ -1459,10 +1459,22 @@ export class QueryBuilder {
   /**
    * Get incoming edges to a node
    */
-  getIncomingEdges(targetId: string, kinds?: EdgeKind[]): Edge[] {
+  getIncomingEdges(targetId: string, kinds?: EdgeKind[], limit?: number): Edge[] {
+    const cap =
+      typeof limit === 'number' && Number.isFinite(limit)
+        ? Math.max(1, Math.min(Math.floor(limit), 2000))
+        : undefined;
     if (kinds && kinds.length > 0) {
-      const sql = `SELECT * FROM edges WHERE target = ? AND kind IN (${kinds.map(() => '?').join(',')})`;
+      let sql = `SELECT * FROM edges WHERE target = ? AND kind IN (${kinds.map(() => '?').join(',')})`;
+      if (cap !== undefined) sql += ` LIMIT ${cap}`;
       const rows = this.db.prepare(sql).all(targetId, ...kinds) as EdgeRow[];
+      return rows.map(rowToEdge);
+    }
+
+    if (cap !== undefined) {
+      const rows = this.db
+        .prepare('SELECT * FROM edges WHERE target = ? LIMIT ?')
+        .all(targetId, cap) as EdgeRow[];
       return rows.map(rowToEdge);
     }
 

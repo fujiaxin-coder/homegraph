@@ -421,13 +421,13 @@ describe('Database Layer Improvements', () => {
     expect(synchronous).toBe(1); // NORMAL = 1
 
     const cacheSize = rawDb.pragma('cache_size', { simple: true }) as number;
-    expect(cacheSize).toBe(-64000);
+    expect(cacheSize).toBe(-16000);
 
     const tempStore = rawDb.pragma('temp_store', { simple: true });
     expect(tempStore).toBe(2); // MEMORY = 2
 
     const mmapSize = rawDb.pragma('mmap_size', { simple: true }) as number;
-    expect(mmapSize).toBe(268435456); // 256 MB
+    expect(mmapSize).toBe(0);
 
     db.close();
   });

@@ -32,9 +32,15 @@ function configureConnection(db: SqliteDatabase): void {
   db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');       // node:sqlite supports WAL on every platform
   db.pragma('synchronous = NORMAL');     // safe with WAL mode
-  db.pragma('cache_size = -64000');      // 64 MB page cache
+  // Keep SQLite's per-connection footprint small. On multi-hundred-MB indexes,
+  // a 64MB cache + 256MB mmap (× main + query-pool workers) was a major driver
+  // of multi-GB process RSS. 16MB cache / 64MB mmap is enough for interactive
+  // lookups without pinning a huge working set.
+  db.pragma('cache_size = -16000');      // 16 MB page cache
   db.pragma('temp_store = MEMORY');      // temp tables in memory
-  db.pragma('mmap_size = 268435456');    // 256 MB memory-mapped I/O
+  // mmap off — on multi-hundred-MB indexes, mapped pages inflate process RSS
+  // into multi-GB working sets on Windows/Linux with little query benefit.
+  db.pragma('mmap_size = 0');
 }
 
 /**

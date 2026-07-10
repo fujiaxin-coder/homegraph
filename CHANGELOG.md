@@ -9,8 +9,26 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- HomeGraph's MCP startup instructions and tool descriptions now lead with a **closed set of when to call** (in-repo structure, callers/callees, named-symbol wiring, Type.member usage, click→handler flows, in-repo `@kit` usages). Everything outside that set defaults to Read/Grep — no exhaustive "don't call for X/Y/Z" list.
+- `homegraph_explore` no longer treats property/event names like `isExpired` / `onClick` as **import-inventory** queries (that returned useless dependency lists and forced Grep). Named `Type.member` / UI-control+event questions take a **compact path**: definition + caller/callee trail + a few source windows.
+- `homegraph_explore` now keeps **local one-symbol / contract questions compact** (definition-focused windows, ~9K cap) and trims meta sections on no-flow answers — avoiding the previous ~24K related-file dump that often still led to extra grep/read.
+
 ### Fixes
 
+- Type / caller inventory only fires on **real survey intent** (子类 / callers / methods…call). Bare PascalCase callbacks like `OnSurfaceChangedCB` no longer get classified as empty type-inventory (that skipped compact and dumped a 15K full explore). Long NL explore anchors are capped and path/verb noise (`cpp`, `calls`, `render`…) is dropped so neighbor fan-out cannot balloon tokens.
+- Caller surveys that also ask how a **second named type becomes visible/used** (definition visible / include / 定义可见) no longer stop at path-only caller inventory — they take compact explore (callers + bodies) so the agent does not Read/Grep to finish the answer.
+- PascalCase SDK module questions ("which methods does the project use on X") now take an **API usage inventory** instead of an empty class→callers list that fell through to "No relevant code found".
+- Bare-name `homegraph_search` / compact explore no longer fan out every callee neighbor into a multi-file dump (that ballooned token cost when agents search a single symbol). Caller-shaped answers stay on callers + the definition body.
+- On large indexes where catch-up sync is deferred for memory, the staleness banner no longer tells the agent to abandon homegraph and Read whole files for structural caller/def questions.
+- `homegraph_callers` / `homegraph_callees` / `homegraph_impact` no longer resolve an ambiguous name to the top FTS hit when no exact symbol matches — that could return callees of an unrelated function and force Grep/Read to recover.
+- `homegraph_callees` and compact explore call trails prefer **same-package** targets when those exist, so cross-package logger name collisions (`logError` / `logInfo`) do not drown the real upstream/downstream.
+- Type-name and method-caller questions answer from a **type surface inventory** first (subtypes + method→caller lists) when intent is clear. Inventory still runs before compact on explore/search.
+- `homegraph_explore` inheritance / subtype questions (子类, `subclass`, `extends Type`) no longer miss the compact survey because of a regex that matched only `subclasses` (not `subclass`), and no longer first FTS-search the words `extends`/`subclass` as import symbols — which previously fell through to a full explore and pushed large-index RSS into multi-GB.
+- HomeGraph tool calls no longer die as empty MCP client timeouts (~60s `-32001`) on large projects. Heavy tools (`explore` / impact) run on the worker pool with a soft deadline (default 15s, clamped ≤20s). Soft-timeout / tool-deadline callbacks return **static** success-shaped Partial guidance only — they never touch the DB or FTS on the transport thread (any sync work there can freeze the reply flush). Light tools (`search` / `node` / callers) stay on the already-warm main connection.
+- Compact explore for named members now adds **text usage sites** when the graph has no caller edges (common for static `Type.member(...)` reads) — a bounded scan of nearby indexed files — so agents do not need a Grep round-trip for those names.
+- Named-symbol explore/search answers on the warm main connection **before** the worker pool, so compact member questions are not lost to cold-worker / wedged-daemon empty MCP timeouts. Soft deadline default is **15s** (clamped ≤20s); the stdio↔daemon proxy also returns success-shaped Partial if the daemon does not answer in time.
 - ArkTS (HarmonyOS) indexing no longer requires a separate `arkanalyzer` install after `npm install -g homegraph`. The published bundle now ships the dependency automatically.
 - **DevEco Code:** `homegraph install` now writes the global MCP config to `~/.config/deveco` on every platform, including Windows. Earlier versions put it under `%APPDATA%\deveco`, which DevEco Code never reads — so a global install could look successful while DevEco saw no MCP server. Re-run `homegraph install --target=deveco --location=global` to fix an existing setup; stale entries under the old location are cleaned up automatically.
 

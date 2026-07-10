@@ -16,6 +16,8 @@ import { findNearestHomeGraphRoot } from '../directory';
 import { watchDisabledReason } from '../sync';
 import { ToolHandler } from './tools';
 import { QueryPool, resolvePoolSize } from './query-pool';
+import { isOverRssBudget, shouldSkipCatchUpSync } from './memory-budget';
+import { getDatabasePath } from '../db';
 
 // Lazy-load the heavy HomeGraph chain (sqlite + query/graph/context layers) OFF
 // the MCP startup path. It's only needed once a tool actually opens a project —
@@ -35,11 +37,10 @@ export interface MCPEngineOptions {
   watch?: boolean;
   /**
    * Whether to off-load read-tool dispatch to a worker-thread pool. Only the
-   * SHARED daemon wants this — it serves many concurrent clients on one event
-   * loop, so without a pool concurrent explores serialize and starve the MCP
-   * transport. Direct mode (one stdio client, no concurrency) leaves it off so a
-   * single call never pays a worker round-trip. `CODEGRAPH_QUERY_POOL_SIZE=0`
-   * disables it even in daemon mode.
+   * SHARED daemon wants this — concurrent clients on one event loop. Direct /
+   * proxy-fallback leave it off: each worker is a second V8 + DB open and blew
+   * RSS on large indexes. `CODEGRAPH_QUERY_POOL_SIZE=0` disables it in daemon
+   * mode too.
    */
   queryPool?: boolean;
 }
@@ -296,8 +297,28 @@ export class MCPEngine {
   private catchUpSync(): void {
     const cg = this.cg;
     if (!cg) return;
+    let dbPath: string | null = null;
+    try {
+      dbPath = getDatabasePath(cg.getProjectRoot());
+    } catch {
+      dbPath = null;
+    }
+    if (shouldSkipCatchUpSync(dbPath)) {
+      process.stderr.write(
+        '[HomeGraph MCP] Skipping catch-up sync (large index / memory budget / HOMEGRAPH_SKIP_CATCHUP_SYNC). ' +
+          'Run `homegraph sync` if the graph may be stale.\n',
+      );
+      return;
+    }
     const p = cg
-      .sync()
+      .sync({
+        onProgress: () => {
+          // Mid-flight abort — re-parse on a large dirty tree is the multi-GB path.
+          if (isOverRssBudget()) {
+            throw new Error('HOMEGRAPH_RSS_BUDGET');
+          }
+        },
+      })
       .then((result) => {
         const changed = result.filesAdded + result.filesModified + result.filesRemoved;
         if (changed > 0) {
@@ -306,6 +327,13 @@ export class MCPEngine {
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('HOMEGRAPH_RSS_BUDGET')) {
+          process.stderr.write(
+            '[HomeGraph MCP] Catch-up sync aborted — process memory budget reached. ' +
+              'Serving the open index; run `homegraph sync` separately if needed.\n',
+          );
+          return;
+        }
         process.stderr.write(`[HomeGraph MCP] Catch-up sync failed: ${msg}\n`);
       });
     this.toolHandler.setCatchUpGate(p);

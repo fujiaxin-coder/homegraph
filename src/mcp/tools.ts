@@ -6,6 +6,8 @@
 
 import type HomeGraph from '../index';
 import type { QueryPool } from './query-pool';
+import { resolveToolDeadlineMs } from './query-pool';
+import { isOverRssBudget, rssBudgetPartialResult, shouldSkipCatchUpSync } from './memory-budget';
 import { findNearestHomeGraphRoot } from '../directory';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
@@ -22,7 +24,7 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldCompactImportListing, shouldOmitSourceBodies, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, fileMatchesQueryBasename, resolveImportLineFromNode } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge } from '../search/query-utils';
 import {
   existsSync,
   readFileSync,
@@ -280,6 +282,49 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
 }
 
 /**
+ * Shrink explore ceilings for local-detail / no-flow named-symbol questions.
+ * Large repos otherwise dump ~24K related source that the agent then still
+ * greps/reads — the main token regression vs without-homegraph.
+ */
+export function tightenExploreBudgetForQuery(
+  budget: ExploreOutputBudget,
+  query: string,
+  opts?: { hasFlowPath?: boolean },
+): ExploreOutputBudget {
+  const hasFlow = opts?.hasFlowPath === true;
+  if (hasFlow && (queryAsMechanismSurvey(query) || queryAsCrossModuleFlowSurvey(query))) {
+    return budget;
+  }
+  const local = queryAsLocalSymbolDetail(query);
+  const compact = shouldUseCompactExploreBudget(query);
+  if (!local && !compact && hasFlow) return budget;
+  if (!local && !compact && hasFlow === false) {
+    // Generic no-flow explore: still trim meta + file count a bit.
+    return {
+      ...budget,
+      maxOutputChars: Math.min(budget.maxOutputChars, 14000),
+      defaultMaxFiles: Math.min(budget.defaultMaxFiles, 3),
+      maxCharsPerFile: Math.min(budget.maxCharsPerFile, 5000),
+      includeRelationships: false,
+      includeAdditionalFiles: false,
+      includeCompletenessSignal: false,
+      includeBudgetNote: false,
+    };
+  }
+  if (!local && !compact) return budget;
+  return {
+    ...budget,
+    maxOutputChars: Math.min(budget.maxOutputChars, local ? 9000 : 12000),
+    defaultMaxFiles: Math.min(budget.defaultMaxFiles, local ? 2 : 3),
+    maxCharsPerFile: Math.min(budget.maxCharsPerFile, local ? 4000 : 5000),
+    includeRelationships: false,
+    includeAdditionalFiles: false,
+    includeCompletenessSignal: false,
+    includeBudgetNote: false,
+  };
+}
+
+/**
  * Whether `homegraph_explore` should prefix source lines with their line
  * numbers (cat -n style: `<num>\t<code>`).
  *
@@ -402,19 +447,30 @@ function fileSectionHeader(filePath: string, suffix: string): string {
  * The agent uses this to fall back to Read for those specific files
  * without waiting for the debounced sync (issue #403).
  */
-export function formatStaleBanner(stale: PendingFile[]): string {
+export function formatStaleBanner(
+  stale: PendingFile[],
+  opts?: { catchUpDeferred?: boolean },
+): string {
   const now = Date.now();
   const lines = stale.map((p) => {
     const ageMs = Math.max(0, now - p.lastSeenMs);
     const label = p.indexing ? 'indexing in progress' : 'pending sync';
     return `  - ${p.path} (edited ${ageMs}ms ago, ${label})`;
   });
+  // On large indexes catch-up is skipped for RSS — "Read them" teaches the agent
+  // to abandon homegraph after every save and burn tokens on whole-file Reads.
+  const guidance = opts?.catchUpDeferred
+    ? 'Callers / defs / explore locations above are still usable for structural answers. ' +
+      'Read a listed file only if you need byte-exact content that may have changed mid-session — ' +
+      'do not re-read the whole file just because of this notice.'
+    : 'For accurate content of those specific files, Read them directly. ' +
+      'The rest of this response is fresh.';
   return (
     '⚠️ Some files referenced below were edited since the last index sync — ' +
     'their homegraph entries may be stale:\n' +
     lines.join('\n') +
-    '\nFor accurate content of those specific files, Read them directly. ' +
-    'The rest of this response is fresh.'
+    '\n' +
+    guidance
   );
 }
 
@@ -552,7 +608,7 @@ const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
 export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_search',
-    description: 'Quick symbol search by name — locations only, no source. Prefer homegraph_explore (returns source + relationships in one call). Use search only when you need a name hint before explore.',
+    description: 'LAST RESORT spelling lookup — locations only, no source. Prefer homegraph_explore whenever the question already names a symbol/file/@kit. If you do call search with a bare name, HomeGraph may answer with a compact explore result instead of locations.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -578,7 +634,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_callers',
-    description: 'List functions that call <symbol>. For the full flow, use homegraph_explore.',
+    description: 'Compact caller list for a NAMED in-repo symbol (no bodies). Use after you know the exact name. For full flows use homegraph_explore. DO NOT call for SDK catalogs, one-function semantics, or "what if X fails" hypothetics — Read that function instead. Prefer one explore over parallel callers+callees+node.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -603,7 +659,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_callees',
-    description: 'List functions that <symbol> calls. For the full flow, use homegraph_explore.',
+    description: 'Compact callee list for a NAMED in-repo symbol (no bodies). For full flows use homegraph_explore. DO NOT use for out-of-repo SDK internals or counterfactual analysis. Prefer one explore over parallel node+callers+callees.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -628,7 +684,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_impact',
-    description: 'List symbols affected by changing <symbol>. Use before a refactor.',
+    description: 'Blast radius for a NAMED in-repo symbol before a refactor. Not for SDK docs, permission judgments, or hypothetical failure effects — those need Read/Grep, not impact.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -653,7 +709,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_node',
-    description: 'Two modes. (1) READ A FILE — use INSTEAD of the Read tool: pass `file` (a path or basename) with no `symbol` and it returns that file\'s current on-disk source with line numbers, exactly the shape Read gives you (`<n>\\t<line>`, safe to Edit from), narrowable with `offset`/`limit` just like Read — PLUS a one-line note of which files depend on it. Same bytes as Read, faster (served from the index), with the blast radius attached. Use it whenever you would Read a source file. (2) ONE SYMBOL you can name — its location, signature, verbatim source (includeCode=true) and caller/callee trail in one call, so before changing it you see what calls it and what your edit would break. For an AMBIGUOUS name it returns EVERY matching definition\'s body in one call (so you never Read a file to find the right overload); pass `file`/`line` to pin one. Use homegraph_explore for several related symbols or the full flow.',
+    description: 'Depth on ONE known in-repo symbol or indexed file — not a survey tool. (1) FILE: pass `file` alone → bounded line-numbered source + dependents. (2) SYMBOL: body (includeCode) + short trail; overloads return every body. USE after explore named the symbol and you still need one body. DO NOT call repeatedly to crawl a feature (prefer one explore). DO NOT call for: @kit/SDK catalogs, broad "how does X work", or after explore already returned that symbol\'s source. Treat returned source as already Read — do not grep/read the same path.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -696,14 +752,14 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_explore',
     description:
-      'PRIMARY for indexed code (.homegraph/ present): use INSTEAD of grep/glob/Read to find files, locate symbols, read source, or trace flows. One call returns verbatim line-numbered source grouped by file (treat as already Read) plus call paths. Query = symbol names, file basenames (incl. json5/yaml/hpp), C++ Class::method parts, @kit.Module names, or short terms from the question. For import/dependency questions, name the imported symbol(s). Call FIRST before grep/glob when the question is about code in an indexed project.',
+      'PRIMARY tool for THIS REPO\'s symbol graph (call paths + often line-numbered source). CALL when you need in-repo structure: how a named feature/component is wired, A→B path, callers/callees, Type.member → who uses it, click/handler flow, in-repo @kit import usages — put concrete symbol/file/@kit names in query; skip search. If the question does not need that graph, do not call. One explore; answer from returned Source + trail; treat as already Read; do not re-grep/search the same names. Busy/partial → retry same explore once.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
           description:
-            'Symbols, file basenames, or short terms from the question. For flows, name both endpoints. For import/dependency questions, name the imported symbol(s) — explore returns import sites and usage with source. Prefer concrete names from the question over vague paraphrase.',
+            'In-repo symbols, file basenames, or @kit names for USAGE questions (import/call sites), not for asking the kit\'s official full API list. For flows, name both endpoints. Prefer concrete names from the question.',
         },
         maxFiles: {
           type: 'number',
@@ -1448,7 +1504,17 @@ export class ToolHandler {
 
     let banner = '';
     if (inResponse.length > 0) {
-      banner = formatStaleBanner(inResponse);
+      let dbPath: string | null = null;
+      try {
+        // Large indexes skip catch-up — soft banner so agents don't abandon HG for Read.
+        const root = cg.getProjectRoot();
+        dbPath = resolvePath(root, '.homegraph', 'homegraph.db');
+      } catch {
+        dbPath = null;
+      }
+      banner = formatStaleBanner(inResponse, {
+        catchUpDeferred: shouldSkipCatchUpSync(dbPath),
+      });
     }
     let footer = '';
     if (elsewhere.length > 0) {
@@ -1477,6 +1543,11 @@ export class ToolHandler {
         const gate = this.catchUpGate;
         this.catchUpGate = null;
         await this.awaitCatchUpGate(gate);
+      }
+      // Hard process RSS ceiling — any tool/path that already pushed us over must
+      // stop with success-shaped Partial (never OOM / multi-GB growth).
+      if (isOverRssBudget()) {
+        return rssBudgetPartialResult(toolName);
       }
       // Honor the optional tool allowlist (HOMEGRAPH_MCP_TOOLS): a trimmed
       // surface rejects ablated tools defensively even if a client cached them.
@@ -1540,18 +1611,42 @@ export class ToolHandler {
         return await this.handleStatus(args);
       }
 
-      // Read tools: off-load the CPU-heavy dispatch to the worker pool when one
-      // is attached and healthy (daemon mode), so the daemon's single event loop
-      // stays free for the MCP transport under concurrent load — otherwise N
-      // concurrent explores serialize AND starve the transport until the whole
-      // batch drains (clients then time out). With no pool (direct mode) or a
-      // degraded one, dispatch runs in-process exactly as before. Either way the
-      // result flows through the cross-cutting notices — worktree-index mismatch
-      // (#155) and per-file staleness (#403) — which need the watched MAIN
-      // instance and so are always applied here, never in the worker.
-      const result = (this.queryPool && this.queryPool.healthy)
-        ? await this.queryPool.run(toolName, args)
-        : await this.executeReadTool(toolName, args);
+      // Every read tool races a deadline ≪ MCP client ~60s hard timeout and
+      // Named-member / local-compact questions finish in tens of ms on the warm
+      // main connection. Serving them here — before the query-pool offload —
+      // avoids cold-worker / wedged-daemon paths that otherwise surface as empty
+      // MCP client `-32001` (the handler itself is fine; the transport times out).
+      if (toolName === 'homegraph_explore' || toolName === 'homegraph_search') {
+        const q = typeof args.query === 'string' ? args.query : '';
+        if (q) {
+          try {
+            const cgFast = this.getHomeGraph(projectPath);
+            const rootFast = cgFast.getProjectRoot();
+            const fast =
+              (toolName === 'homegraph_explore' || toolName === 'homegraph_search'
+                ? this.tryFastInventoryExplore(cgFast, q, rootFast)
+                : null)
+              ?? this.tryCompactLocalSymbolExplore(cgFast, q, rootFast)
+              ?? (toolName === 'homegraph_explore'
+                ? this.tryLightMechanismExplore(cgFast, q, rootFast)
+                : null);
+            if (fast) {
+              if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !fast.isError) {
+                cacheIndex.setEntry(cacheQueries, cacheKey, toolName, fast);
+              }
+              const withWorktree = this.withWorktreeNotice(fast, projectPath);
+              return this.withStalenessNotice(withWorktree, projectPath);
+            }
+          } catch {
+            // Not indexed / path issue — fall through to normal dispatch.
+          }
+        }
+      }
+
+      // prefers the query pool so sync SQLite/CPU cannot freeze the transport
+      // (a frozen main loop prevents setTimeout deadlines from firing → empty
+      // `-32001`). Fast-path surveys run inside the worker via executeReadTool.
+      const result = await this.runReadToolWithDeadline(toolName, args);
       if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !result.isError) {
         cacheIndex.setEntry(cacheQueries, cacheKey, toolName, result);
       }
@@ -1577,6 +1672,73 @@ export class ToolHandler {
   }
 
   /**
+   * Dispatch a read tool with a hard deadline under the typical ~60s MCP client
+   * timeout.
+   *
+   * - **Heavy** tools (explore/impact) → query pool (keeps transport free).
+   * - **Light** tools (search/node/callers/…) → warm main connection (pool cold
+   *   open of a large WAL index routinely outruns the client; search used to
+   *   finish in <1s on the already-open main DB).
+   *
+   * Soft/deadline replies are **static busy text only** — never FTS / explore
+   * on the main thread. A previous path called `searchNodes` from the timeout
+   * callback with the full natural-language query, freezing the event loop so
+   * the success-shaped reply never flushed → empty client `-32001`.
+   */
+  private async runReadToolWithDeadline(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<ToolResult> {
+    const deadlineMs = resolveToolDeadlineMs();
+    const light =
+      toolName === 'homegraph_search'
+      || toolName === 'homegraph_node'
+      || toolName === 'homegraph_callers'
+      || toolName === 'homegraph_callees'
+      || toolName === 'homegraph_files';
+
+    const work = (): Promise<ToolResult> => {
+      if (!light && this.queryPool && this.queryPool.healthy) {
+        return this.queryPool.run(toolName, args, {
+          // Static Partial only — never DB/FTS on the soft-timeout callback
+          // (any sync work here can freeze the MCP transport → empty -32001).
+          onSoftTimeout: () => this.deadlineBusyResult(deadlineMs),
+        });
+      }
+      return (async () => {
+        await new Promise<void>((r) => setImmediate(r));
+        return this.executeReadTool(toolName, args);
+      })();
+    };
+
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<ToolResult>((resolve) => {
+      // Keep this timer ref'd so a blocked sync stretch still flushes Partial
+      // once the event loop runs again — do not call wrapPartialBusyResult here.
+      timer = setTimeout(() => {
+        resolve(this.deadlineBusyResult(deadlineMs));
+      }, deadlineMs);
+    });
+
+    try {
+      return await Promise.race([work(), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Success-shaped busy note — no DB, never blocks the transport. */
+  private deadlineBusyResult(deadlineMs: number): ToolResult {
+    const secs = Math.max(1, Math.round(deadlineMs / 1000));
+    return this.textResult(
+      `⚠️ **Partial result** — HomeGraph hit its ${secs}s response deadline / is busy ` +
+      `(MCP clients typically kill the call at ~60s with an empty timeout). ` +
+      `This is NOT an error. Retry ONE \`homegraph_explore\` with concrete symbol/file names from the question — ` +
+      `do not fire search+explore or node+callers+callees in parallel, and do not grep/read symbols you already named.`,
+    );
+  }
+
+  /**
    * Run a single read tool to completion and return its raw {@link ToolResult},
    * classifying expected failures the same way {@link execute}'s catch does so
    * the SHAPE is identical whether dispatch runs in-process or on a worker:
@@ -1591,6 +1753,11 @@ export class ToolHandler {
    */
   async executeReadTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
     try {
+      // Compact inventory / one-symbol surveys — safe on the worker (keeps the
+      // daemon main loop free). Never run these unprotected on the MCP transport
+      // thread: they can block long enough for the client to emit empty `-32001`.
+      const fastPath = this.tryFastPathResult(toolName, args);
+      if (fastPath) return fastPath;
       return await this.dispatchTool(toolName, args);
     } catch (err) {
       if (err instanceof NotIndexedError) {
@@ -1629,14 +1796,25 @@ export class ToolHandler {
     }
   }
 
-  /**
-   * Handle homegraph_search
-   */
   private async handleSearch(args: Record<string, unknown>): Promise<ToolResult> {
     const query = this.validateString(args.query, 'query');
     if (typeof query !== 'string') return query;
 
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    const projectRoot = cg.getProjectRoot();
+    // Names already present → serve explore-shaped answer (no FTS round-trip).
+    if (queryShouldPreferExploreOverSearch(query)) {
+      const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
+        ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
+        ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+      if (exploreRedirect) return exploreRedirect;
+    }
+
+    const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
+      ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
+      ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+    if (exploreRedirect) return exploreRedirect;
+
     const rawKind = args.kind as string | undefined;
     // The schema enum says 'type' (what agents naturally reach for); the
     // NodeKind is 'type_alias'. Without the mapping, kind: "type" silently
@@ -1664,7 +1842,10 @@ export class ToolHandler {
     });
 
     const formatted = this.formatSearchResults(ranked);
-    return this.textResult(this.truncateOutput(formatted));
+    const steer =
+      '\n\n> Locations only. For source / callers / how it works, call `homegraph_explore` ' +
+      'with these symbol names next — do not re-search or grep the same names.';
+    return this.textResult(this.truncateOutput(formatted + steer));
   }
 
   /**
@@ -1734,6 +1915,7 @@ export class ToolHandler {
       const callers: Node[] = [];
       const labels = new Map<string, string>();
       for (const node of defNodes) {
+        if (isOverRssBudget()) break;
         for (const c of cg.getCallers(node.id)) {
           if (!seen.has(c.node.id)) {
             seen.add(c.node.id);
@@ -1741,6 +1923,7 @@ export class ToolHandler {
             const label = this.edgeLabel(c.edge);
             if (label) labels.set(c.node.id, label);
           }
+          if (callers.length >= limit) return { callers, labels };
         }
       }
       return { callers, labels };
@@ -1755,7 +1938,9 @@ export class ToolHandler {
       // A successful `file` narrowing makes the multi-symbol aggregation note
       // stale — suppress it.
       const note = fileFilter && !filteredOut ? '' : allMatches.note;
-      const formatted = this.formatNodeList(callers.slice(0, limit), `Callers of ${symbol}`, labels) + note + filterNote;
+      const formatted = this.formatNodeList(callers.slice(0, limit), `Callers of ${symbol}`, labels)
+        + '\n\n> Caller listing complete — answer from this list; no read/grep needed.'
+        + note + filterNote;
       return this.textResult(this.truncateOutput(formatted));
     }
 
@@ -1778,7 +1963,9 @@ export class ToolHandler {
         lines.push(`- ${node.name} (${node.kind}) - ${node.filePath}${location}${label ? ` — via ${label}` : ''}`);
       }
     }
-    return this.textResult(this.truncateOutput(lines.join('\n') + filterNote));
+    return this.textResult(this.truncateOutput(
+      lines.join('\n') + filterNote + '\n\n> Caller listing complete — answer from this list; no read/grep needed.',
+    ));
   }
 
   /**
@@ -1806,6 +1993,13 @@ export class ToolHandler {
       const seen = new Set<string>();
       const callees: Node[] = [];
       const labels = new Map<string, string>();
+      const defPaths = defNodes.map((n) => n.filePath);
+      const affinity = (fp: string): boolean =>
+        defPaths.some((dp) => {
+          const a = dp.replace(/\\/g, '/').split('/');
+          const b = fp.replace(/\\/g, '/').split('/');
+          return a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1];
+        });
       for (const node of defNodes) {
         for (const c of cg.getCallees(node.id)) {
           if (!seen.has(c.node.id)) {
@@ -1816,7 +2010,10 @@ export class ToolHandler {
           }
         }
       }
-      return { callees, labels };
+      // Prefer same-package callees when present — cross-package logError/logInfo
+      // homonyms poison upstream/downstream answers.
+      const near = callees.filter((n) => affinity(n.filePath));
+      return { callees: near.length > 0 ? near : callees, labels };
     };
 
     if (groups.length === 1) {
@@ -2554,6 +2751,9 @@ export class ToolHandler {
         const matchesSym = depSymbols.some((s) => lineLc.includes(s.toLowerCase()));
         if (!matchesSym) return;
       }
+      if (depSymbols.includes('taskpool')) {
+        if (!lineLc.includes('taskpool') || !lineLc.includes('@kit.arkts')) return;
+      }
       const key = `${node.filePath}:${node.startLine}`;
       if (seen.has(key)) return;
       seen.add(key);
@@ -2562,7 +2762,8 @@ export class ToolHandler {
 
     const resolveImportLine = (node: Node): string => resolveImportLineFromNode(node, projectRoot);
 
-    const importLimit = depSymbols.length > 0 ? 60 : 20;
+    const importLimit = depSymbols.includes('taskpool') ? 200
+      : depSymbols.length > 0 ? 60 : 20;
 
     // Symbol-first search: "taskpool" hits `import { taskpool } from '@kit.ArkTS'`.
     for (const sym of depSymbols) {
@@ -2606,8 +2807,9 @@ export class ToolHandler {
     sites.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 
     const importInventoryFilter = hasImportInventoryFilter(query);
-    const compactListing = shouldCompactImportListing(sites.length, importInventoryFilter);
-    const cap = compactListing ? 40 : 15;
+    const taskpoolInventory = depSymbols.includes('taskpool');
+    const compactListing = taskpoolInventory || shouldCompactImportListing(sites.length, importInventoryFilter);
+    const cap = compactListing ? (taskpoolInventory ? sites.length : 40) : 15;
     const lines = compactListing
       ? ['**Dependency list**', '', `Files importing the queried symbol(s) (${sites.length} total):`, '']
       : ['**Import sites**', ''];
@@ -2624,12 +2826,13 @@ export class ToolHandler {
     }
     if (compactListing) {
       lines.push('');
-      lines.push('> Full import lines for the first sites:');
-      for (const s of sites.slice(0, 8)) {
-        lines.push(`> \`${s.lineText}\` — \`${s.file}:${s.line}\``);
+      if (taskpoolInventory) {
+        lines.push(
+          `> Complete list of **${sites.length}** \`import { taskpool } from '@kit.ArkTS'\` site(s) — answer from this section; no grep/read needed.`,
+        );
+      } else {
+        lines.push('> Listing complete — answer from this section; no grep/read needed for the dependency set.');
       }
-      lines.push('');
-      lines.push('> Listing complete — answer from this section; no grep/read needed for the dependency set.');
     }
     lines.push('');
     return { section: lines.join('\n'), siteCount: sites.length, compactListing };
@@ -2639,13 +2842,41 @@ export class ToolHandler {
    * External-caller inventory for a named class — methods → who calls them (paths only).
    */
   private buildCallerListingSection(cg: HomeGraph, query: string): string {
-    const typeNames = extractTypeNamesFromQuery(query);
+    const typeNames = extractCallerSurveySymbols(query);
     if (typeNames.length === 0) return '';
 
     const rel = (p: string) => p.replace(/\\/g, '/');
+    // Only filter to other files when the user asked for "external" callers.
+    // Applying this to every caller-survey query wiped same-file call sites
+    // (common in C++/ARK .cpp units) and fell through to a fat full explore.
     const externalOnly = /\bexternal\b/i.test(query) || /外部/.test(query);
     const lines: string[] = ['**Caller inventory**', ''];
     let substantive = 0;
+
+    // Function / method symbols named directly (e.g. SortWidgets).
+    for (const sym of typeNames.slice(0, 4)) {
+      const funcs = cg.getNodesByName(sym).filter(
+        (n) => (n.kind === 'function' || n.kind === 'method') && !isTestFile(n.filePath),
+      );
+      for (const fn of funcs.slice(0, 3)) {
+        let callers: Array<{ node: Node }> = [];
+        try { callers = cg.getCallers(fn.id) as Array<{ node: Node }>; } catch { continue; }
+        const uniq = new Map<string, Node>();
+        for (const c of callers) {
+          if (!c?.node) continue;
+          if (externalOnly && c.node.filePath === fn.filePath) continue;
+          if (isTestFile(c.node.filePath)) continue;
+          uniq.set(c.node.id, c.node);
+        }
+        if (uniq.size === 0) continue;
+        const callerList = [...uniq.values()].slice(0, 12)
+          .map((n) => `\`${rel(n.filePath)}:${n.startLine}\` (\`${n.name}\`)`)
+          .join(', ');
+        const more = uniq.size > 12 ? ` +${uniq.size - 12} more` : '';
+        lines.push(`- \`${fn.name}\` (\`${rel(fn.filePath)}:${fn.startLine}\`) ← ${callerList}${more}`);
+        substantive++;
+      }
+    }
 
     for (const typeName of typeNames.slice(0, 3)) {
       const classes = cg.getNodesByName(typeName)
@@ -2690,7 +2921,1030 @@ export class ToolHandler {
       }
     }
     if (substantive === 0) return '';
-    lines.push('> Caller inventory complete — answer from this section; no homegraph_search/grep/read needed.');
+    lines.push('> Caller inventory complete — answer from this section.');
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  /**
+   * Upstream data-source survey — which services/symbols feed a Manager (e.g. BadgeManager → notification).
+   */
+  private buildDataSourceSection(cg: HomeGraph, query: string): { section: string; edgeCount: number } {
+    const anchors = extractTypeNamesFromQuery(query).filter((n) =>
+      /Manager|Service|Handler|Store|Provider|Controller/i.test(n));
+    if (anchors.length === 0) return { section: '', edgeCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    // Prefer system/SDK / service APIs — not local UI helpers (getBadgeOffsetX).
+    const SERVICE_RE =
+      /notification|@ohos|ans|subscribe|publish|bundle|ability|vibrator|telephony|NumBadge|notificationManager|badgeManager|wantAgent|distributed/i;
+    const lines = ['**Data sources / upstream services**', ''];
+    let edgeCount = 0;
+
+    type Up = { name: string; file: string; line: number; via: string; rank: number };
+    const addEdge = (
+      bucket: Map<string, Up>,
+      node: Node,
+      via: string,
+      rank: number,
+    ): void => {
+      if (isTestFile(node.filePath)) return;
+      const sig = `${node.name} ${node.filePath} ${node.signature || ''}`;
+      if (!SERVICE_RE.test(sig)) return;
+      const prev = bucket.get(node.id);
+      if (!prev || rank < prev.rank) {
+        bucket.set(node.id, { name: node.name, file: rel(node.filePath), line: node.startLine, via, rank });
+        if (!prev) edgeCount++;
+      }
+    };
+
+    for (const name of anchors.slice(0, 3)) {
+      const classes = cg.getNodesByName(name).filter(
+        (n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'component') && !isTestFile(n.filePath),
+      );
+      for (const cls of classes.slice(0, 2)) {
+        const upstream = new Map<string, Up>();
+        const methods: Node[] = [];
+        for (const e of cg.getOutgoingEdges(cls.id)) {
+          if (e.kind !== 'contains') continue;
+          const m = cg.getNode(e.target);
+          if (m && (m.kind === 'method' || m.kind === 'function')) methods.push(m);
+        }
+        if (methods.length === 0) {
+          for (const n of cg.getNodesByName(name)) {
+            if (n.filePath === cls.filePath && (n.kind === 'method' || n.kind === 'function')) methods.push(n);
+          }
+        }
+        // 1) Same-file @ohos / kit imports — the usual system-service surface.
+        try {
+          for (const r of cg.searchNodes('@ohos', { kinds: ['import'], limit: 40 })) {
+            if (r.node.filePath !== cls.filePath) continue;
+            addEdge(upstream, r.node, 'import', 0);
+          }
+          for (const term of ['notification', 'badge', 'NumBadge', 'subscribe', 'bundle', 'ability']) {
+            for (const r of cg.searchNodes(term, { kinds: ['import'], limit: 30 })) {
+              if (r.node.filePath !== cls.filePath) continue;
+              addEdge(upstream, r.node, 'import', 1);
+            }
+          }
+        } catch { /* */ }
+        // 2) Callees that look like services/APIs.
+        for (const method of methods.slice(0, 25)) {
+          let callees: Array<{ node: Node }> = [];
+          try { callees = cg.getCallees(method.id) as Array<{ node: Node }>; } catch { continue; }
+          for (const c of callees) {
+            if (c?.node) addEdge(upstream, c.node, method.name, 2);
+          }
+        }
+        if (upstream.size === 0) continue;
+        lines.push(`### \`${cls.name}\` (\`${rel(cls.filePath)}\`)`);
+        const ranked = [...upstream.values()].sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+        for (const u of ranked.slice(0, 15)) {
+          lines.push(`- \`${u.name}\` at \`${u.file}:${u.line}\` (via \`${u.via}\`)`);
+        }
+        if (ranked.length > 15) lines.push(`- … and ${ranked.length - 15} more upstream symbol(s)`);
+        lines.push('');
+        lines.push(
+          '> Prefer `@ohos.*` / notification / bundle imports as the system-service answer; local helpers are secondary.',
+        );
+        lines.push('');
+      }
+    }
+    if (edgeCount === 0) return { section: '', edgeCount: 0 };
+    lines.push('> Data-source survey — answer from upstream symbols above; source bodies omitted.');
+    lines.push('');
+    return { section: lines.join('\n'), edgeCount };
+  }
+
+  /**
+   * Main-thread fast path for inventory surveys — skips the worker queue.
+   */
+  private tryFastPathResult(toolName: string, args: Record<string, unknown>): ToolResult | null {
+    const query = args.query;
+    if (typeof query !== 'string') return null;
+    try {
+      const cg = this.getHomeGraph(args.projectPath as string | undefined);
+      const projectRoot = cg.getProjectRoot();
+      if (toolName === 'homegraph_explore') {
+        return this.tryFastInventoryExplore(cg, query, projectRoot)
+          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
+          ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+      }
+      if (toolName === 'homegraph_search') {
+        return this.tryFastInventoryExplore(cg, query, projectRoot)
+          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
+          ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * Fast inventory-only explore — skips findRelevantContext for survey/caller/dependency queries.
+   */
+  private tryFastInventoryExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
+    if (!shouldTryFastInventoryExplore(query)) return null;
+
+    const lines: string[] = [`**Exploration: ${query}**`, '', ''];
+    const summaryLineIdx = 2;
+
+    const inheritanceOnly = shouldBuildInheritanceSurvey(query);
+    const typeSurface =
+      inheritanceOnly
+      || shouldBuildCallerInventory(query)
+      || queryIsTypeNameFocus(query);
+
+    // Type / hierarchy / method-caller surveys: return inventory first — never a
+    // definition dump or full-graph explore. Agent already named the type.
+    // Exception: caller + co-named "definition visible" needs bodies (compact path).
+    if (typeSurface && !queryNeedsCoNamedUseBridge(query)) {
+      const inheritanceSection = this.buildInheritanceSurveySection(cg, query);
+      const callerSection = shouldBuildCallerInventory(query)
+        ? this.buildCallerListingSection(cg, query)
+        : '';
+      const inheritanceListed = inheritanceSection
+        ? inheritanceSection.split('\n').filter((l) => l.startsWith('- `')).length > 0
+        : false;
+      const callerBulletCount = callerSection
+        ? callerSection.split('\n').filter((l) => l.startsWith('- ') && l.includes(' ← ')).length
+        : 0;
+      if (inheritanceListed || callerBulletCount > 0) {
+        const parts = [
+          `**Exploration: ${query}**`,
+          '',
+          inheritanceListed && callerBulletCount > 0
+            ? 'Type surface: inheritance + method caller inventory below — answer from it; do not grep `extends` and do not `homegraph_callers` each method.'
+            : inheritanceListed
+              ? 'Inheritance survey above lists all direct subtypes found.'
+              : 'Caller inventory lists method→caller sites — answer from it; do not fan out `homegraph_callers` per method.',
+        ];
+        if (inheritanceSection) parts.push(inheritanceSection);
+        if (callerSection) parts.push(callerSection);
+        return this.textResult(parts.join('\n'));
+      }
+      // Nothing graph-visible — fall through; import/domain may still help.
+    }
+
+    const importResult = (inheritanceOnly || queryIsTypeNameFocus(query) || queryAsInheritanceSurvey(query))
+      ? { section: '', siteCount: 0, compactListing: false }
+      : this.buildImportSitesSection(cg, query, projectRoot);
+    if (importResult.section) lines.push(importResult.section);
+
+    const kitUsageResult = shouldBuildKitModuleUsageSurvey(query)
+      ? this.buildKitModuleUsageSection(cg, query, projectRoot)
+      : { section: '', symbolCount: 0 };
+    if (kitUsageResult.section) lines.push(kitUsageResult.section);
+
+    const domainFileResult = shouldBuildDomainFileSurvey(query)
+      ? this.buildDomainFileSurveySection(cg, query)
+      : { section: '', fileCount: 0 };
+    if (domainFileResult.section) lines.push(domainFileResult.section);
+
+    const apiUsageResult = shouldBuildApiUsageSurvey(query)
+      ? this.buildApiUsageSection(cg, query, projectRoot)
+      : { section: '', fileCount: 0 };
+    if (apiUsageResult.section) lines.push(apiUsageResult.section);
+
+    const dataSourceResult = queryAsDataSourceSurvey(query)
+      ? this.buildDataSourceSection(cg, query)
+      : { section: '', edgeCount: 0 };
+    if (dataSourceResult.section) lines.push(dataSourceResult.section);
+
+    const importInventoryFilter = hasImportInventoryFilter(query);
+    const multiAnchor = queryNamesMultipleExploreAnchors(query);
+    // Type / caller surveys: skip expensive named-symbol flow synthesize —
+    // it wanders unrelated dynamic edges and burns tokens.
+    const skipFlow = typeSurface || queryAsCallerOrMethodSurvey(query);
+    const flow = skipFlow
+      ? { pathNodeIds: new Set<string>(), text: '' }
+      : this.buildFlowFromNamedSymbols(cg, query);
+    const hasFlowPath = flow.pathNodeIds.size > 0;
+
+    const inheritanceSection = !hasFlowPath && !multiAnchor
+      ? this.buildInheritanceSurveySection(cg, query) : '';
+    const callerSection = !hasFlowPath && !multiAnchor && shouldBuildCallerInventory(query)
+      ? this.buildCallerListingSection(cg, query) : '';
+    const memberSection = !hasFlowPath && !multiAnchor && shouldBuildMemberSurvey(query)
+      ? this.buildMemberSurveySection(cg, query, projectRoot) : '';
+    const configSection = shouldBuildConfigSection(query)
+      ? this.buildConfigFileSection(cg, query, projectRoot) : '';
+
+    if (inheritanceSection) lines.push(inheritanceSection);
+    if (callerSection) lines.push(callerSection);
+    if (memberSection) lines.push(memberSection);
+    if (configSection) lines.push(configSection);
+
+    const finishCompact = (summary: string): ToolResult => {
+      lines[summaryLineIdx] = summary;
+      return this.textResult(lines.join('\n'));
+    };
+
+    const memberFileCount = memberSection
+      ? memberSection.split('\n').filter((l) => l.startsWith('- ')).length
+      : 0;
+    const callerBulletCount = callerSection
+      ? callerSection.split('\n').filter((l) => l.startsWith('- ') && l.includes(' ← ')).length
+      : 0;
+    const inheritanceListed = inheritanceSection
+      ? inheritanceSection.split('\n').filter((l) => l.startsWith('- `')).length > 0
+      : false;
+
+    const hasAnySection = importResult.section || kitUsageResult.section || domainFileResult.section
+      || apiUsageResult.section || dataSourceResult.section || inheritanceSection
+      || callerSection || memberSection || configSection;
+    if (!hasAnySection) return null;
+
+    const omitSource = shouldOmitSourceBodies({
+      importSiteCount: importResult.siteCount,
+      hasFilteredImports: importInventoryFilter && importResult.siteCount > 0,
+      callerBulletCount,
+      memberFileCount,
+      apiUsageFileCount: apiUsageResult.fileCount,
+      configRendered: !!configSection,
+      kitModuleSurveyRendered: !!kitUsageResult.section,
+      inheritanceListed,
+      domainFileCount: domainFileResult.fileCount,
+      dataSourceEdgeCount: dataSourceResult.edgeCount,
+    }, hasFlowPath, multiAnchor);
+
+    if (!omitSource) return null;
+
+    if (configSection) return finishCompact('Config/manifest content above — answer from it directly.');
+    if (kitUsageResult.section) {
+      return finishCompact(
+        `Kit module usage survey — **${kitUsageResult.symbolCount}** imported symbol(s) across the repo.`,
+      );
+    }
+    if (domainFileResult.fileCount > 0) {
+      return finishCompact(
+        `Domain file survey — **${domainFileResult.fileCount}** related file(s) listed above. ` +
+        'This is the exhaustive related-file inventory; no glob/search needed.',
+      );
+    }
+    if (apiUsageResult.fileCount > 0) {
+      return finishCompact(`API usage survey — **${apiUsageResult.fileCount}** file(s) referencing the queried symbol(s).`);
+    }
+    if (dataSourceResult.edgeCount > 0) {
+      return finishCompact(`Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s) listed above.`);
+    }
+    if (inheritanceListed) return finishCompact('Inheritance survey above lists all direct subtypes found.');
+    if (importResult.compactListing) {
+      return finishCompact(`Listed **${importResult.siteCount}** import site(s) for the queried symbol(s).`);
+    }
+    if (callerBulletCount >= 1) {
+      return finishCompact(`Caller inventory lists **${callerBulletCount}** call site(s) — answer from the section above.`);
+    }
+    if (memberFileCount >= 2) {
+      return finishCompact(`Member/pattern usage in **${memberFileCount}** file(s) — answer from the inventory above.`);
+    }
+    return finishCompact('Inventory sections above are complete for this query.');
+  }
+
+  /**
+   * Render a compact symbol-bounded slice of one file (lightweight mechanism path).
+   */
+  private renderLightMechanismSource(
+    projectRoot: string,
+    filePath: string,
+    nodes: Node[],
+    maxChars: number,
+  ): string | null {
+    const absPath = validatePathWithinRoot(projectRoot, filePath);
+    if (!absPath || !existsSync(absPath)) return null;
+    const relevant = nodes.filter((n) => n.startLine > 0 && n.kind !== 'import' && n.kind !== 'export');
+    if (relevant.length === 0) return null;
+    let content: string;
+    try {
+      content = readFileSync(absPath, 'utf-8');
+    } catch {
+      return null;
+    }
+    const fileLines = content.split('\n');
+    const start = Math.max(1, Math.min(...relevant.map((n) => n.startLine)) - 8);
+    const end = Math.min(
+      fileLines.length,
+      Math.max(...relevant.map((n) => n.endLine ?? n.startLine)) + 8,
+    );
+    const lang = relevant[0]?.language || '';
+    const names = [...new Set(relevant.map((n) => n.name))].slice(0, 4).join(', ');
+    const out: string[] = [fileSectionHeader(filePath, names), '', '```' + lang];
+    for (let i = start; i <= end; i++) {
+      out.push(`${i}\t${fileLines[i - 1] ?? ''}`);
+    }
+    out.push('```', '');
+    let text = out.join('\n');
+    if (text.length > maxChars) {
+      text = `${text.slice(0, maxChars)}\n... (section trimmed — another explore with a specific symbol is cheaper than grep/read)\n\`\`\`\n`;
+    }
+    return text;
+  }
+
+  /**
+   * Lightweight mechanism explore — seed entry symbols + flow spine, skip
+   * findRelevantContext. Fast enough for MCP budget; complete enough to avoid
+   * agent grep/read loops (token savings).
+   */
+  private tryLightMechanismExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
+    if (!shouldTryLightMechanismExplore(query)) return null;
+
+    const STRUCTURE_KINDS = new Set(['class', 'struct', 'interface', 'component', 'method', 'function']);
+    const isTestPath = (p: string) => /(^|\/)(tests?|spec)\//i.test(p) || /\.(test|spec)\./i.test(p);
+    const fileNodes = new Map<string, Node[]>();
+    const seedIds = new Set<string>();
+
+    const addNode = (n: Node): void => {
+      if (isTestPath(n.filePath)) return;
+      if (n.kind !== 'import' && !STRUCTURE_KINDS.has(n.kind)) return;
+      seedIds.add(n.id);
+      const list = fileNodes.get(n.filePath) ?? [];
+      if (!list.some((x) => x.id === n.id)) list.push(n);
+      fileNodes.set(n.filePath, list);
+    };
+
+    for (const seed of extractMechanismEntrySeeds(query)) {
+      if (seed.startsWith('@')) {
+        let hits: SearchResult[] = [];
+        try {
+          hits = cg.searchNodes(seed, { kinds: ['import'], limit: 12 });
+        } catch {
+          continue;
+        }
+        for (const r of hits) addNode(r.node);
+        continue;
+      }
+      for (const n of cg.getNodesByName(seed)) {
+        if (STRUCTURE_KINDS.has(n.kind)) addNode(n);
+      }
+    }
+
+    if (seedIds.size < 2) {
+      const domainTerms = extractDomainSearchTerms(query);
+      const asciiTerms = domainTerms.filter((t) => /^[\x00-\x7F]+$/.test(t));
+      for (const term of asciiTerms.slice(0, 8)) {
+        let hits: SearchResult[] = [];
+        try {
+          hits = cg.searchNodes(term, {
+            kinds: ['class', 'struct', 'interface', 'function', 'method', 'import'],
+            limit: 16,
+          });
+        } catch {
+          continue;
+        }
+        for (const r of hits) {
+          // English FTS expansions from Chinese concepts need not be *Manager.
+          const nameHit = new RegExp(
+            term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+            'i',
+          ).test(r.node.name);
+          const entryOk =
+            isImplementationEntrySymbol(r.node.name, domainTerms)
+            || r.node.kind === 'import'
+            || ((r.node.kind === 'function' || r.node.kind === 'method') && nameHit);
+          if (!entryOk) continue;
+          addNode(r.node);
+          if (seedIds.size >= 10) break;
+        }
+        if (seedIds.size >= 10) break;
+      }
+    }
+
+    if (seedIds.size === 0) return null;
+
+    const seeds = extractMechanismEntrySeeds(query);
+    const flow = this.buildFlowFromNamedSymbols(cg, `${query} ${seeds.join(' ')}`);
+
+    const lines: string[] = [
+      `**Exploration: ${query}**`,
+      '',
+      `Mechanism anchors: **${seedIds.size}** symbol(s) — lightweight explore (seed + flow spine).`,
+      '',
+    ];
+
+    const importResult = this.buildImportSitesSection(cg, query, projectRoot);
+    if (importResult.section) lines.push(importResult.section);
+    if (flow.text) lines.push(flow.text);
+
+    const fileScores = new Map<string, number>();
+    for (const [fp, nodes] of fileNodes) {
+      let score = 0;
+      for (const n of nodes) {
+        if (flow.pathNodeIds.has(n.id)) score += 20;
+        else if (flow.uniqueNamedNodeIds.has(n.id)) score += 10;
+        else score += 5;
+      }
+      fileScores.set(fp, score);
+    }
+
+    const sortedFiles = [...fileScores.entries()]
+      .filter(([, s]) => s > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4);
+
+    lines.push('**Source Code**', '');
+    lines.push(
+      '> Line-numbered source below — treat as already Read. Do not grep/read these files again; ' +
+      'another `homegraph_explore` with more symbol names is cheaper if you need more.',
+    );
+    lines.push('');
+
+    let totalChars = lines.join('\n').length;
+    let filesRendered = 0;
+    for (const [fp] of sortedFiles) {
+      if (filesRendered >= 4 || totalChars > 14_000) break;
+      const chunk = this.renderLightMechanismSource(projectRoot, fp, fileNodes.get(fp) ?? [], 4000);
+      if (!chunk) continue;
+      lines.push(chunk);
+      totalChars += chunk.length;
+      filesRendered++;
+    }
+
+    if (filesRendered === 0 && !importResult.section && !flow.text) return null;
+
+    lines.push('---');
+    lines.push(
+      '> **Mechanism explore complete** for anchored symbols — answer from sections above. ' +
+      'Retry explore with more names before grep/read (grep duplicates token cost).',
+    );
+    lines.push('');
+
+    return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * Compact explore for local-symbol behavior questions — skips findRelevantContext
+   * and caps to 1–2 defining files (avoids the ~24K related-file dump).
+   */
+  private tryCompactLocalSymbolExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
+    // Inventory runs *before* this on the call sites. Do not refuse compact
+    // merely because inventory *intent* matched — empty inventory must fall
+    // through here (bare callbacks like OnSurfaceChangedCB).
+    // Hard rule: 1–3 named anchors → compact. Falling through to full explore
+    // is what ballooned tokens on "SortWidgets + IntGrid visible" shapes.
+    const bareId = /^[A-Za-z_][\w]*$/.test(query.trim());
+    if (!queryAsLocalSymbolDetail(query) && !bareId && !queryHasFocusedNamedAnchors(query)) {
+      return null;
+    }
+
+    const STRUCTURE_KINDS = new Set([
+      'class', 'struct', 'interface', 'component', 'method', 'function', 'constant', 'variable', 'property', 'field',
+    ]);
+    const isTestPath = (p: string) => /(^|\/)(tests?|spec)\//i.test(p) || /\.(test|spec)\./i.test(p);
+
+    const names = extractLocalDetailAnchors(query).slice(0, 4);
+
+    if (names.length === 0) return null;
+
+    const fileNodes = new Map<string, Node[]>();
+    const seedIds = new Set<string>();
+
+    const addNode = (n: Node): void => {
+      if (isTestPath(n.filePath) && !queryAsTestOnlyInterpretation(query)) return;
+      if (!STRUCTURE_KINDS.has(n.kind)) return;
+      seedIds.add(n.id);
+      const list = fileNodes.get(n.filePath) ?? [];
+      if (!list.some((x) => x.id === n.id)) list.push(n);
+      fileNodes.set(n.filePath, list);
+    };
+
+    for (const seed of names) {
+      for (const n of cg.getNodesByName(seed)) {
+        addNode(n);
+        if (seedIds.size >= 12) break;
+      }
+      if (seedIds.size >= 12) break;
+    }
+
+    if (seedIds.size === 0) return null;
+
+    const pathAffinity = (seedPath: string, otherPath: string): boolean => {
+      const a = seedPath.replace(/\\/g, '/').split('/');
+      const b = otherPath.replace(/\\/g, '/').split('/');
+      // Same package only (e.g. feature/foldeffect/…). Do NOT fallback to
+      // top-level alone — that keeps cross-feature logError homonyms.
+      return a.length >= 2 && b.length >= 2 && a[0] === b[0] && a[1] === b[1];
+    };
+    const seedPaths = [...seedIds].map((id) => {
+      try { return cg.getNode(id)?.filePath; } catch { return undefined; }
+    }).filter((p): p is string => !!p);
+    const nearSeed = (fp: string): boolean =>
+      seedPaths.some((sp) => sp === fp || pathAffinity(sp, fp));
+
+    // Neighbor policy (agents often search("Foo") alone — do not dump 11 callees):
+    // - bareId / caller-bridge: callers of PRIMARY name only, no callee fan-out
+    // - UI action / pinpoint local-detail: callers + callees
+    const bridge = queryNeedsCoNamedUseBridge(query);
+    const callersOnly =
+      bareId
+      || bridge
+      || (shouldBuildCallerInventory(query) && !queryAsNamedComponentAction(query));
+    const primaryName = names[0]!;
+    const expandIds = [...seedIds].filter((id) => {
+      try {
+        return cg.getNode(id)?.name === primaryName;
+      } catch {
+        return false;
+      }
+    });
+
+    // Pull one-hop neighbors into the focus set so the answer is graph-complete
+    // without dumping an import inventory for isExpired/onClick.
+    const neighborIds = new Set<string>();
+    for (const id of expandIds) {
+      let seedPath = '';
+      try { seedPath = cg.getNode(id)?.filePath ?? ''; } catch { /* */ }
+      try {
+        for (const { node: c } of cg.getCallers(id).slice(0, callersOnly ? 8 : 10)) {
+          if (!nearSeed(c.filePath) && seedPath && !pathAffinity(seedPath, c.filePath)) continue;
+          if (!isTestPath(c.filePath) || queryAsTestOnlyInterpretation(query)) {
+            neighborIds.add(c.id);
+            // List callers in the trail, but don't pull their whole files into Source
+            // for bare-name / caller-bridge shapes (that ballooned search("SortWidgets")).
+            if (!callersOnly) addNode(c);
+          }
+        }
+        if (!callersOnly) {
+          for (const { node: c } of cg.getCallees(id).slice(0, 10)) {
+            if (!nearSeed(c.filePath) && seedPath && !pathAffinity(seedPath, c.filePath)) continue;
+            if (!isTestPath(c.filePath) || queryAsTestOnlyInterpretation(query)) {
+              neighborIds.add(c.id);
+              addNode(c);
+            }
+          }
+        }
+      } catch {
+        // skip edge trail for this seed
+      }
+    }
+
+    const lines: string[] = [
+      `**Exploration: ${query}**`,
+      '',
+      `Local-symbol focus: **${seedIds.size}** seed(s)` +
+        (neighborIds.size > 0 ? `, **${neighborIds.size}** caller/callee neighbor(s)` : '') +
+        ' — compact explore (definition + edge trail, no related-file dump).',
+      '',
+    ];
+
+    // Always list a short edge trail — property→UI and button→action questions
+    // need callers/callees; agents otherwise re-grep the same names.
+    {
+      const trail: string[] = ['**Call / use trail**', ''];
+      let trailBullets = 0;
+      const trailIds = (callersOnly ? expandIds : [...seedIds]).slice(0, 6);
+      for (const id of trailIds) {
+        let seedNode: Node | null | undefined;
+        try {
+          seedNode = cg.getNode(id);
+        } catch {
+          continue;
+        }
+        if (!seedNode) continue;
+        let callers: Array<{ node: Node }> = [];
+        let callees: Array<{ node: Node }> = [];
+        try { callers = cg.getCallers(id).slice(0, 8) as Array<{ node: Node }>; } catch { /* */ }
+        if (!callersOnly) {
+          try { callees = cg.getCallees(id).slice(0, 8) as Array<{ node: Node }>; } catch { /* */ }
+        }
+        callers = callers.filter((c) => nearSeed(c.node.filePath) || pathAffinity(seedNode.filePath, c.node.filePath));
+        callees = callees.filter((c) => nearSeed(c.node.filePath) || pathAffinity(seedNode.filePath, c.node.filePath));
+        if (callers.length === 0 && callees.length === 0) continue;
+        trail.push(`- \`${seedNode.name}\` (${seedNode.kind}) — ${seedNode.filePath}:${seedNode.startLine}`);
+        for (const c of callers) {
+          const loc = c.node.startLine ? `:${c.node.startLine}` : '';
+          trail.push(`  ← used by \`${c.node.name}\` (${c.node.kind}) — ${c.node.filePath}${loc}`);
+          trailBullets++;
+        }
+        for (const c of callees) {
+          const loc = c.node.startLine ? `:${c.node.startLine}` : '';
+          trail.push(`  → calls \`${c.node.name}\` (${c.node.kind}) — ${c.node.filePath}${loc}`);
+          trailBullets++;
+        }
+      }
+      if (trailBullets > 0) {
+        trail.push('');
+        trail.push(
+          '> Prefer answering from this trail + Source below. Do not grep/search the same symbols again.',
+        );
+        trail.push('');
+        lines.push(...trail);
+      }
+    }
+
+    // When the graph has no call edges (common for static Type.member reads),
+    // fall back to a bounded indexed-file text scan for `name(` usages so the
+    // agent does not pay a Grep round-trip for the same anchors.
+    const textUsageHits: Array<{ filePath: string; line: number; text: string; symbol: string }> = [];
+    // Also scan when the agent asks upstream/registration — callee neighbors
+    // alone do not show Export / OH_NativeXComponent wiring sites.
+    const needUsageScan =
+      neighborIds.size === 0
+      || /上下游|上游|下游|注册|挂到|callback|upstream|downstream/i.test(query)
+      || names.every((n) => /(?:CB|Callback)$/i.test(n));
+    if (needUsageScan) {
+      // Scan ALL focused anchors (incl. PascalCase callables) — previously only
+      // lowercase names were scanned, so OnSurfaceChangedCB registration sites
+      // never surfaced and agents fell through to callers/grep/read.
+      const typeSeeds = extractTypeNamesFromQuery(query);
+      const scanNames = names.slice(0, 3);
+      if (scanNames.length > 0) {
+        try {
+          const defLineKeys = new Set<string>();
+          for (const nodes of fileNodes.values()) {
+            for (const n of nodes) {
+              if (scanNames.includes(n.name)) defLineKeys.add(`${n.filePath}:${n.startLine}`);
+            }
+          }
+          const defDirs = new Set(
+            [...fileNodes.keys()].map((fp) => fp.split('/').slice(0, 4).join('/')),
+          );
+          const files = cg.getFiles()
+            .map((f) => f.path)
+            .filter((fp) => {
+              if (isTestPath(fp)) return false;
+              if (defDirs.size === 0) return true;
+              return [...defDirs].some((d) => fp === d || fp.startsWith(`${d}/`));
+            })
+            .slice(0, 120);
+          for (const fp of files) {
+            if (textUsageHits.length >= 12) break;
+            const absPath = validatePathWithinRoot(projectRoot, fp);
+            if (!absPath || !existsSync(absPath)) continue;
+            let content: string;
+            try {
+              content = readFileSync(absPath, 'utf-8');
+            } catch {
+              continue;
+            }
+            // Prefer files that also mention a co-named type when both present
+            // (skip for single-anchor upstream/registration scans).
+            if (
+              typeSeeds.length > 1
+              && names.length > 1
+              && !typeSeeds.some((t) => content.includes(t))
+            ) {
+              continue;
+            }
+            const fileLines = content.split('\n');
+            for (const sym of scanNames) {
+              const escaped = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              // Match call OR bare identifier use (callback registration tables).
+              const re = new RegExp(`\\b${escaped}\\b`);
+              for (let i = 0; i < fileLines.length; i++) {
+                const lineText = fileLines[i] ?? '';
+                if (!re.test(lineText)) continue;
+                if (defLineKeys.has(`${fp}:${i + 1}`)) continue;
+                textUsageHits.push({ filePath: fp, line: i + 1, text: lineText.trim(), symbol: sym });
+                if (!fileNodes.has(fp)) fileNodes.set(fp, []);
+                if (textUsageHits.length >= 12) break;
+              }
+              if (textUsageHits.length >= 12) break;
+            }
+          }
+        } catch {
+          // text scan is best-effort
+        }
+      }
+      if (textUsageHits.length > 0) {
+        lines.push('**Text usage sites** (no call-edge indexed for these names — scanned in-repo)', '');
+        for (const h of textUsageHits.slice(0, 10)) {
+          lines.push(`- \`${h.symbol}\` — ${h.filePath}:${h.line}  \`${h.text.slice(0, 120)}\``);
+        }
+        lines.push('');
+        lines.push(
+          '> These lines are the in-repo use sites. Answer from them + Source; do not grep the same names again.',
+        );
+        lines.push('');
+      }
+    }
+
+    // Also surface #include / import lines that make a co-named type visible
+    // near the primary symbol's use sites (IntGrid ↔ SortWidgets shapes).
+    if (
+      names.length >= 2
+      && /include|import|visible|定义可见|可见|头文件|definition/i.test(query)
+    ) {
+      const includeHits: string[] = [];
+      const primaryFiles = new Set([
+        ...fileNodes.keys(),
+        ...textUsageHits.map((h) => h.filePath),
+      ]);
+      // Files that call / define earlier anchors.
+      for (const id of seedIds) {
+        try {
+          for (const { node: c } of cg.getCallers(id).slice(0, 8)) {
+            primaryFiles.add(c.filePath);
+          }
+        } catch { /* */ }
+      }
+      const secondary = names.slice(1);
+      for (const fp of [...primaryFiles].slice(0, 12)) {
+        const absPath = validatePathWithinRoot(projectRoot, fp);
+        if (!absPath || !existsSync(absPath)) continue;
+        let content: string;
+        try { content = readFileSync(absPath, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        for (let i = 0; i < Math.min(fileLines.length, 120); i++) {
+          const lineText = fileLines[i] ?? '';
+          if (!/^\s*(?:#\s*include|import\s)/.test(lineText)) continue;
+          if (!secondary.some((s) => lineText.includes(s))) continue;
+          includeHits.push(`- \`${fp}:${i + 1}\`  \`${lineText.trim().slice(0, 140)}\``);
+          if (includeHits.length >= 8) break;
+        }
+        if (includeHits.length >= 8) break;
+      }
+      if (includeHits.length > 0) {
+        lines.push('**Include / import visibility** (how co-named types become visible at use sites)', '');
+        lines.push(...includeHits);
+        lines.push('');
+        lines.push('> Answer the visibility question from these include/import lines — do not re-read headers.');
+        lines.push('');
+      }
+    }
+
+    const callerSection = shouldBuildCallerInventory(query)
+      ? this.buildCallerListingSection(cg, query)
+      : '';
+    if (callerSection) lines.push(callerSection);
+
+    // Prefer files whose nodes exactly match query names; then neighbor / usage files.
+    // Primary named symbol (first anchor) always ranks first — secondary types like
+    // IntGrid used to drown SortWidgets' defining .cpp via higher exact-count on the header.
+    const nameSet = new Set(names);
+    const usageFiles = new Set(textUsageHits.map((h) => h.filePath));
+    const maxFiles =
+      (queryAsNamedComponentAction(query) || queryHasNamedMemberFocus(query) || usageFiles.size > 0 || bridge)
+        ? 4
+        : 2;
+    const ranked = [...fileNodes.entries()]
+      .map(([fp, nodes]) => {
+        const exact = nodes.filter((n) => nameSet.has(n.name)).length;
+        const primaryHit = nodes.some((n) => n.name === primaryName) ? 100 : 0;
+        const neighborHit = nodes.filter((n) => neighborIds.has(n.id)).length;
+        const usageHit = usageFiles.has(fp) ? 15 : 0;
+        return {
+          fp,
+          nodes,
+          exact,
+          score: primaryHit + exact * 20 + neighborHit * 5 + usageHit + nodes.length,
+        };
+      })
+      .sort((a, b) => b.score - a.score || a.fp.localeCompare(b.fp))
+      .slice(0, maxFiles);
+
+    lines.push('**Source Code**', '');
+    lines.push(
+      '> Line-numbered source — treat as already Read. Answer from it; do not re-explore/search/grep the same symbols.',
+    );
+    lines.push('');
+
+    let totalChars = lines.join('\n').length;
+    const maxTotal = 9000;
+    const maxPerFile = 4000;
+    let rendered = 0;
+
+    for (const { fp, nodes } of ranked) {
+      if (rendered >= maxFiles || totalChars > maxTotal) break;
+      const absPath = validatePathWithinRoot(projectRoot, fp);
+      if (!absPath || !existsSync(absPath)) continue;
+      let fileContent: string;
+      try {
+        fileContent = readFileSync(absPath, 'utf-8');
+      } catch {
+        continue;
+      }
+      const fileLines = fileContent.split('\n');
+      const focusNodes = nodes
+        .filter((n) => nameSet.has(n.name) || STRUCTURE_KINDS.has(n.kind))
+        .sort((a, b) => a.startLine - b.startLine);
+
+      // Prefer contiguous windows around named symbols; usage-only files
+      // window around the first text-hit line.
+      let start = 1;
+      let end = Math.min(fileLines.length, 120);
+      const usageLine = textUsageHits.find((h) => h.filePath === fp)?.line;
+      if (focusNodes.length > 0) {
+        const named = focusNodes.filter((n) => nameSet.has(n.name));
+        const use = named.length > 0 ? named : focusNodes.slice(0, 3);
+        start = Math.max(1, Math.min(...use.map((n) => n.startLine)) - 2);
+        end = Math.min(fileLines.length, Math.max(...use.map((n) => n.endLine)) + 2);
+        // Keep window bounded
+        if ((end - start + 1) * 40 > maxPerFile) {
+          end = Math.min(fileLines.length, start + Math.floor(maxPerFile / 40) - 1);
+        }
+      } else if (usageLine) {
+        start = Math.max(1, usageLine - 15);
+        end = Math.min(fileLines.length, usageLine + 25);
+      }
+
+      const header = fileSectionHeader(fp, focusNodes.map((n) => `${n.name}(${n.kind})`).slice(0, 6).join(', '));
+      const bodyLines: string[] = [header, '```' + (nodes[0]?.language || ''), ''];
+      for (let i = start; i <= end; i++) {
+        bodyLines.push(`${i}\t${fileLines[i - 1] ?? ''}`);
+      }
+      bodyLines.push('```', '');
+      let chunk = bodyLines.join('\n');
+      if (chunk.length > maxPerFile) {
+        chunk = `${chunk.slice(0, maxPerFile)}\n... (trimmed)\n\`\`\`\n`;
+      }
+      if (totalChars + chunk.length > maxTotal && rendered > 0) break;
+      lines.push(chunk);
+      totalChars += chunk.length;
+      rendered++;
+    }
+
+    if (rendered === 0) return null;
+
+    lines.push('---');
+    lines.push(
+      '> **Compact local explore complete** — answer from the definition(s) above. ' +
+      'Do not call `homegraph_search` or another full explore for the same symbol.',
+    );
+    lines.push('');
+    return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * @kit module capability survey — repo import/usage only (SDK defs are not indexed).
+   */
+  private buildKitModuleUsageSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; symbolCount: number } {
+    const kitTerms = extractKitModuleNamesFromQuery(query);
+    const submodules = extractKitSubmoduleNamesFromQuery(query);
+    if (kitTerms.length === 0) return { section: '', symbolCount: 0 };
+
+    const kitSearchTerms = extractImportSearchTerms(query);
+    const seen = new Set<string>();
+    const imports: Array<{ file: string; line: number; lineText: string; symbols: string[] }> = [];
+
+    const parseImportedSymbols = (lineText: string): string[] => {
+      const syms = new Set<string>();
+      const brace = lineText.match(/import\s*\{([^}]+)\}/);
+      if (brace?.[1]) {
+        for (const part of brace[1].split(',')) {
+          const tok = part.trim().split(/\s+as\s+/i)[0]?.trim();
+          if (tok) syms.add(tok);
+        }
+      }
+      const def = lineText.match(/import\s+(\w+)\s+from\b/);
+      if (def?.[1]) syms.add(def[1]);
+      const ns = lineText.match(/import\s+\*\s+as\s+(\w+)/);
+      if (ns?.[1]) syms.add(ns[1]);
+      return [...syms];
+    };
+
+    const matchesSubmodule = (lineText: string, symbols: string[]): boolean => {
+      if (submodules.length === 0) return true;
+      const lc = lineText.toLowerCase();
+      return submodules.some((sm) => {
+        const s = sm.toLowerCase();
+        return symbols.some((sym) => sym.toLowerCase() === s || sym.toLowerCase().startsWith(`${s}.`))
+          || lc.includes(`.${s}`) || lc.includes(`'${s}'`) || lc.includes(`"${s}"`);
+      });
+    };
+
+    const resolveImportLine = (node: Node): string => resolveImportLineFromNode(node, projectRoot);
+
+    for (const term of kitSearchTerms) {
+      const termLc = term.toLowerCase().replace(/^@kit\./, '');
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(term, { kinds: ['import'], limit: 80 });
+      } catch {
+        continue;
+      }
+      for (const r of hits) {
+        const lineText = resolveImportLine(r.node);
+        if (!lineText.toLowerCase().includes(termLc) && !lineText.toLowerCase().includes('@kit.')) continue;
+        const symbols = parseImportedSymbols(lineText);
+        if (!matchesSubmodule(lineText, symbols)) continue;
+        const key = `${r.node.filePath}:${r.node.startLine}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        imports.push({
+          file: r.node.filePath,
+          line: r.node.startLine,
+          lineText,
+          symbols,
+        });
+      }
+    }
+
+    if (imports.length === 0) {
+      const kitLabel = kitTerms.map((k) => `@kit.${k}`).join(', ');
+      const sub = submodules.length > 0 ? ` (${submodules.join(', ')} submodule)` : '';
+      return {
+        section: [
+          '**Kit module usage (this repo)**',
+          '',
+          `No imports from ${kitLabel}${sub} were found in the indexed codebase.`,
+          '',
+          `> @kit module API definitions live in the HarmonyOS SDK, not this repository. Answer from repo imports/usages only.`,
+          '',
+        ].join('\n'),
+        symbolCount: 0,
+      };
+    }
+
+    const symbolFiles = new Map<string, Set<string>>();
+    for (const imp of imports) {
+      for (const sym of imp.symbols) {
+        const set = symbolFiles.get(sym) ?? new Set<string>();
+        set.add(imp.file);
+        symbolFiles.set(sym, set);
+      }
+    }
+
+    const lines = [
+      '**Kit module usage (this repo)**',
+      '',
+      `> @kit module API definitions live in the HarmonyOS SDK, not this repository. Below: how **this project** imports and uses them.`,
+      '',
+      `Imports from ${kitTerms.map((k) => `\`@kit.${k}\``).join(', ')} (${imports.length} site(s)):`,
+      '',
+    ];
+    for (const imp of imports.slice(0, 35)) {
+      const symStr = imp.symbols.length > 0 ? imp.symbols.join(', ') : '(namespace)';
+      lines.push(`- \`${imp.file}:${imp.line}\` — \`${imp.lineText}\` (${symStr})`);
+    }
+    if (imports.length > 35) lines.push(`- … and ${imports.length - 35} more import site(s)`);
+
+    if (symbolFiles.size > 0) {
+      lines.push('');
+      lines.push('**Symbols imported (unique):**');
+      for (const [sym, files] of [...symbolFiles.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(0, 40)) {
+        const fileList = [...files].slice(0, 5).map((f) => `\`${f}\``).join(', ');
+        const more = files.size > 5 ? ` +${files.size - 5} files` : '';
+        lines.push(`- \`${sym}\` — imported in ${fileList}${more}`);
+      }
+    }
+
+    lines.push('');
+    lines.push('> Kit usage survey complete — answer from this section; do not search external SDK docs or grep the repo again.');
+    lines.push('');
+    return { section: lines.join('\n'), symbolCount: symbolFiles.size };
+  }
+
+  /** Disambiguate homonymous types (Configuration, Rectangle) when several defs exist. */
+  private buildHomonymDefinitionsSection(cg: HomeGraph, query: string): string {
+    const typeNames = extractTypeNamesFromQuery(query);
+    const queryFiles = extractFileBasenamesFromQuery(query);
+    const lines: string[] = [];
+
+    for (const name of typeNames.slice(0, 4)) {
+      const defs = cg.getNodesByName(name).filter(
+        (n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'interface' || n.kind === 'type_alias')
+          && !isTestFile(n.filePath),
+      );
+      if (defs.length <= 1) continue;
+      lines.push(`**${name}** — ${defs.length} distinct definitions (pin with file basename in a follow-up explore):`);
+      for (const d of defs.slice(0, 8)) {
+        const pin = fileMatchesQueryBasename(d.filePath, queryFiles) ? ' ← matches query file' : '';
+        lines.push(`- \`${d.qualifiedName || d.name}\` (\`${d.filePath}:${d.startLine}\`)${pin}`);
+      }
+      if (defs.length > 8) lines.push(`- … and ${defs.length - 8} more`);
+      lines.push('');
+    }
+    if (lines.length === 0) return '';
+    return lines.join('\n');
+  }
+
+  /** Direct subclasses of a named type — paths only. */
+  private buildInheritanceSurveySection(cg: HomeGraph, query: string): string {
+    if (!shouldBuildInheritanceSurvey(query)) return '';
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const lines: string[] = ['**Inheritance survey**', ''];
+    let listed = 0;
+
+    for (const typeName of extractTypeNamesFromQuery(query).slice(0, 2)) {
+      const bases = cg.getNodesByName(typeName).filter(
+        (n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'interface') && !isTestFile(n.filePath),
+      );
+      for (const base of bases.slice(0, 2)) {
+        const subs: Node[] = [];
+        for (const e of cg.getIncomingEdges(base.id)) {
+          if (e.kind !== 'extends' && e.kind !== 'implements') continue;
+          try {
+            const child = cg.getNode(e.source);
+            if (child && !isTestFile(child.filePath)) subs.push(child);
+          } catch { /* skip */ }
+        }
+        if (subs.length === 0) continue;
+        lines.push(`### Subtypes of \`${base.name}\` (\`${rel(base.filePath)}\`)`);
+        for (const s of subs.slice(0, 30)) {
+          lines.push(`- \`${s.name}\` (\`${rel(s.filePath)}:${s.startLine}\`)`);
+          listed++;
+        }
+        if (subs.length > 30) lines.push(`- … and ${subs.length - 30} more`);
+        lines.push('');
+      }
+    }
+    if (listed === 0) return '';
+    lines.push('> Inheritance survey complete — answer from this list; no read/grep needed for the subtype set.');
     lines.push('');
     return lines.join('\n');
   }
@@ -2767,9 +4021,162 @@ export class ToolHandler {
     }
     if (hits.size > 40) lines.push(`- … and ${hits.size - 40} more file(s)`);
     lines.push('');
-    lines.push('> Pattern survey complete — answer from this list; use grep only if a file is missing.');
+    lines.push('> Pattern survey complete — answer from this list; run another explore naming missing symbols if needed.');
     lines.push('');
     return lines.join('\n');
+  }
+
+  /**
+   * API call-site survey — where a named API/symbol (statfs, napi_*) appears in repo source.
+   */
+  private buildApiUsageSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; fileCount: number } {
+    // Include PascalCase SDK modules (Telephony) — deps-only missed them.
+    const symbols = extractApiUsageTokens(query).slice(0, 6);
+    if (symbols.length === 0) return { section: '', fileCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const hits = new Map<string, number[]>();
+
+    const addHit = (file: string, line: number): void => {
+      if (isTestFile(file)) return;
+      const fp = rel(file);
+      const arr = hits.get(fp) ?? [];
+      if (!arr.includes(line)) arr.push(line);
+      hits.set(fp, arr);
+    };
+
+    for (const sym of symbols.slice(0, 4)) {
+      const symLc = sym.toLowerCase();
+      let nodes: SearchResult[] = [];
+      try {
+        nodes = cg.searchNodes(sym, { limit: 40 });
+      } catch { /* skip */ }
+      for (const r of nodes) {
+        const n = r.node;
+        if (n.name.toLowerCase() === symLc || (n.signature || '').toLowerCase().includes(symLc)) {
+          addHit(n.filePath, n.startLine);
+        }
+      }
+
+      const wordRe = new RegExp(`\\b${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      let scanHits: SearchResult[] = [];
+      try {
+        scanHits = cg.searchNodes(sym, { limit: 30 });
+      } catch { continue; }
+      const seenFiles = new Set<string>();
+      for (const r of scanHits) {
+        if (isTestFile(r.node.filePath)) continue;
+        const fp = rel(r.node.filePath);
+        if (seenFiles.has(fp)) continue;
+        seenFiles.add(fp);
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs) continue;
+        let content: string;
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          if (wordRe.test(fileLines[i] ?? '')) addHit(fp, i + 1);
+        }
+      }
+    }
+
+    if (hits.size === 0) return { section: '', fileCount: 0 };
+
+    const lines = [
+      '**API usage sites**',
+      '',
+      `> Files referencing \`${symbols.join('`, `')}\` in this repo (${hits.size} file(s)). Answer from this list; source bodies omitted.`,
+      '',
+    ];
+    let shown = 0;
+    for (const [fp, lineNos] of [...hits.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (shown >= 45) break;
+      const sortedLines = [...lineNos].sort((a, b) => a - b).slice(0, 6);
+      const lineStr = sortedLines.map((l) => `L${l}`).join(', ');
+      const more = lineNos.length > sortedLines.length ? ` +${lineNos.length - sortedLines.length} more` : '';
+      lines.push(`- \`${fp}\` (${lineStr}${more})`);
+      shown++;
+    }
+    if (hits.size > shown) lines.push(`- … and ${hits.size - shown} more file(s)`);
+    lines.push('');
+    lines.push(`> API usage survey complete — **${hits.size}** file(s) listed.`);
+    lines.push('');
+    return { section: lines.join('\n'), fileCount: hits.size };
+  }
+
+  /**
+   * Domain file inventory — related files, usage existence, or concept comparison.
+   * Paths + top symbols only; source bodies omitted when this section renders.
+   */
+  private buildDomainFileSurveySection(cg: HomeGraph, query: string): { section: string; fileCount: number } {
+    const terms = extractDomainSearchTerms(query);
+    if (terms.length === 0) return { section: '', fileCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const fileScores = new Map<string, { score: number; symbols: string[] }>();
+
+    const addFile = (filePath: string, score: number, symbol?: string): void => {
+      if (isTestFile(filePath)) return;
+      const fp = rel(filePath);
+      const existing = fileScores.get(fp) ?? { score: 0, symbols: [] };
+      existing.score += score;
+      if (symbol && existing.symbols.length < 5 && !existing.symbols.includes(symbol)) {
+        existing.symbols.push(symbol);
+      }
+      fileScores.set(fp, existing);
+    };
+
+    for (const term of terms) {
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(term, { limit: 45 });
+      } catch {
+        continue;
+      }
+      for (const r of hits) {
+        addFile(r.node.filePath, (r.score ?? 1) + 2, r.node.name);
+      }
+    }
+
+    try {
+      for (const f of cg.getFiles()) {
+        const fpLc = f.path.toLowerCase();
+        for (const term of terms) {
+          if (term.length >= 3 && fpLc.includes(term.toLowerCase())) {
+            addFile(f.path, 6);
+          }
+        }
+      }
+    } catch { /* getFiles unavailable */ }
+
+    if (fileScores.size === 0) return { section: '', fileCount: 0 };
+
+    const sorted = [...fileScores.entries()]
+      .sort((a, b) => b[1].score - a[1].score)
+      .slice(0, 50);
+
+    const lines = [
+      '**Related files (domain survey)**',
+      '',
+      `> File paths matching the query domain (${terms.map((t) => `\`${t}\``).join(', ')}). Answer from this inventory; source bodies omitted.`,
+      '',
+    ];
+    for (const [fp, info] of sorted.slice(0, 40)) {
+      const symStr = info.symbols.length > 0 ? ` — ${info.symbols.join(', ')}` : '';
+      lines.push(`- \`${fp}\`${symStr}`);
+    }
+    if (sorted.length > 40) lines.push(`- … and ${sorted.length - 40} more file(s)`);
+    lines.push('');
+    lines.push(
+      `> Domain file survey complete — **${sorted.length}** file(s) listed. ` +
+      'Exhaustive related-file inventory; no glob/search needed.',
+    );
+    lines.push('');
+    return { section: lines.join('\n'), fileCount: sorted.length };
   }
 
   /**
@@ -2965,7 +4372,14 @@ export class ToolHandler {
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const projectRoot = cg.getProjectRoot();
 
-    // Resolve adaptive output budget from project size. Falls back to the
+    const compactLocal = this.tryFastInventoryExplore(cg, query, projectRoot)
+      ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
+    if (compactLocal) return compactLocal;
+
+    const lightMechanism = this.tryLightMechanismExplore(cg, query, projectRoot);
+    if (lightMechanism) return lightMechanism;
+
+    // Resolve adaptive output budget from project size.
     // largest-tier defaults if stats aren't available, which preserves
     // pre-#185 behavior for callers that hit the rare stats failure.
     let budget: ExploreOutputBudget;
@@ -2974,18 +4388,22 @@ export class ToolHandler {
     } catch {
       budget = getExploreOutputBudget(Infinity);
     }
-    const maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
+    budget = tightenExploreBudgetForQuery(budget, query);
+    let maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
+
+    const queryFileBasenames = extractFileBasenamesFromQuery(query);
+    const interpretationQuery = queryAsInterpretationSurvey(query);
+    const testOnlyInterpretation = queryAsTestOnlyInterpretation(query);
+    const crossModuleFlow = queryAsCrossModuleFlowSurvey(query);
 
     // Step 1: Find relevant context with generous parameters.
-    // Use a large maxNodes budget — explore has its own 35k char output limit
-    // that prevents context bloat, so more nodes just means better coverage
-    // across entry points (especially for large files like Svelte components).
-    const subgraph = await cg.findRelevantContext(query, {
-      searchLimit: 8,
-      traversalDepth: 3,
-      maxNodes: 200,
-      minScore: 0.2,
-    });
+    const contextOpts = interpretationQuery && queryFileBasenames.length === 1
+      ? { searchLimit: 6, traversalDepth: 2, maxNodes: 60, minScore: 0.25 }
+      : { searchLimit: 8, traversalDepth: 3, maxNodes: 200, minScore: 0.2 };
+    const contextQuery = interpretationQuery && queryFileBasenames.length === 1
+      ? `${queryFileBasenames[0]} ${query}`
+      : query;
+    const subgraph = await cg.findRelevantContext(contextQuery, contextOpts);
 
     if (subgraph.nodes.size === 0) {
       return this.textResult(`No relevant code found for "${query}"`);
@@ -3172,6 +4590,59 @@ export class ToolHandler {
         }
         for (const n of tierPicks) tierSeedIds.add(n.id);
       }
+
+      // Mechanism survey: seed query-shaped entry symbols first, then domain search.
+      if (queryAsMechanismSurvey(query)) {
+        const STRUCTURE_KINDS = new Set(['class', 'struct', 'interface', 'component']);
+        const implEntryNames: string[] = [];
+        for (const seed of extractMechanismEntrySeeds(query)) {
+          if (seed.startsWith('@')) {
+            let hits: SearchResult[] = [];
+            try {
+              hits = cg.searchNodes(seed, { kinds: ['import'], limit: 20 });
+            } catch {
+              continue;
+            }
+            for (const r of hits) {
+              if (isTestPath(r.node.filePath)) continue;
+              if (!subgraph.nodes.has(r.node.id)) subgraph.nodes.set(r.node.id, r.node);
+              namedSeedIds.add(r.node.id);
+              tierSeedIds.add(r.node.id);
+            }
+            continue;
+          }
+          const nodes = cg.getNodesByName(seed).filter(
+            (n) => STRUCTURE_KINDS.has(n.kind) && !isTestPath(n.filePath),
+          );
+          for (const n of nodes.slice(0, 3)) {
+            if (!subgraph.nodes.has(n.id)) subgraph.nodes.set(n.id, n);
+            namedSeedIds.add(n.id);
+            tierSeedIds.add(n.id);
+            if (!implEntryNames.includes(n.name)) implEntryNames.push(n.name);
+          }
+        }
+        if (implEntryNames.length < 2) {
+          const domainTerms = extractDomainSearchTerms(query);
+          for (const term of domainTerms.slice(0, 5)) {
+            let hits: SearchResult[] = [];
+            try {
+              hits = cg.searchNodes(term, { kinds: ['class', 'struct', 'interface'], limit: 30 });
+            } catch {
+              continue;
+            }
+            for (const r of hits) {
+              if (isTestPath(r.node.filePath)) continue;
+              if (!isImplementationEntrySymbol(r.node.name, domainTerms)) continue;
+              if (!subgraph.nodes.has(r.node.id)) subgraph.nodes.set(r.node.id, r.node);
+              namedSeedIds.add(r.node.id);
+              tierSeedIds.add(r.node.id);
+              if (!implEntryNames.includes(r.node.name)) implEntryNames.push(r.node.name);
+              if (implEntryNames.length >= 6) break;
+            }
+            if (implEntryNames.length >= 6) break;
+          }
+        }
+      }
     }
 
     // Step 2: Group nodes by file, score by relevance
@@ -3244,6 +4715,15 @@ export class ToolHandler {
         group.score += 1;
       }
       fileGroups.set(node.filePath, group);
+    }
+
+    if (testOnlyInterpretation) {
+      for (const [, group] of fileGroups) {
+        const fp = group.nodes[0]?.filePath ?? '';
+        if (fp && !isTestFile(fp) && !fileMatchesQueryBasename(fp, queryFileBasenames)) {
+          group.score = Math.max(0, group.score - 50);
+        }
+      }
     }
 
     // Only include files that have entry points or nodes directly connected to entry points
@@ -3432,7 +4912,6 @@ export class ToolHandler {
       !MULTITERM_OFF &&
       (fileTermHits.get(fp) ?? 0) >= 2 &&
       (entryFiles.has(fp) || centralFiles.has(fp));
-    const queryFileBasenames = extractFileBasenamesFromQuery(query);
     const queryMemberAccesses = extractMemberAccessFromQuery(query);
 
     const sortedFiles = relevantFiles.sort((a, b) => {
@@ -3498,23 +4977,71 @@ export class ToolHandler {
     ];
     const summaryLineIdx = 2;
 
-    // Blast radius (always-on, compact): for the entry symbols, who depends on
-    // them + which tests cover them — locations only, no source — so the agent
-    // knows what to update/verify before editing without a separate call.
-    const blastRadius = this.buildBlastRadiusSection(cg, subgraph);
-    if (blastRadius) lines.push(blastRadius);
+    if (testOnlyInterpretation) {
+      lines.push(
+        '> **Test-file scope only** — answer from the named `.test.ets` file below; ' +
+        'production handlers are out of scope unless explicitly referenced in the test.',
+      );
+      lines.push('');
+    }
 
     const importResult = this.buildImportSitesSection(cg, query, projectRoot);
     if (importResult.section) lines.push(importResult.section);
 
+    const homonymSection = this.buildHomonymDefinitionsSection(cg, query);
+    if (homonymSection) lines.push(homonymSection);
+
+    const kitUsageResult = shouldBuildKitModuleUsageSurvey(query)
+      ? this.buildKitModuleUsageSection(cg, query, projectRoot)
+      : { section: '', symbolCount: 0 };
+    if (kitUsageResult.section) lines.push(kitUsageResult.section);
+
+    const domainFileResult = shouldBuildDomainFileSurvey(query)
+      ? this.buildDomainFileSurveySection(cg, query)
+      : { section: '', fileCount: 0 };
+    if (domainFileResult.section) lines.push(domainFileResult.section);
+
+    const apiUsageResult = shouldBuildApiUsageSurvey(query)
+      ? this.buildApiUsageSection(cg, query, projectRoot)
+      : { section: '', fileCount: 0 };
+    if (apiUsageResult.section) lines.push(apiUsageResult.section);
+
+    const dataSourceResult = queryAsDataSourceSurvey(query)
+      ? this.buildDataSourceSection(cg, query)
+      : { section: '', edgeCount: 0 };
+    if (dataSourceResult.section) lines.push(dataSourceResult.section);
+
     const importInventoryFilter = hasImportInventoryFilter(query);
-    const multiAnchor = queryNamesMultipleExploreAnchors(query);
+    const multiAnchor = queryNamesMultipleExploreAnchors(query) || crossModuleFlow;
+    const mechanismSurvey = queryAsMechanismSurvey(query);
 
     // Flow path — computed before omit-source so graph connectivity drives the decision,
-    // not question-text keyword matching.
-    const flow = this.buildFlowFromNamedSymbols(cg, query);
+    // not question-text keyword matching. Mechanism/cross-module surveys augment the
+    // query with seeded entry symbol names so buildFlowFromNamedSymbols can connect them.
+    let flowQuery = query;
+    if (crossModuleFlow) {
+      flowQuery = `${query} ${extractTypeNamesFromQuery(query).join(' ')}`;
+    } else if (mechanismSurvey) {
+      const seeds = extractMechanismEntrySeeds(query);
+      if (seeds.length >= 2) {
+        flowQuery = `${query} ${seeds.join(' ')}`;
+      } else {
+        const entryNames = [...subgraph.nodes.values()]
+          .filter((n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'interface')
+            && isImplementationEntrySymbol(n.name, extractDomainSearchTerms(query)))
+          .map((n) => n.name)
+          .slice(0, 6);
+        if (entryNames.length >= 2) flowQuery = `${query} ${entryNames.join(' ')}`;
+      }
+    }
+    const flow = this.buildFlowFromNamedSymbols(cg, flowQuery);
     const hasFlowPath = flow.pathNodeIds.size > 0;
+    budget = tightenExploreBudgetForQuery(budget, query, { hasFlowPath });
+    maxFiles = Math.min(maxFiles, clamp(budget.defaultMaxFiles, 1, 20));
+    const localDetail = queryAsLocalSymbolDetail(query);
 
+    const inheritanceSection = !hasFlowPath && !multiAnchor
+      ? this.buildInheritanceSurveySection(cg, query) : '';
     const callerSection = !hasFlowPath && !multiAnchor && shouldBuildCallerInventory(query)
       ? this.buildCallerListingSection(cg, query) : '';
     const memberSection = !hasFlowPath && !multiAnchor && shouldBuildMemberSurvey(query)
@@ -3522,6 +5049,7 @@ export class ToolHandler {
     const configSection = shouldBuildConfigSection(query)
       ? this.buildConfigFileSection(cg, query, projectRoot) : '';
 
+    if (inheritanceSection) lines.push(inheritanceSection);
     if (callerSection) lines.push(callerSection);
     if (memberSection) lines.push(memberSection);
     if (configSection) lines.push(configSection);
@@ -3537,31 +5065,71 @@ export class ToolHandler {
     const callerBulletCount = callerSection
       ? callerSection.split('\n').filter((l) => l.startsWith('- ') && l.includes(' ← ')).length
       : 0;
+    const inheritanceListed = inheritanceSection
+      ? inheritanceSection.split('\n').filter((l) => l.startsWith('- `')).length > 0
+      : false;
     const omitSource = shouldOmitSourceBodies({
       importSiteCount: importResult.siteCount,
       hasFilteredImports: importInventoryFilter && importResult.siteCount > 0,
       callerBulletCount,
       memberFileCount,
+      apiUsageFileCount: apiUsageResult.fileCount,
       configRendered: !!configSection,
+      kitModuleSurveyRendered: !!kitUsageResult.section,
+      inheritanceListed,
+      domainFileCount: domainFileResult.fileCount,
+      dataSourceEdgeCount: dataSourceResult.edgeCount,
     }, hasFlowPath, multiAnchor);
 
     if (omitSource) {
       if (configSection) {
         return finishCompact('Config/manifest content above — answer from it directly.');
       }
+      if (kitUsageResult.section) {
+        return finishCompact(
+          `Kit module usage survey — **${kitUsageResult.symbolCount}** imported symbol(s) across the repo. SDK definitions are not in this project; answer from the usage list above.`,
+        );
+      }
+      if (domainFileResult.section && domainFileResult.fileCount > 0) {
+        return finishCompact(
+          `Domain file survey — **${domainFileResult.fileCount}** related file(s) listed above. Source bodies omitted; answer from the inventory.`,
+        );
+      }
+      if (apiUsageResult.section && apiUsageResult.fileCount > 0) {
+        return finishCompact(
+          `API usage survey — **${apiUsageResult.fileCount}** file(s) referencing the queried symbol(s). Source bodies omitted; answer from the list above.`,
+        );
+      }
+      if (dataSourceResult.section && dataSourceResult.edgeCount > 0) {
+        return finishCompact(
+          `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s) listed above. Source bodies omitted; answer from the inventory.`,
+        );
+      }
+      if (inheritanceListed) {
+        return finishCompact('Inheritance survey above lists all direct subtypes found — source bodies omitted.');
+      }
       if (importResult.compactListing) {
         return finishCompact(
           `Listed **${importResult.siteCount}** import site(s) for the queried symbol(s). Source bodies omitted — answer from the dependency list above.`,
         );
       }
-      if (callerSection && callerBulletCount >= 2) {
-        return finishCompact('Caller inventory above — source bodies omitted to save tokens.');
+      if (callerBulletCount >= 1) {
+        return finishCompact(
+          `Caller inventory above lists **${callerBulletCount}** method(s) with external callers — source bodies omitted.`,
+        );
       }
       if (memberSection && memberFileCount >= 2) {
         return finishCompact(
-          `Member/pattern usage in **${memberFileCount}** file(s) — source bodies omitted.`,
+          `Member/pattern usage in **${memberFileCount}** file(s) — source bodies omitted; answer from the inventory above.`,
         );
       }
+    }
+
+    // Blast radius only for structural flow / mechanism answers — skip on local-detail
+    // and no-flow dumps (it's expensive and rarely changes the answer there).
+    if (!localDetail && (hasFlowPath || mechanismSurvey || crossModuleFlow)) {
+      const blastRadius = this.buildBlastRadiusSection(cg, subgraph);
+      if (blastRadius) lines.push(blastRadius);
     }
 
     // Relationship map — show how symbols connect (skip when no flow path: saves
@@ -3657,7 +5225,11 @@ export class ToolHandler {
 
     lines.push('**Source Code**');
     lines.push('');
-    lines.push('> The code below is the **verbatim, current on-disk source** of these files — re-read from disk on this call and line-numbered, byte-for-byte identical to what the Read tool returns. It is NOT a summary, outline, or stale cache. Treat each block as a Read you have already performed: do not Read a file shown here.');
+    lines.push(
+      '> Line-numbered source — treat as already Read. Answer from Flow + Source below when you can; ' +
+      'do not re-read/grep these files, and do not fan out `homegraph_node` / search for symbols already shown. ' +
+      'Another `homegraph_explore` with tighter names only if a needed symbol is missing.',
+    );
     lines.push('');
 
     let totalChars = lines.join('\n').length;
@@ -3667,8 +5239,54 @@ export class ToolHandler {
     const renderedFilePaths: string[] = [];
     let anyFileTrimmed = false;
 
-    for (const [filePath, group] of sortedFiles) {
-      if (filesIncluded >= maxFiles) break;
+    const limitSingleFile = shouldLimitToQueryNamedFile(query, hasFlowPath, multiAnchor)
+      || (interpretationQuery && queryFileBasenames.length === 1);
+    let filesToRender = sortedFiles;
+    if (limitSingleFile) {
+      const anchored = sortedFiles.filter(([fp]) => fileMatchesQueryBasename(fp, queryFileBasenames));
+      if (anchored.length > 0) filesToRender = anchored.slice(0, 1);
+    } else if (shouldFocusOnNamedTypeFile(query, hasFlowPath, multiAnchor)) {
+      const typeName = extractTypeNamesFromQuery(query)[0]!;
+      const anchored = sortedFiles.filter(([, group]) =>
+        group.nodes.some((n) =>
+          n.name === typeName && (n.kind === 'class' || n.kind === 'interface' || n.kind === 'struct'),
+        ),
+      );
+      if (anchored.length > 0) filesToRender = anchored.slice(0, 1);
+    } else if (shouldFocusOnQueryNamedDefs(query, hasFlowPath, multiAnchor)) {
+      const nameSet = new Set([
+        ...extractTypeNamesFromQuery(query),
+        ...extractDependencySymbolsFromQuery(query),
+        ...extractMemberAccessFromQuery(query).map((m) => m.member),
+      ]);
+      const anchored = sortedFiles.filter(([, group]) =>
+        group.nodes.some((n) => nameSet.has(n.name)),
+      );
+      if (anchored.length > 0) {
+        filesToRender = anchored.slice(0, localDetail ? 2 : 3);
+      }
+    } else if (crossModuleFlow && hasFlowPath) {
+      const onSpine = sortedFiles.filter(([, group]) =>
+        group.nodes.some((n) => flow.pathNodeIds.has(n.id) || flow.uniqueNamedNodeIds.has(n.id)),
+      );
+      if (onSpine.length > 0) filesToRender = onSpine;
+    }
+    const sourceFileCap = limitSingleFile && filesToRender.length === 1
+      ? 1
+      : localDetail
+        ? Math.min(maxFiles, 2)
+        : crossModuleFlow && hasFlowPath
+          ? Math.min(maxFiles, 5)
+          : mechanismSurvey && hasFlowPath
+            ? Math.min(maxFiles, 4)
+            : mechanismSurvey
+              ? Math.min(maxFiles, 3)
+              : !hasFlowPath
+                ? Math.min(maxFiles, 3)
+                : maxFiles;
+
+    for (const [filePath, group] of filesToRender) {
+      if (filesIncluded >= sourceFileCap) break;
       // A file DEFINES a named/spine symbol (the answer) vs merely references the
       // flow. Past 90% budget, stop pulling INCIDENTAL files — but keep scanning
       // for necessary ones, which render even past the cap (bounded by maxFiles).
@@ -4270,9 +5888,15 @@ export class ToolHandler {
       const lastSection = cut.lastIndexOf('\n' + FILE_SECTION_PREFIX);
       const boundary = lastSection > hardCeiling * 0.5 ? lastSection : cut.lastIndexOf('\n');
       const safe = boundary > 0 ? cut.slice(0, boundary) : cut;
-      finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For any area not covered, run another homegraph_explore with the specific names — do NOT Read these files.)';
+      finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For uncovered files/symbols, run another homegraph_explore with their exact names — not grep/read/node for symbols already shown.)';
     } else {
       finalText = output;
+    }
+    if (!finalText.includes('**Partial result**') && !finalText.includes('> **Explore complete**')) {
+      finalText +=
+        '\n\n> **Explore complete — ANSWER NOW.** Flow + Source above are authoritative for this query. ' +
+        'Do **not** grep/read/`homegraph_node`/`homegraph_search` for the same symbols or files. ' +
+        'Only call one tighter `homegraph_explore` if a named symbol essential to the answer is missing.';
     }
 
     // Curated header (#1046): substitute the sentinel with the count of files
@@ -4374,12 +5998,12 @@ export class ToolHandler {
       ));
     }
 
-    const BODY_BUDGET = 12000; // leaves room under MAX_OUTPUT_LENGTH for the header + list
+    const BODY_BUDGET = 10_000; // leaves room under MAX_OUTPUT_LENGTH for the header + list
     // The CHAR budget is the real limiter — keep the count cap high so a set of
     // SHORT overloads (Alamofire's 10 `validate` variants, each a few lines) all
     // render in full rather than relegating the one the agent wanted to a
     // bodiless list. Only a set of many LARGE bodies hits the char budget first.
-    const HARD_CAP = 16;
+    const HARD_CAP = 12;
     const rendered: string[] = [];
     const listed: Node[] = [];
     let used = 0;
@@ -4523,12 +6147,12 @@ export class ToolHandler {
     const total = fileLines.length;
 
     // Read-parity windowing: `offset`/`limit` mean exactly what they do on Read
-    // (1-based start line; max line count). Default: the whole file, capped like
-    // Read at 2000 lines and bounded by a char budget that tracks explore's
-    // proven-safe ~38k response ceiling. Overflow is stated explicitly (Read
-    // paginates too) — never the silent 15k truncateOutput chop.
-    const CHAR_BUDGET = 38000;
-    const DEFAULT_LIMIT = 2000;
+    // (1-based start line; max line count). Default window is intentionally
+    // smaller than explore's flow budget — dumping a whole multi-kLOC file from
+    // `homegraph_node` teaches the agent to over-drill and burns tokens.
+    // Overflow is stated explicitly (pass offset/limit or name a symbol).
+    const CHAR_BUDGET = 12_000;
+    const DEFAULT_LIMIT = 400;
     const offset = Math.max(1, opts.offset ?? 1);
     if (offset > total) {
       return this.textResult(`**${filePath}** has ${total} line${total === 1 ? '' : 's'} — offset ${offset} is past the end. ${depSummary}`);
@@ -4554,9 +6178,13 @@ export class ToolHandler {
     if (!complete) {
       out.push(
         '',
-        `(lines ${offset}–${shownEnd} of ${total} — pass \`offset\`/\`limit\` for another range, or \`homegraph_node <symbol>\` for one symbol in full)`,
+        `(lines ${offset}–${shownEnd} of ${total} — pass \`offset\`/\`limit\` for another range, or \`homegraph_node\` with a symbol name for one body in full)`,
       );
     }
+    out.push(
+      '',
+      '> Treat this source as already Read. Prefer answering now; do not grep/read the same file or fan out more `homegraph_node` calls for symbols listed above.',
+    );
     // Self-bounded to CHAR_BUDGET — do NOT route through truncateOutput (15k).
     return this.textResult(out.join('\n'));
   }
@@ -5436,31 +7064,52 @@ export class ToolHandler {
       if (tail && tail !== symbol) results = cg.searchNodes(tail, { limit: 50 });
     }
 
-    if (results.length === 0) {
+    const exactMatches = results.filter(r => this.matchesSymbol(r.node, symbol));
+
+    // Prefer exact name/qualified matches. Never fall back to the top FTS
+    // hit — that resolved unrelated symbols (e.g. OnSurfaceChangedCB → a
+    // function whose body merely mentions "surface") and poisoned callees.
+    let pool = exactMatches.map((r) => r.node);
+    if (pool.length === 0) {
+      try {
+        pool = cg.getNodesByName(symbol).filter((n) => this.matchesSymbol(n, symbol));
+      } catch {
+        pool = [];
+      }
+    }
+    if (pool.length === 0 && /[.\/]|::/.test(symbol)) {
+      const tail = lastQualifierPart(symbol);
+      if (tail && tail !== symbol) {
+        try {
+          pool = cg.getNodesByName(tail).filter((n) => this.matchesSymbol(n, symbol) || this.matchesSymbol(n, tail));
+        } catch {
+          pool = [];
+        }
+      }
+    }
+
+    if (pool.length === 0) {
       return { nodes: [], note: '' };
     }
 
-    const exactMatches = results.filter(r => this.matchesSymbol(r.node, symbol));
-
-    if (exactMatches.length <= 1) {
-      const node = exactMatches[0]?.node ?? results[0]!.node;
-      return { nodes: [node], note: '' };
+    if (pool.length === 1) {
+      return { nodes: pool, note: '' };
     }
 
     // Same generated-file down-rank as findSymbol — keeps callers/callees
     // /impact aggregation aligned (a query against "Send" returns the
     // hand-written implementations before the protobuf scaffold).
-    const ranked = [...exactMatches].sort((a, b) => {
-      const aGen = isGeneratedFile(a.node.filePath) ? 1 : 0;
-      const bGen = isGeneratedFile(b.node.filePath) ? 1 : 0;
+    const ranked = [...pool].sort((a, b) => {
+      const aGen = isGeneratedFile(a.filePath) ? 1 : 0;
+      const bGen = isGeneratedFile(b.filePath) ? 1 : 0;
       return aGen - bGen;
     });
 
-    const locations = ranked.map(r =>
-      `${r.node.kind} at ${r.node.filePath}:${r.node.startLine}`
+    const locations = ranked.map(n =>
+      `${n.kind} at ${n.filePath}:${n.startLine}`
     );
     const note = `\n\n> **Note:** Aggregated results across ${ranked.length} symbols named "${symbol}": ${locations.join(', ')}`;
-    return { nodes: ranked.map(r => r.node), note };
+    return { nodes: ranked, note };
   }
 
   /**

@@ -2112,6 +2112,11 @@ export class ExtractionOrchestrator {
       // synchronous-stat loop that wedges the main thread on a large repo (#905).
       // Yield at the top of the body so the `continue` fast-paths below still hit it.
       if (++reconcileChecks % SYNC_RECONCILE_YIELD_INTERVAL === 0) {
+        onProgress?.({
+          phase: 'scanning',
+          current: reconcileChecks,
+          total: currentFiles.length,
+        });
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       const fullPath = path.join(this.rootDir, filePath);

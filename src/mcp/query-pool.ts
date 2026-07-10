@@ -10,17 +10,25 @@
  * connection) restores true multi-core parallelism and an idle main loop.
  *
  * Properties:
- *   - lazy growth: one warm worker on construct, grows to `size` on demand, so a
- *     single-agent session pays for one connection and a 10-subagent burst grows
- *     to the core budget.
+ *   - lazy growth: **no worker until the first heavy call**, then grows to
+ *     `size` on demand. Eager warm-start used to open a second full DB on every
+ *     MCP session and balloon RSS (~5GB on ~800MB indexes).
+ *   - **default concurrency is 1** — each worker is another V8 + WAL open; on
+ *     large indexes two workers routinely doubled working-set into multi-GB.
+ *     Override with `CODEGRAPH_QUERY_POOL_SIZE` when you truly need more.
+ *   - **admission**: when outstanding work already fills `size` in-flight plus
+ *     another `size` waiting, further calls resolve immediately with
+ *     success-shaped busy/partial guidance instead of queuing up to die at the
+ *     client hard timeout.
  *   - crash recovery: a dead worker is respawned and its in-flight call retried
  *     once; a poison call that keeps crashing fails gracefully (never wedges the
  *     pool). A crash budget trips a circuit breaker (`healthy` → false) so the
  *     caller falls back to in-process dispatch instead of thrashing respawns.
  *   - graceful backstop: a call that can't be served within `softTimeoutMs`
- *     resolves with SUCCESS-shaped "busy, retry" guidance — never `isError`, so
- *     a momentary overload can't teach the agent to abandon codegraph — instead
- *     of hanging past the client's hard timeout.
+ *     (default 20s, clamped ≤30s — well under typical ~60s MCP client timeouts)
+ *     resolves with SUCCESS-shaped static "Partial / busy, retry" guidance —
+ *     never `isError`, and never DB/FTS work on the timeout callback (that
+ *     can freeze the transport so the client still sees empty `-32001`).
  */
 
 import { Worker } from 'worker_threads';
@@ -45,8 +53,24 @@ export interface PoolWorker {
   on(event: 'exit', cb: (code: number) => void): void;
 }
 
-/** Default linger before a queued call is answered with busy-guidance. */
-const DEFAULT_BUSY_TIMEOUT_MS = 45_000; // < the ~60s MCP client request timeout
+/**
+ * Default soft backstop — must stay **well below** typical MCP client hard
+ * timeouts (~60s). Eval / agent configs sometimes set the env to 60000, which
+ * races the client and yields empty `-32001`; we clamp to
+ * {@link MAX_BUSY_TIMEOUT_MS} regardless. Prefer returning busy/partial early
+ * so the agent can retry once instead of waiting out the client hard cut.
+ */
+const DEFAULT_BUSY_TIMEOUT_MS = 15_000;
+
+/** Hard ceiling — leave headroom under ~30–60s client timeouts (flush / scheduling). */
+const MAX_BUSY_TIMEOUT_MS = 20_000;
+
+/**
+ * Default concurrent workers when env is unset. Keep at 1: a second connection
+ * on a large index is a multi-GB RSS hit. Explicit env overrides still go up to
+ * {@link MAX_POOL_SIZE}.
+ */
+const DEFAULT_POOL_CAP = 1;
 
 /** Hard ceiling on pool size regardless of core count / env. */
 const MAX_POOL_SIZE = 16;
@@ -86,14 +110,15 @@ interface Job {
   settled: boolean;
   enqueuedAt: number;
   softTimer?: NodeJS.Timeout;
+  onSoftTimeout?: () => ToolResult | null | undefined;
 }
 
 export interface QueryPoolOptions {
   /** Default project root each worker opens at spawn. */
   root: string;
-  /** Max worker threads. Defaults to `clamp(cores-1, 1, 16)`. */
+  /** Max worker threads. Defaults to `clamp(cores-1, 1, DEFAULT_POOL_CAP)`. */
   size?: number;
-  /** Linger before a queued call gets busy-guidance. Default 45s. */
+  /** Linger before a queued/in-flight call gets busy-guidance. Default 20s (≤30s clamp). */
   softTimeoutMs?: number;
   /** Retries for an in-flight call whose worker crashed. Default 1. */
   maxRetries?: number;
@@ -104,9 +129,9 @@ export interface QueryPoolOptions {
 /**
  * Resolve the pool size from the `CODEGRAPH_QUERY_POOL_SIZE` override and the
  * machine's core count. `0` (or a negative) explicitly disables the pool (the
- * caller serves in-process — today's behavior). Unset → `clamp(cores-1, 1, 16)`:
- * leave a core for the main loop + OS, but never zero, since even one worker
- * frees the transport and lets responses flush incrementally.
+ * caller serves in-process — today's behavior). Unset → `clamp(cores-1, 1, 1)`:
+ * one parallel explore without a second full-DB RSS hit. Explicit overrides still
+ * honor up to {@link MAX_POOL_SIZE}.
  */
 export function resolvePoolSize(envVal: string | undefined, cpuCount: number): number {
   if (envVal !== undefined && envVal !== '') {
@@ -114,27 +139,41 @@ export function resolvePoolSize(envVal: string | undefined, cpuCount: number): n
     if (Number.isFinite(n) && n >= 0) return Math.min(Math.floor(n), MAX_POOL_SIZE);
     // non-numeric / negative → fall through to the default
   }
-  return Math.max(1, Math.min(cpuCount - 1, MAX_POOL_SIZE));
+  return Math.max(1, Math.min(cpuCount - 1, DEFAULT_POOL_CAP));
 }
 
-function resolveBusyTimeoutMs(): number {
+/**
+ * Soft / tool deadline. Env `CODEGRAPH_QUERY_BUSY_TIMEOUT_MS` may raise or
+ * lower it, but is always clamped into `[1000, MAX_BUSY_TIMEOUT_MS]` so a
+ * mistaken `60000` cannot race DevEco/Cursor's ~60s MCP hard timeout.
+ */
+export function resolveBusyTimeoutMs(): number {
   const raw = process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS;
   if (raw === undefined || raw === '') return DEFAULT_BUSY_TIMEOUT_MS;
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 1000) return DEFAULT_BUSY_TIMEOUT_MS;
-  return Math.floor(n);
+  return Math.min(Math.floor(n), MAX_BUSY_TIMEOUT_MS);
+}
+
+/** Same as {@link resolveBusyTimeoutMs} — used by ToolHandler for all tools. */
+export function resolveToolDeadlineMs(): number {
+  return resolveBusyTimeoutMs();
 }
 
 /** Success-shaped overload guidance (NEVER isError — see the abandonment rule). */
-function busyGuidance(waitedMs: number): ToolResult {
+function busyGuidance(waitedMs: number, reason: 'timeout' | 'admission' = 'timeout'): ToolResult {
   const secs = Math.max(1, Math.round(waitedMs / 1000));
+  const why = reason === 'admission'
+    ? 'too many concurrent HomeGraph queries are already in flight'
+    : `this call waited ${secs}s in the queue / on a worker`;
   return {
     content: [{
       type: 'text',
       text:
-        `CodeGraph is busy serving other concurrent requests right now (this call waited ${secs}s in the queue). ` +
-        `This is NOT an error and the index is fine — wait a few seconds and retry this exact call; it will return normally. ` +
-        `If you can't wait, use your built-in tools for just this one step.`,
+        `⚠️ **Partial result** — HomeGraph is busy (${why}). This is NOT an error. ` +
+        `Retry ONE \`homegraph_explore\` with the concrete symbol/file names from the question — ` +
+        `do not fire search+explore or node+callers+callees in parallel, and do not fall back to grep/read ` +
+        `for symbols you already named (that duplicates tokens). A single retry usually returns full source.`,
     }],
   };
 }
@@ -161,11 +200,11 @@ export class QueryPool {
 
   constructor(opts: QueryPoolOptions) {
     this.root = opts.root;
-    this.maxSize = Math.max(1, Math.min(opts.size ?? Math.max(1, os.cpus().length - 1), MAX_POOL_SIZE));
+    this.maxSize = Math.max(1, Math.min(opts.size ?? Math.min(DEFAULT_POOL_CAP, Math.max(1, os.cpus().length - 1)), MAX_POOL_SIZE));
     this.softTimeoutMs = opts.softTimeoutMs ?? resolveBusyTimeoutMs();
     this.maxRetries = opts.maxRetries ?? 1;
     this.createWorker = opts.createWorker ?? (() => new Worker(WORKER_FILE, { workerData: { root: this.root } }));
-    this.spawnOne(); // one eager warm worker, ready for the first call
+    // Deliberately no eager spawn — see class doc. First `run()` spawns on demand.
   }
 
   /** Pool size cap (for logging/status). */
@@ -181,6 +220,20 @@ export class QueryPool {
    */
   get healthy(): boolean {
     return !this.destroyed && this.totalCrashes < CRASH_BUDGET;
+  }
+
+  /** In-flight + unsettled queued jobs (for admission / tests). */
+  outstandingCount(): number {
+    return this.inflight.size + this.queue.filter((j) => !j.settled).length;
+  }
+
+  /**
+   * How many unsettled jobs we tolerate before refusing new ones immediately.
+   * One full wave running + one full wave waiting — further fan-out gets
+   * busy/partial guidance instead of stacking up to the soft timeout.
+   */
+  private admissionLimit(): number {
+    return this.maxSize * 2;
   }
 
   private spawnOne(): void {
@@ -271,18 +324,41 @@ export class QueryPool {
     job.resolve(result);
   }
 
+  private settleBusyOrPartial(job: Job, reason: 'timeout' | 'admission'): void {
+    if (job.settled) return;
+    const partial = job.onSoftTimeout?.();
+    if (partial) {
+      this.settle(job, partial);
+      return;
+    }
+    this.settle(job, busyGuidance(Date.now() - job.enqueuedAt, reason));
+  }
+
   /** Run a read tool on the pool. Always resolves (never rejects). */
-  run(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+  run(
+    toolName: string,
+    args: Record<string, unknown>,
+    opts?: { onSoftTimeout?: () => ToolResult | null | undefined },
+  ): Promise<ToolResult> {
     return new Promise<ToolResult>((resolve) => {
       const job: Job = {
         id: this.nextId++, toolName, args, resolve,
         retries: 0, settled: false, enqueuedAt: Date.now(),
+        onSoftTimeout: opts?.onSoftTimeout,
       };
+
+      // Hard admission: refuse to stack another wave that would sit until soft
+      // timeout / client hard timeout. Caller gets partial/busy NOW.
+      if (this.outstandingCount() >= this.admissionLimit()) {
+        this.settleBusyOrPartial(job, 'admission');
+        return;
+      }
+
       // Don't let the caller wait past softTimeoutMs. The worker may still be
       // busy (we can't cancel synchronous CPU), but the CLIENT gets a prompt,
-      // success-shaped "retry" instead of a hard timeout.
+      // success-shaped "retry"/partial instead of a hard timeout.
       job.softTimer = setTimeout(() => {
-        if (!job.settled) this.settle(job, busyGuidance(Date.now() - job.enqueuedAt));
+        this.settleBusyOrPartial(job, 'timeout');
       }, this.softTimeoutMs);
       job.softTimer.unref?.();
       this.queue.push(job);

@@ -28,6 +28,7 @@ import { HomeGraphPackageVersion } from './version';
 import { SERVER_INFO, PROTOCOL_VERSION } from './session';
 import { SERVER_INSTRUCTIONS } from './server-instructions';
 import { getStaticTools } from './tools';
+import { resolveToolDeadlineMs } from './query-pool';
 import { getTelemetry, ClientInfo } from '../telemetry';
 import type { MCPEngine } from './engine';
 
@@ -228,6 +229,11 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
   // new session starts), these would otherwise hang forever; we re-serve them
   // in-process so the host always gets a reply.
   const inflight = new Map<unknown, string>();
+  // tools/call forwarded to the daemon that hit the proxy-side deadline.
+  // Late daemon replies for these ids are dropped so the client isn't confused
+  // by a second response after it already got Partial (or timed out itself).
+  const timedOutToolIds = new Set<unknown>();
+  const toolDeadlineTimers = new Map<unknown, NodeJS.Timeout>();
   const trackInflight = (line: string): void => {
     try {
       const m = JSON.parse(line) as JsonRpc;
@@ -240,8 +246,53 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
   const writeClient = (obj: JsonRpc | string): void => {
     try { process.stdout.write((typeof obj === 'string' ? obj : JSON.stringify(obj)) + '\n'); } catch { /* host gone */ }
   };
+
+  /** Proxy-side deadline — daemon wedging must not become empty client `-32001`. */
+  const armToolCallDeadline = (id: unknown): void => {
+    if (id === undefined || id === null) return;
+    const prev = toolDeadlineTimers.get(id);
+    if (prev) clearTimeout(prev);
+    const deadlineMs = resolveToolDeadlineMs();
+    const timer = setTimeout(() => {
+      toolDeadlineTimers.delete(id);
+      if (!inflight.has(id)) return; // already answered
+      inflight.delete(id);
+      timedOutToolIds.add(id);
+      const secs = Math.max(1, Math.round(deadlineMs / 1000));
+      writeClient({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{
+            type: 'text',
+            text:
+              `⚠️ **Partial result** — HomeGraph did not finish within ${secs}s (daemon busy or wedged). ` +
+              `This is NOT an error. Retry ONE \`homegraph_explore\` with concrete symbol/file names — ` +
+              `do not stack search+explore, and do not grep symbols you already named.`,
+          }],
+          isError: false,
+        },
+      });
+    }, deadlineMs);
+    toolDeadlineTimers.set(id, timer);
+  };
+  const clearToolCallDeadline = (id: unknown): 'ok' | 'already-timed-out' => {
+    const t = toolDeadlineTimers.get(id);
+    if (t) {
+      clearTimeout(t);
+      toolDeadlineTimers.delete(id);
+    }
+    if (timedOutToolIds.has(id)) {
+      timedOutToolIds.delete(id);
+      return 'already-timed-out';
+    }
+    return 'ok';
+  };
+
   const shutdown = (): void => {
     if (shuttingDown) return; shuttingDown = true;
+    for (const t of toolDeadlineTimers.values()) clearTimeout(t);
+    toolDeadlineTimers.clear();
     try { daemonSocket?.destroy(); } catch { /* ignore */ }
     try { engine?.stop(); } catch { /* ignore */ }
     process.exit(0);
@@ -318,6 +369,9 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
       } else if (msg.method === 'prompts/list') {
         writeClient({ jsonrpc: '2.0', id: msg.id, result: { prompts: [] } });
       } else {
+        if (msg.method === 'tools/call' && msg.id !== undefined) {
+          armToolCallDeadline(msg.id);
+        }
         routeToDaemon(line);
       }
     }
@@ -351,6 +405,9 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
         let resp: JsonRpc | null = null;
         try { resp = JSON.parse(line) as JsonRpc; } catch { /* not JSON — relay verbatim */ }
         if (resp && resp.id !== undefined && ('result' in resp || 'error' in resp)) {
+          if (clearToolCallDeadline(resp.id) === 'already-timed-out') {
+            continue; // client already got Partial from the proxy deadline
+          }
           inflight.delete(resp.id); // answered — no longer in flight
           // Suppress the daemon's reply to the initialize we forwarded to prime it
           // (the client already got the local handshake response).

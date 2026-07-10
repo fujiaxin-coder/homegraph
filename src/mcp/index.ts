@@ -294,7 +294,11 @@ export class MCPServer {
     if (reason && process.env.HOMEGRAPH_MCP_DEBUG) {
       process.stderr.write(`[HomeGraph MCP] Direct mode: ${reason}.\n`);
     }
-    this.engine = new MCPEngine();
+    // Direct mode = one client. Do NOT start a query-pool worker: each worker
+    // is a second V8 isolate + a second open of the project DB, and on large
+    // indexes (hundreds of MB) that alone pushed process-tree RSS to ~5GB.
+    // Soft deadlines + compact-before-pool still run on the warm main connection.
+    this.engine = new MCPEngine({ queryPool: false });
     const transport = new StdioTransport();
     this.session = new MCPSession(transport, this.engine, {
       explicitProjectPath: this.projectPath,
@@ -409,7 +413,13 @@ export class MCPServer {
       }
       return null; // never bound — the proxy serves this session in-process
     };
-    await runLocalHandshakeProxy({ getDaemonSocket, makeEngine: () => new MCPEngine(), root });
+    await runLocalHandshakeProxy({
+      getDaemonSocket,
+      // Daemon-unavailable fallback is one client — same as direct mode: no
+      // pool. Duplicating the DB open here blew RSS on large indexes.
+      makeEngine: () => new MCPEngine({ queryPool: false }),
+      root,
+    });
   }
 
   /** Standard SIGINT/SIGTERM handlers that route to our `stop()` (direct mode). */
