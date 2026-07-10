@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { HomeGraph } from '../src';
+import { killMcpChild, removeTempDir } from './helpers/fs';
 
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
@@ -84,13 +85,11 @@ describe('MCP project resolution via roots/list (issue #196)', () => {
     projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-mcp-proj-'));
   });
 
-  afterEach(() => {
-    if (child && !child.killed) {
-      child.kill('SIGKILL');
-      child = null;
-    }
-    fs.rmSync(cwdDir, { recursive: true, force: true });
-    fs.rmSync(projectDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await killMcpChild(child);
+    child = null;
+    removeTempDir(cwdDir);
+    removeTempDir(projectDir);
   });
 
   it('resolves the project from the client roots/list when no rootUri is sent', async () => {

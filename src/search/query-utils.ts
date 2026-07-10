@@ -7,10 +7,128 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Node } from '../types';
+import { validatePathWithinRoot } from '../utils';
 
 /** Normalize a name to a comparable token: lowercase, alphanumerics only. */
 export function normalizeNameToken(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/** Source/config extensions recognized in natural-language queries. */
+export const QUERY_SOURCE_FILE_EXT =
+  'ets|ts|tsx|js|jsx|mjs|cjs|json5?|ya?ml|toml|hpp|h|cpp|c';
+
+/** Member-access anchor extracted from a query (e.g. locationManager.on, .drawModifier). */
+export interface QueryMemberAccess {
+  receiver?: string;
+  member: string;
+  /** Dotted form as written in the query. */
+  dotted: string;
+}
+
+/**
+ * File basenames from queries — supports `Foo.ets` and path-style `common\\constants.ets`.
+ */
+export function extractFileBasenamesFromQuery(query: string): string[] {
+  const basenames = new Set<string>();
+  const ext = QUERY_SOURCE_FILE_EXT;
+  const pathStyle = new RegExp(`(?:^|[/\\\\])([A-Za-z][A-Za-z0-9_-]*)\\.(?:${ext})\\b`, 'gi');
+  const wordStyle = new RegExp(`\\b([A-Za-z][A-Za-z0-9_-]*)\\.(?:${ext})\\b`, 'gi');
+  for (const re of [pathStyle, wordStyle]) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(query)) !== null) {
+      if (m[1] && m[1].length >= 2) basenames.add(m[1]);
+    }
+  }
+  return [...basenames];
+}
+
+/**
+ * HarmonyOS @kit module names — from `@kit.ArkTS` literals or PascalCase `*Kit` tokens
+ * (e.g. ServiceCollaborationKit in "调用 ServiceCollaborationKit 需要…").
+ */
+export function extractKitModuleNamesFromQuery(query: string): string[] {
+  const names = new Set<string>();
+  for (const m of query.matchAll(/@kit\.([A-Za-z][A-Za-z0-9]*)/gi)) {
+    if (m[1]) names.add(m[1]);
+  }
+  for (const m of query.matchAll(/\b([A-Z][A-Za-z0-9]*Kit)\b/g)) {
+    if (m[1] && m[1].length >= 5) names.add(m[1]);
+  }
+  return [...names];
+}
+
+/**
+ * Member-access patterns from a query — `obj.method`, `Type.method`, or `.member`.
+ */
+export function extractMemberAccessFromQuery(query: string): QueryMemberAccess[] {
+  const results: QueryMemberAccess[] = [];
+  const seen = new Set<string>();
+
+  for (const m of query.matchAll(/\b([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)+)\b/g)) {
+    const dotted = m[1];
+    if (!dotted || seen.has(dotted)) continue;
+    const parts = dotted.split('.');
+    if (parts.length < 2) continue;
+    const member = parts[parts.length - 1]!;
+    if (member.length < 2) continue;
+    seen.add(dotted);
+    results.push({
+      receiver: parts.slice(0, -1).join('.'),
+      member,
+      dotted,
+    });
+  }
+
+  for (const m of query.matchAll(/\.([A-Za-z_][\w]*)\b/g)) {
+    const member = m[1]!;
+    const dotted = `.${member}`;
+    if (seen.has(dotted)) continue;
+    seen.add(dotted);
+    results.push({ member, dotted });
+  }
+
+  return results;
+}
+
+/** Terms for targeted import-node FTS (kit modules and their @kit.* paths). */
+export function extractImportSearchTerms(query: string): string[] {
+  const terms = new Set<string>();
+  for (const kit of extractKitModuleNamesFromQuery(query)) {
+    terms.add(kit);
+    terms.add(`@kit.${kit}`);
+  }
+  return [...terms];
+}
+
+/** True when the file's basename matches a basename named in the query (Foo.ets, bar.ts, …). */
+export function fileMatchesQueryBasename(filePath: string, basenames: string[]): boolean {
+  if (basenames.length === 0) return false;
+  const base = path.basename(filePath).toLowerCase();
+  return basenames.some((b) => {
+    const stem = b.toLowerCase();
+    return base === stem || base.startsWith(`${stem}.`);
+  });
+}
+
+/**
+ * Full `import … from '…'` line for an import node — reads from disk when the
+ * stored signature is module-only (common for @kit.* extraction).
+ */
+export function resolveImportLineFromNode(node: Node, projectRoot: string): string {
+  const fromSig = (node.signature || '').trim();
+  if (/import\b|from\s+['"]/.test(fromSig)) return fromSig;
+  if (node.startLine > 0) {
+    try {
+      const abs = validatePathWithinRoot(projectRoot, node.filePath);
+      if (abs) {
+        const lines = fs.readFileSync(abs, 'utf-8').split('\n');
+        const raw = (lines[node.startLine - 1] || '').trim();
+        if (raw) return raw;
+      }
+    } catch { /* fall through */ }
+  }
+  return fromSig || node.name;
 }
 
 /**
@@ -76,6 +194,117 @@ export const STOP_WORDS = new Set([
   'code', 'file', 'files', 'function', 'method', 'class', 'type',
   'fix', 'bug', 'called',
 ]);
+
+/**
+ * Lowercase API / import symbol names in a dependency question (taskpool, formInfo).
+ * Used to filter import sites to the symbol actually asked about, not every @kit.ArkTS import.
+ */
+export function extractDependencySymbolsFromQuery(query: string): string[] {
+  const symbols = new Set<string>();
+  for (const ma of extractMemberAccessFromQuery(query)) {
+    if (ma.member.length >= 3 && !STOP_WORDS.has(ma.member.toLowerCase())) {
+      symbols.add(ma.member);
+    }
+  }
+  for (const m of query.matchAll(/\b([a-z][a-zA-Z0-9]{3,})\b/g)) {
+    const sym = m[1]!;
+    if (!STOP_WORDS.has(sym.toLowerCase())) symbols.add(sym);
+  }
+  for (const kit of extractKitModuleNamesFromQuery(query)) {
+    symbols.delete(kit);
+    symbols.delete(kit.charAt(0).toLowerCase() + kit.slice(1));
+  }
+  return [...symbols];
+}
+
+/**
+ * Query text names a config/manifest file by basename + extension (structural, not a hardcoded whitelist).
+ */
+export function queryNamesConfigFile(query: string): boolean {
+  if (/\b[\w./\\-]+\.(?:json5?|ya?ml|toml|xml|ini|properties)\b/i.test(query)) return true;
+  const basenames = extractFileBasenamesFromQuery(query);
+  if (basenames.length === 0) return false;
+  return /\.(?:json5?|ya?ml|toml)/i.test(query);
+}
+
+/** Query names concrete import/kit/symbol tokens usable to filter dependency sites. */
+export function hasSymbolFilterInQuery(query: string): boolean {
+  return (
+    extractDependencySymbolsFromQuery(query).length > 0
+    || extractKitModuleNamesFromQuery(query).length > 0
+    || extractImportSearchTerms(query).length > 0
+  );
+}
+
+/** Import-inventory omit/compact — @kit.* or distinctive symbol; not generic terms like "item". */
+export function hasImportInventoryFilter(query: string): boolean {
+  if (extractKitModuleNamesFromQuery(query).length > 0) return true;
+  return extractDependencySymbolsFromQuery(query).some((d) => isDistinctiveIdentifier(d));
+}
+
+export function shouldBuildCallerInventory(query: string): boolean {
+  return extractTypeNamesFromQuery(query).length > 0;
+}
+
+export function shouldBuildMemberSurvey(query: string): boolean {
+  return extractMemberAccessFromQuery(query).length > 0;
+}
+
+export function shouldBuildConfigSection(query: string): boolean {
+  return queryNamesConfigFile(query);
+}
+
+/** Compact import list when query filters symbols and multiple sites match. */
+export function shouldCompactImportListing(
+  siteCount: number,
+  hasSymbolFilter: boolean,
+): boolean {
+  if (!hasSymbolFilter) return false;
+  return siteCount >= 2;
+}
+
+export interface ExploreInventorySignals {
+  importSiteCount: number;
+  hasFilteredImports: boolean;
+  callerBulletCount: number;
+  memberFileCount: number;
+  configRendered: boolean;
+}
+
+/** Multiple named anchors in one query → trace/connect intent, not flat inventory. */
+export function queryNamesMultipleExploreAnchors(query: string): boolean {
+  const typeCount = extractTypeNamesFromQuery(query).length;
+  const memberCount = extractMemberAccessFromQuery(query).length;
+  const fileCount = extractFileBasenamesFromQuery(query).length;
+  if (typeCount >= 2 || memberCount >= 2) return true;
+  return typeCount + memberCount + fileCount >= 2;
+}
+
+/** Omit source bodies when inventory sections suffice and the graph found no flow path. */
+export function shouldOmitSourceBodies(
+  inv: ExploreInventorySignals,
+  hasFlowPath: boolean,
+  multiAnchorQuery: boolean,
+): boolean {
+  if (hasFlowPath || multiAnchorQuery) return false;
+  if (inv.configRendered) return true;
+  // Import dependency lists are self-contained answers; caller/member inventories
+  // supplement explore but must not hide source/flow on their own.
+  if (inv.hasFilteredImports && inv.importSiteCount >= 2) return true;
+  return false;
+}
+
+/** PascalCase type / class names mentioned in the query (Configuration, BadgeManager). */
+export function extractTypeNamesFromQuery(query: string): string[] {
+  const names = new Set<string>();
+  for (const m of query.matchAll(/\b([A-Z][A-Za-z0-9]*(?:[A-Z][a-z]+)+|[A-Z][a-z][A-Za-z0-9]*)\b/g)) {
+    if (m[1] && m[1].length >= 3) names.add(m[1]);
+  }
+  for (const base of extractFileBasenamesFromQuery(query)) {
+    if (/^[A-Z]/.test(base)) names.add(base);
+  }
+  return [...names];
+}
 
 /**
  * Generate stem variants of a search term by removing common English suffixes.
@@ -156,11 +385,31 @@ export function getStemVariants(term: string): string[] {
 export function extractSearchTerms(query: string, options?: { stems?: boolean }): string[] {
   const includeStems = options?.stems !== false;
   const tokens = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  for (const kit of extractKitModuleNamesFromQuery(query)) {
+    tokens.add(kit.toLowerCase());
+  }
+
+  for (const base of extractFileBasenamesFromQuery(query)) {
+    if (base.length >= 2) tokens.add(base.toLowerCase());
+  }
+
+  for (const ma of extractMemberAccessFromQuery(query)) {
+    if (ma.member.length >= 3) tokens.add(ma.member.toLowerCase());
+    if (ma.receiver && ma.receiver.length >= 3) tokens.add(ma.receiver.toLowerCase());
+  }
+
+  // C++ qualified names
+  const cppQualPattern = /\b([A-Za-z_][\w]*)(::)([A-Za-z_][\w]*)\b/g;
+  while ((match = cppQualPattern.exec(query)) !== null) {
+    if (match[1] && match[1].length >= 3) tokens.add(match[1].toLowerCase());
+    if (match[3] && match[3].length >= 3) tokens.add(match[3].toLowerCase());
+  }
 
   // First, extract and preserve compound identifiers before splitting
   // CamelCase: scrapeLoop, UserService, getCallGraph
   const compoundPattern = /\b([a-zA-Z][a-zA-Z0-9]*(?:[A-Z][a-z]+)+|[A-Z][a-z]+(?:[A-Z][a-z]*)+)\b/g;
-  let match;
   while ((match = compoundPattern.exec(query)) !== null) {
     if (match[1] && match[1].length >= 3) {
       tokens.add(match[1].toLowerCase()); // preserve full compound: "scrapeloop"

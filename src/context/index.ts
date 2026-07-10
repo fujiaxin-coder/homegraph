@@ -25,7 +25,7 @@ import { GraphTraverser } from '../graph';
 import { formatContextAsMarkdown, formatContextAsJson } from './formatter';
 import { logDebug } from '../errors';
 import { validatePathWithinRoot, isConfigLeafNode } from '../utils';
-import { isTestFile, extractSearchTerms, scorePathRelevance, getStemVariants, isDistinctiveIdentifier } from '../search/query-utils';
+import { isTestFile, extractSearchTerms, scorePathRelevance, getStemVariants, isDistinctiveIdentifier, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, resolveImportLineFromNode } from '../search/query-utils';
 import { LOW_CONFIDENCE_MARKER } from './markers';
 
 /**
@@ -99,6 +99,30 @@ function extractSymbolsFromQuery(query: string): string[] {
     if (match[1]) {
       symbols.add(match[1]);
     }
+  }
+
+  for (const kit of extractKitModuleNamesFromQuery(query)) {
+    symbols.add(kit);
+  }
+
+  for (const base of extractFileBasenamesFromQuery(query)) {
+    symbols.add(base);
+  }
+
+  for (const ma of extractMemberAccessFromQuery(query)) {
+    symbols.add(ma.member);
+    if (ma.receiver) {
+      for (const part of ma.receiver.split('.')) {
+        if (part.length >= 2) symbols.add(part);
+      }
+    }
+  }
+
+  // C++ qualified names: EGLCore::Release → both parts
+  const cppQualPattern = /\b([A-Za-z_][\w]*)(::)([A-Za-z_][\w]*)\b/g;
+  while ((match = cppQualPattern.exec(query)) !== null) {
+    if (match[1]) symbols.add(match[1]);
+    if (match[3]) symbols.add(match[3]);
   }
 
   // Filter out common English words that aren't likely symbol names
@@ -530,6 +554,65 @@ export class ContextBuilder {
           if (!existing) {
             exactMatches.push(r);
           }
+        }
+      }
+      exactMatches.sort((a, b) => b.score - a.score);
+      exactMatches = exactMatches.slice(0, Math.ceil(opts.searchLimit * 3));
+    }
+
+    // Step 2c: Targeted import signature search for @kit.* / *Kit module names.
+    // FTS normally excludes imports (they flood results), but dependency questions
+    // need the files that `import … from '@kit.FooKit'` — not unrelated *Collaboration*
+    // classes that share a substring.
+    const importSearchTerms = extractImportSearchTerms(query);
+    const depSymbols = extractDependencySymbolsFromQuery(query);
+    if (importSearchTerms.length > 0 || depSymbols.length > 0) {
+      const tryBoostImport = (r: SearchResult, lineText: string): void => {
+        const lineLc = lineText.toLowerCase();
+        if (importSearchTerms.length > 0) {
+          const kitNames = extractKitModuleNamesFromQuery(query);
+          if (kitNames.length > 0 && !kitNames.some((k) => lineLc.includes(`@kit.${k.toLowerCase()}`))) {
+            return;
+          }
+        }
+        if (depSymbols.length > 0 && !depSymbols.some((s) => lineLc.includes(s.toLowerCase()))) {
+          return;
+        }
+        const boosted: SearchResult = { ...r, score: r.score + 45 };
+        const existing = exactMatches.find((e) => e.node.id === boosted.node.id);
+        if (existing) {
+          existing.score = Math.max(existing.score, boosted.score);
+        } else {
+          exactMatches.push(boosted);
+        }
+      };
+      for (const sym of depSymbols) {
+        try {
+          const importHits = this.queries.searchNodes(sym, {
+            limit: opts.searchLimit * 5,
+            kinds: ['import'],
+          });
+          for (const r of importHits) {
+            tryBoostImport(r, resolveImportLineFromNode(r.node, this.projectRoot));
+          }
+        } catch (error) {
+          logDebug('Import symbol search failed', { sym, error: String(error) });
+        }
+      }
+      for (const term of importSearchTerms) {
+        try {
+          const termLc = term.toLowerCase().replace(/^@kit\./, '');
+          const importHits = this.queries.searchNodes(term, {
+            limit: opts.searchLimit * 3,
+            kinds: ['import'],
+          });
+          for (const r of importHits) {
+            const lineText = resolveImportLineFromNode(r.node, this.projectRoot);
+            if (!lineText.toLowerCase().includes(termLc)) continue;
+            tryBoostImport(r, lineText);
+          }
+        } catch (error) {
+          logDebug('Import signature search failed', { term, error: String(error) });
         }
       }
       exactMatches.sort((a, b) => b.score - a.score);

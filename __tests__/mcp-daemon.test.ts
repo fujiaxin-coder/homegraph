@@ -39,6 +39,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { HomeGraph } from '../src';
 import { getDaemonSocketPath } from '../src/mcp/daemon-paths';
+import { removeTempDir } from './helpers/fs';
 
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
@@ -193,7 +194,7 @@ describe('Shared MCP daemon (issue #411)', () => {
     }
     await new Promise((r) => setTimeout(r, 50));
     servers.length = 0;
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTempDir(tempDir);
   });
 
   it('two invocations share ONE detached daemon; both attach as proxies', async () => {

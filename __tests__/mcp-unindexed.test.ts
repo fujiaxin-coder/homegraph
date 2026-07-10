@@ -175,7 +175,8 @@ describe('No-root-index session policy', () => {
     child = spawnServer(tempDir);
     const init = await request(child, { id: 0, method: 'initialize', params: initializeParams(tempDir) });
     const instructions = (init.result as { instructions: string }).instructions;
-    expect(instructions).toMatch(/How to query/);
+    expect(instructions).toMatch(/homegraph_explore/);
+    expect(instructions).toMatch(/When to call homegraph_explore/i);
     expect(instructions).not.toMatch(/inactive/i);
 
     const list = await request(child, { id: 1, method: 'tools/list' });
