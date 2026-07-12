@@ -243,7 +243,7 @@ describe('scanner — scanCommits', () => {
 
     const results = scanCommits(repo, '', 'HEAD');
     expect(results.length).toBe(1);
-    // .md files are not diffable (not in SUPPORTED_EXTENSIONS), so fileChanges is empty.
+    // .md files are not supported by the grammar system, so fileChanges is empty.
     expect(results[0]!.fileChanges).toEqual([]);
   });
 });
@@ -571,9 +571,11 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(0)];
-    await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    expect(result.specs.length).toBe(1);
 
-    const specFile = path.join(outputDir, 'spec0.md');
+    const specId = result.specs[0]!.specId;
+    const specFile = path.join(outputDir, `${specId}.md`);
     expect(fs.existsSync(specFile)).toBe(true);
     const content = fs.readFileSync(specFile, 'utf-8');
     expect(content).toContain('Spec A');
@@ -628,7 +630,7 @@ describe('generator — generateSpecs', () => {
     expect(result.specs.length).toBe(0);
   });
 
-  it('specId matches cluster id format', async () => {
+  it('specId uses cluster timeRange timestamp', async () => {
     vi.mocked(OpenAiLlmClient).mockImplementation(() => ({
       chat: vi.fn().mockResolvedValue('# Spec 3\n\nContent.'),
       chatJson: vi.fn().mockResolvedValue({}),
@@ -637,7 +639,8 @@ describe('generator — generateSpecs', () => {
     const clusters = [makeCluster(3)];
     const result = await generateSpecs(clusters, llmConfig, outputDir);
     expect(result.specs.length).toBe(1);
-    expect(result.specs[0]!.specId).toBe('spec3');
+    // specId is generated as spec_${cluster.timeRange.end}
+    expect(result.specs[0]!.specId).toMatch(/^spec_\d+$/);
   });
 });
 
@@ -744,7 +747,7 @@ describe('persist — persistToGraph', () => {
     expect(row2).toBeDefined();
   });
 
-  it('inserts GENERATE relation', () => {
+  it('inserts SUMMARIZED_FROM relation', () => {
     const hash = commitFile(repo, 'src/main.ts', 'export const x = 1;\n', 'feat: main');
     const cluster = makeCluster(0, [hash], ['feat: main']);
     const spec = makeSpec('spec0', 0, '# Spec\nContent.\n', [hash]);
@@ -752,12 +755,12 @@ describe('persist — persistToGraph', () => {
     const result = persistToGraph(db, repo, [spec], [cluster], '/tmp/output');
     expect(result.relationsWritten).toBeGreaterThan(0);
 
-    // Verify spec_commit_relations exists
+    // Verify spec_commit_relations exists with SUMMARIZED_FROM
     const relRow = db
       .prepare(
         'SELECT * FROM spec_commit_relations WHERE spec_id = ? AND commit_hash = ? AND relation_type = ?',
       )
-      .get('spec0', hash, 'GENERATE') as any;
+      .get('spec0', hash, 'SUMMARIZED_FROM') as any;
     expect(relRow).toBeDefined();
   });
 

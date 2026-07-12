@@ -37,7 +37,6 @@ import { SPEC_DATA_DIR } from './utils';
 export interface SpecDiscoveryConfig {
   primaryDocCandidates: string[];
   supplementaryGlobs: string[];
-  commitInfoCandidates: string[];
 }
 
 export interface CommitScopeConfig {
@@ -127,7 +126,6 @@ export const DEFAULT_CONFIG: SpecConfig = Object.freeze({
       'spec-{spec_dir}.md',
     ]),
     supplementaryGlobs: Object.freeze(['logic/**/*.md', 'design/**/*.md']),
-    commitInfoCandidates: Object.freeze(['commit-info.md']),
   }),
   commitScope: Object.freeze({
     scopeRegex:
@@ -265,12 +263,6 @@ function normalizeDiscovery(
       'discovery.supplementaryGlobs',
       file,
     ),
-    commitInfoCandidates: normalizeStringArray(
-      val.commitInfoCandidates,
-      def.commitInfoCandidates,
-      'discovery.commitInfoCandidates',
-      file,
-    ),
   };
 }
 
@@ -338,7 +330,7 @@ const LLM_CONFIG_EXAMPLE = [
  *
  * Optional fields with defaults:
  * - `temperature`: defaults to 0.2
- * - `maxTokens`: defaults to 4096
+ * - `maxTokens`: defaults to 20000
  *
  * Returns a valid LLMConfig, or `null` if the user did not provide an `llm`
  * section at all (no error in that case — callers decide how to handle it).

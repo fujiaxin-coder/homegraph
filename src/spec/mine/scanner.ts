@@ -10,7 +10,6 @@
  */
 
 import { execFileSync } from 'child_process';
-import * as path from 'path';
 import { CommitInfo, getCommitRange } from '../build/git-scanner';
 import { extractFromSource } from '../../extraction/tree-sitter';
 import { detectLanguage, isLanguageSupported } from '../../extraction/grammars';
@@ -92,17 +91,15 @@ function getFileAtCommit(
   }
 }
 
-/** File extensions that AST-level diffing is meaningful for. */
-const SUPPORTED_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.java',
-  '.cs', '.swift', '.kt', '.kts', '.scala', '.rb', '.php',
-  '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.dart', '.lua',
-  '.vue', '.svelte',
-]);
-
+/**
+ * Check whether a file can be structurally diffed.
+ *
+ * Delegates to the grammar system's `detectLanguage` + `isLanguageSupported`
+ * so the supported language set is always aligned — any language the grammar
+ * system supports is automatically supported here.
+ */
 function isDiffableFile(filePath: string): boolean {
-  const ext = path.extname(filePath).toLowerCase();
-  return SUPPORTED_EXTENSIONS.has(ext);
+  return isLanguageSupported(detectLanguage(filePath));
 }
 
 /**
@@ -433,8 +430,6 @@ export function scanCommits(
         seenFiles.add(filePath);
 
         try {
-          if (!isLanguageSupported(detectLanguage(filePath))) continue;
-
           const oldContent = parentHash
             ? getFileAtCommit(repoPath, parentHash, filePath)
             : null;

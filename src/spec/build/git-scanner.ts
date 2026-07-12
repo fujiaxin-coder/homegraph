@@ -3,12 +3,8 @@
  *
  * Replaces `commit4spec/reverse_engineer/git_scanner.py` and
  * `commit4spec/reverse_engineer/git_utils.py`. Discovers spec↔commit pairs via
- * two strategies:
- *
- *  - **Strategy A — commit message scope:** extract conventional-commit scopes
- *    from commit messages and resolve them to spec IDs on disk.
- *  - **Strategy B — commit-info.md:** discover specs on disk, read their
- *    `commit-info.md` for linked commit hashes, and verify those commits exist.
+ * conventional-commit scope extraction: extracts scopes from commit messages
+ * and resolves them to spec IDs on disk.
  *
  * All Git operations use `execFileSync` with an args array (never template
  * strings) to avoid shell injection risks — matching the HomeGraph convention
@@ -19,10 +15,9 @@
 
 import { execFileSync } from 'child_process';
 import { SpecConfig } from '../config';
-import { discoverSpecs } from '../utils';
 import { resolveScopeToSpec } from './scope-resolver';
 import { extractSpecMetadata, SpecMetadata } from './spec-extractor';
-import { logDebug, logWarn } from '../../errors';
+import { logDebug } from '../../errors';
 import { gitExecOptions } from '../git-utils';
 
 // ---------------------------------------------------------------------------
@@ -290,18 +285,12 @@ export function getCommitRange(
 // ---------------------------------------------------------------------------
 
 /**
- * Main scanning function — discovers spec↔commit pairs using two strategies.
+ * Main scanning function — discovers spec↔commit pairs from commit history.
  *
- * **Strategy A — commit message scope:**
  * Iterates every commit in the repo, extracts a conventional-commit scope from
  * its message, normalizes it, and checks whether the resulting spec ID exists
  * on disk. When a match is found the pair is recorded with full spec and
  * commit metadata.
- *
- * **Strategy B — commit-info.md:**
- * Discovers all specs on disk that were **not** already paired by Strategy A,
- * reads their metadata (which may include a commit hash from `commit-info.md`),
- * and verifies the commit exists in the repo. Verified pairs are added.
  *
  * Duplicates (identical specId + commitHash) are de-duplicated via a
  * `Map` keyed on `"${specId}|${commitHash}"`.
@@ -313,14 +302,12 @@ export function scan(
 ): SpecCommitPair[] {
   const pairs = new Map<string, SpecCommitPair>();
 
-  // ---- Strategy A: commit message scope ----
-
   const commits = getAllCommits(repoPath);
 
   for (const commit of commits) {
     const specId = resolveScopeToSpec(commit.message, specStoragePath, config);
     if (!specId) {
-      logDebug('Strategy A: no scope match', {
+      logDebug('scan: no scope match', {
         commitHash: commit.hash.slice(0, 7),
         message: commit.message,
       });
@@ -336,54 +323,6 @@ export function scan(
         commitHash: commit.hash,
         specMetadata,
         commitMetadata: commit,
-      });
-    }
-  }
-
-  // ---- Strategy B: commit-info.md ----
-
-  // Collect specIds already paired by Strategy A.
-  const pairedSpecIds = new Set<string>();
-  for (const pair of pairs.values()) {
-    pairedSpecIds.add(pair.specId);
-  }
-
-  const specs = discoverSpecs(specStoragePath);
-
-  for (const spec of specs) {
-    if (pairedSpecIds.has(spec.specId)) {
-      continue;
-    }
-
-    const metadata = extractSpecMetadata(specStoragePath, spec.specId, config);
-    if (!metadata) {
-      // extractSpecMetadata already logs the reason.
-      continue;
-    }
-
-    if (!metadata.commitHash) {
-      logDebug('Strategy B: no commit hash in spec metadata', {
-        specId: spec.specId,
-      });
-      continue;
-    }
-
-    const commitInfo = getCommitInfo(repoPath, metadata.commitHash);
-    if (!commitInfo) {
-      logWarn('Strategy B: commit-info.md hash does not match any known commit', {
-        specId: spec.specId,
-        commitHash: metadata.commitHash,
-      });
-      continue;
-    }
-
-    const key = `${spec.specId}|${metadata.commitHash}`;
-    if (!pairs.has(key)) {
-      pairs.set(key, {
-        specId: spec.specId,
-        commitHash: metadata.commitHash,
-        specMetadata: metadata,
-        commitMetadata: commitInfo,
       });
     }
   }

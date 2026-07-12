@@ -83,60 +83,6 @@ export function writeFileContent(filePath: string, content: string): void {
 }
 
 // =============================================================================
-// Commit-info.md parsing
-// =============================================================================
-
-/**
- * Regex matching commit-hash annotations in commit-info.md content.
- *
- * Matches lines like:
- *   commit: abc123def456...
- *   commit-id: abc123def456...
- *   commit_id: abc123def456...
- *   commit-id=abc123def456...
- *   abc123def456789... (bare 40-char hex on its own line)
- */
-const COMMIT_HASH_RE = /^commit[-_ ]?(?:id)?[:= ]\s*([a-f0-9]{7,40})\s*$/i;
-const BARE_HASH_RE = /^([a-f0-9]{40})\s*$/i;
-
-/**
- * Parse commit-info.md content for a commit hash.
- *
- * Searches line by line for one of:
- * - `commit: HASH`
- * - `commit-id: HASH`
- * - `commit_id: HASH`
- * - a bare 40-char hex hash on its own line
- *
- * Returns the first matched hash (7–40 hex chars), or `null` if no hash is
- * found. Empty or whitespace-only input returns `null`.
- */
-export function parseCommitInfoMd(content: string): string | null {
-  if (!content) return null;
-
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    // Try annotated hash first
-    const match = COMMIT_HASH_RE.exec(trimmed);
-    if (match) {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      return match[1]!.toLowerCase();
-    }
-
-    // Try bare 40-char hex
-    const bareMatch = BARE_HASH_RE.exec(trimmed);
-    if (bareMatch) {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      return bareMatch[1]!.toLowerCase();
-    }
-  }
-
-  return null;
-}
-
-// =============================================================================
 // Spec discovery
 // =============================================================================
 

@@ -350,21 +350,6 @@ describe('git-scanner — scan', () => {
     expect(pair!.commitMetadata!.message).toContain('feat(spec01)');
   });
 
-  it('Strategy B: commit-info.md returns pairs', () => {
-    // Create spec with commit-info.md pointing to a commit
-    const hash = commitFile(repo, 'src/b.ts', 'y\n', 'chore: initial commit');
-    const specDir = path.join(specStorage, 'spec99');
-    fs.mkdirSync(specDir, { recursive: true });
-    fs.writeFileSync(path.join(specDir, 'plan.md'), '# Spec 99\nContent\n', 'utf-8');
-    fs.writeFileSync(path.join(specDir, 'commit-info.md'), `commit: ${hash}\n`, 'utf-8');
-
-    const pairs = scan(repo, specStorage, DEFAULT_CONFIG);
-    const pair = pairs.find((p) => p.specId === 'spec99');
-    expect(pair).toBeDefined();
-    expect(pair!.commitHash).toBe(hash);
-    expect(pair!.commitMetadata).toBeDefined();
-  });
-
   it('empty commits returns []', () => {
     // No commits at all
     const pairs = scan(repo, specStorage, DEFAULT_CONFIG);
