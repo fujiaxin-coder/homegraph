@@ -2243,7 +2243,6 @@ specCommand
   .command('mine')
   .description('Mine design specs from Git history using AST analysis and LLM')
   .option('-p, --path <path>', 'Path to the repository')
-  .option('--repo <path>', 'Path to the repository (alias for --path)')
   .option('--limit <number>', 'Maximum commits to scan', '100')
   .option('--output <path>', 'Output directory for generated specs', '.spec')
   .option('--threshold <number>', 'Clustering similarity threshold (0-1)', '0.5')
@@ -2255,7 +2254,6 @@ specCommand
   .option('-j, --json', 'Output as JSON')
   .action(async (options: {
     path?: string;
-    repo?: string;
     limit?: string;
     output?: string;
     threshold?: string;
@@ -2267,7 +2265,7 @@ specCommand
     json?: boolean;
   }) => {
     try {
-      const repoPath = path.resolve(options.repo || options.path || process.cwd());
+      const repoPath = path.resolve(options.path || process.cwd());
 
       const { isGitRepo } = await import('../spec/build/git-scanner');
       const { loadSpecConfig } = await import('../spec/config');
