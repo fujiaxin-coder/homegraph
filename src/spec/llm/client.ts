@@ -1,14 +1,17 @@
 /**
  * Provider-agnostic LLM client for spec
  *
- * Supports OpenAI-compatible chat completions API. No mock mode — callers
- * that need test doubles inject their own stubs implementing the interface.
+ * Supports OpenAI-compatible chat completions API with automatic retry on
+ * transient errors (rate limits, server errors, network failures). No mock
+ * mode — callers that need test doubles inject their own stubs implementing
+ * the interface.
  *
  * @module spec/llm/client
  */
 import OpenAI from 'openai';
 import { LLMConfig } from '../config';
 import { logDebug } from '../../errors';
+import { classifyError, computeDelay, sleep } from './retry';
 
 // =============================================================================
 // Interface
@@ -31,40 +34,100 @@ export class OpenAiLlmClient implements LlmClient {
   }
 
   // ===========================================================================
+  // Helpers
+  // ===========================================================================
+
+  /** Resolve the baseURL for the OpenAI SDK. */
+  private resolveBaseURL(): string | undefined {
+    if (this.config.baseUrl) return this.config.baseUrl;
+    if (this.config.provider === 'anthropic') return 'https://api.anthropic.com/v1';
+    return undefined;
+  }
+
+  /**
+   * Build a fresh OpenAI client suitable for one call (no SDK-level retry —
+   * we handle retries ourselves with proper visibility).
+   */
+  private buildClient(): OpenAI {
+    return new OpenAI({
+      apiKey: this.config.apiKey,
+      baseURL: this.resolveBaseURL(),
+      maxRetries: 0, // disable SDK retry
+    });
+  }
+
+  // ===========================================================================
   // chat
   // ===========================================================================
 
   /**
    * Send a chat completion request and return the message content string.
    *
-   * Calls the OpenAI-compatible chat completions API and returns
-   * `choices[0].message.content`.  Throws on API or network errors so
-   * callers (e.g. the spec mine generator) can count failures reliably.
+   * Automatically retries on transient errors (429, 5xx, connection failures)
+   * with exponential backoff and jitter.  Retry-After headers on 429 responses
+   * are honoured as a floor for the delay.
+   *
+   * Retry configuration is in {@link LLMConfig}: `maxRetries` (default 3),
+   * `retryBaseDelayMs` (default 1000), `retryMaxDelayMs` (default 30000).
+   *
+   * Once all retries are exhausted the last error is re-thrown so callers
+   * (e.g. the spec mine generator) can count failures reliably.
    */
   async chat(systemPrompt: string, userPrompt: string): Promise<string> {
-    const baseURL = this.config.baseUrl
-      ? this.config.baseUrl
-      : this.config.provider === 'anthropic'
-        ? 'https://api.anthropic.com/v1'
-        : undefined;
+    // Build once per call — the OpenAI client is stateless so we can reuse it
+    // across retry attempts.
+    const client = this.buildClient();
 
-    const client = new OpenAI({
-      apiKey: this.config.apiKey,
-      baseURL,
-    });
+    const maxRetries = this.config.maxRetries;
+    const baseDelay = this.config.retryBaseDelayMs;
+    const maxDelay = this.config.retryMaxDelayMs;
 
-    const completion = await client.chat.completions.create({
-      model: this.config.model,
-      temperature: this.config.temperature,
-      max_tokens: this.config.maxTokens,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    });
+    // We track the cumulative attempt number for logging (1-based),
+    // and the zero-based index for backoff calculation.
+    for (let attemptIndex = 0; attemptIndex <= maxRetries; attemptIndex++) {
+      const callIndex = attemptIndex + 1; // 1-based for logging
 
-    const content = completion.choices[0]?.message?.content;
-    return content ?? '';
+      try {
+        const completion = await client.chat.completions.create({
+          model: this.config.model,
+          temperature: this.config.temperature,
+          max_tokens: this.config.maxTokens,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+        });
+
+        const content = completion.choices[0]?.message?.content;
+        return content ?? '';
+      } catch (err) {
+        // No more retries left — re-throw the raw error so callers can
+        // inspect its type (e.g. RateLimitError) if needed.
+        if (attemptIndex >= maxRetries) throw err;
+
+        const decision = classifyError(err);
+        if (!decision.retryable) throw err;
+
+        const delay = computeDelay(
+          decision.retryAfterMs,
+          baseDelay,
+          maxDelay,
+          attemptIndex,
+        );
+
+        logDebug(`LLM retry ${callIndex}/${maxRetries}`, {
+          attempt: callIndex,
+          maxRetries,
+          delayMs: delay,
+          error: err instanceof Error ? err.message : String(err),
+        });
+
+        await sleep(delay);
+      }
+    }
+
+    // Unreachable — the loop returns or throws in every branch.
+    throw new Error('unreachable: retry loop exited without returning');
   }
 
   // ===========================================================================

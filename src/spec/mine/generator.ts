@@ -16,6 +16,7 @@ import { LLMConfig } from '../config';
 import { OpenAiLlmClient } from '../llm/client';
 import { writeFileContent } from '../utils';
 import { logDebug, logWarn } from '../../errors';
+import type { MineProgressCallback } from './progress';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -188,6 +189,7 @@ function extractTitle(content: string): string {
  * @param llmConfig - LLM configuration (apiKey, model, etc.).
  * @param outputDir - Directory to write generated spec files.
  * @param templateContent - Optional custom template string.
+ * @param onProgress - Optional progress callback (called per cluster).
  * @returns Generation result with generated specs and stats.
  */
 export async function generateSpecs(
@@ -195,6 +197,7 @@ export async function generateSpecs(
   llmConfig: LLMConfig,
   outputDir: string,
   templateContent?: string,
+  onProgress?: MineProgressCallback,
 ): Promise<GenerationResult> {
   const client = new OpenAiLlmClient(llmConfig);
 
@@ -207,9 +210,18 @@ export async function generateSpecs(
   const specs: GeneratedSpec[] = [];
   let skipped = 0;
   let errors = 0;
+  const total = clusters.length;
 
-  for (const cluster of clusters) {
+  for (let ci = 0; ci < clusters.length; ci++) {
+    const cluster = clusters[ci]!;
     const specId = `spec_${cluster.timeRange.end}`;
+    const msg = `${specId} (${cluster.commits.length} commits)`;
+    onProgress?.({
+      phase: 'generating',
+      current: ci + 1,
+      total,
+      message: msg,
+    });
     logDebug('Generating spec for cluster', {
       specId,
       commitCount: cluster.commits.length,

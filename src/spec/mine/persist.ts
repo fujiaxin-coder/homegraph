@@ -26,6 +26,7 @@ import { extractMarkdownHeadings } from '../build/spec-extractor';
 import { GeneratedSpec } from './generator';
 import { CommitCluster } from './clusterer';
 import { logDebug, logWarn } from '../../errors';
+import type { MineProgressCallback } from './progress';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,6 +71,7 @@ function extractTitle(content: string, specId: string): string {
  * @param specs     - Generated specs from the LLM phase.
  * @param clusters  - Commit clusters (must align with specs by clusterId).
  * @param outputDir - Directory where generated spec markdown files were written.
+ * @param onProgress - Optional progress callback (called per spec).
  * @returns Counts of written nodes and relations.
  */
 export function persistToGraph(
@@ -78,6 +80,7 @@ export function persistToGraph(
   specs: GeneratedSpec[],
   clusters: CommitCluster[],
   outputDir: string,
+  onProgress?: MineProgressCallback,
 ): PersistResult {
   // Ensure schema exists (idempotent)
   initSpecSchema(db);
@@ -95,8 +98,16 @@ export function persistToGraph(
   let commitsWritten = 0;
   let fragmentsWritten = 0;
   let relationsWritten = 0;
+  const totalSpecs = specs.length;
 
-  for (const spec of specs) {
+  for (let si = 0; si < specs.length; si++) {
+    const spec = specs[si]!;
+    onProgress?.({
+      phase: 'persisting',
+      current: si + 1,
+      total: totalSpecs,
+      message: spec.specId,
+    });
     const cluster = clusterMap.get(spec.clusterId);
     if (!cluster) {
       logDebug('persistToGraph: spec has no matching cluster', {

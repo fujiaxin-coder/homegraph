@@ -16,6 +16,7 @@ import { detectLanguage, isLanguageSupported } from '../../extraction/grammars';
 import { NodeKind, Language, Node, ExtractionResult } from '../../types';
 import { logDebug, logWarn } from '../../errors';
 import { gitExecOptions } from '../git-utils';
+import type { MineProgressCallback } from './progress';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -323,6 +324,7 @@ function isFeatureCommit(message: string): boolean {
  * @param toHash - Ending commit hash (inclusive), typically 'HEAD'.
  * @param limit - If set, only the most recent N commits are processed.
  * @param allCommits - When false (default), skip non-feat conventional commits.
+ * @param onProgress - Optional progress callback (called per commit).
  * @returns Aggregated AST change data for each commit.
  */
 export function scanCommits(
@@ -331,6 +333,7 @@ export function scanCommits(
   toHash: string,
   limit?: number,
   allCommits = false,
+  onProgress?: MineProgressCallback,
 ): CommitChange[] {
   let commits: CommitInfo[];
 
@@ -385,8 +388,16 @@ export function scanCommits(
 
   const changes: CommitChange[] = [];
   let parseErrorCount = 0;
+  const totalCommits = commits.length;
 
-  for (const commit of commits) {
+  for (let ci = 0; ci < commits.length; ci++) {
+    const commit = commits[ci]!;
+    onProgress?.({
+      phase: 'scanning',
+      current: ci + 1,
+      total: totalCommits,
+      message: `${commit.hash.slice(0, 7)} ${commit.message.slice(0, 50)}`,
+    });
     logDebug('Mine scan: processing commit', {
       hash: commit.hash.slice(0, 7),
       message: commit.message,

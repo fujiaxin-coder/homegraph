@@ -22,6 +22,7 @@ import { generateSpecs } from './generator';
 import { logDebug, logWarn } from '../../errors';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { persistToGraph } from './persist';
+import type { MineProgressCallback } from './progress';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -100,6 +101,8 @@ function getHeadHash(repoPath: string): string {
  * @param repoPath - Path to the git repository.
  * @param config - Reverse pipeline configuration.
  * @param llmConfig - LLM configuration (required unless skipLlm is true).
+ * @param db - Optional SQLite database handle for persistence.
+ * @param onProgress - Optional progress callback for real-time feedback.
  * @returns Pipeline result with stats.
  */
 export async function runMinePipeline(
@@ -107,6 +110,7 @@ export async function runMinePipeline(
   config: MineConfig,
   llmConfig: LLMConfig | null,
   db: SqliteDatabase | null = null,
+  onProgress?: MineProgressCallback,
 ): Promise<MinePipelineResult> {
   const errors: string[] = [];
 
@@ -148,9 +152,11 @@ export async function runMinePipeline(
   }
 
   // 3. Scan commits (AST-level diff)
-  const changes = scanCommits(repoPath, fromHash, headHash, config.limit, config.allCommits);
+  onProgress?.({ phase: 'scanning', current: 0, total: 0, message: 'Starting...' });
+  const changes = scanCommits(repoPath, fromHash, headHash, config.limit, config.allCommits, onProgress);
 
   if (changes.length === 0) {
+    onProgress?.({ phase: 'done', current: 1, total: 1 });
     return {
       commitsScanned: 0,
       changesFound: 0,
@@ -168,6 +174,7 @@ export async function runMinePipeline(
   const changesWithData = changes.filter((c) => c.fileChanges.length > 0);
 
   if (changesWithData.length === 0) {
+    onProgress?.({ phase: 'done', current: 1, total: 1 });
     return {
       commitsScanned: changes.length,
       changesFound: 0,
@@ -188,11 +195,23 @@ export async function runMinePipeline(
   });
 
   // 4. Cluster commits
+  onProgress?.({
+    phase: 'clustering',
+    current: 0,
+    total: 0,
+    message: `${changesWithData.length} commits`,
+  });
   const clusterResult = clusterCommits(
     changesWithData,
     config.threshold,
     config.maxCluster,
   );
+  onProgress?.({
+    phase: 'clustering',
+    current: 1,
+    total: 1,
+    message: `${clusterResult.clusters.length} clusters`,
+  });
 
   logDebug('Mine pipeline: clustering complete', clusterResult.stats);
 
@@ -228,6 +247,7 @@ export async function runMinePipeline(
       llmConfig,
       config.outputDir,
       templateContent,
+      onProgress,
     );
 
     specsGenerated = genResult.specs.length;
@@ -247,6 +267,7 @@ export async function runMinePipeline(
           genResult.specs,
           clusterResult.clusters,
           config.outputDir,
+          onProgress,
         );
         specsWritten = persistResult.specsWritten;
         commitsWritten = persistResult.commitsWritten;
@@ -288,6 +309,7 @@ export async function runMinePipeline(
     }
   }
 
+  onProgress?.({ phase: 'done', current: 1, total: 1 });
   return {
     commitsScanned: changes.length,
     changesFound: changesWithData.length,

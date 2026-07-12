@@ -56,6 +56,12 @@ export interface LLMConfig {
   baseUrl?: string;
   temperature: number;
   maxTokens: number;
+  /** Maximum retries on transient errors. Default 3 (4 total attempts). */
+  maxRetries: number;
+  /** Base delay for exponential backoff in ms. Default 1000. */
+  retryBaseDelayMs: number;
+  /** Delay ceiling in ms. Default 30000. */
+  retryMaxDelayMs: number;
 }
 
 export interface SpecConfig {
@@ -381,6 +387,18 @@ function validateLLM(val: any, file: string): LLMConfig | null {
       typeof val.maxTokens === 'number' && Number.isInteger(val.maxTokens) && val.maxTokens > 0
         ? val.maxTokens
         : 20000,
+    maxRetries:
+      typeof val.maxRetries === 'number' && Number.isInteger(val.maxRetries) && val.maxRetries >= 0
+        ? val.maxRetries
+        : 3,
+    retryBaseDelayMs:
+      typeof val.retryBaseDelayMs === 'number' && val.retryBaseDelayMs > 0
+        ? val.retryBaseDelayMs
+        : 1000,
+    retryMaxDelayMs:
+      typeof val.retryMaxDelayMs === 'number' && val.retryMaxDelayMs > 0
+        ? val.retryMaxDelayMs
+        : 30000,
   };
 }
 

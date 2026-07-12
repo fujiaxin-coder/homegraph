@@ -2272,6 +2272,7 @@ specCommand
       const { runMinePipeline } = await import('../spec/mine/pipeline');
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { resolveDbPath } = await import('../spec/utils');
+      const { createMineProgressHandler } = await import('../spec/mine/progress-handler');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2365,9 +2366,21 @@ specCommand
         }
       }
 
+      // Wire up progress reporting.
+      // - JSON mode: no progress output (only final JSON).
+      // - Verbose mode: plain-text lines with timestamps.
+      // - TTY (default): ANSI progress bar with phase + item details.
+      // - Pipe / non-TTY: fall back to verbose (5 % stepping).
+      let onProgress: import('../spec/mine/progress').MineProgressCallback | undefined;
+      if (!options.json) {
+        onProgress = createMineProgressHandler(
+          options.verbose ? 'verbose' : process.stdout.isTTY ? 'bar' : 'verbose',
+        );
+      }
+
       let result: any;
       try {
-        result = await runMinePipeline(repoPath, mineConfig, llmConfig, db);
+        result = await runMinePipeline(repoPath, mineConfig, llmConfig, db, onProgress);
       } finally {
         // Close database even if pipeline throws
         try { db?.close(); } catch { /* best effort */ }
