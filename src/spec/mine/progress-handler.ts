@@ -34,8 +34,9 @@ function createBarHandler(): MineProgressCallback {
 
   return (p) => {
     if (p.phase === 'done') {
-      // Clear progress line
-      if (process.stdout.isTTY) process.stdout.write('\r\x1b[K');
+      // Print a trailing newline so the last progress bar stays visible
+      // and subsequent CLI output (success/info lines) starts on a fresh line.
+      if (process.stdout.isTTY) process.stdout.write('\n');
       return;
     }
 
