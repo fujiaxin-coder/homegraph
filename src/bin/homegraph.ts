@@ -2245,11 +2245,10 @@ specCommand
   .option('-p, --path <path>', 'Path to the repository')
   .option('--limit <number>', 'Maximum commits to scan', '100')
   .option('--output <path>', 'Output directory for generated specs', '.spec')
-  .option('--threshold <number>', 'Clustering similarity threshold (0-1)', '0.5')
+  .option('--threshold <number>', 'Clustering similarity threshold (0-1)', '0.25')
   .option('--max-cluster <number>', 'Maximum number of clusters', '10')
   .option('--template <path>', 'Path to a spec template markdown file')
   .option('--skip-llm', 'Skip LLM generation — only output clusters')
-  .option('--all-commits', 'Include all commit types (default: feat-only for conventional commits)')
   .option('-v, --verbose', 'Show detailed output')
   .option('-j, --json', 'Output as JSON')
   .action(async (options: {
@@ -2260,7 +2259,6 @@ specCommand
     maxCluster?: string;
     template?: string;
     skipLlm?: boolean;
-    allCommits?: boolean;
     verbose?: boolean;
     json?: boolean;
   }) => {
@@ -2286,7 +2284,7 @@ specCommand
         process.exit(1);
       }
 
-      const threshold = parseFloat(options.threshold || '0.5');
+      const threshold = parseFloat(options.threshold || '0.25');
       if (isNaN(threshold) || threshold < 0 || threshold > 1) {
         error('--threshold must be a number between 0 and 1');
         process.exit(1);
@@ -2335,7 +2333,6 @@ specCommand
           outputDir,
           template: options.template,
           skipLlm: !!options.skipLlm,
-          allCommits: !!options.allCommits,
         },
         !!llmConfig,
       );
@@ -2347,7 +2344,6 @@ specCommand
         info(`Max clusters: ${maxCluster}`);
         info(`Output: ${outputDir}`);
         info(`Skip LLM: ${mineConfig.skipLlm}`);
-        info(`All commits: ${mineConfig.allCommits}`);
         if (options.template) {
           info(`Template: ${options.template}`);
         }

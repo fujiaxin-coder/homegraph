@@ -83,8 +83,6 @@ export interface MineConfig {
   template?: string;
   /** Skip LLM generation — only output clusters (default: false). */
   skipLlm: boolean;
-  /** Include all commit types (default: false — feat-only for conventional commits). */
-  allCommits: boolean;
 }
 
 /**
@@ -102,7 +100,6 @@ export function createMineConfig(
     outputDir: string;
     template?: string;
     skipLlm: boolean;
-    allCommits: boolean;
   },
   llmConfigured: boolean,
 ): MineConfig {
@@ -113,7 +110,6 @@ export function createMineConfig(
     outputDir: options.outputDir,
     template: options.template,
     skipLlm: options.skipLlm || !llmConfigured,
-    allCommits: options.allCommits,
   };
 }
 

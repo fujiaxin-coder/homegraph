@@ -166,16 +166,6 @@ describe('scanner — scanCommits', () => {
     expect(results[0]!.commitMessage).toBe('feat: feature');
   });
 
-  it('allCommits=true includes all commits', () => {
-    commitFile(repo, 'README.md', '# Project\n', 'chore: base');
-    commitFile(repo, 'src/a.ts', 'export const a = 1;\n', 'chore: setup');
-    commitFile(repo, 'doc/readme.md', '# Docs\n', 'docs: readme');
-
-    const results = scanCommits(repo, '', 'HEAD', undefined, true);
-    // Should include all 3 conventional commits
-    expect(results.length).toBeGreaterThanOrEqual(3);
-  });
-
   it('extracts added symbols for new files', () => {
     commitFile(repo, 'README.md', '# Project\n', 'chore: base');
     commitFile(
@@ -205,15 +195,15 @@ describe('scanner — scanCommits', () => {
     expect(results.length).toBe(2);
   });
 
-  it('merges commits are not filtered out', () => {
-    // Create a branch, commit on it, then merge. The merge commit should appear.
+  it('merge commits and mechanical revert/reapply commits are filtered out', () => {
+    // Create a branch, commit on it, then merge. The merge commit should be excluded.
     commitFile(repo, 'README.md', '# Project\n', 'chore: base');
     commitFile(repo, 'src/main.ts', 'export const x = 1;\n', 'feat: main branch');
 
     // Create and switch to a feature branch
     execFileSync('git', ['checkout', '-b', 'feature'], { cwd: repo, stdio: 'ignore' });
     commitFile(repo, 'src/feature.ts', 'export function f() {}\n', 'feat: feature branch');
-    // Switch back to original branch (works regardless of default name 'main' or 'master')
+    // Switch back to original branch
     execFileSync('git', ['checkout', '-'], { cwd: repo, stdio: 'ignore' });
     // Use --no-ff to ensure a merge commit is created
     let mergeSucceeded = false;
@@ -227,10 +217,11 @@ describe('scanner — scanCommits', () => {
       // Merge might fail in some test setups — skip gracefully
     }
 
-    const results = scanCommits(repo, '', 'HEAD', undefined, true);
+    const results = scanCommits(repo, '', 'HEAD');
     if (mergeSucceeded) {
+      // Merge commit should be filtered out (--no-merges)
       const mergeCommit = results.find((r) => r.commitMessage === 'feat: merge feature');
-      expect(mergeCommit).toBeDefined();
+      expect(mergeCommit).toBeUndefined();
     } else {
       // Fallback: at minimum, no crash
       expect(Array.isArray(results)).toBe(true);
@@ -310,8 +301,8 @@ describe('clusterer — clusterCommits', () => {
     expect(result.stats.clusterCount).toBe(1);
   });
 
-  it('single commit with < 5 symbols goes to unclustered', () => {
-    const symbols = [sym('a'), sym('b')];
+  it('single commit with < 2 symbols goes to unclustered', () => {
+    const symbols = [sym('a')];
     const commit = makeCommit({
       message: 'feat: small change',
       fileChanges: [
@@ -400,17 +391,14 @@ describe('clusterer — clusterCommits', () => {
     });
 
     // threshold=1 means only identical commits cluster — these are dissimilar.
+    // With no edges in the graph, Louvain places each commit in its own
+    // community. Both have ≥5 symbols → each gets a solo cluster (consistent
+    // with the n=1 solo-cluster rule, unlike the old connected-components
+    // approach which discarded size-1 components).
     const result = clusterCommits([c1, c2], 1.0, 10);
-    // Both have >=5 symbols → each gets its own solo cluster.
-    // Actually with threshold=1 and completely different symbols, Jaccard=0
-    // so each would go to solo cluster (n=1 path) — wait, n=2, so they go through
-    // connected components. With threshold=1, similarity must be >=1 to connect,
-    // which won't happen for different commits. So they each become solo clusters
-    // via the solo path? No — n=2 path. With no edges, findConnectedComponents
-    // returns nothing (only components of size >1). Both commits are unclustered.
-    expect(result.clusters.length).toBe(0);
-    expect(result.unclustered.length).toBe(2);
-    expect(result.stats.clusteredCommits).toBe(0);
+    expect(result.clusters.length).toBe(2);
+    expect(result.unclustered.length).toBe(0);
+    expect(result.stats.clusteredCommits).toBe(2);
   });
 
   it('stats are accurate', () => {
@@ -839,7 +827,6 @@ describe('mine pipeline — runMinePipeline', () => {
       maxCluster: 10,
       outputDir,
       skipLlm: false,
-      allCommits: false,
       ...overrides,
     };
   }
@@ -867,7 +854,7 @@ describe('mine pipeline — runMinePipeline', () => {
       chatJson: vi.fn().mockResolvedValue({}),
     }));
 
-    const config = makeMineConfig({ allCommits: true });
+    const config = makeMineConfig();
     const result = await runMinePipeline(repo, config, llmConfig, db);
 
     // All counts should be > 0 since we have valid commits.
@@ -908,7 +895,7 @@ describe('mine pipeline — runMinePipeline', () => {
     commitFile(repo, 'README.md', '# Project\n', 'chore: base');
     commitFile(repo, 'src/a.ts', 'export const a = 1;\n', 'feat: add a');
 
-    const config = makeMineConfig({ skipLlm: true, allCommits: true });
+    const config = makeMineConfig({ skipLlm: true });
     const result = await runMinePipeline(repo, config, null, null);
 
     expect(result.commitsScanned).toBeGreaterThan(0);
@@ -919,7 +906,7 @@ describe('mine pipeline — runMinePipeline', () => {
     commitFile(repo, 'README.md', '# Project\n', 'chore: base');
     commitFile(repo, 'src/a.ts', 'export const a = 1;\n', 'feat: add a');
 
-    const config = makeMineConfig({ skipLlm: true, allCommits: true });
+    const config = makeMineConfig({ skipLlm: true });
     const result = await runMinePipeline(repo, config, null, null);
 
     // Should scan from beginning (full scan because no meta.json)
@@ -930,7 +917,7 @@ describe('mine pipeline — runMinePipeline', () => {
     commitFile(repo, 'README.md', '# Project\n', 'chore: base');
     commitFile(repo, 'src/a.ts', 'export const a = 1;\n', 'feat: add a');
 
-    const config = makeMineConfig({ skipLlm: true, allCommits: true });
+    const config = makeMineConfig({ skipLlm: true });
     await runMinePipeline(repo, config, null, null);
 
     // skipLlm means no specs were generated, so meta.json should NOT advance —
@@ -949,7 +936,7 @@ describe('mine pipeline — runMinePipeline', () => {
       chatJson: vi.fn().mockResolvedValue({}),
     }));
 
-    const config = makeMineConfig({ allCommits: true });
+    const config = makeMineConfig();
     await runMinePipeline(repo, config, llmConfig, db);
 
     // LLM ran and persistence succeeded — meta.json should advance.
@@ -966,7 +953,7 @@ describe('mine pipeline — runMinePipeline', () => {
       chatJson: vi.fn().mockResolvedValue({}),
     }));
 
-    const config = makeMineConfig({ allCommits: true });
+    const config = makeMineConfig();
     // Pass db=null — should skip persist
     const result = await runMinePipeline(repo, config, llmConfig, null);
 

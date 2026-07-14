@@ -250,7 +250,7 @@ export function getCommitRange(
   try {
     stdout = execFileSync(
       'git',
-      ['log', '--reverse', `--format=%H%x00%aI%x00%an%x00%s%x00`, `${fromHash}..${toHash}`],
+      ['log', '--no-merges', '--reverse', `--format=%H%x00%aI%x00%an%x00%s%x00`, `${fromHash}..${toHash}`],
       gitExecOptions(repoPath),
     );
   } catch {

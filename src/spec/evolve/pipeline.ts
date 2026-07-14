@@ -454,11 +454,10 @@ async function mineStyleFallback(
   try {
     const mineConfig = createMineConfig({
       limit: 200,
-      threshold: 0.5,
+      threshold: 0.25,
       maxCluster: 10,
       outputDir: specStoragePath,
       skipLlm: false,
-      allCommits: true,
     }, true);
 
     const mineResult = await runMinePipeline(repoPath, mineConfig, llmConfig, db);

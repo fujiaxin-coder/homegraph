@@ -299,21 +299,44 @@ function parseChangedFiles(diff: string): string[] {
 const CONVENTIONAL_PREFIX =
   /^(feat|fix|refactor|chore|docs|test|style|build|ci|perf|revert)(?:\([^)]*\))?[!]?:\s/;
 
+/** Conventional commit types that involve source-code structural changes
+ *  and may carry design intent worth documenting as a spec. */
+const DESIGN_RELEVANT_TYPES: ReadonlySet<string> = new Set([
+  'feat',
+  'fix',
+  'refactor',
+  'perf',
+]);
+
 /**
- * Determine whether a commit message represents a feature/requirement change.
+ * Git-generated mechanical-commit prefixes that carry no design intent.
  *
- * For conventional-commit messages (`feat: …`, `fix: …` etc.), only `feat`
- * passes the filter — we want design specs that reflect feature work, not
- * bugfixes or refactors.
- *
- * Non-conventional messages (no prefix match) are kept as a conservative
- * default — the user can always use `--all-commits` to skip this filter
- * entirely.
+ * - `Revert "..."` — `git revert` undo commits
+ * - `Reapply "..."` — cherry-pick re-application of a previously reverted commit
  */
-function isFeatureCommit(message: string): boolean {
+const MECHANICAL_COMMIT_PREFIX = /^(Revert|Reapply)\s+"/;
+
+/**
+ * Determine whether a commit message represents a design-relevant change.
+ *
+ * Filtered out:
+ * - Git-generated mechanical commits (Revert / Reapply).
+ * - Conventional-commit types that rarely introduce new symbols or material
+ *   design intent: chore, docs, test, style, build, ci, revert.
+ *
+ * Kept:
+ * - Conventional-commit types with structural source-code impact:
+ *   feat, fix, refactor, perf.
+ * - Non-conventional messages (no prefix match) — conservatively treated as
+ *   unstructured feature work.
+ */
+function isDesignRelevant(message: string): boolean {
+  // Git mechanical commits (Revert / Reapply) — no design intent
+  if (MECHANICAL_COMMIT_PREFIX.test(message)) return false;
+
   const m = message.match(CONVENTIONAL_PREFIX);
-  if (!m) return true;         // Non-standard format — keep
-  return m[1] === 'feat';      // Only feat
+  if (!m) return true;                      // Non-standard format — keep
+  return DESIGN_RELEVANT_TYPES.has(m[1]!);
 }
 
 /**
@@ -323,7 +346,6 @@ function isFeatureCommit(message: string): boolean {
  * @param fromHash - Starting commit hash (exclusive). Use empty string for root.
  * @param toHash - Ending commit hash (inclusive), typically 'HEAD'.
  * @param limit - If set, only the most recent N commits are processed.
- * @param allCommits - When false (default), skip non-feat conventional commits.
  * @param onProgress - Optional progress callback (called per commit).
  * @returns Aggregated AST change data for each commit.
  */
@@ -332,7 +354,6 @@ export function scanCommits(
   fromHash: string,
   toHash: string,
   limit?: number,
-  allCommits = false,
   onProgress?: MineProgressCallback,
 ): CommitChange[] {
   let commits: CommitInfo[];
@@ -345,7 +366,7 @@ export function scanCommits(
     try {
       const stdout = execFileSync(
         'git',
-        ['log', '--reverse', `--format=%H%x00%aI%x00%an%x00%s%x00`, toHash],
+        ['log', '--no-merges', '--reverse', `--format=%H%x00%aI%x00%an%x00%s%x00`, toHash],
         gitExecOptions(repoPath),
       );
       const parts = stdout.replace(/\0+$/, '').trim().split('\0');
@@ -373,17 +394,16 @@ export function scanCommits(
     commits = commits.slice(commits.length - limit);
   }
 
-  // Filter to feature commits unless --all-commits
-  if (!allCommits) {
-    const before = commits.length;
-    commits = commits.filter((c) => isFeatureCommit(c.message));
-    const skipped = before - commits.length;
-    if (skipped > 0) {
-      logDebug('Mine scan: filtered non-feat commits', {
-        kept: commits.length,
-        skipped,
-      });
-    }
+  // Filter to design-relevant commits (feat / fix / refactor / perf) for
+  // conventional-commit messages. Non-conventional messages are kept.
+  const before = commits.length;
+  commits = commits.filter((c) => isDesignRelevant(c.message));
+  const skipped = before - commits.length;
+  if (skipped > 0) {
+    logDebug('Mine scan: filtered non-design commits', {
+      kept: commits.length,
+      skipped,
+    });
   }
 
   const changes: CommitChange[] = [];

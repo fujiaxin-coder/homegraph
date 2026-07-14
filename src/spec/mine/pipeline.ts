@@ -153,7 +153,7 @@ export async function runMinePipeline(
 
   // 3. Scan commits (AST-level diff)
   onProgress?.({ phase: 'scanning', current: 0, total: 0, message: 'Starting...' });
-  const changes = scanCommits(repoPath, fromHash, headHash, config.limit, config.allCommits, onProgress);
+  const changes = scanCommits(repoPath, fromHash, headHash, config.limit, onProgress);
 
   if (changes.length === 0) {
     onProgress?.({ phase: 'done', current: 1, total: 1 });
@@ -194,13 +194,7 @@ export async function runMinePipeline(
     commitsWithChanges: changesWithData.length,
   });
 
-  // 4. Cluster commits
-  onProgress?.({
-    phase: 'clustering',
-    current: 0,
-    total: 0,
-    message: `${changesWithData.length} commits`,
-  });
+  // 4. Cluster commits (synchronous — one-shot; no per-item counting)
   const clusterResult = clusterCommits(
     changesWithData,
     config.threshold,
@@ -208,9 +202,9 @@ export async function runMinePipeline(
   );
   onProgress?.({
     phase: 'clustering',
-    current: 1,
-    total: 1,
-    message: `${clusterResult.clusters.length} clusters`,
+    current: 0,
+    total: 0,
+    message: `${changesWithData.length} commits → ${clusterResult.clusters.length} clusters`,
   });
 
   logDebug('Mine pipeline: clustering complete', clusterResult.stats);
