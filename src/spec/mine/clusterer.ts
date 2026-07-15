@@ -16,6 +16,7 @@
 
 import { CommitChange } from './scanner';
 import { logDebug } from '../../errors';
+import { isTestFile } from '../../search/query-utils';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -831,6 +832,22 @@ function countChangedSymbols(change: CommitChange): number {
 }
 
 /**
+ * Fallback quality gate: true when a commit has at least one new file that
+ * is not a test file.  Used when the symbol-level change count is below the
+ * solo-cluster threshold — a commit that adds non-test source files carries
+ * structural intent even when the extractor could not produce symbols
+ * (e.g. ArkTS files without an active extraction context).
+ */
+function hasNewNonTestFiles(change: CommitChange): boolean {
+  for (const fc of change.fileChanges) {
+    if (fc.isNewFile && !isTestFile(fc.filePath)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Cluster commits using Leiden community detection on a multi-signal
  * similarity graph, with recursive sub-splitting for large clusters.
  *
@@ -873,7 +890,7 @@ export function clusterCommits(
     const c = changes[0]!;
     const totalSymbols = countChangedSymbols(c);
 
-    if (totalSymbols < MIN_SYMBOLS_FOR_SOLO_CLUSTER) {
+    if (totalSymbols < MIN_SYMBOLS_FOR_SOLO_CLUSTER && !hasNewNonTestFiles(c)) {
       logDebug('Clusterer: single commit below quality threshold', {
         hash: c.commitHash.slice(0, 7),
         changedSymbols: totalSymbols,
@@ -971,7 +988,7 @@ export function clusterCommits(
     if (comp.length === 1) {
       const idx = comp[0]!;
       const c = changes[idx]!;
-      if (countChangedSymbols(c) < MIN_SYMBOLS_FOR_SOLO_CLUSTER) {
+      if (countChangedSymbols(c) < MIN_SYMBOLS_FOR_SOLO_CLUSTER && !hasNewNonTestFiles(c)) {
         unclusteredIndices.push(idx);
         continue;
       }

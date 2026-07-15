@@ -40,6 +40,8 @@ export interface FileChange {
   addedSymbols: ChangedSymbol[];
   removedSymbols: ChangedSymbol[];
   modifiedSymbols: { old: ChangedSymbol; new: ChangedSymbol }[];
+  /** True when the file did not exist in the parent commit. */
+  isNewFile?: boolean;
 }
 
 /** Aggregated AST change data for a single commit. */
@@ -232,13 +234,19 @@ function compareSymbolSets(
 }
 
 /**
- * Extract meaningful symbols from an ExtractionResult.
+ * Node kinds that carry structural design intent and are tracked as
+ * significant changes during commit scanning.
  *
- * Filters to function, class, method, interface, type_alias, variable,
- * enum, component nodes — the kinds that carry structural meaning.
+ * - OOP/data containers: class, struct, trait, interface, protocol
+ * - Behaviour: function, method, component
+ * - Type system: type_alias, enum
+ * - Data: variable, constant
+ * - Organisation: namespace, module
+ * - Web API surface: route
  */
 const SIGNIFICANT_KINDS: ReadonlySet<NodeKind> = new Set([
   'function', 'class', 'method', 'interface', 'type_alias',
+  'struct', 'trait', 'protocol', 'route', 'module',
   'variable', 'constant', 'enum', 'component', 'namespace',
 ]);
 
@@ -494,6 +502,7 @@ export function scanCommits(
               addedSymbols: newSymbols,
               removedSymbols: [],
               modifiedSymbols: [],
+              isNewFile: true,
             });
             continue;
           }
