@@ -119,6 +119,29 @@ function lastQualifierPart(symbol: string): string {
 }
 
 /**
+ * Normalize Erlang-native symbol spellings in an explore query into the shapes
+ * the rest of the pipeline already understands. Agents working Erlang code
+ * name symbols the way the language spells them — `mod:fn/3`, `init/2` — and
+ * those tokens previously died in both consumers: the flow-builder's token
+ * filter rejects `:` and `/arity` outright, and the search-side field parser
+ * eats `mod:fn` as an unknown `field:value`.
+ *
+ *   - `fn/3` → `fn` (arity tail after an identifier)
+ *   - `mod:fn` → `mod.fn` (exactly one colon between identifiers)
+ *
+ * Safe cross-language: Lua's `t:m` spelling maps to the same `t.m` its
+ * qualified names use.
+ */
+export function normalizeQuerySpelling(query: string): string {
+  return query
+    .replace(/\b([A-Za-z_][\w@]*)\/(\d{1,3})(?=$|[\s,()[\]/])/g, '$1')
+    .replace(
+      /(^|[\s,()[\]])(?!(?:kind|lang|language|path|name):)([a-z_][\w@]*):([A-Za-z_][\w@]*)(?=$|[\s,()[\]])/g,
+      '$1$2.$3'
+    );
+}
+
+/**
  * Calculate the recommended number of homegraph_explore calls based on project size.
  * Larger codebases need more exploration calls to cover their surface area,
  * but smaller ones should use fewer to avoid unnecessary overhead.
@@ -4410,8 +4433,11 @@ export class ToolHandler {
    * tax on small projects while earning its keep on large ones.
    */
   private async handleExplore(args: Record<string, unknown>): Promise<ToolResult> {
-    const query = this.validateString(args.query, 'query');
-    if (typeof query !== 'string') return query;
+    const rawQuery = this.validateString(args.query, 'query');
+    if (typeof rawQuery !== 'string') return rawQuery;
+    // One normalization point so the flow-builder, relevance search, and
+    // ranking all see the same canonical spelling (Erlang `mod:fn/arity`).
+    const query = normalizeQuerySpelling(rawQuery);
 
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const projectRoot = cg.getProjectRoot();

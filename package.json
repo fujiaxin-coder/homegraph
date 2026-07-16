@@ -1,7 +1,7 @@
 {
   "name": "homegraph",
-  "version": "1.2.0",
-  "description": "Supercharge AI coding agents with semantic code intelligence — surgical context, fewer tool calls, faster answers. 100% local.",
+  "version": "1.4.1",
+  "description": "Supercharge AI coding agents with semantic code intelligence \u2014 surgical context, fewer tool calls, faster answers. 100% local.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {

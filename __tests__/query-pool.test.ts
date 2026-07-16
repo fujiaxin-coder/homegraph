@@ -132,12 +132,12 @@ describe('QueryPool', () => {
     await pool.destroy();
   });
 
-  it('does not spawn until the first call, and never the whole pool for one call', async () => {
+  it('spawns one eager warm worker, and never the whole pool for one call', async () => {
     let created = 0;
     const pool = new QueryPool({ root: '/x', size: 8, createWorker: () => { created++; return new FakeWorker((m) => ({ result: ok(`r${m.id}`) })); } });
-    expect(created).toBe(0); // no eager warm worker
+    expect(created).toBe(1); // one eager warm worker (#662)
     await pool.run('homegraph_node', { symbol: 's' });
-    expect(created).toBe(1); // only what one call needs
+    expect(created).toBe(1); // only what one call needs — no thundering herd
     await pool.destroy();
   });
 
@@ -231,5 +231,29 @@ describe('QueryPool', () => {
     const res = await pending; // must resolve, not hang
     expect(res.isError).toBe(true);
     expect(pool.healthy).toBe(false);
+  });
+
+  it('is not `ready` until a worker completes its cold start (#662 first-call stall)', async () => {
+    // A worker cold start is seconds (tens under load); a call queued behind it
+    // waits for the 45s busy backstop with nothing served. The ToolHandler must
+    // be able to see "no warm worker yet" and dispatch in-process instead — so
+    // `ready` is false before the first 'ready' handshake and true after.
+    // (FakeWorker posts 'ready' on a macrotask — the synchronous check below
+    // observes the cold-start window.)
+    const pool = new QueryPool({ root: '/x', size: 1, createWorker: () => new FakeWorker((m) => ({ result: ok(`r:${m.toolName}`) })) });
+    expect(pool.ready).toBe(false); // eager worker spawned but not yet warm
+    await sleep(5);                 // let the ready handshake land
+    expect(pool.ready).toBe(true);
+    const res = await pool.run('homegraph_status', {});
+    expect(res.content[0].text).toBe('r:homegraph_status');
+    await pool.destroy();
+    expect(pool.ready).toBe(false); // destroyed pool must not be selected
+  });
+
+  it('a failed cold start (ready ok:false) does not mark the pool ready', async () => {
+    const pool = new QueryPool({ root: '/x', size: 1, createWorker: () => new FakeWorker(() => ({ hang: true }), /* readyOk */ false) });
+    await sleep(5);
+    expect(pool.ready).toBe(false); // hard open failure — keep serving in-process
+    await pool.destroy();
   });
 });

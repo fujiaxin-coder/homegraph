@@ -70,3 +70,5 @@ assets/__pycache__/
 *.pyc
 
 assets/generate-waitlist.py
+
+.kommandr/

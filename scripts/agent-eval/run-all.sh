@@ -19,6 +19,12 @@ OUT="${AGENT_EVAL_OUT:-/tmp/agent-eval}"
 HARNESS="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
 
+# Neutralize any ambient HomeGraph prompt-hook (~/.claude) in BOTH arms:
+# the hook injects homegraph context into every prompt, which contaminates
+# the without-arm (free structural context) and double-counts the with-arm.
+# The A/B's only variable must be the MCP server wired below.
+export HOMEGRAPH_NO_PROMPT_HOOK=1
+
 [ -n "$CG_BIN" ] || { echo "no homegraph binary on PATH (set CG_BIN)"; exit 1; }
 [ -d "$REPO/.homegraph" ] || { echo "no .homegraph index at $REPO — index it first"; exit 1; }
 case "$MODE" in headless|tmux|all) ;; *) echo "mode must be headless|tmux|all (got '$MODE')"; exit 1;; esac

@@ -197,6 +197,7 @@ export class QueryPool {
   private readonly softTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly createWorker: () => PoolWorker;
+  private everReady = false;
 
   constructor(opts: QueryPoolOptions) {
     this.root = opts.root;
@@ -204,7 +205,17 @@ export class QueryPool {
     this.softTimeoutMs = opts.softTimeoutMs ?? resolveBusyTimeoutMs();
     this.maxRetries = opts.maxRetries ?? 1;
     this.createWorker = opts.createWorker ?? (() => new Worker(WORKER_FILE, { workerData: { root: this.root } }));
-    // Deliberately no eager spawn — see class doc. First `run()` spawns on demand.
+    // One eager warm worker so the first tool call isn't queued behind a cold start (#662).
+    this.spawnOne();
+  }
+
+  /**
+   * True once at least one worker has completed a successful cold-start handshake.
+   * False during the cold-start window (and after destroy) so ToolHandler can
+   * fall back to in-process dispatch instead of queuing behind a busy backstop.
+   */
+  get ready(): boolean {
+    return this.everReady && !this.destroyed;
   }
 
   /** Pool size cap (for logging/status). */
@@ -257,6 +268,7 @@ export class QueryPool {
     if (m.type === 'ready') {
       this.pendingWorkers.delete(w);
       if (m.ok === false) this.totalCrashes++; // hard open failure
+      else this.everReady = true;
       this.idle.push(w);
       this.drain();
       return;
