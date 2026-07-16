@@ -9,8 +9,8 @@
  * connection and runs homegraph_explore) is validated separately against a real
  * index; here we pin the orchestration that makes that safe and fair.
  */
-import { describe, it, expect } from 'vitest';
-import { QueryPool, resolvePoolSize, type PoolWorker } from '../src/mcp/query-pool';
+import { describe, it, expect, afterEach } from 'vitest';
+import { QueryPool, resolvePoolSize, resolveBusyTimeoutMs, type PoolWorker } from '../src/mcp/query-pool';
 import type { ToolResult } from '../src/mcp/tools';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -66,12 +66,37 @@ describe('resolvePoolSize', () => {
   it('caps the override at the hard ceiling', () => {
     expect(resolvePoolSize('999', 8)).toBe(16);
   });
-  it('defaults to clamp(cores-1, 1, 16) when unset/blank/non-numeric', () => {
-    expect(resolvePoolSize(undefined, 8)).toBe(7);
-    expect(resolvePoolSize('', 8)).toBe(7);
-    expect(resolvePoolSize('abc', 8)).toBe(7);
+  it('defaults to clamp(cores-1, 1, 1) when unset/blank/non-numeric', () => {
+    // Default cap is 1 — a second worker is another full DB open (multi-GB RSS).
+    expect(resolvePoolSize(undefined, 8)).toBe(1);
+    expect(resolvePoolSize('', 8)).toBe(1);
+    expect(resolvePoolSize('abc', 8)).toBe(1);
     expect(resolvePoolSize(undefined, 1)).toBe(1);   // never zero
-    expect(resolvePoolSize(undefined, 64)).toBe(16); // never above the ceiling
+    expect(resolvePoolSize(undefined, 64)).toBe(1);  // default cap, not MAX_POOL_SIZE
+    expect(resolvePoolSize(undefined, 2)).toBe(1);   // cores-1 still applies under the cap
+  });
+});
+
+describe('resolveBusyTimeoutMs', () => {
+  const prev = process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS;
+    else process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS = prev;
+  });
+
+  it('defaults to 15s when unset', () => {
+    delete process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS;
+    expect(resolveBusyTimeoutMs()).toBe(15_000);
+  });
+
+  it('clamps 60000 so soft-timeout cannot race a ~60s MCP client hard timeout', () => {
+    process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS = '60000';
+    expect(resolveBusyTimeoutMs()).toBe(20_000);
+  });
+
+  it('honors a value under the clamp', () => {
+    process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS = '12000';
+    expect(resolveBusyTimeoutMs()).toBe(12_000);
   });
 });
 
@@ -107,12 +132,12 @@ describe('QueryPool', () => {
     await pool.destroy();
   });
 
-  it('does not spawn the whole pool for a single call (pending-aware growth)', async () => {
+  it('spawns one eager warm worker, and never the whole pool for one call', async () => {
     let created = 0;
     const pool = new QueryPool({ root: '/x', size: 8, createWorker: () => { created++; return new FakeWorker((m) => ({ result: ok(`r${m.id}`) })); } });
+    expect(created).toBe(1); // one eager warm worker (#662)
     await pool.run('homegraph_node', { symbol: 's' });
-    // One eager worker + at most the cold-start cap — never all 8.
-    expect(created).toBeLessThanOrEqual(2);
+    expect(created).toBe(1); // only what one call needs — no thundering herd
     await pool.destroy();
   });
 
@@ -162,6 +187,42 @@ describe('QueryPool', () => {
     await pool.destroy();
   });
 
+  it('soft-timeout prefers onSoftTimeout partial over empty busy text', async () => {
+    const pool = new QueryPool({
+      root: '/x', size: 1, softTimeoutMs: 40,
+      createWorker: () => new FakeWorker(() => ({ hang: true })),
+    });
+    const res = await pool.run('homegraph_explore', { query: 'q' }, {
+      onSoftTimeout: () => ok('PARTIAL: Foo at a.cpp:10'),
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('PARTIAL: Foo');
+    await pool.destroy();
+  });
+
+  it('admission: refuses a third wave immediately instead of stacking to soft-timeout', async () => {
+    // size=1 → admissionLimit=2. First call occupies the worker (hangs); second
+    // sits in queue; third must resolve immediately with busy/partial.
+    const pool = new QueryPool({
+      root: '/x', size: 1, softTimeoutMs: 10_000,
+      createWorker: () => new FakeWorker(() => ({ hang: true })),
+    });
+    const first = pool.run('homegraph_explore', { query: 'a' });
+    await sleep(30); // dispatch + spawn
+    const second = pool.run('homegraph_explore', { query: 'b' });
+    await sleep(10);
+    expect(pool.outstandingCount()).toBe(2);
+    const t0 = Date.now();
+    const third = await pool.run('homegraph_explore', { query: 'c' }, {
+      onSoftTimeout: () => ok('ADMISSION PARTIAL'),
+    });
+    expect(Date.now() - t0).toBeLessThan(200); // immediate, not soft-timeout
+    expect(third.isError).toBeFalsy();
+    expect(third.content[0].text).toContain('ADMISSION PARTIAL');
+    await pool.destroy();
+    await Promise.allSettled([first, second]);
+  });
+
   it('destroy settles outstanding calls instead of hanging', async () => {
     const pool = new QueryPool({ root: '/x', size: 1, softTimeoutMs: 10_000, createWorker: () => new FakeWorker(() => ({ hang: true })) });
     const pending = pool.run('homegraph_explore', { query: 'q' });
@@ -170,5 +231,29 @@ describe('QueryPool', () => {
     const res = await pending; // must resolve, not hang
     expect(res.isError).toBe(true);
     expect(pool.healthy).toBe(false);
+  });
+
+  it('is not `ready` until a worker completes its cold start (#662 first-call stall)', async () => {
+    // A worker cold start is seconds (tens under load); a call queued behind it
+    // waits for the 45s busy backstop with nothing served. The ToolHandler must
+    // be able to see "no warm worker yet" and dispatch in-process instead — so
+    // `ready` is false before the first 'ready' handshake and true after.
+    // (FakeWorker posts 'ready' on a macrotask — the synchronous check below
+    // observes the cold-start window.)
+    const pool = new QueryPool({ root: '/x', size: 1, createWorker: () => new FakeWorker((m) => ({ result: ok(`r:${m.toolName}`) })) });
+    expect(pool.ready).toBe(false); // eager worker spawned but not yet warm
+    await sleep(5);                 // let the ready handshake land
+    expect(pool.ready).toBe(true);
+    const res = await pool.run('homegraph_status', {});
+    expect(res.content[0].text).toBe('r:homegraph_status');
+    await pool.destroy();
+    expect(pool.ready).toBe(false); // destroyed pool must not be selected
+  });
+
+  it('a failed cold start (ready ok:false) does not mark the pool ready', async () => {
+    const pool = new QueryPool({ root: '/x', size: 1, createWorker: () => new FakeWorker(() => ({ hang: true }), /* readyOk */ false) });
+    await sleep(5);
+    expect(pool.ready).toBe(false); // hard open failure — keep serving in-process
+    await pool.destroy();
   });
 });

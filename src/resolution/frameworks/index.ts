@@ -29,6 +29,7 @@ import { expoModulesResolver } from './expo-modules';
 import { fabricViewResolver } from './fabric';
 import { arktsNapiResolver } from './arkts-napi';
 import { arktsEntryResolver } from './arkts-entry';
+import { terraformResolver } from './terraform';
 
 /**
  * All registered framework resolvers
@@ -76,6 +77,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   arktsNapiResolver,
   // ArkTS module.json5 pages + loadContent startup wiring
   arktsEntryResolver,
+  // Terraform / OpenTofu HCL
+  terraformResolver,
 ];
 
 /**

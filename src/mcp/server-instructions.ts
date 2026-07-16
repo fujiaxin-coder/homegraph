@@ -4,60 +4,54 @@
  * Single source of truth for agent-facing tool guidance (issue #529).
  * Edit here — not installer prompts or eval harness prompts.
  */
-export const SERVER_INSTRUCTIONS = `# HomeGraph — indexed code: explore instead of grep/read
 
-When a project has a \`.homegraph/\` index, **\`homegraph_explore\` is the default way to find and read code there** — before grep, glob, or Read. One call returns **verbatim, line-numbered source** (\`<n>\\t<line>\`, safe to Edit from) plus call paths and blast radius. Treat returned source as **already Read**; do not grep/read the same symbols again.
+export const SERVER_INSTRUCTIONS = `# HomeGraph — when to call
 
-## When to call homegraph_explore (indexed code only)
+HomeGraph is a **local structural index of THIS repo**: symbols + call/import/extends edges + files. Use it only when the answer needs that graph.
 
-Use **first** for:
+## Call HomeGraph (closed set)
 
-- **Find related files** — put symbol names or domain terms from the question in \`query\`
-- **Where is X used / defined** — \`query\` = the symbol or API name from the question
-- **Imports / dependencies in this repo** — \`query\` = the imported symbol(s); answers from indexed source, not external docs
-- **A named source file** — \`query\` = file basename (no directory) plus any symbol named in the question
-- **Config / manifest filenames** — include the filename (e.g. \`*.json5\`, \`*.yaml\`) in \`query\`
-- **\`@kit.*\` imports (HarmonyOS/OpenHarmony)** — \`query\` = kit module + API/symbol from the question
-- **How A reaches B** — name symbols on the path in one \`query\`
-- **Read a symbol or file** — put the path or symbol in \`query\`; overloads return every body in one call
+Use \`homegraph_explore\` (primary) when **all** of these hold:
 
-Query = **symbol names, file basenames, or a short question**. No prior \`homegraph_search\` needed.
+1. The evidence lives **in this repository's source** (not an external SDK manual).
+2. You need **structure**: definition location, who calls whom, how A reaches B, multi-file wiring, or in-repo import/usage of a named API/\`@kit\` module.
+3. You can put **concrete names** in \`query\` — symbol, \`Type.member\`, file basename, or \`@kit…\` (skip \`homegraph_search\` when names are already known).
 
-**After explore:** need another area? Call \`homegraph_explore\` again with more names — not grep/read for indexed source.
+Typical fits:
 
-**Not indexed** (configs, docs, no \`.homegraph/\`): use built-in Read/Grep/Glob for that gap only.
+- How a **feature in this repo** is wired (mechanism / cross-file / click→handler flow)
+- Callers / callees / blast radius of a **named** symbol
+- What a **named component/method** does (include the name; one explore is enough)
+- In-repo usages of an imported API (not the official feature catalog)
+
+**One explore with names** beats search→explore→node→grep→read. Treat returned line-numbered source as already Read. After a full explore — **answer**; do not re-verify with grep/read/node for the same symbols. Busy/partial → retry that **same** explore once.
+
+## Do not call HomeGraph otherwise
+
+If the question is **outside the set above**, do **not** open any \`homegraph_*\` tool — use Read / Grep / Glob / SDK docs. HomeGraph is not a general Q&A layer; forcing it on the wrong shape costs time and tokens and often lowers quality.
 
 ## Tool roles
 
 | Tool | Role |
 |------|------|
-| **homegraph_explore** | **Primary** — find + read + flow in one call |
-| homegraph_node | One symbol or file depth after explore |
-| homegraph_search | Name hint only — then explore |
-| homegraph_files | Folder tree only — not for code Q&A |
+| **homegraph_explore** | Primary for the closed set above |
+| homegraph_node | One known symbol body (or indexed file) after explore named it |
+| homegraph_callers / callees | Compact edge lists for a named symbol |
+| homegraph_search | Rare — unknown spelling only |
+| homegraph_files | Folder tree only |
 
-## Anti-patterns
+## Tips
 
-- **Don't grep/glob first** to discover or read indexed source — explore already returns paths and bodies.
-- **Don't fetch external SDK docs first** when the question is about code **in this repo** (imports, usages, dependencies) — explore the imported symbol names from the index.
-- **Don't re-verify explore output with grep** — it is AST-derived; trust it unless the staleness banner lists a file.
-- **Don't hand-reconstruct flows** — name endpoints in one explore query.
-- **Pure literal text patterns** (exact string chains with no symbol names) — explore may not enumerate every match; use grep only after explore does not cover the question.
-- **Staleness banner** — if listed files were edited since sync, Read those files only; others stay authoritative.
-- **Inventory sections** (dependency list, caller paths, config file) may omit full source when the graph has no flow path — answer from those sections directly.
-
-## Limits
-
-- Index lags writes ~1s. Ambiguous symbols may return multiple candidates.
-- If a project isn't indexed, use built-in tools there; mention \`homegraph init\` if relevant — don't run it yourself.
+- **Deadline / partial** — success-shaped; retry ONE explore with the same names. Do not abandon to grep for those symbols.
+- **Staleness banner** — Read only the listed edited files.
+- **Not indexed** — built-in tools; user runs \`homegraph init\` — you do not.
 `;
 
 export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — per-project (pass projectPath)
 
-HomeGraph indexes a codebase into a symbol graph. **\`homegraph_explore\`** returns line-numbered source + call paths in one call — use it **instead of grep/read/glob** for any project that has a \`.homegraph/\` index.
+HomeGraph indexes a codebase into a symbol graph. Call it **only** for in-repo structural / flow / usage questions on a project that has \`.homegraph/\`. Pass that project as \`projectPath\`.
 
-This server root has no index. For a project **with** \`.homegraph/\`, pass its path as \`projectPath\` on \`homegraph_explore\` (and other homegraph tools).
-
-- **Indexed project** → \`homegraph_explore\` first for where/what/how and file/symbol lookup.
-- **No index** → Read/Grep/Glob. User runs \`homegraph init\` if they want indexing (picked up live).
+- Fits the closed set (structure, callers, wiring, named symbol/file) → \`homegraph_explore\`
+- Anything else → Read/Grep/Glob — **do not call homegraph_***
+- No index → Read/Grep/Glob; user runs \`homegraph init\` if they want indexing
 `;

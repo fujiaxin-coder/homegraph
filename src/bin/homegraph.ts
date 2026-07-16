@@ -852,6 +852,7 @@ program
 
       const buildInfo = cg.getIndexBuildInfo();
       const reindexRecommended = cg.isIndexStale();
+      const indexState = cg.getIndexState();
       const ohosApi = cg.getOhosApiBinding();
 
       // JSON output mode
@@ -883,6 +884,7 @@ program
             ? { version: ohosApi.version, packageName: ohosApi.packageName, dbPath: ohosApi.dbPath }
             : null,
           index: {
+            state: indexState,
             builtWithVersion: buildInfo.version,
             builtWithExtractionVersion: buildInfo.extractionVersion,
             currentExtractionVersion: EXTRACTION_VERSION,
@@ -3342,6 +3344,7 @@ program
         method,
         resolveLatest: () => up.resolveLatestVersion(),
         run: up.defaultRun,
+        capture: up.defaultCapture,
         hasCommand: up.hasCommand,
         log: (m: string) => console.log(m),
         warn: (m: string) => warn(m),

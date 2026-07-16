@@ -22,12 +22,15 @@ import * as fs from 'fs';
 import * as net from 'net';
 import { HOST_PPID_ENV } from '../extraction/wasm-runtime-flags';
 import { DaemonClientHello, DaemonHello, MAX_HELLO_LINE_BYTES } from './daemon';
+import { EARLY_PPID } from './early-ppid';
 import { supervisionLostReason } from './ppid-watchdog';
+import { armStartupHandshakeTimeout } from './startup-handshake';
 import { treatStdinFailureAsShutdown } from './stdin-teardown';
 import { HomeGraphPackageVersion } from './version';
-import { SERVER_INFO, PROTOCOL_VERSION } from './session';
+import { SERVER_INFO, PROTOCOL_VERSION, initializeInstructions } from './session';
 import { SERVER_INSTRUCTIONS } from './server-instructions';
 import { getStaticTools } from './tools';
+import { resolveToolDeadlineMs } from './query-pool';
 import { getTelemetry, ClientInfo } from '../telemetry';
 import type { MCPEngine } from './engine';
 
@@ -178,7 +181,7 @@ function sendClientHello(socket: net.Socket): void {
   const clientHello: DaemonClientHello = {
     homegraph_client: 1,
     pid: process.pid,
-    hostPid: parseHostPpid(process.env[HOST_PPID_ENV]) ?? process.ppid,
+    hostPid: parseHostPpid(process.env[HOST_PPID_ENV]) ?? EARLY_PPID,
   };
   try { socket.write(JSON.stringify(clientHello) + '\n'); } catch { /* best-effort */ }
 }
@@ -228,6 +231,11 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
   // new session starts), these would otherwise hang forever; we re-serve them
   // in-process so the host always gets a reply.
   const inflight = new Map<unknown, string>();
+  // tools/call forwarded to the daemon that hit the proxy-side deadline.
+  // Late daemon replies for these ids are dropped so the client isn't confused
+  // by a second response after it already got Partial (or timed out itself).
+  const timedOutToolIds = new Set<unknown>();
+  const toolDeadlineTimers = new Map<unknown, NodeJS.Timeout>();
   const trackInflight = (line: string): void => {
     try {
       const m = JSON.parse(line) as JsonRpc;
@@ -240,8 +248,53 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
   const writeClient = (obj: JsonRpc | string): void => {
     try { process.stdout.write((typeof obj === 'string' ? obj : JSON.stringify(obj)) + '\n'); } catch { /* host gone */ }
   };
+
+  /** Proxy-side deadline — daemon wedging must not become empty client `-32001`. */
+  const armToolCallDeadline = (id: unknown): void => {
+    if (id === undefined || id === null) return;
+    const prev = toolDeadlineTimers.get(id);
+    if (prev) clearTimeout(prev);
+    const deadlineMs = resolveToolDeadlineMs();
+    const timer = setTimeout(() => {
+      toolDeadlineTimers.delete(id);
+      if (!inflight.has(id)) return; // already answered
+      inflight.delete(id);
+      timedOutToolIds.add(id);
+      const secs = Math.max(1, Math.round(deadlineMs / 1000));
+      writeClient({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{
+            type: 'text',
+            text:
+              `⚠️ **Partial result** — HomeGraph did not finish within ${secs}s (daemon busy or wedged). ` +
+              `This is NOT an error. Retry ONE \`homegraph_explore\` with concrete symbol/file names — ` +
+              `do not stack search+explore, and do not grep symbols you already named.`,
+          }],
+          isError: false,
+        },
+      });
+    }, deadlineMs);
+    toolDeadlineTimers.set(id, timer);
+  };
+  const clearToolCallDeadline = (id: unknown): 'ok' | 'already-timed-out' => {
+    const t = toolDeadlineTimers.get(id);
+    if (t) {
+      clearTimeout(t);
+      toolDeadlineTimers.delete(id);
+    }
+    if (timedOutToolIds.has(id)) {
+      timedOutToolIds.delete(id);
+      return 'already-timed-out';
+    }
+    return 'ok';
+  };
+
   const shutdown = (): void => {
     if (shuttingDown) return; shuttingDown = true;
+    for (const t of toolDeadlineTimers.values()) clearTimeout(t);
+    toolDeadlineTimers.clear();
     try { daemonSocket?.destroy(); } catch { /* ignore */ }
     try { engine?.stop(); } catch { /* ignore */ }
     process.exit(0);
@@ -277,10 +330,12 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
   const routeToDaemon = (line: string): void => {
     if (daemonStatus === 'ready' && daemonSocket) {
       trackInflight(line);
+      if (process.env.HOMEGRAPH_MCP_DEBUG) process.stderr.write(`[mcp-debug] proxy->daemon ${line.slice(0, 80)}\n`);
       try { daemonSocket.write(line.endsWith('\n') ? line : line + '\n'); } catch { /* close path */ }
     } else if (daemonStatus === 'failed') {
       void handleLocally(line);
     } else {
+      if (process.env.HOMEGRAPH_MCP_DEBUG) process.stderr.write(`[mcp-debug] proxy-buffer(${daemonStatus}) ${line.slice(0, 80)}\n`);
       pending.push(line);
     }
   };
@@ -305,7 +360,7 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
             version: typeof initParams.clientInfo.version === 'string' ? initParams.clientInfo.version : undefined,
           };
         }
-        writeClient({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO, instructions: SERVER_INSTRUCTIONS } });
+        writeClient({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: SERVER_INFO, instructions: initializeInstructions(SERVER_INSTRUCTIONS) } });
         routeToDaemon(line); // prime the daemon so it resolves the project (its reply is suppressed below)
       } else if (msg.method === 'tools/list') {
         writeClient({ jsonrpc: '2.0', id: msg.id, result: { tools: getStaticTools() } });
@@ -318,6 +373,9 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
       } else if (msg.method === 'prompts/list') {
         writeClient({ jsonrpc: '2.0', id: msg.id, result: { prompts: [] } });
       } else {
+        if (msg.method === 'tools/call' && msg.id !== undefined) {
+          armToolCallDeadline(msg.id);
+        }
         routeToDaemon(line);
       }
     }
@@ -328,6 +386,18 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
   // busy-spinning the event loop (#799).
   treatStdinFailureAsShutdown(shutdown);
   startPpidWatchdogNoSocket(shutdown);
+  // Backstop for a launch abandoned before any of the above can see it: killed
+  // launcher + held-open pipes + reparent that beat the EARLY_PPID capture
+  // (#1185). A server that never receives a single byte isn't serving anyone.
+  // Armed after the stdin 'data' consumer above so no bytes are emitted while
+  // only the backstop's listener exists.
+  armStartupHandshakeTimeout(() => {
+    process.stderr.write(
+      '[HomeGraph MCP] No MCP traffic since startup; assuming an abandoned launch and shutting down (#1185). ' +
+      'Tune with HOMEGRAPH_STARTUP_HANDSHAKE_TIMEOUT_MS (0 disables).\n'
+    );
+    shutdown();
+  });
 
   // ---- daemon connection (background) ----
   let socket: net.Socket | null = null;
@@ -350,7 +420,11 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
         if (!line.trim()) continue;
         let resp: JsonRpc | null = null;
         try { resp = JSON.parse(line) as JsonRpc; } catch { /* not JSON — relay verbatim */ }
+        if (process.env.HOMEGRAPH_MCP_DEBUG) process.stderr.write(`[mcp-debug] daemon->proxy ${line.slice(0, 80)}\n`);
         if (resp && resp.id !== undefined && ('result' in resp || 'error' in resp)) {
+          if (clearToolCallDeadline(resp.id) === 'already-timed-out') {
+            continue; // client already got Partial from the proxy deadline
+          }
           inflight.delete(resp.id); // answered — no longer in flight
           // Suppress the daemon's reply to the initialize we forwarded to prime it
           // (the client already got the local handshake response).
@@ -378,7 +452,11 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
     };
     socket.on('close', onDaemonLost);
     socket.on('error', onDaemonLost);
-    for (const line of pending) { trackInflight(line); try { socket.write(line + '\n'); } catch { /* ignore */ } }
+    for (const line of pending) {
+      trackInflight(line);
+      if (process.env.HOMEGRAPH_MCP_DEBUG) process.stderr.write(`[mcp-debug] proxy-flush ${line.slice(0, 80)}\n`);
+      try { socket.write(line + '\n'); } catch { /* ignore */ }
+    }
     pending.length = 0;
   } else if (!shuttingDown) {
     daemonStatus = 'failed';
@@ -396,7 +474,10 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
 function startPpidWatchdogNoSocket(onDeath: () => void): void {
   const pollMs = parsePollMs(process.env.HOMEGRAPH_PPID_POLL_MS);
   if (pollMs <= 0) return;
-  const originalPpid = process.ppid;
+  // Baseline from the CLI entry's earliest capture, not process.ppid here —
+  // a launcher killed during our first ~100ms would otherwise leave the
+  // baseline at 1 and blind the divergence check forever (#1185).
+  const originalPpid = EARLY_PPID;
   const hostPpid = parseHostPpid(process.env[HOST_PPID_ENV]);
   const timer = setInterval(() => {
     const reason = supervisionLostReason({
@@ -524,7 +605,10 @@ function pipeUntilClose(socket: net.Socket): Promise<void> {
 function startPpidWatchdog(socket: net.Socket): void {
   const pollMs = parsePollMs(process.env.HOMEGRAPH_PPID_POLL_MS);
   if (pollMs <= 0) return;
-  const originalPpid = process.ppid;
+  // Baseline from the CLI entry's earliest capture, not process.ppid here —
+  // a launcher killed during our first ~100ms would otherwise leave the
+  // baseline at 1 and blind the divergence check forever (#1185).
+  const originalPpid = EARLY_PPID;
   const hostPpid = parseHostPpid(process.env[HOST_PPID_ENV]);
   const timer = setInterval(() => {
     const reason = supervisionLostReason({
