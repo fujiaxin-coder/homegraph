@@ -1801,19 +1801,24 @@ export class ToolHandler {
     if (typeof query !== 'string') return query;
 
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
-    const projectRoot = cg.getProjectRoot();
-    // Names already present → serve explore-shaped answer (no FTS round-trip).
-    if (queryShouldPreferExploreOverSearch(query)) {
+    // Explore redirect is best-effort — incomplete/faked graphs (or missing
+    // getProjectRoot) must fall through to FTS search rather than error.
+    try {
+      const projectRoot = cg.getProjectRoot();
+      if (queryShouldPreferExploreOverSearch(query)) {
+        const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
+          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
+          ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+        if (exploreRedirect) return exploreRedirect;
+      }
+
       const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
         ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
         ?? this.tryLightMechanismExplore(cg, query, projectRoot);
       if (exploreRedirect) return exploreRedirect;
+    } catch {
+      // Fall through to FTS search.
     }
-
-    const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
-      ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
-      ?? this.tryLightMechanismExplore(cg, query, projectRoot);
-    if (exploreRedirect) return exploreRedirect;
 
     const rawKind = args.kind as string | undefined;
     // The schema enum says 'type' (what agents naturally reach for); the
@@ -3380,8 +3385,10 @@ export class ToolHandler {
     // Inventory runs *before* this on the call sites. Do not refuse compact
     // merely because inventory *intent* matched — empty inventory must fall
     // through here (bare callbacks like OnSurfaceChangedCB).
-    // Hard rule: 1–3 named anchors → compact. Falling through to full explore
-    // is what ballooned tokens on "SortWidgets + IntGrid visible" shapes.
+    // Hard rule: 1–3 named anchors → compact for local-detail / bare-id shapes.
+    // Multi-anchor flow bags (routeSave/onSave, aboutToAppear/build, thunk→thunk)
+    // must fall through to full explore so Flow / Dynamic-dispatch / adaptive
+    // sizing still surface — compact trail is not a substitute.
     const bareId = /^[A-Za-z_][\w]*$/.test(query.trim());
     if (!queryAsLocalSymbolDetail(query) && !bareId && !queryHasFocusedNamedAnchors(query)) {
       return null;
@@ -3395,6 +3402,23 @@ export class ToolHandler {
     const names = extractLocalDetailAnchors(query).slice(0, 4);
 
     if (names.length === 0) return null;
+
+    // Multi-anchor bags that form a Flow / Dynamic-dispatch section must use
+    // full explore (synth notes, adaptive sizing, boundary announcements).
+    // Compact trail alone loses those sections. Probe using the raw query —
+    // extractLocalDetailAnchors can drop snake_case tokens (handle_save) that
+    // buildFlowFromNamedSymbols still resolves.
+    const rawTokens = query.split(/[\s,()[\]]+/).filter(
+      (t) => t.length >= 3 && /^[A-Za-z_][\w]*$/.test(t),
+    );
+    if (names.length >= 2 || rawTokens.length >= 2) {
+      try {
+        const flow = this.buildFlowFromNamedSymbols(cg, query);
+        if (flow.text.length > 0) return null;
+      } catch {
+        // Probe is best-effort — stay on compact if flow build fails.
+      }
+    }
 
     const fileNodes = new Map<string, Node[]>();
     const seedIds = new Set<string>();
@@ -3486,6 +3510,24 @@ export class ToolHandler {
         ' — compact explore (definition + edge trail, no related-file dump).',
       '',
     ];
+
+    // Blast radius for entry seeds (locations only) — same signal full explore
+    // always-on section gives, so bare-name edits know what to update/verify.
+    {
+      const nodes = new Map<string, Node>();
+      for (const id of seedIds) {
+        try {
+          const n = cg.getNode(id);
+          if (n) nodes.set(id, n);
+        } catch { /* skip */ }
+      }
+      const blast = this.buildBlastRadiusSection(cg, {
+        nodes,
+        edges: [],
+        roots: [...seedIds],
+      } as Subgraph);
+      if (blast) lines.push(blast);
+    }
 
     // Always list a short edge trail — property→UI and button→action questions
     // need callers/callees; agents otherwise re-grep the same names.
@@ -3739,9 +3781,11 @@ export class ToolHandler {
       }
 
       const header = fileSectionHeader(fp, focusNodes.map((n) => `${n.name}(${n.kind})`).slice(0, 6).join(', '));
+      const withLineNumbers = exploreLineNumbersEnabled();
       const bodyLines: string[] = [header, '```' + (nodes[0]?.language || ''), ''];
       for (let i = start; i <= end; i++) {
-        bodyLines.push(`${i}\t${fileLines[i - 1] ?? ''}`);
+        const code = fileLines[i - 1] ?? '';
+        bodyLines.push(withLineNumbers ? `${i}\t${code}` : code);
       }
       bodyLines.push('```', '');
       let chunk = bodyLines.join('\n');
@@ -4389,6 +4433,7 @@ export class ToolHandler {
       budget = getExploreOutputBudget(Infinity);
     }
     budget = tightenExploreBudgetForQuery(budget, query);
+    const explicitMaxFiles = typeof args.maxFiles === 'number' && !Number.isNaN(args.maxFiles);
     let maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
 
     const queryFileBasenames = extractFileBasenamesFromQuery(query);
@@ -4507,6 +4552,13 @@ export class ToolHandler {
     {
       const FILE_EXT = /\.(?:java|kt|kts|ts|tsx|js|jsx|mjs|cjs|cs|py|go|rb|php|swift|rs|cpp|cc|cxx|c|h|hpp|scala|lua|dart|vue|svelte|astro)$/i;
       const CALLABLE = new Set(['method', 'function', 'component', 'constructor']);
+      // Named types (BridgeInterceptor, ResponseFormatter) must also seed — the
+      // adaptive sibling-skeleton path needs those files in the subgraph even
+      // when they hold no callable the agent also named.
+      const SEED_KINDS = new Set([
+        ...CALLABLE,
+        'class', 'struct', 'interface', 'trait', 'protocol', 'constant', 'variable',
+      ]);
       const isTestPath = (p: string) => /(^|\/)(tests?|specs?|__tests__|testdata|mocks?|fixtures?)\//i.test(p) || /\.(test|spec)\.[a-z]+$/i.test(p);
       const bodyLines = (n: Node) => Math.max(0, (n.endLine ?? n.startLine) - n.startLine);
       const callerCount = (n: Node) => { try { return cg.getCallers(n.id).length; } catch { return 0; } };
@@ -4553,8 +4605,14 @@ export class ToolHandler {
         const isQual = /[.\/]|::/.test(t);
         const raw = isQual ? this.findAllSymbols(cg, t).nodes : cg.getNodesByName(t);
         const cands = raw
-          .filter((n) => CALLABLE.has(n.kind) && !isTestPath(n.filePath))
-          .sort((a, b) => (bodyLines(b) > 1 ? 1 : 0) - (bodyLines(a) > 1 ? 1 : 0) || bodyLines(b) - bodyLines(a));
+          .filter((n) => SEED_KINDS.has(n.kind) && !isTestPath(n.filePath))
+          .sort((a, b) => {
+            // Prefer callables over types when both share a name, then body size.
+            const ac = CALLABLE.has(a.kind) ? 1 : 0;
+            const bc = CALLABLE.has(b.kind) ? 1 : 0;
+            if (ac !== bc) return bc - ac;
+            return (bodyLines(b) > 1 ? 1 : 0) - (bodyLines(a) > 1 ? 1 : 0) || bodyLines(b) - bodyLines(a);
+          });
         // A specific name (<=3 defs) injects all its defs. An overloaded name
         // (`validate` = 10, `request` = 44) would flood the subgraph, so inject
         // only: the overloads whose file/class the query ALSO names (the agent
@@ -5037,7 +5095,11 @@ export class ToolHandler {
     const flow = this.buildFlowFromNamedSymbols(cg, flowQuery);
     const hasFlowPath = flow.pathNodeIds.size > 0;
     budget = tightenExploreBudgetForQuery(budget, query, { hasFlowPath });
-    maxFiles = Math.min(maxFiles, clamp(budget.defaultMaxFiles, 1, 20));
+    // Honor an explicit maxFiles from the caller — budget.defaultMaxFiles is only
+    // a default when the agent didn't ask for more (adaptive sibling tests pass 12).
+    if (!explicitMaxFiles) {
+      maxFiles = Math.min(maxFiles, clamp(budget.defaultMaxFiles, 1, 20));
+    }
     const localDetail = queryAsLocalSymbolDetail(query);
 
     const inheritanceSection = !hasFlowPath && !multiAnchor
