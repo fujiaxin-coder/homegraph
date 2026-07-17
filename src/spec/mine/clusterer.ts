@@ -106,6 +106,49 @@ function collectFilePaths(change: CommitChange): string[] {
   return Array.from(paths);
 }
 
+/** Collect directory prefixes (first 2 path segments) for module proximity.
+ *  For single-segment paths (root-level files) the filename itself is used as
+ *  the key — this prevents unrelated root-level files from falsely sharing an
+ *  empty "directory" and being grouped together. */
+function collectDirectoryPrefixes(change: CommitChange): string[] {
+  const dirs = new Set<string>();
+  for (const fc of change.fileChanges) {
+    const parts = fc.filePath.split('/');
+    if (parts.length === 1) {
+      dirs.add(parts[0]!);
+    } else {
+      dirs.add(parts.slice(0, 2).join('/'));
+    }
+  }
+  return Array.from(dirs);
+}
+
+/** Minimum number of changed symbols (added + removed + modified) required
+ *  for a solo commit to be promoted into its own cluster.  Commits below
+ *  this threshold go to `unclustered` — they are too small to warrant a
+ *  standalone spec document. */
+const MIN_SYMBOLS_FOR_SOLO_CLUSTER = 2;
+
+/** Count total changed symbols across all file changes in a commit. */
+function countChangedSymbols(change: CommitChange): number {
+  let count = 0;
+  for (const fc of change.fileChanges) {
+    count += fc.addedSymbols.length;
+    count += fc.removedSymbols.length;
+    count += fc.modifiedSymbols.length;
+  }
+  return count;
+}
+
+/** Compute the cohesion ratio for a commit — symbols changed per file touched.
+ *  Low cohesion (< 1.0) suggests a mechanical refactor across many files;
+ *  high cohesion (≥ 2.0) suggests concentrated feature work. */
+function computeCohesion(change: CommitChange): number {
+  const totalSymbols = countChangedSymbols(change);
+  const filesTouched = change.fileChanges.length || 1;
+  return totalSymbols / filesTouched;
+}
+
 /** Extract ticket references (e.g., PROJ-123, #456) from a commit message. */
 function extractTicketRefs(message: string): string[] {
   const refs: string[] = [];
@@ -179,11 +222,15 @@ class TfidfVectorizer {
  * Compute multi-signal similarity between two commits.
  *
  * Weights:
- *   - Symbol overlap (Jaccard): 0.40
- *   - File path overlap (Jaccard): 0.15
- *   - Message TF-IDF cosine: 0.25
- *   - Ticket reference overlap (Jaccard): 0.10
- *   - Temporal proximity: 0.10 (half-life 3 days)
+ *   - Symbol overlap (Jaccard):       0.40
+ *   - Spatial proximity (Jaccard):    0.15  (max of file-path and dir-prefix)
+ *   - Message TF-IDF cosine:          0.25
+ *   - Ticket reference overlap:       0.10
+ *   - Temporal proximity:             0.10  (half-life 3 days)
+ *
+ * A cohesion penalty is applied as a multiplier when one commit has low
+ * symbol-per-file density (< 2.0), which is characteristic of mechanical
+ * refactors that should not bridge unrelated feature clusters.
  */
 function computeSimilarity(
   a: CommitChange,
@@ -192,6 +239,8 @@ function computeSimilarity(
   bSymbols: string[],
   aFiles: string[],
   bFiles: string[],
+  aDirs: string[],
+  bDirs: string[],
   aTickets: string[],
   bTickets: string[],
   msgTfidfMatrix: number[][],
@@ -201,8 +250,13 @@ function computeSimilarity(
   // Symbol overlap — highest weight because AST-level diff is precise
   const symbolSim = jaccard(aSymbols, bSymbols);
 
-  // File path overlap
-  const fileSim = jaccard(aFiles, bFiles);
+  // Spatial proximity — max of exact file-path and module-level dir-prefix
+  // overlap, so same-file edits get full credit and same-module edits also
+  // connect, without double-counting the same spatial dimension.
+  const spatialSim = Math.max(
+    jaccard(aFiles, bFiles),
+    jaccard(aDirs, bDirs),
+  );
 
   // Message TF-IDF cosine
   const msgSim = cosineSimilarity(
@@ -218,13 +272,24 @@ function computeSimilarity(
   const maxTimeSpan = Math.abs(a.timestamp - b.timestamp);
   const timeSim = Math.exp(-maxTimeSpan / halfLife);
 
-  return (
+  // Cohesion penalty: low cohesion (many files, few symbols) = refactor-like.
+  // Penalty multiplier: 0.6 at cohesion 0 → 1.0 at cohesion ≥ 2.0
+  const minCohesion = Math.min(
+    computeCohesion(a),
+    computeCohesion(b),
+  );
+  const cohesionPenalty = minCohesion >= 2.0
+    ? 1.0
+    : 0.6 + 0.4 * (minCohesion / 2.0);
+
+  const rawScore =
     0.40 * symbolSim +
-    0.15 * fileSim +
+    0.15 * spatialSim +
     0.25 * msgSim +
     0.10 * ticketSim +
-    0.10 * timeSim
-  );
+    0.10 * timeSim;
+
+  return rawScore * cohesionPenalty;
 }
 
 // ---------------------------------------------------------------------------
@@ -814,23 +879,6 @@ function greedyMerge(
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Minimum number of changed symbols (added + removed + modified) required
- *  for a solo commit to be promoted into its own cluster.  Commits below
- *  this threshold go to `unclustered` — they are too small to warrant a
- *  standalone spec document. */
-const MIN_SYMBOLS_FOR_SOLO_CLUSTER = 2;
-
-/** Count total changed symbols across all file changes in a commit. */
-function countChangedSymbols(change: CommitChange): number {
-  let count = 0;
-  for (const fc of change.fileChanges) {
-    count += fc.addedSymbols.length;
-    count += fc.removedSymbols.length;
-    count += fc.modifiedSymbols.length;
-  }
-  return count;
-}
-
 /**
  * Fallback quality gate: true when a commit has at least one new file that
  * is not a test file.  Used when the symbol-level change count is below the
@@ -927,12 +975,14 @@ export function clusterCommits(
   const messages: string[][] = [];
   const allSymbols: string[][] = [];
   const allFiles: string[][] = [];
+  const allDirs: string[][] = [];
   const allTickets: string[][] = [];
 
   for (const change of changes) {
     messages.push(tokenize(change.commitMessage));
     allSymbols.push(collectSymbolNames(change));
     allFiles.push(collectFilePaths(change));
+    allDirs.push(collectDirectoryPrefixes(change));
     allTickets.push(extractTicketRefs(change.commitMessage));
   }
 
@@ -952,6 +1002,7 @@ export function clusterCommits(
         changes[i]!, changes[j]!,
         allSymbols[i]!, allSymbols[j]!,
         allFiles[i]!, allFiles[j]!,
+        allDirs[i]!, allDirs[j]!,
         allTickets[i]!, allTickets[j]!,
         msgTfidfMatrix, i, j,
       );

@@ -16,6 +16,7 @@ import { detectLanguage, isLanguageSupported } from '../../extraction/grammars';
 import { NodeKind, Language, Node, ExtractionResult } from '../../types';
 import { logDebug, logWarn } from '../../errors';
 import { gitExecOptions } from '../git-utils';
+import { isTestFile } from '../../search/query-utils';
 import type { MineProgressCallback } from './progress';
 
 // ---------------------------------------------------------------------------
@@ -469,6 +470,7 @@ export function scanCommits(
 
       const changedFiles = parseChangedFiles(diff)
         .filter(isDiffableFile)
+        .filter((fp) => !isTestFile(fp))
         .filter((fp) => !seenFiles.has(fp));
 
       for (const filePath of changedFiles) {
