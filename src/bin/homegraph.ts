@@ -2315,14 +2315,20 @@ specCommand
       if (!options.skipLlm && !llmConfig) {
         info(
           'No LLM configuration found. Set up "llm" in .homegraph/commit4spec/configs.json.\n' +
-          'Example:\n' +
+          '\n' +
+          'All available options (fields marked * are required):\n' +
           '{\n' +
           '  "llm": {\n' +
-          '    "provider": "openai",\n' +
-          '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
-          '    "model": "gpt-4o"\n' +
+          '    "provider":     "openai",          // * "openai" or "anthropic"\n' +
+          '    "apiKey":       "sk-...",          // * API key string (plain text)\n' +
+          '    "apiKeyEnv":   "OPENAI_API_KEY",   //   or read from env var (takes precedence)\n' +
+          '    "model":        "gpt-4o",          // * model name (e.g. gpt-4o, claude-3-5-sonnet)\n' +
+          '    "baseUrl":      "https://...",     //   custom endpoint (proxies / local models)\n' +
+          '    "temperature":  0.2,               //   creativity control (default: 0.2)\n' +
+          '    "maxTokens":    20000              //   max output tokens (default: 20000)\n' +
           '  }\n' +
-          '}\n\n' +
+          '}\n' +
+          '\n' +
           'Continuing with --skip-llm (clustering only).',
         );
       }
