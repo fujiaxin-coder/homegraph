@@ -3127,9 +3127,13 @@ evolveCommand
         warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
           '{\n' +
           '  "llm": {\n' +
-          '    "provider": "openai",\n' +
-          '    "apiKeyEnv": "OPENAI_API_KEY",\n' +
-          '    "model": "gpt-4o"\n' +
+          '    "provider":     "openai",          // * "openai" or "anthropic"\n' +
+          '    "apiKey":       "sk-...",          // * API key string (plain text)\n' +
+          '    "apiKeyEnv":   "OPENAI_API_KEY",   //   or read from env var (takes precedence)\n' +
+          '    "model":        "gpt-4o",          // * model name\n' +
+          '    "baseUrl":      "https://...",     //   custom endpoint\n' +
+          '    "temperature":  0.2,               //   creativity control (default: 0.2)\n' +
+          '    "maxTokens":    20000              //   max output tokens (default: 20000)\n' +
           '  }\n' +
           '}');
       }
