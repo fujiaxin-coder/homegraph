@@ -343,7 +343,7 @@ async function evaluateAndApply(
     for (const cs of clusterCtx.commitSummaries) {
       try {
         const diff = getCommitDiff(repoPath, cs.fullHash);
-        cs.truncatedDiff = truncateText(diff, 4000);
+        cs.truncatedDiff = truncateText(diff, 16000);
       } catch {
         cs.truncatedDiff = '(diff unavailable)';
       }

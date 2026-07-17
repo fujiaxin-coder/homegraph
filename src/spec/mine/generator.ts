@@ -89,10 +89,10 @@ Output format — fill in the template exactly. Replace {{placeholders}} with re
 // Prompt Building
 // ---------------------------------------------------------------------------
 
-/** Maximum characters for the cluster context summary. */
-const MAX_CONTEXT_CHARS = 12000;
-/** Maximum characters per commit symbol list. */
-const MAX_SYMBOL_CHARS = 2000;
+/** Maximum characters for the cluster context summary (~12K tokens @ ~0.25 token/char). */
+const MAX_CONTEXT_CHARS = 48000;
+/** Maximum characters per commit symbol list (~1.5K tokens @ ~0.25 token/char). */
+const MAX_SYMBOL_CHARS = 6000;
 
 /**
  * Build the user prompt with commit-level context from a cluster.
@@ -116,29 +116,47 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
     const lines: string[] = [header, ''];
 
     for (const fc of change.fileChanges) {
-      const fileHeader = `**${fc.filePath}** (${fc.language})`;
-      const symbols: string[] = [];
-      if (fc.addedSymbols.length > 0) {
-        symbols.push(
-          `+ ${fc.addedSymbols.map((s) => s.name).join(', ')}`,
-        );
+      const fileHeader = `**${fc.filePath}** (${fc.language})${fc.isNewFile ? ' [new file]' : ''}`;
+      const symbolLines: string[] = [];
+
+      // Format one symbol with kind tag, signature, and visibility.
+      // `extra` is an optional suffix appended after the visibility.
+      const fmtSym = (
+        marker: string,
+        sym: { kind: string; name: string; signature?: string; visibility?: string },
+        extra?: string,
+      ): string => {
+        const tag = `[${sym.kind}]`;
+        const sig = sym.signature ? ` ${sym.signature}` : '';
+        const vis = sym.visibility && sym.visibility !== 'public'
+          ? ` (${sym.visibility})` : '';
+        const ext = extra ? ` ${extra}` : '';
+        return `${marker} ${tag} ${sym.name}${sig}${vis}${ext}`;
+      };
+
+      for (const s of fc.addedSymbols) {
+        symbolLines.push(fmtSym('+', s));
       }
-      if (fc.removedSymbols.length > 0) {
-        symbols.push(
-          `- ${fc.removedSymbols.map((s) => s.name).join(', ')}`,
-        );
+      for (const s of fc.removedSymbols) {
+        symbolLines.push(fmtSym('-', s));
       }
-      if (fc.modifiedSymbols.length > 0) {
-        symbols.push(
-          `~ ${fc.modifiedSymbols.map((m) => m.new.name).join(', ')}`,
-        );
+      for (const m of fc.modifiedSymbols) {
+        const changes: string[] = [];
+        if (m.old.signature !== m.new.signature) changes.push('sig');
+        if (m.old.name !== m.new.name) changes.push('name');
+        if (m.old.visibility !== m.new.visibility) changes.push('vis');
+        const extra = changes.length > 0
+          ? `(changed: ${changes.join(', ')})`
+          : '(changed)';
+        symbolLines.push(fmtSym('~', m.new, extra));
       }
 
-      const symbolStr = symbols.join(' | ');
-      const truncated =
-        symbolStr.length > MAX_SYMBOL_CHARS
-          ? symbolStr.slice(0, MAX_SYMBOL_CHARS) + '…'
-          : symbolStr;
+      if (symbolLines.length === 0) continue;
+
+      const symbolStr = symbolLines.join('\n');
+      const truncated = symbolStr.length > MAX_SYMBOL_CHARS
+        ? symbolStr.slice(0, MAX_SYMBOL_CHARS) + '\n…'
+        : symbolStr;
 
       const block = `${fileHeader}\n${truncated}`;
       if (totalChars + block.length > MAX_CONTEXT_CHARS) break;

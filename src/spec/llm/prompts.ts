@@ -5,10 +5,16 @@
  */
 
 import { ClusterContext } from '../evolve/cluster-context';
+import { truncateText } from '../utils';
 
 // =============================================================================
 // Cluster spec evaluation prompt
 // =============================================================================
+
+/** Maximum characters for the current plan content in the user prompt
+ *  (~16K tokens @ ~0.25 token/char). Exceedingly large spec documents are
+ *  truncated to prevent context-window overflow. */
+const MAX_PLAN_CONTENT_CHARS = 64000;
 
 export const SPEC_EVALUATION_CLUSTER_SYSTEM_PROMPT = `You are a technical documentation maintainer. Your task is to evaluate whether a GROUP of related git commits requires updating a software design specification (plan.md).
 
@@ -52,9 +58,10 @@ export function buildClusterSpecEvaluationUserPrompt(
   const parts: string[] = [];
 
   // 1. Current plan
+  const truncatedPlan = truncateText(planContent, MAX_PLAN_CONTENT_CHARS);
   parts.push('## Current Plan Content');
   parts.push('');
-  parts.push(planContent);
+  parts.push(truncatedPlan);
   parts.push('');
 
   // 2. Cluster overview

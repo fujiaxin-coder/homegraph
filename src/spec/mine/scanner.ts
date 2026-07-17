@@ -31,6 +31,10 @@ export interface ChangedSymbol {
   endLine: number;
   /** Structural fingerprint for detecting content changes even when line ranges are unchanged. */
   fingerprint: string;
+  /** Function/method signature (e.g. "authenticate(token: string): Promise<User>"). */
+  signature?: string;
+  /** Visibility modifier. */
+  visibility?: 'public' | 'private' | 'protected' | 'internal';
 }
 
 /** AST-level structural changes for one file in a commit. */
@@ -139,6 +143,8 @@ function nodeToSymbol(node: Node): ChangedSymbol {
     startLine: node.startLine,
     endLine: node.endLine,
     fingerprint: computeFingerprint(node),
+    signature: node.signature,
+    visibility: node.visibility,
   };
 }
 

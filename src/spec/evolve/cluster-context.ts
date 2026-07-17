@@ -45,8 +45,8 @@ export interface CommitContextInput {
 // Constants
 // =============================================================================
 
-/** Maximum total characters for the cluster context. */
-const DEFAULT_MAX_CONTEXT_CHARS = 12000;
+/** Maximum total characters for the cluster context (~12K tokens @ ~0.25 token/char). */
+const DEFAULT_MAX_CONTEXT_CHARS = 48000;
 
 /** Number of top files reported in primaryFiles. */
 const TOP_PRIMARY_FILES = 10;
