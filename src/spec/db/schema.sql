@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS spec_commit_relations (
 CREATE TABLE IF NOT EXISTS commit_fragment_relations (
     commit_hash TEXT NOT NULL,
     fragment_id TEXT NOT NULL,
-    PRIMARY KEY (commit_hash, fragment_id),
+    relation_type TEXT NOT NULL,
+    PRIMARY KEY (commit_hash, fragment_id, relation_type),
     FOREIGN KEY (commit_hash) REFERENCES commit_nodes(hash) ON DELETE CASCADE,
     FOREIGN KEY (fragment_id) REFERENCES code_fragment_nodes(id) ON DELETE CASCADE
 );

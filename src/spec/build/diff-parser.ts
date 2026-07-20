@@ -6,7 +6,7 @@
  * unified diff output and extracts file-level change information (change
  * type, line range, diff text).
  *
- * @module spec/mining/diff-parser
+ * @module spec/build/diff-parser
  */
 
 import { getCommitDiff } from './git-scanner';

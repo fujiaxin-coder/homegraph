@@ -5,7 +5,7 @@
  * Extracts conventional-commit scopes, normalizes them, and resolves them to
  * spec IDs found on disk.
  *
- * @module spec/mining/scope-resolver
+ * @module spec/build/scope-resolver
  */
 
 import { SpecConfig } from '../config';

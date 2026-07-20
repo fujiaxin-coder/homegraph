@@ -179,8 +179,8 @@ describe('getSpecContext', () => {
     );
 
     insertSpecCommitRelation(db, 's-frag', 'c'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 'c'.repeat(40), frag1.id);
-    insertCommitFragmentRelation(db, 'c'.repeat(40), frag2.id);
+    insertCommitFragmentRelation(db, 'c'.repeat(40), frag1.id, 'CONTAINS');
+    insertCommitFragmentRelation(db, 'c'.repeat(40), frag2.id, 'CONTAINS');
 
     const ctx = getSpecContext(db, 's-frag', 5, true);
     expect(ctx).not.toBeNull();
@@ -208,7 +208,7 @@ describe('getSpecContext', () => {
 
     const frag = insertCodeFragment(db, makeFragment({ id: '', filePath: 'src/c.ts' }));
     insertSpecCommitRelation(db, 's-nofrag', 'd'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 'd'.repeat(40), frag.id);
+    insertCommitFragmentRelation(db, 'd'.repeat(40), frag.id, 'CONTAINS');
 
     const ctx = getSpecContext(db, 's-nofrag', 5, false);
     expect(ctx).not.toBeNull();
@@ -388,7 +388,7 @@ describe('searchAndGetContext', () => {
 
     const frag = insertCodeFragment(db, makeFragment({ id: '', filePath: 'src/a.ts' }));
     insertSpecCommitRelation(db, 's-frag', 'c'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 'c'.repeat(40), frag.id);
+    insertCommitFragmentRelation(db, 'c'.repeat(40), frag.id, 'CONTAINS');
 
     const results = searchAndGetContext(db, 'Fragmented', 10, false);
     expect(results.length).toBeGreaterThanOrEqual(1);
@@ -407,7 +407,7 @@ describe('searchAndGetContext', () => {
 
     const frag = insertCodeFragment(db, makeFragment({ id: '', filePath: 'src/b.ts' }));
     insertSpecCommitRelation(db, 's-withfrag', 'd'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 'd'.repeat(40), frag.id);
+    insertCommitFragmentRelation(db, 'd'.repeat(40), frag.id, 'CONTAINS');
 
     const results = searchAndGetContext(db, 'Spec With Fragments', 10, true);
     expect(results.length).toBeGreaterThanOrEqual(1);
@@ -544,8 +544,8 @@ describe('getSpecStats', () => {
     const frag1 = insertCodeFragment(db, makeFragment({ id: '' }));
     const frag2 = insertCodeFragment(db, makeFragment({ id: '' }));
 
-    insertCommitFragmentRelation(db, 'c'.repeat(40), frag1.id);
-    insertCommitFragmentRelation(db, 'c'.repeat(40), frag2.id);
+    insertCommitFragmentRelation(db, 'c'.repeat(40), frag1.id, 'CONTAINS');
+    insertCommitFragmentRelation(db, 'c'.repeat(40), frag2.id, 'CONTAINS');
 
     const stats = getSpecStats(db);
     expect(stats.relationCount).toBe(2);
@@ -572,7 +572,7 @@ describe('getSpecStats', () => {
     const frag = insertCodeFragment(db, makeFragment({ id: '' }));
 
     insertSpecCommitRelation(db, 's-total', 't'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 't'.repeat(40), frag.id);
+    insertCommitFragmentRelation(db, 't'.repeat(40), frag.id, 'CONTAINS');
 
     insertSpecNode(db, makeSpec('s-other', 'Other Spec'));
     insertSpecSpecRelation(db, 's-total', 's-other', 'SIMILAR_TO');
@@ -608,7 +608,7 @@ describe('findSpecsByFragmentPath', () => {
     );
 
     insertSpecCommitRelation(db, 's-path', 'p'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 'p'.repeat(40), frag.id);
+    insertCommitFragmentRelation(db, 'p'.repeat(40), frag.id, 'CONTAINS');
 
     const specIds = findSpecsByFragmentPath(db, 'src/auth/login.ts');
     expect(specIds).toHaveLength(1);
@@ -631,7 +631,7 @@ describe('findSpecsByFragmentPath', () => {
       makeFragment({ id: '', filePath: 'src/components/Button.tsx' })
     );
     insertSpecCommitRelation(db, 'spec-btn', 'b1'.padEnd(40, '1'), 'GENERATE');
-    insertCommitFragmentRelation(db, 'b1'.padEnd(40, '1'), frag1.id);
+    insertCommitFragmentRelation(db, 'b1'.padEnd(40, '1'), frag1.id, 'CONTAINS');
 
     // Spec 2 → commit 2 → fragment: src/components/Modal.tsx
     const spec2 = makeSpec('spec-modal', 'Modal Spec');
@@ -643,7 +643,7 @@ describe('findSpecsByFragmentPath', () => {
       makeFragment({ id: '', filePath: 'src/components/Modal.tsx' })
     );
     insertSpecCommitRelation(db, 'spec-modal', 'b2'.padEnd(40, '2'), 'GENERATE');
-    insertCommitFragmentRelation(db, 'b2'.padEnd(40, '2'), frag2.id);
+    insertCommitFragmentRelation(db, 'b2'.padEnd(40, '2'), frag2.id, 'CONTAINS');
 
     // Both match 'components' substring
     const specIds = findSpecsByFragmentPath(db, 'components');
@@ -668,8 +668,8 @@ describe('findSpecsByFragmentPath', () => {
     );
 
     insertSpecCommitRelation(db, 's-distinct', 'd'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 'd'.repeat(40), frag1.id);
-    insertCommitFragmentRelation(db, 'd'.repeat(40), frag2.id);
+    insertCommitFragmentRelation(db, 'd'.repeat(40), frag1.id, 'CONTAINS');
+    insertCommitFragmentRelation(db, 'd'.repeat(40), frag2.id, 'CONTAINS');
 
     const specIds = findSpecsByFragmentPath(db, 'utils');
     // Should return distinct IDs, not duplicates
@@ -690,7 +690,7 @@ describe('findSpecsByFragmentPath', () => {
     );
 
     insertSpecCommitRelation(db, 's-like', 'l'.repeat(40), 'GENERATE');
-    insertCommitFragmentRelation(db, 'l'.repeat(40), frag.id);
+    insertCommitFragmentRelation(db, 'l'.repeat(40), frag.id, 'CONTAINS');
 
     // Search with just a substring of the path
     const specIds = findSpecsByFragmentPath(db, 'nested');
@@ -742,7 +742,7 @@ describe('findSpecsByFilePath', () => {
       endLine: 10,
       codeDiff: '...',
     });
-    insertCommitFragmentRelation(db, hash, frag.id);
+    insertCommitFragmentRelation(db, hash, frag.id, 'CONTAINS');
     insertSpecCommitRelation(db, specId, hash, 'SUMMARIZED_FROM');
   }
 
@@ -789,7 +789,7 @@ describe('findSpecsByFilePath', () => {
       endLine: 20,
       codeDiff: '...',
     });
-    insertCommitFragmentRelation(db, 'commit-spec01', frag2.id);
+    insertCommitFragmentRelation(db, 'commit-spec01', frag2.id, 'CONTAINS');
 
     const result = findSpecsByFilePath(db, 'src/auth/login.ts');
     expect(result.results).toHaveLength(1);
@@ -881,7 +881,7 @@ function seedSpecChain(
   insertSpecNode(db, spec);
   insertCommitNode(db, commit);
   insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
-  insertCommitFragmentRelation(db, commit.hash, fragment.id);
+  insertCommitFragmentRelation(db, commit.hash, fragment.id, 'CONTAINS');
 
   return {
     name: 'chainFunction',
@@ -945,7 +945,7 @@ describe('findSpecsByCodeSymbol', () => {
     insertSpecNode(db, spec);
     insertCommitNode(db, commit);
     insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
-    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+    insertCommitFragmentRelation(db, commit.hash, fragment.id, 'CONTAINS');
 
     const entity = makeEntity({ startLine: 10, endLine: 20 });
     const result = findSpecsByCodeSymbol(db, entity);
@@ -970,7 +970,7 @@ describe('findSpecsByCodeSymbol', () => {
     insertSpecNode(db, spec);
     insertCommitNode(db, commit);
     insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
-    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+    insertCommitFragmentRelation(db, commit.hash, fragment.id, 'CONTAINS');
 
     const entity = makeEntity({ startLine: 10, endLine: 20 });
     const result = findSpecsByCodeSymbol(db, entity);
@@ -993,7 +993,7 @@ describe('findSpecsByCodeSymbol', () => {
     insertSpecNode(db, spec);
     insertCommitNode(db, commit);
     insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
-    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+    insertCommitFragmentRelation(db, commit.hash, fragment.id, 'CONTAINS');
 
     const entity = makeEntity({ name: 'matchMe', filePath: 'src/other.ts', startLine: 1, endLine: 5 });
     const result = findSpecsByCodeSymbol(db, entity);
@@ -1014,7 +1014,7 @@ describe('findSpecsByCodeSymbol', () => {
     insertSpecNode(db, spec);
     insertCommitNode(db, commit);
     insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
-    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+    insertCommitFragmentRelation(db, commit.hash, fragment.id, 'CONTAINS');
 
     const entity = makeEntity({ name: 'authenticate', filePath: 'src/auth.ts' });
     const result = findSpecsByCodeSymbol(db, entity);
@@ -1052,8 +1052,8 @@ describe('findSpecsByCodeSymbol', () => {
     insertCommitNode(db, commit2);
     insertSpecCommitRelation(db, oldSpec.id, commit1.hash, 'GENERATE');
     insertSpecCommitRelation(db, newSpec.id, commit2.hash, 'GENERATE');
-    insertCommitFragmentRelation(db, commit1.hash, frag1.id);
-    insertCommitFragmentRelation(db, commit2.hash, frag2.id);
+    insertCommitFragmentRelation(db, commit1.hash, frag1.id, 'CONTAINS');
+    insertCommitFragmentRelation(db, commit2.hash, frag2.id, 'CONTAINS');
 
     const entity = makeEntity({ startLine: 1, endLine: 10 });
     const result = findSpecsByCodeSymbol(db, entity);
@@ -1142,7 +1142,7 @@ describe('findSpecsByCodeSymbol', () => {
     insertSpecNode(db, spec);
     insertCommitNode(db, commit);
     insertSpecCommitRelation(db, spec.id, commit.hash, 'GENERATE');
-    insertCommitFragmentRelation(db, commit.hash, fragment.id);
+    insertCommitFragmentRelation(db, commit.hash, fragment.id, 'CONTAINS');
 
     const entity = makeEntity({
       name: 'uniqueName12345',  // Won't appear in any FTS

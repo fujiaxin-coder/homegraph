@@ -1,7 +1,7 @@
 /**
  * Spec configuration module — replaces `commit4spec/utils/config.py`.
  *
- * Loads spec mining/evolve configuration from `${SPEC_DATA_DIR}/configs.json`
+ * Loads spec build/evolve configuration from `${SPEC_DATA_DIR}/configs.json`
  * within a repository. Discovery and commitScope sections fall back to code
  * defaults; the `llm` section must be explicitly configured by the user —
  * there are no hard-coded LLM defaults.
@@ -37,7 +37,6 @@ import { SPEC_DATA_DIR } from './utils';
 export interface SpecDiscoveryConfig {
   primaryDocCandidates: string[];
   supplementaryGlobs: string[];
-  commitInfoCandidates: string[];
 }
 
 export interface CommitScopeConfig {
@@ -57,12 +56,61 @@ export interface LLMConfig {
   baseUrl?: string;
   temperature: number;
   maxTokens: number;
+  /** Maximum retries on transient errors. Default 3 (4 total attempts). */
+  maxRetries: number;
+  /** Base delay for exponential backoff in ms. Default 1000. */
+  retryBaseDelayMs: number;
+  /** Delay ceiling in ms. Default 30000. */
+  retryMaxDelayMs: number;
 }
 
 export interface SpecConfig {
   discovery: SpecDiscoveryConfig;
   commitScope: CommitScopeConfig;
   llm: LLMConfig | null;
+}
+
+export interface MineConfig {
+  /** Maximum commits to scan (default: 100). */
+  limit: number;
+  /** Clustering similarity threshold (0-1, default: 0.5). */
+  threshold: number;
+  /** Maximum number of clusters to produce (default: 10). */
+  maxCluster: number;
+  /** Output directory for generated spec files (default: '.spec'). */
+  outputDir: string;
+  /** Optional path to a spec template markdown file. */
+  template?: string;
+  /** Skip LLM generation — only output clusters (default: false). */
+  skipLlm: boolean;
+}
+
+/**
+ * Build a MineConfig from raw option values (typically from CLI parsing).
+ *
+ * @param options - Raw option values from the CLI action handler.
+ * @param llmConfigured - Whether a valid LLM config was loaded. When false,
+ *   skipLlm is forced to true regardless of the option value.
+ */
+export function createMineConfig(
+  options: {
+    limit: number;
+    threshold: number;
+    maxCluster: number;
+    outputDir: string;
+    template?: string;
+    skipLlm: boolean;
+  },
+  llmConfigured: boolean,
+): MineConfig {
+  return {
+    limit: options.limit,
+    threshold: options.threshold,
+    maxCluster: options.maxCluster,
+    outputDir: options.outputDir,
+    template: options.template,
+    skipLlm: options.skipLlm || !llmConfigured,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +128,6 @@ export const DEFAULT_CONFIG: SpecConfig = Object.freeze({
       'spec-{spec_dir}.md',
     ]),
     supplementaryGlobs: Object.freeze(['logic/**/*.md', 'design/**/*.md']),
-    commitInfoCandidates: Object.freeze(['commit-info.md']),
   }),
   commitScope: Object.freeze({
     scopeRegex:
@@ -218,12 +265,6 @@ function normalizeDiscovery(
       'discovery.supplementaryGlobs',
       file,
     ),
-    commitInfoCandidates: normalizeStringArray(
-      val.commitInfoCandidates,
-      def.commitInfoCandidates,
-      'discovery.commitInfoCandidates',
-      file,
-    ),
   };
 }
 
@@ -291,7 +332,7 @@ const LLM_CONFIG_EXAMPLE = [
  *
  * Optional fields with defaults:
  * - `temperature`: defaults to 0.2
- * - `maxTokens`: defaults to 4096
+ * - `maxTokens`: defaults to 20000
  *
  * Returns a valid LLMConfig, or `null` if the user did not provide an `llm`
  * section at all (no error in that case — callers decide how to handle it).
@@ -341,7 +382,19 @@ function validateLLM(val: any, file: string): LLMConfig | null {
     maxTokens:
       typeof val.maxTokens === 'number' && Number.isInteger(val.maxTokens) && val.maxTokens > 0
         ? val.maxTokens
-        : 4096,
+        : 20000,
+    maxRetries:
+      typeof val.maxRetries === 'number' && Number.isInteger(val.maxRetries) && val.maxRetries >= 0
+        ? val.maxRetries
+        : 3,
+    retryBaseDelayMs:
+      typeof val.retryBaseDelayMs === 'number' && val.retryBaseDelayMs > 0
+        ? val.retryBaseDelayMs
+        : 1000,
+    retryMaxDelayMs:
+      typeof val.retryMaxDelayMs === 'number' && val.retryMaxDelayMs > 0
+        ? val.retryMaxDelayMs
+        : 30000,
   };
 }
 

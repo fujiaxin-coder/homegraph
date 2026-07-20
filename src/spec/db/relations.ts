@@ -91,13 +91,14 @@ export function transferSpecCommitRelations(
 export function insertCommitFragmentRelation(
   db: SqliteDatabase,
   commitHash: string,
-  fragmentId: string
+  fragmentId: string,
+  relationType: RelationType
 ): void {
   db.prepare(`
     INSERT OR IGNORE INTO commit_fragment_relations
-      (commit_hash, fragment_id)
-    VALUES (@commitHash, @fragmentId)
-  `).run({ commitHash, fragmentId });
+      (commit_hash, fragment_id, relation_type)
+    VALUES (@commitHash, @fragmentId, @relationType)
+  `).run({ commitHash, fragmentId, relationType });
 }
 
 // ===========================================================================

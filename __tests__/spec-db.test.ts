@@ -210,8 +210,8 @@ describe('Spec Schema (schema.ts)', () => {
       'INSERT INTO code_fragment_nodes (id, change_type, file_path, start_line, end_line, code_diff) VALUES (?, ?, ?, ?, ?, ?)'
     ).run('f1', 'MODIFY', 'f.ts', 1, 2, 'diff');
     db.prepare(
-      'INSERT INTO commit_fragment_relations (commit_hash, fragment_id) VALUES (?, ?)'
-    ).run('d'.repeat(40), 'f1');
+      'INSERT INTO commit_fragment_relations (commit_hash, fragment_id, relation_type) VALUES (?, ?, ?)'
+    ).run('d'.repeat(40), 'f1', 'CONTAINS');
 
     const row = db
       .prepare('SELECT commit_hash, fragment_id FROM commit_fragment_relations WHERE fragment_id = ?')
@@ -702,7 +702,7 @@ describe('Relations (relations.ts)', () => {
       insertCommitNode(db, makeCommit({ hash: 'f'.repeat(40) }));
       const frag = insertCodeFragment(db, makeFragment({ id: '' }));
 
-      insertCommitFragmentRelation(db, 'f'.repeat(40), frag.id);
+      insertCommitFragmentRelation(db, 'f'.repeat(40), frag.id, 'CONTAINS');
 
       const row = db
         .prepare(
@@ -717,9 +717,9 @@ describe('Relations (relations.ts)', () => {
       insertCommitNode(db, makeCommit({ hash: 'g'.repeat(40) }));
       const frag = insertCodeFragment(db, makeFragment({ id: '' }));
 
-      insertCommitFragmentRelation(db, 'g'.repeat(40), frag.id);
+      insertCommitFragmentRelation(db, 'g'.repeat(40), frag.id, 'CONTAINS');
       expect(() =>
-        insertCommitFragmentRelation(db, 'g'.repeat(40), frag.id)
+        insertCommitFragmentRelation(db, 'g'.repeat(40), frag.id, 'CONTAINS')
       ).not.toThrow();
 
       const rows = db
@@ -746,8 +746,8 @@ describe('Relations (relations.ts)', () => {
         makeFragment({ id: '', filePath: 'src/b.ts', startLine: 10 })
       );
 
-      insertCommitFragmentRelation(db, 'h'.repeat(40), frag1.id);
-      insertCommitFragmentRelation(db, 'h'.repeat(40), frag2.id);
+      insertCommitFragmentRelation(db, 'h'.repeat(40), frag1.id, 'CONTAINS');
+      insertCommitFragmentRelation(db, 'h'.repeat(40), frag2.id, 'CONTAINS');
 
       const results = findFragmentsByCommit(db, 'h'.repeat(40));
       expect(results).toHaveLength(2);

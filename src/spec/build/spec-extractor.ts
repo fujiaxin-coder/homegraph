@@ -3,15 +3,15 @@
  *
  * Replaces `commit4spec/reverse_engineer/spec_extractor.py`.
  * Discovers spec files in a storage directory and extracts structured
- * metadata (title, subtitles, commit hash from commit-info.md).
+ * metadata (title, subtitles).
  *
- * @module spec/mining/spec-extractor
+ * @module spec/build/spec-extractor
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { SpecConfig, SpecDiscoveryConfig, DEFAULT_CONFIG } from '../config';
-import { readFileContent, parseCommitInfoMd } from '../utils';
+import { readFileContent } from '../utils';
 import { logDebug, logWarn } from '../../errors';
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,6 @@ export interface SpecMetadata {
   specId: string;
   title: string;
   subtitles: string[];
-  commitHash: string | null;
   filePath: string;
   type: 'directory' | 'flat-file';
 }
@@ -229,8 +228,6 @@ function globToRegex(glob: string): RegExp {
  * 3. Discover supplementary `.md` files in `specDirPath` that match
  *    `config.supplementaryGlobs` (excluding the primary doc) and merge
  *    their headings into the subtitle list.
- * 4. Resolve a commit hash from `commit-info.md` content in `specDirPath`
- *    (using `config.commitInfoCandidates`).
  */
 function _buildMetadata(
   specId: string,
@@ -284,24 +281,12 @@ function _buildMetadata(
     }
   }
 
-  // ---- commit hash ----
-  let commitHash: string | null = null;
-  for (const candidate of config.commitInfoCandidates) {
-    const ciPath = path.join(specDirPath, candidate);
-    const ciContent = readFileContent(ciPath);
-    if (ciContent !== null) {
-      commitHash = parseCommitInfoMd(ciContent);
-      break;
-    }
-  }
-
-  logDebug('Built spec metadata', { specId, title, subtitleCount: subtitles.length, commitHash });
+  logDebug('Built spec metadata', { specId, title, subtitleCount: subtitles.length });
 
   return {
     specId,
     title,
     subtitles,
-    commitHash,
     filePath,
     type: 'directory',
   };
@@ -347,9 +332,6 @@ export function extractSpecMetadata(
     if (content !== null) {
       logDebug('Discovered flat-file spec', { specDirName, path: flatFilePath });
 
-      // Build metadata manually for flat-file (no supplementary docs or
-      // commit-info in the same directory — those live alongside the flat
-      // file's parent, which is specStoragePath itself).
       let title = specDirName;
       const firstH1Match = content.match(/^#\s+(.*)/m);
       if (firstH1Match && firstH1Match[1]) {
@@ -359,23 +341,10 @@ export function extractSpecMetadata(
 
       const subtitles = extractMarkdownHeadings(content);
 
-      // Attempt to read commit-info from specStoragePath for supplementary
-      // context (though flat-file specs rarely have one).
-      let commitHash: string | null = null;
-      for (const candidate of discoveryConfig.commitInfoCandidates) {
-        const ciPath = path.join(specStoragePath, candidate);
-        const ciContent = readFileContent(ciPath);
-        if (ciContent !== null) {
-          commitHash = parseCommitInfoMd(ciContent);
-          break;
-        }
-      }
-
       return {
         specId: specDirName,
         title,
         subtitles,
-        commitHash,
         filePath: flatFilePath,
         type: 'flat-file',
       };

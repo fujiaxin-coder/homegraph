@@ -1,14 +1,12 @@
 /**
- * Spec rewriter — evaluates a commit's impact on a design spec and applies
- * UPDATE / DEPRECATE decisions.
- *
- * Replaces `commit4spec/self_evolve/spec_rewriter.py` (lines 1-231).
+ * Spec rewriter — evaluates a commit cluster's impact on a design spec and
+ * applies UPDATE / DEPRECATE decisions.
  *
  * @module spec/evolve/spec-rewriter
  */
 import * as fs from 'fs';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
-import { readFileContent, writeFileContent, truncateText } from '../utils';
+import { readFileContent, writeFileContent } from '../utils';
 import {
   insertSpecNode,
   findSpecById,
@@ -22,12 +20,13 @@ import {
   transferSpecSpecRelations,
   deleteSimilarToRelations,
 } from '../db/relations';
-import { extractSpecMetadata } from '../mining/spec-extractor';
+import { extractSpecMetadata } from '../build/spec-extractor';
 import { LlmClient } from '../llm/client';
 import {
-  SPEC_EVALUATION_SYSTEM_PROMPT,
-  buildSpecEvaluationUserPrompt,
+  SPEC_EVALUATION_CLUSTER_SYSTEM_PROMPT,
+  buildClusterSpecEvaluationUserPrompt,
 } from '../llm/prompts';
+import { ClusterContext } from './cluster-context';
 import { logDebug, logWarn } from '../../errors';
 
 // =============================================================================
@@ -42,72 +41,77 @@ export interface EvolveDecision {
 }
 
 // =============================================================================
-// evaluateSpec
+// evaluateSpecWithCluster
 // =============================================================================
 
 /**
- * Ask the LLM whether a commit requires updating, deprecating, or leaving
- * a spec unchanged.
+ * Ask the LLM whether a cluster of commits requires updating, deprecating,
+ * or leaving a spec unchanged.
  *
- * @param specId            - The spec identifier (for logging / context).
- * @param specStoragePath   - Root spec storage directory.
- * @param specFilePath      - Absolute path to the plan.md file.
- * @param commitMessage     - First line of the commit message.
- * @param commitDiff        - Full unified diff of the commit.
- * @param scheduleNextSpecs - Remaining spec IDs to be processed (for context).
- * @param client            - Optional LLM client; if absent, returns UNCHANGED.
+ * Accepts a ClusterContext (multiple commits) and uses a cluster-aware
+ * prompt template that presents aggregated commit summaries rather than
+ * raw concatenated diffs.
+ *
+ * @param specId         - The spec identifier (for logging / context).
+ * @param specFilePath   - Absolute path to the plan.md file.
+ * @param clusterContext - Pre-built cluster context (from buildClusterContext).
+ * @param client         - LLM client; if absent, returns UNCHANGED.
  */
-export async function evaluateSpec(
+export async function evaluateSpecWithCluster(
   specId: string,
-  _specStoragePath: string,
   specFilePath: string,
-  commitMessage: string,
-  commitDiff: string,
-  scheduleNextSpecs: string[],
+  clusterContext: ClusterContext,
   client?: LlmClient,
 ): Promise<EvolveDecision> {
   // 1. Read plan content
   const planContent = readFileContent(specFilePath);
   if (planContent === null) {
-    logDebug('evaluateSpec: plan file not found, returning UNCHANGED', {
+    logDebug('evaluateSpecWithCluster: plan file not found, returning UNCHANGED', {
       specId,
       specFilePath,
     });
     return { action: 'UNCHANGED' };
   }
 
-  // 2. Truncate commitDiff to 6000 chars
-  const truncatedDiff = truncateText(commitDiff, 6000);
-
-  // 3. Build user prompt
-  const userPrompt = buildSpecEvaluationUserPrompt(
+  // 2. Build user prompt from cluster context
+  const userPrompt = buildClusterSpecEvaluationUserPrompt(
     planContent,
-    commitMessage,
-    truncatedDiff,
-    scheduleNextSpecs,
+    clusterContext,
   );
 
-  // 4. Call LLM
+  // 3. Call LLM
   if (!client) {
-    logDebug('evaluateSpec: no LLM client, returning UNCHANGED', { specId });
+    logDebug('evaluateSpecWithCluster: no LLM client, returning UNCHANGED', { specId });
     return { action: 'UNCHANGED' };
   }
 
-  const result = await client.chatJson(SPEC_EVALUATION_SYSTEM_PROMPT, userPrompt);
+  let result: Record<string, unknown>;
+  try {
+    result = await client.chatJson(
+      SPEC_EVALUATION_CLUSTER_SYSTEM_PROMPT,
+      userPrompt,
+    );
+  } catch (err) {
+    logWarn('evaluateSpecWithCluster: LLM call failed, defaulting to UNCHANGED', {
+      specId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { action: 'UNCHANGED' };
+  }
 
-  // 5. Validate action
+  // 4. Validate action
   const rawAction = result.action;
   let action: EvolveDecision['action'] = 'UNCHANGED';
   if (rawAction === 'UPDATE' || rawAction === 'DEPRECATE' || rawAction === 'UNCHANGED') {
     action = rawAction;
   } else {
-    logWarn('evaluateSpec: unknown action from LLM, defaulting to UNCHANGED', {
+    logWarn('evaluateSpecWithCluster: unknown action from LLM, defaulting to UNCHANGED', {
       specId,
       rawAction: String(rawAction),
     });
   }
 
-  // 6. Return EvolveDecision
+  // 5. Return EvolveDecision
   return {
     action,
     title: typeof result.title === 'string' ? result.title : undefined,
@@ -141,9 +145,6 @@ export function applyUpdate(
   commitHash: string,
 ): { newSpecId: string; newVersion: number } {
   // ---- Step 1: Write new plan content to temp file ----
-  // We write to a temp file first so the original is preserved until every
-  // DB operation succeeds.  If the caller's transaction rolls back, the
-  // temp file is harmless garbage — the original plan.md is untouched.
   const tmpPath = oldFilePath + '.new';
   writeFileContent(tmpPath, decision.plan_content || '');
 
@@ -158,7 +159,6 @@ export function applyUpdate(
     logDebug('applyUpdate: old spec not found in DB, returning early', {
       oldSpecId,
     });
-    // Clean up the temp file — no DB changes were made.
     try { fs.unlinkSync(tmpPath); } catch { /* best-effort */ }
     return { newSpecId: oldSpecId, newVersion: oldVersion + 1 };
   }
@@ -202,8 +202,6 @@ export function applyUpdate(
   insertSpecCommitRelation(db, oldSpecId, commitHash, 'GENERATE');
 
   // ---- Step 10: File system finalisation ----
-  // Only now — after all DB ops succeeded — do we touch the original disk
-  // files.  rename() is atomic on the same filesystem.
   try {
     fs.renameSync(oldFilePath, bakPath);
   } catch {
@@ -232,8 +230,6 @@ export function applyUpdate(
  * Apply a DEPRECATE decision: mark the spec as deprecated, create a
  * deprecated target node, create the EVOLVED_FROM relation, and clean
  * SIMILAR_TO relations.
- *
- * Ported from spec_rewriter.py:181-231.
  */
 export function applyDeprecate(
   db: SqliteDatabase,
@@ -250,7 +246,7 @@ export function applyDeprecate(
     version: 1,
     title: oldSpecId,
     subtitles: [],
-    filePath: '', // Synthetic deprecated node — no on-disk file.
+    filePath: '',
     timestamp: Date.now(),
   });
 

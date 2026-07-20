@@ -2,7 +2,7 @@
  * Spec Utility Tests
  *
  * Comprehensive tests for spec utility functions from:
- *   - src/spec/utils.ts (file I/O, commit-info parsing, meta r/w, db path,
+ *   - src/spec/utils.ts (file I/O, meta r/w, db path,
  *     budget profile, truncation, spec discovery)
  *   - src/spec/config.ts (config loading)
  */
@@ -27,7 +27,6 @@ vi.mock('../src/errors', () => ({
 import {
   readFileContent,
   writeFileContent,
-  parseCommitInfoMd,
   readMeta,
   writeMeta,
   resolveDbPath,
@@ -155,96 +154,6 @@ describe('writeFileContent', () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseCommitInfoMd
-// ---------------------------------------------------------------------------
-
-describe('parseCommitInfoMd', () => {
-  it('should parse "commit: <hash>" format', () => {
-    expect(parseCommitInfoMd('commit: abc1234')).toBe('abc1234');
-  });
-
-  it('should parse "commit-id: <hash>" format', () => {
-    expect(parseCommitInfoMd('commit-id: abc1234')).toBe('abc1234');
-  });
-
-  it('should parse "commit_id: <hash>" format', () => {
-    expect(parseCommitInfoMd('commit_id: abc1234')).toBe('abc1234');
-  });
-
-  it('should parse "commit = <hash>" format', () => {
-    expect(parseCommitInfoMd('commit = abc1234')).toBe('abc1234');
-  });
-
-  it('should parse a bare 40-char hex hash on its own line', () => {
-    const hash = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
-    expect(parseCommitInfoMd(hash)).toBe(hash);
-  });
-
-  it('should parse a short 7-char hash', () => {
-    expect(parseCommitInfoMd('commit: abc1234')).toBe('abc1234');
-  });
-
-  it('should parse case-insensitively and lowercase the result', () => {
-    // The implementation calls .toLowerCase() on the matched hash.
-    expect(parseCommitInfoMd('Commit: ABC1234')).toBe('abc1234');
-  });
-
-  it('should handle whitespace around delimiters', () => {
-    // Multiple spaces after the delimiter are consumed by \s*
-    expect(parseCommitInfoMd('commit:   abc1234')).toBe('abc1234');
-    // Leading/trailing whitespace on the line is trimmed
-    expect(parseCommitInfoMd('  commit: abc1234  ')).toBe('abc1234');
-  });
-
-  it('should not match when spaces appear before the delimiter', () => {
-    // The regex requires the delimiter (:, =, or space) to immediately
-    // follow the optional "id" suffix; extra spaces before ":" break it.
-    expect(parseCommitInfoMd('commit   :   abc1234')).toBeNull();
-  });
-
-  it('should skip blank lines', () => {
-    const content = '\n\ncommit: abc1234\n\n';
-    expect(parseCommitInfoMd(content)).toBe('abc1234');
-  });
-
-  it('should ignore irrelevant lines', () => {
-    const content = 'Some description\nAuthor: someone\ncommit: abc1234\nDate: today';
-    expect(parseCommitInfoMd(content)).toBe('abc1234');
-  });
-
-  it('should return null for empty string', () => {
-    expect(parseCommitInfoMd('')).toBeNull();
-  });
-
-  it('should return null for whitespace-only string', () => {
-    expect(parseCommitInfoMd('   \n  \n  ')).toBeNull();
-  });
-
-  it('should return null when no hash is present', () => {
-    expect(parseCommitInfoMd('Some random text\nwithout any hash')).toBeNull();
-  });
-
-  it('should return the first hash when multiple are present', () => {
-    const content = 'commit: abc1234\ncommit: def5678';
-    expect(parseCommitInfoMd(content)).toBe('abc1234');
-  });
-
-  it('should not match a hash shorter than 7 characters', () => {
-    expect(parseCommitInfoMd('commit: abc12')).toBeNull();
-  });
-
-  it('should not match a hash longer than 40 characters', () => {
-    const hash = 'a'.repeat(41);
-    expect(parseCommitInfoMd(`commit: ${hash}`)).toBeNull();
-  });
-
-  it('should parse "commit:<hash>" (no space after colon)', () => {
-    // `[:= ]` matches colon, then `\s*` matches zero spaces, then hash.
-    expect(parseCommitInfoMd('commit:abc1234')).toBe('abc1234');
-  });
-});
-
-// ---------------------------------------------------------------------------
 // readMeta
 // ---------------------------------------------------------------------------
 
@@ -333,11 +242,12 @@ describe('writeMeta', () => {
     expect(typeof result.updatedAt).toBe('string');
   });
 
-  it('should set updatedAt but leave createdAt undefined on first write', () => {
-    // On first write there is no existing meta.json, so createdAt is not
-    // carried forward from a previous write — it remains undefined.
+  it('should set both createdAt and updatedAt on first write', () => {
+    // On first write there is no existing meta.json, so createdAt is
+    // assigned the current timestamp (same as updatedAt).
     const result = writeMeta(tmpDir, '/some/repo/specs');
-    expect(result.createdAt).toBeUndefined();
+    expect(result.createdAt).toBeTruthy();
+    expect(typeof result.createdAt).toBe('string');
     expect(result.updatedAt).toBeTruthy();
     expect(typeof result.updatedAt).toBe('string');
   });
@@ -839,7 +749,7 @@ describe('loadSpecConfig', () => {
     expect(config.llm!.temperature).toBe(0.5);
     expect(config.discovery.primaryDocCandidates).toEqual(['custom.md']);
     // Default values still present for keys not overridden
-    expect(config.llm!.maxTokens).toBe(4096);
+    expect(config.llm!.maxTokens).toBe(20000);
     expect(config.discovery.supplementaryGlobs).toBeInstanceOf(Array);
   });
 
