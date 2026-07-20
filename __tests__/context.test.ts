@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import HomeGraph from '../src/index';
+import { removeTempDir } from './helpers/fs';
 
 describe('Context Builder', () => {
   let testDir: string;
@@ -151,9 +152,7 @@ export function validateEmail(email: string): boolean {
     if (cg) {
       cg.destroy();
     }
-    if (fs.existsSync(testDir)) {
-      fs.rmSync(testDir, { recursive: true, force: true });
-    }
+    removeTempDir(testDir);
   });
 
   describe('getCode()', () => {

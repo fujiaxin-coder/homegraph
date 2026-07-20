@@ -2200,7 +2200,7 @@ export class QueryBuilder {
     // this file. The internal resolution path uses deleteSpecificResolvedReferences
     // instead, but QueryBuilder is part of the public API, so a library consumer
     // passing more ids than SQLITE_MAX_VARIABLE_NUMBER (32766 on the bundled
-    // node:sqlite) would otherwise hit "too many SQL variables". (#540, #1001)
+    // SQLite would otherwise hit "too many SQL variables". (#540, #1001)
     for (let i = 0; i < fromNodeIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
       const chunk = fromNodeIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
       const placeholders = chunk.map(() => '?').join(',');

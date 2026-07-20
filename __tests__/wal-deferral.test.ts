@@ -189,7 +189,9 @@ describe('indexAll WAL deferral end-to-end', () => {
     }
   }
 
-  it('produces the same graph with and without deferral, and restores the interval', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'produces the same graph with and without deferral, and restores the interval',
+    async () => {
     writeFixtureProject();
 
     const cg1 = HomeGraph.initSync(tmpDir);

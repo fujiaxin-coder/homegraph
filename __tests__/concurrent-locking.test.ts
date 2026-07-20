@@ -1,12 +1,15 @@
 /**
  * Issue #238 — "database is locked" on concurrent MCP tool calls.
  *
- * With node:sqlite (real WAL) as the backend, the fixes that remain relevant:
+ * With better-sqlite3 (real WAL) as the preferred backend, the fixes that remain
+ * relevant:
  *  1. busy_timeout is a bounded few-second wait (not a 2-minute hang) and WAL is
  *     active — so a reader never blocks on a concurrent writer.
  *  2. The MCP ToolHandler reuses the default instance when a tool passes a
  *     projectPath pointing at the default project, instead of opening a SECOND
  *     connection to the same DB.
+ * The WASM fallback has no WAL; WAL-specific assertions below skip when the
+ * active backend is not native.
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
@@ -45,11 +48,17 @@ describe('issue #238 — connection PRAGMAs (#1)', () => {
   });
 
   it('runs in WAL mode — the mode that lets readers proceed during a write', () => {
+    // WASM remaps journal_mode=WAL → DELETE; only assert WAL on native.
+    if (conn.getBackend() !== 'native') return;
     const mode = String(pragmaValue(conn.getDb().pragma('journal_mode'), 'journal_mode')).toLowerCase();
     expect(mode).toBe('wal');
   });
 
   it('getJournalMode() surfaces the effective mode for status triage', () => {
+    if (conn.getBackend() !== 'native') {
+      expect(conn.getJournalMode()).toBe('delete');
+      return;
+    }
     expect(conn.getJournalMode()).toBe('wal');
   });
 });

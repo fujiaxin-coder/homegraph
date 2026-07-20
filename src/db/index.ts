@@ -11,7 +11,7 @@ import { SchemaVersion } from '../types';
 import { runMigrations, getCurrentVersion, CURRENT_SCHEMA_VERSION } from './migrations';
 import { getHomeGraphDir } from '../directory';
 
-export { SqliteDatabase, SqliteBackend } from './sqlite-adapter';
+export { SqliteDatabase, SqliteBackend, WASM_FALLBACK_FIX_RECIPE } from './sqlite-adapter';
 
 /**
  * Apply connection-level PRAGMAs. Shared by `initialize` and `open` so the two
@@ -23,15 +23,15 @@ export { SqliteDatabase, SqliteBackend } from './sqlite-adapter';
  * the lock instead of throwing "database is locked" immediately. See issue #238.
  *
  * The 5s window (was 120s) rides out a normal incremental sync; the old
- * 2-minute wait presented as a frozen, hung agent. With WAL, reads never block
- * on a writer, so this timeout only governs cross-process write contention
- * (e.g. the git-hook `homegraph sync` running while the MCP server writes).
+ * 2-minute wait presented as a frozen, hung agent. With WAL (native
+ * better-sqlite3), reads never block on a writer, so this timeout only governs
+ * cross-process write contention. The WASM fallback remaps WAL → DELETE.
  */
 function configureConnection(db: SqliteDatabase): void {
   db.pragma('busy_timeout = 5000');      // MUST be first — see above
   db.pragma('foreign_keys = ON');
-  db.pragma('journal_mode = WAL');       // node:sqlite supports WAL on every platform
-  db.pragma('synchronous = NORMAL');     // safe with WAL mode
+  db.pragma('journal_mode = WAL');       // native: WAL; wasm remaps to DELETE
+  db.pragma('synchronous = NORMAL');     // safe with WAL; wasm remaps to FULL
   // Keep SQLite's per-connection footprint small. On multi-hundred-MB indexes,
   // a 64MB cache + 256MB mmap (× main + query-pool workers) was a major driver
   // of multi-GB process RSS. 16MB cache / 64MB mmap is enough for interactive
@@ -259,8 +259,10 @@ export class DatabaseConnection {
         const { workerData, parentPort } = require('node:worker_threads');
         let row = null;
         try {
-          const { DatabaseSync } = require('node:sqlite');
-          const db = new DatabaseSync(workerData.dbPath);
+          // Prefer better-sqlite3 (same as createDatabase). Skip if unavailable —
+          // maintenance is best-effort; WAL checkpoint only applies on native.
+          const Database = require('better-sqlite3');
+          const db = new Database(workerData.dbPath);
           try { row = db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get(); } catch {}
           try { db.close(); } catch {}
         } catch {}
@@ -352,8 +354,8 @@ export class DatabaseConnection {
       const workerSource = `
         const { workerData, parentPort } = require('node:worker_threads');
         try {
-          const { DatabaseSync } = require('node:sqlite');
-          const db = new DatabaseSync(workerData.dbPath);
+          const Database = require('better-sqlite3');
+          const db = new Database(workerData.dbPath);
           for (const p of workerData.pragmas) { try { db.exec(p); } catch {} }
           try { db.close(); } catch {}
         } catch {}

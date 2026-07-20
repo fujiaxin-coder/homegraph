@@ -15,6 +15,7 @@ import * as os from 'os';
 import HomeGraph from '../src/index';
 import { ToolHandler } from '../src/mcp/tools';
 import { scanDynamicDispatch } from '../src/mcp/dynamic-boundaries';
+import { removeTempDir } from './helpers/fs';
 
 // ---------------------------------------------------------------------------
 // Unit: the scanner
@@ -146,7 +147,7 @@ describe('homegraph_explore — dynamic boundaries', () => {
 
   afterEach(() => {
     if (cg) cg.destroy();
-    if (testDir && fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    if (testDir && fs.existsSync(testDir)) removeTempDir(testDir);
   });
 
   it('announces the boundary site and shortlists the keyed candidate', async () => {
@@ -321,7 +322,7 @@ describe('homegraph_explore — interface dispatch', () => {
 
   afterEach(() => {
     if (cg) cg.destroy();
-    if (testDir && fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    if (testDir && fs.existsSync(testDir)) removeTempDir(testDir);
   });
 
   // 9 classes implement INodeType, each with execute(); a runtime registry lookup

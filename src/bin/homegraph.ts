@@ -910,14 +910,11 @@ program
       console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
       console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
       console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
-      // Surface the active SQLite backend (node:sqlite — Node's built-in real
-      // SQLite, full WAL + FTS5, no native build).
-      const backendLabel = chalk.green(`node:sqlite ${getGlyphs().dash} built-in (full WAL)`);
+      // Prefer better-sqlite3; wasm is the fallback when native is unavailable.
+      const backendLabel = backend === 'native'
+        ? chalk.green('native')
+        : chalk.yellow(`wasm ${getGlyphs().dash} slower fallback; run \`npm rebuild better-sqlite3\``);
       console.log(`  Backend:   ${backendLabel}`);
-      // Effective journal mode: 'wal' means concurrent reads never block on a
-      // writer; anything else means they can ("database is locked"). node:sqlite
-      // supports WAL everywhere, so a non-wal mode means the filesystem can't
-      // (network mounts, WSL2 /mnt). See issue #238.
       const journalLabel = journalMode === 'wal'
         ? chalk.green('wal')
         : chalk.yellow(`${journalMode || 'unknown'} ${getGlyphs().dash} WAL inactive; reads can block on writes`);

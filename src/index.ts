@@ -1039,9 +1039,8 @@ export class HomeGraph {
   }
 
   /**
-   * Active SQLite backend for this project's connection (`node-sqlite` — Node's
-   * built-in real-SQLite module). Surfaced via `homegraph status` and the
-   * `homegraph_status` MCP tool alongside the effective journal mode.
+   * Active SQLite backend (`native` = better-sqlite3, or `wasm` fallback).
+   * Surfaced via `homegraph status` / `homegraph_status` with journal mode.
    */
   getBackend(): import('./db').SqliteBackend {
     return this.db.getBackend();

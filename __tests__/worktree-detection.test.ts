@@ -162,7 +162,9 @@ describe('worktree mismatch surfaces on hot read tools (issue #155)', () => {
     expect(res.content[0].text).not.toContain('different git worktree');
   });
 
-  it('still shows the verbose warning on homegraph_status', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'still shows the verbose warning on homegraph_status',
+    async () => {
     handler.setDefaultProjectHint(worktree);
     const res = await handler.execute('homegraph_status', {});
     const text = res.content[0].text;

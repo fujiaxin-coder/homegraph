@@ -20,6 +20,14 @@ export default defineConfig({
        * they inject their own `env` via the Telemetry constructor.
        */
       HOMEGRAPH_TELEMETRY: '0',
+      /**
+       * Vitest loads the full HomeGraph + tree-sitter grammar set into one
+       * long-lived process. The production MCP RSS ceiling (1024MB) is for
+       * daemons serving a single project — trip it mid-suite and every later
+       * tool call returns a success-shaped Partial, masking real assertions.
+       * Raise the ceiling for the test process only.
+       */
+      HOMEGRAPH_MAX_RSS_MB: '4096',
     },
     coverage: {
       provider: 'v8',

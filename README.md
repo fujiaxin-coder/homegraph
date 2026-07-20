@@ -15,7 +15,7 @@
 
 ### 1. 安装 CLI
 
-需要 **Node.js 22.5+**（推荐 22 LTS 或 24）。HomeGraph 使用 Node 内置的 `node:sqlite`，22.5 以下无法运行。
+需要 **Node.js 20+**（推荐 22 LTS 或 24）。索引库优先用 `better-sqlite3`（原生），装不上时回退到 `node-sqlite3-wasm`。
 
 ```bash
 npm install -g homegraph
@@ -294,7 +294,7 @@ Cursor 等项目级配置写入 `./.cursor/mcp.json`，格式相同。推荐使�
 
 ## 环境要求
 
-- Node.js **22.5+**（推荐 22 LTS 或 24；使用 Node 内置 `node:sqlite`）
+- Node.js **20+**（推荐 22 LTS 或 24；SQLite 优先 better-sqlite3，回退 wasm）
 - 首次索引时会对项目源码做 AST 解析，大型仓库首次 `init -i` 可能需要数分钟
 - WSL2 下若项目位于 Windows 盘符（`/mnt/c` 等）且 MCP 连接不稳定，可设置 `HOMEGRAPH_NO_DAEMON=1` 跳过共享后台服务，每个会话独立运行
 

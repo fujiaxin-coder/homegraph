@@ -18,15 +18,14 @@ import { ToolHandler, tools } from '../src/mcp/tools';
 import { scanDirectory, isSourceFile } from '../src/extraction';
 import { DatabaseConnection, getDatabasePath } from '../src/db';
 import { QueryBuilder } from '../src/db/queries';
+import { removeTempDir } from './helpers/fs';
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-security-test-'));
 }
 
 function cleanupTempDir(dir: string): void {
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  removeTempDir(dir);
 }
 
 describe('FileLock', () => {
@@ -196,8 +195,8 @@ describe('Symlink escape prevention (#527)', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(outside, { recursive: true, force: true });
+    removeTempDir(root);
+    removeTempDir(outside);
   });
 
   // Symlink creation needs privileges on Windows; skip gracefully if it fails.
@@ -311,7 +310,7 @@ describe('validateProjectPath — sensitive directory blocking', () => {
     try {
       expect(validateProjectPath(dir)).toBeNull();
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      removeTempDir(dir);
     }
   });
 

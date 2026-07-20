@@ -12,6 +12,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
 import HomeGraph from '../src/index';
+import { removeTempDir } from './helpers/fs';
 
 describe('Sync Module', () => {
   describe('Sync Functionality', () => {
@@ -44,7 +45,7 @@ describe('Sync Module', () => {
         cg.destroy();
       }
       if (fs.existsSync(testDir)) {
-        fs.rmSync(testDir, { recursive: true, force: true });
+        removeTempDir(testDir);
       }
     });
 
@@ -193,7 +194,7 @@ describe('Sync Module', () => {
         cg.destroy();
       }
       if (fs.existsSync(testDir)) {
-        fs.rmSync(testDir, { recursive: true, force: true });
+        removeTempDir(testDir);
       }
     });
 
@@ -360,7 +361,7 @@ describe('Sync Module', () => {
 
     afterEach(() => {
       if (cg) cg.destroy();
-      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+      if (fs.existsSync(testDir)) removeTempDir(testDir);
     });
 
     it('the full index excludes both (baseline the sync path must match)', () => {
@@ -467,7 +468,7 @@ describe('Sync Module', () => {
 
     afterEach(() => {
       if (cg) cg.destroy();
-      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+      if (fs.existsSync(testDir)) removeTempDir(testDir);
     });
 
     it('baseline: the unresolvable ref creates no edge and does not report as pending', () => {
@@ -574,7 +575,7 @@ describe('Sync Module', () => {
 
     afterEach(() => {
       if (cg) cg.destroy();
-      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+      if (fs.existsSync(testDir)) removeTempDir(testDir);
     });
 
     it('rebinds the unchanged caller when the symbol moves to another file', async () => {
@@ -677,7 +678,7 @@ describe('Sync Module', () => {
 
     afterEach(() => {
       if (cg) cg.destroy();
-      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+      if (fs.existsSync(testDir)) removeTempDir(testDir);
     });
 
     function callerCount(fnName: string): number {

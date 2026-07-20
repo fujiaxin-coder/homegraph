@@ -4,7 +4,7 @@
  * Comprehensive Vitest tests for the Commit4Spec knowledge graph database
  * layer: schema initialisation, entity CRUD, relations, and FTS5 search.
  *
- * Uses in-memory SQLite via node:sqlite (the same backend as production).
+ * Uses in-memory SQLite via createDatabase (better-sqlite3, or wasm fallback).
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -135,10 +135,9 @@ describe('Spec Schema (schema.ts)', () => {
   it('foreign keys are enabled after initSpecSchema', () => {
     initSpecSchema(db);
 
-    const row = db.pragma('foreign_keys') as Record<string, unknown>;
-    // node:sqlite returns the pragma value; check it is truthy
-    const val = Object.values(row)[0];
-    expect(val).toBe(1);
+    // Prefer `{ simple: true }` — better-sqlite3 / wasm shapes differ without it.
+    const val = db.pragma('foreign_keys', { simple: true });
+    expect(Number(val)).toBe(1);
   });
 
   it('can insert and query from spec_nodes table', () => {

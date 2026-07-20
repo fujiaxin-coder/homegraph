@@ -30,9 +30,9 @@ import { randomUUID } from 'crypto';
 export const TELEMETRY_ENDPOINT = 'https://telemetry.gethomegraph.com/v1/events';
 export const TELEMETRY_DOCS = 'https://github.com/colbymchenry/homegraph/blob/main/TELEMETRY.md';
 
-// v2: dropped the `sqlite_backend` field from the `index` event — node:sqlite is
-// now the only backend (the better-sqlite3-native / wasm-fallback split is gone),
-// so the value was a constant carrying no signal. See TELEMETRY.md.
+// v2: dropped the `sqlite_backend` field from the `index` event. Telemetry still
+// uses schema v2; the native/wasm split is observable via `homegraph status`
+// instead of being reported here. See TELEMETRY.md.
 const SCHEMA_VERSION = 2;
 const MAX_BUFFER_BYTES = 256 * 1024;
 const MAX_EVENTS_PER_REQUEST = 100;

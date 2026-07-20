@@ -142,7 +142,7 @@ export function persistToGraph(
 
     for (const cc of cluster.commits) {
       // CommitNode — must be inserted before the relation because
-      // node:sqlite enforces FOREIGN KEY constraints eagerly and
+      // SQLite enforces FOREIGN KEY constraints eagerly and
       // INSERT OR IGNORE throws on FK violations in Node's SQLite.
       if (!seenCommitHashes.has(cc.commitHash)) {
         seenCommitHashes.add(cc.commitHash);

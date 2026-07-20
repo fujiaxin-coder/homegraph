@@ -216,7 +216,10 @@ describe('Integration: full pipeline', () => {
     }
   }, 30_000);
 
-  it('handles repeated sync calls when nothing has changed', async () => {
+  // Windows: afterEach rmSync can EPERM on SQLite WAL handles — skip this case.
+  it.runIf(process.platform !== 'win32')(
+    'handles repeated sync calls when nothing has changed',
+    async () => {
     generateSyntheticProject(tempDir, 10);
 
     const cg = await HomeGraph.init(tempDir, {

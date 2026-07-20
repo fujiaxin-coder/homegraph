@@ -19,10 +19,17 @@ import {
 
 function hasSqliteBindings(): boolean {
   try {
-    require('node:sqlite');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('better-sqlite3');
     return true;
   } catch {
-    return false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require('node-sqlite3-wasm');
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

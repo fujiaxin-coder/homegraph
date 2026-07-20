@@ -53,6 +53,7 @@ const VIEWTREE_STRUCTURE_VIAS = new Set([
 // Spec knowledge-graph tooling — loaded lazily so the MCP startup path
 // doesn't pull in SQLite / spec-graph layers before the daemon binds.
 import type { SqliteDatabase } from '../db/sqlite-adapter';
+import { WASM_FALLBACK_FIX_RECIPE } from '../db/sqlite-adapter';
 
 /**
  * An expected, recoverable "homegraph can't serve this" condition — most
@@ -6374,21 +6375,28 @@ export class ToolHandler {
       `**Database size:** ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`,
     );
 
-    // Surface the active SQLite backend (node:sqlite, Node's built-in real
-    // SQLite — full WAL + FTS5, no native build).
-    lines.push(`**Backend:** node:sqlite (Node built-in) — full WAL + FTS5`);
+    // Surface the active SQLite backend. Prefer better-sqlite3; wasm is the
+    // fallback when the native binding is unavailable (no WAL — slower / lock-prone).
+    const backend = cg.getBackend();
+    if (backend === 'native') {
+      lines.push(`**Backend:** native (better-sqlite3)`);
+    } else {
+      lines.push(
+        `**Backend:** ⚠ wasm (better-sqlite3 unavailable) — ` +
+        `5-10x slower than native. Fix: ${WASM_FALLBACK_FIX_RECIPE}`
+      );
+    }
 
     // Effective journal mode. 'wal' ⇒ concurrent reads never block on a writer;
-    // anything else ⇒ they can ("database is locked"). node:sqlite supports WAL
-    // everywhere, so a non-wal mode means the filesystem can't (network/
-    // virtualized mounts, WSL2 /mnt). See issue #238.
+    // anything else ⇒ they can ("database is locked"). Native supports WAL;
+    // wasm remaps to DELETE.
     const journalMode = cg.getJournalMode();
     if (journalMode === 'wal') {
       lines.push(`**Journal mode:** wal (concurrent reads safe)`);
     } else {
       lines.push(
         `**Journal mode:** ⚠ ${journalMode || 'unknown'} — WAL not active, so reads ` +
-        `can block on a concurrent write (WAL appears unsupported on this filesystem)`
+        `can block on a concurrent write`
       );
     }
 

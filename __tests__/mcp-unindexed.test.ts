@@ -21,6 +21,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { HomeGraph } from '../src';
 import { ToolHandler } from '../src/mcp/tools';
+import { removeTempDir } from './helpers/fs';
 
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
@@ -107,7 +108,7 @@ describe('No-root-index session policy', () => {
       await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
       child = null;
     }
-    fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    removeTempDir(tempDir);
   });
 
   it('initialize returns the per-project instructions (not "inactive", not the full playbook)', async () => {
@@ -196,7 +197,7 @@ describe('No-error policy on expected conditions', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTempDir(tempDir);
   });
 
   it('cross-project query to an unindexed path is SUCCESS-shaped guidance, not isError', async () => {
@@ -249,7 +250,7 @@ describe('search kind filter', () => {
 
   afterEach(() => {
     cg.close();
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    removeTempDir(tempDir);
   });
 
   it("kind: 'type' (the advertised enum value) finds type aliases", async () => {

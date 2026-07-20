@@ -45,15 +45,24 @@ function cleanupTempDir(dir: string): void {
   }
 }
 
-// Check if the node:sqlite backend is available (Node >= 22.5)
+// Check if any SQLite backend is available (better-sqlite3 or wasm)
 function hasSqliteBindings(): boolean {
   try {
-    const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(':memory:');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require('better-sqlite3');
+    const db = new Database(':memory:');
     db.close();
     return true;
   } catch {
-    return false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { Database } = require('node-sqlite3-wasm');
+      const db = new Database(':memory:');
+      db.close();
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
