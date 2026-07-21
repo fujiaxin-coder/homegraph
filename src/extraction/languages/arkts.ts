@@ -199,13 +199,16 @@ function isStackOverflowExitCode(code: number | null): boolean {
   return code === 3221225725 || code === -1073741571;
 }
 
-function shouldUseIsolatedArkTSBuild(etsCount: number): boolean {
+/**
+ * Opt-in isolated ArkTS Scene build (child process + enlarged `--stack-size`).
+ * Default is in-process: faster and avoids a Windows-only auto-isolated path that
+ * could burn minutes on failed stack-size retries before giving up. Set
+ * `HOMEGRAPH_ARKTS_ISOLATED=1` only when an in-process Scene build stack-overflows
+ * the indexer (rare Photos-scale Windows cases).
+ */
+export function shouldUseIsolatedArkTSBuild(): boolean {
   const mode = process.env.HOMEGRAPH_ARKTS_ISOLATED?.trim();
-  if (mode === '1' || mode === 'true') return true;
-  if (mode === '0' || mode === 'false') return false;
-  // Photos-scale repos on Windows: build Scene in a child with a larger stack.
-  if (process.platform === 'win32' && etsCount >= 500) return true;
-  return false;
+  return mode === '1' || mode === 'true';
 }
 
 function homegraphDbPath(rootDir: string): string {
@@ -650,7 +653,7 @@ function runArkTSBatchFull(
   etsFiles: string[],
   batchKey: string
 ): PersistedBatch {
-  if (shouldUseIsolatedArkTSBuild(etsFiles.length)) {
+  if (shouldUseIsolatedArkTSBuild()) {
     const dbPath = homegraphDbPath(rootDir);
     if (!fs.existsSync(dbPath)) {
       throw new Error(`ArkTS isolated build requires ${dbPath}`);
@@ -662,7 +665,8 @@ function runArkTSBatchFull(
       if (!spawned.ok) {
         throw new Error(
           `ArkTS isolated Scene build failed (exit ${spawned.lastCode ?? 'unknown'}). ` +
-            'Try HOMEGRAPH_ARKTS_STACK_SIZES_KB=65536,131072,262144'
+            'Unset HOMEGRAPH_ARKTS_ISOLATED to use the default in-process build, ' +
+            'or raise HOMEGRAPH_ARKTS_STACK_SIZES_KB (e.g. 65536,131072,262144)'
         );
       }
       return markBatchCommittedAfterWorker(rootDir, triggerFile, etsFiles, batchKey);
@@ -728,7 +732,7 @@ export async function primeArkTSBatch(
     return;
   }
 
-  if (shouldUseIsolatedArkTSBuild(etsFiles.length)) {
+  if (shouldUseIsolatedArkTSBuild()) {
     runArkTSBatchFull(rootDir, queries, normalizedTrigger, etsFiles, batchKey);
     return;
   }

@@ -445,9 +445,9 @@ function printIndexResult(clack: typeof import('@clack/prompts'), result: IndexR
     clack.log.warn('ArkTS index quality notice — see details below.');
     clack.note(
       `${arktsDegraded[0]!.message}\n\n` +
-        'Large ArkTS repos on Windows use an isolated indexer with enableMethodBodyBuild=true.\n' +
-        'If indexing failed, set HOMEGRAPH_ARKTS_STACK_SIZES_KB=65536,131072,262144 and retry:\n' +
-        '  node --stack-size=65536 dist/bin/homegraph.js index <path>',
+        'ArkTS Scene builds run in-process by default (fastest). If the indexer\n' +
+        'exits with a Windows stack overflow on a huge repo, opt into the isolated\n' +
+        'worker: HOMEGRAPH_ARKTS_ISOLATED=1 (optional HOMEGRAPH_ARKTS_STACK_SIZES_KB).',
       'ArkTS quality notice'
     );
   }

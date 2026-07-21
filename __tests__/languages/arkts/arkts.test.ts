@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { bindExtractionContext, resetExtractionContext } from '../../../src/extraction/context';
-import { ArkTSExtractor, isArkTSBatchPersisted, resetArkTSBatch } from '../../../src/extraction/languages/arkts';
+import { ArkTSExtractor, isArkTSBatchPersisted, resetArkTSBatch, shouldUseIsolatedArkTSBuild } from '../../../src/extraction/languages/arkts';
 import { detectLanguage, isArkModuleJson5, isSourceFile } from '../../../src/extraction/grammars';
 import { cleanupArktsProjects, makeArktsProject, mockArktsQueries } from './helpers';
 
@@ -17,6 +17,23 @@ describe('languages/arkts', () => {
     expect(isSourceFile('src/main/module.json5')).toBe(true);
     expect(detectLanguage('foo.ets')).toBe('arkts');
     expect(detectLanguage('src/main/module.json5')).toBe('yaml');
+  });
+
+  it('keeps isolated ArkTS Scene build opt-in (default in-process)', () => {
+    const prev = process.env.HOMEGRAPH_ARKTS_ISOLATED;
+    try {
+      delete process.env.HOMEGRAPH_ARKTS_ISOLATED;
+      expect(shouldUseIsolatedArkTSBuild()).toBe(false);
+      process.env.HOMEGRAPH_ARKTS_ISOLATED = '0';
+      expect(shouldUseIsolatedArkTSBuild()).toBe(false);
+      process.env.HOMEGRAPH_ARKTS_ISOLATED = '1';
+      expect(shouldUseIsolatedArkTSBuild()).toBe(true);
+      process.env.HOMEGRAPH_ARKTS_ISOLATED = 'true';
+      expect(shouldUseIsolatedArkTSBuild()).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.HOMEGRAPH_ARKTS_ISOLATED;
+      else process.env.HOMEGRAPH_ARKTS_ISOLATED = prev;
+    }
   });
 
   it('builds a Scene, persists batch, and returns symbols + RTA calls', () => {

@@ -1,8 +1,9 @@
 /**
  * Isolated-process entry for full ArkTS batch indexing (Scene + RTA + persist).
  *
- * Spawned with an enlarged `--stack-size` so Photos-scale Scene builds do not
- * kill the parent indexer. Always uses enableMethodBodyBuild=true (no degrade).
+ * Opt-in via `HOMEGRAPH_ARKTS_ISOLATED=1` when an in-process Scene build
+ * stack-overflows the parent indexer. Spawned with an enlarged `--stack-size`.
+ * Always uses enableMethodBodyBuild=true (no degrade).
  *
  * Usage: node [--stack-size=N] [--liftoff-only] arkts-batch-worker.js <rootDir> <dbPath> <triggerFile>
  */
