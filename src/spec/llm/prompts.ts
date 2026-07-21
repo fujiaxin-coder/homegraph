@@ -57,17 +57,17 @@ Output format — fill in the template exactly. Replace {{placeholders}} with re
 // Cluster spec evaluation prompt
 // =============================================================================
 
-/** Maximum characters for the current plan content in the user prompt
+/** Maximum characters for the current spec content in the user prompt
  *  (~16K tokens @ ~0.25 token/char). Exceedingly large spec documents are
  *  truncated to prevent context-window overflow. */
-const MAX_PLAN_CONTENT_CHARS = 64000;
+const MAX_SPEC_CONTENT_CHARS = 64000;
 
-export const SPEC_EVALUATION_CLUSTER_SYSTEM_PROMPT = `You are a technical documentation maintainer. Your task is to evaluate whether a GROUP of related git commits requires updating a software design specification (plan.md).
+export const SPEC_EVALUATION_CLUSTER_SYSTEM_PROMPT = `You are a technical documentation maintainer. Your task is to evaluate whether a GROUP of related git commits requires updating a software design specification.
 
-Given the current plan content and a summary of multiple commits that affect this spec, determine:
-1. Whether the plan needs to be updated (UPDATE), deprecated (DEPRECATE), or left unchanged (UNCHANGED).
-2. If UPDATE: provide the new title, subtitles (as an array of heading-preview strings), and full rewritten plan_content that incorporates the changes from all commits.
-3. If DEPRECATE: provide a brief explanation in the plan_content field.
+Given the current content and a summary of multiple commits that affect this spec, determine:
+1. Whether the spec needs to be updated (UPDATE), deprecated (DEPRECATE), or left unchanged (UNCHANGED).
+2. If UPDATE: provide the new title, subtitles (as an array of heading-preview strings), and full rewritten spec_content that incorporates the changes from all commits.
+3. If DEPRECATE: provide a brief explanation in the spec_content field.
 
 Key considerations for batch evaluation:
 - Multiple commits may partially overlap in their changes — synthesize the combined impact.
@@ -79,35 +79,35 @@ Response format (JSON):
   "action": "UPDATE" | "DEPRECATE" | "UNCHANGED",
   "title": "New spec title (for UPDATE)",
   "subtitles": ["heading1 → heading2 - preview", ...],
-  "plan_content": "Full rewritten markdown content (for UPDATE) or deprecation reason (for DEPRECATE)"
+  "spec_content": "Full rewritten markdown content (for UPDATE) or deprecation reason (for DEPRECATE)"
 }`;
 
 /**
  * Build the user prompt for cluster-based spec evaluation.
  *
  * Presents:
- * 1. The current plan content.
+ * 1. The current spec content.
  * 2. A cluster overview (commit count, primary files).
  * 3. Per-commit summaries (short hash, message, changed files, truncated diff).
  *
  * The prompt is designed to fit within a reasonable token budget for a
  * single LLM call even with 5-10 commits in the cluster.
  *
- * @param planContent    - Full current plan.md content.
+ * @param specContent    - Full current spec.md content.
  * @param clusterContext - Pre-built cluster context from buildClusterContext.
  * @returns Formatted user prompt string.
  */
 export function buildClusterSpecEvaluationUserPrompt(
-  planContent: string,
+  specContent: string,
   clusterContext: ClusterContext,
 ): string {
   const parts: string[] = [];
 
-  // 1. Current plan
-  const truncatedPlan = truncateText(planContent, MAX_PLAN_CONTENT_CHARS);
-  parts.push('## Current Plan Content');
+  // 1. Current spec
+  const truncatedSpec = truncateText(specContent, MAX_SPEC_CONTENT_CHARS);
+  parts.push('## Current Spec Content');
   parts.push('');
-  parts.push(truncatedPlan);
+  parts.push(truncatedSpec);
   parts.push('');
 
   // 2. Cluster overview
