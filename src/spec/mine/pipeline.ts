@@ -11,13 +11,12 @@
  * @module spec/mine/pipeline
  */
 
-import { execFileSync } from 'child_process';
 import * as path from 'path';
 import { LLMConfig, MineConfig } from '../config';
-import { isGitRepo } from '../build/git-scanner';
+import { isGitRepo, getHeadHash, isAncestor } from '../git';
 import { readMeta, writeMeta } from '../utils';
 import { scanCommits } from './scanner';
-import { clusterCommits } from './clusterer';
+import { clusterCommits } from './clustering';
 import { generateSpecs } from './generator';
 import { logDebug, logWarn } from '../../errors';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
@@ -40,55 +39,6 @@ export interface MinePipelineResult {
   fragmentsWritten: number;
   relationsWritten: number;
   errors: string[];
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Check whether `ancestor` is an ancestor of `descendant` in the git history.
- */
-function isAncestor(
-  repoPath: string,
-  ancestor: string,
-  descendant: string,
-): boolean {
-  try {
-    execFileSync(
-      'git',
-      ['merge-base', '--is-ancestor', ancestor, descendant],
-      {
-        cwd: repoPath,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        windowsHide: true,
-      },
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Get the current HEAD commit hash.
- */
-function getHeadHash(repoPath: string): string {
-  try {
-    return execFileSync(
-      'git',
-      ['rev-parse', 'HEAD'],
-      {
-        cwd: repoPath,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        windowsHide: true,
-      },
-    ).trim();
-  } catch {
-    return '';
-  }
 }
 
 // ---------------------------------------------------------------------------

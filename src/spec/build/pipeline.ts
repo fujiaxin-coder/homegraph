@@ -14,15 +14,11 @@ import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { SpecConfig, loadSpecConfig } from '../config';
 import { writeMeta, discoverSpecs } from '../utils';
 import { initSpecSchema } from '../db/schema';
-import { insertSpecNode } from '../db/spec-node';
 import { insertCommitNode } from '../db/commit-node';
-import { insertCodeFragment } from '../db/fragment-node';
-import {
-  insertSpecCommitRelation,
-  insertCommitFragmentRelation,
-} from '../db/relations';
-import { execFileSync } from 'child_process';
-import { scan, getCommitDiff } from './git-scanner';
+import { insertSpecCommitRelation } from '../db/relations';
+import { upsertSpecFromMetadata, persistCommitFragments } from '../db/persist';
+import { scan } from './scan';
+import { getCommitDiff, getHeadHash } from '../git';
 import { analyzeCommitDiff } from './diff-parser';
 import { logDebug, logWarn } from '../../errors';
 
@@ -125,15 +121,7 @@ export function runBuildPipeline(
         title: sm.title,
       });
 
-      insertSpecNode(db, {
-        id: sm.specId,
-        title: sm.title,
-        subtitles: sm.subtitles,
-        status: 'active',
-        version: 1,
-        filePath: sm.filePath,
-        timestamp: cm.timestamp,
-      });
+      upsertSpecFromMetadata(db, sm, cm.timestamp);
       if (!writtenSpecIds.has(pair.specId)) {
         writtenSpecIds.add(pair.specId);
         specsFound++;
@@ -161,20 +149,9 @@ export function runBuildPipeline(
     // ---- Analyze diff and insert fragments ----
     const preFetchedDiff = getCommitDiff(repoPath, cm.hash);
     const fragments = analyzeCommitDiff(repoPath, cm.hash, preFetchedDiff);
-    for (const frag of fragments) {
-      // insertCodeFragment auto-generates an id when the `id` field is empty.
-      const inserted = insertCodeFragment(db, {
-        id: '',
-        changeType: frag.changeType,
-        filePath: frag.filePath,
-        startLine: frag.startLine,
-        endLine: frag.endLine,
-        codeDiff: frag.codeDiff,
-      });
-      fragmentsFound++;
-      insertCommitFragmentRelation(db, cm.hash, inserted.id, 'CONTAINS');
-      relationsCreated++;
-    }
+    const persisted = persistCommitFragments(db, cm.hash, fragments);
+    fragmentsFound += persisted.fragmentsInserted;
+    relationsCreated += persisted.relationsCreated;
   }
 
   // ---- Step 6: build skipped entries ----
@@ -189,17 +166,7 @@ export function runBuildPipeline(
   }
 
   // ---- Step 7: write meta ----
-  let headHash: string | undefined;
-  try {
-    headHash = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: repoPath,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-    }).trim();
-  } catch {
-    headHash = undefined;
-  }
+  const headHash = getHeadHash(repoPath) ?? undefined;
   writeMeta(repoPath, specStoragePath, headHash);
 
   // ---- Step 8: return result ----

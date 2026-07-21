@@ -1,11 +1,57 @@
 /**
- * LLM prompt templates for spec self-evolution.
+ * LLM prompt templates for the spec pipelines — spec self-evolution
+ * (cluster evaluation) and spec mining (spec generation from clusters).
  *
  * @module spec/llm/prompts
  */
 
-import { ClusterContext } from '../evolve/cluster-context';
+import { ClusterContext } from '../types';
 import { truncateText } from '../utils';
+
+// =============================================================================
+// Spec generation prompt + template (mine pipeline)
+// =============================================================================
+
+/** Default markdown template for generated spec documents. */
+export const DEFAULT_SPEC_TEMPLATE = `# Spec: {{title}}
+
+## Summary
+{{summary}}
+
+## Motivation
+{{motivation}}
+
+## Specification
+
+### Functional Requirements
+{{functional_requirements}}
+
+### Acceptance Criteria (EARS format)
+{{acceptance_criteria}}
+
+## Implementation Notes
+
+### Related Commits
+{{commit_list}}
+
+### Affected Files
+{{file_list}}
+
+### Key Symbols
+{{symbol_list}}
+`;
+
+/** System prompt for LLM spec generation from a commit cluster. */
+export const SPEC_GENERATION_SYSTEM_PROMPT = `You are a technical documentation writer specializing in software design specifications. Given a cluster of related Git commits, generate a design specification in markdown format.
+
+Guidelines:
+- Focus on WHAT was built, not HOW it was implemented
+- Use EARS (Easy Approach to Requirements Syntax) for acceptance criteria
+- Be specific — reference real symbols, files, and commit messages
+- Keep the spec concise but complete
+- Output ONLY the spec document, no preamble or commentary
+
+Output format — fill in the template exactly. Replace {{placeholders}} with real content. Do NOT include the placeholder braces in your output.`;
 
 // =============================================================================
 // Cluster spec evaluation prompt

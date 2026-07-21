@@ -9,7 +9,6 @@
  */
 
 import { SpecConfig } from '../config';
-import { discoverSpecs } from '../utils';
 import { logDebug } from '../../errors';
 
 // ---------------------------------------------------------------------------
@@ -96,14 +95,19 @@ export function normalizeScope(
 
 /**
  * Extract a scope from a commit message, normalize it, then check whether the
- * resulting spec ID exists on disk in `specStoragePath`.
+ * resulting spec ID exists among the known on-disk spec IDs.
+ *
+ * @param message - Commit message (only the first line is searched).
+ * @param specIds - Known spec IDs (from `discoverSpecs`, hoisted by the
+ *   caller so scanning N commits does not re-read the directory N times).
+ * @param config  - Spec configuration (commitScope section).
  *
  * Returns the normalized spec ID when the scope resolves to an existing spec,
  * otherwise `null`.
  */
 export function resolveScopeToSpec(
   message: string,
-  specStoragePath: string,
+  specIds: Set<string>,
   config: SpecConfig,
 ): string | null {
   const scope = extractScope(message, config.commitScope.scopeRegex);
@@ -112,9 +116,6 @@ export function resolveScopeToSpec(
   }
 
   const normalized = normalizeScope(scope, config.commitScope.normalize);
-
-  const entries = discoverSpecs(specStoragePath);
-  const specIds = new Set(entries.map((e) => e.specId));
 
   return specIds.has(normalized) ? normalized : null;
 }

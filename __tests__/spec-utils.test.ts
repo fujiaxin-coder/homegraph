@@ -2,7 +2,7 @@
  * Spec Utility Tests
  *
  * Comprehensive tests for spec utility functions from:
- *   - src/spec/utils.ts (file I/O, meta r/w, db path,
+ *   - src/spec/utils/ (file I/O, meta r/w, db path,
  *     budget profile, truncation, spec discovery)
  *   - src/spec/config.ts (config loading)
  */

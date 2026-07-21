@@ -16,13 +16,19 @@
  */
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFileSync } from 'child_process';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { createMineConfig, LLMConfig, SpecConfig } from '../config';
 import { readMeta, writeMeta, SPEC_DATA_DIR } from '../utils';
 import { initSpecSchema } from '../db/schema';
 import { findSpecById } from '../db/spec-node';
-import { getCommitRange, getCommitDiff, getCommitInfo, CommitInfo } from '../build/git-scanner';
+import {
+  getCommitRange,
+  getCommitDiff,
+  getCommitInfo,
+  getHeadHash,
+  isAncestor,
+  CommitInfo,
+} from '../git';
 import { OpenAiLlmClient } from '../llm/client';
 import { analyzeIncrementalCommits, CommitSpecAnalysis } from './commit-spec-analyzer';
 import { persistCommitSpecGraph, PersistResult } from './commit-spec-persister';
@@ -107,25 +113,18 @@ const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 // Helpers
 // =============================================================================
 
-/** Resolve HEAD hash. */
+/** Resolve HEAD hash (throws when it cannot be resolved). */
 function resolveHead(repoPath: string): string {
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: repoPath, encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'] as const, windowsHide: true,
-    }).trim();
-  } catch {
+  const head = getHeadHash(repoPath);
+  if (!head) {
     throw new Error('Failed to resolve HEAD. Not a valid git repository?');
   }
+  return head;
 }
 
 /** Validate that lastEvolved is an ancestor of HEAD (detect rebase). */
 function validateAncestry(repoPath: string, lastEvolved: string, headHash: string): void {
-  try {
-    execFileSync('git', ['merge-base', '--is-ancestor', lastEvolved, headHash], {
-      cwd: repoPath, stdio: 'ignore', windowsHide: true,
-    });
-  } catch {
+  if (!isAncestor(repoPath, lastEvolved, headHash)) {
     throw new Error(
       `The last evolved commit (${lastEvolved.slice(0, 7)}) is not an ancestor of ` +
       `HEAD (${headHash.slice(0, 7)}). This usually happens after a rebase ` +
@@ -275,7 +274,7 @@ async function processSingleCommit(
   // Phase 3
   const client = config.llm ? new OpenAiLlmClient(config.llm) : undefined;
   const evolvedSpecsByCommit = await evaluateAndApply(
-    db, repoPath, specStoragePath, affectedEntries, phaseOneResults, client,
+    db, repoPath, affectedEntries, phaseOneResults, client,
   );
 
   return buildBatchResult({
@@ -298,7 +297,6 @@ async function processSingleCommit(
 async function evaluateAndApply(
   db: SqliteDatabase,
   repoPath: string,
-  specStoragePath: string,
   affectedEntries: AffectedSpecEntry[],
   phaseOneResults: Map<string, PersistResult | { skipped: true; reason: string }>,
   client?: OpenAiLlmClient,
@@ -367,7 +365,7 @@ async function evaluateAndApply(
     try {
       if (decision.action === 'UPDATE') {
         const result = applyUpdate(
-          db, specStoragePath, entry.specId, specNode.filePath,
+          db, entry.specId, specNode.filePath,
           specNode.version, decision,
           lastAffectingCommit,
         );
@@ -427,21 +425,10 @@ async function mineStyleFallback(
       'or configure an LLM in .homegraph/commit4spec/configs.json.',
     );
     return {
-      fromCommit: lastEvolved,
-      toCommit: headHash,
-      commitsScanned: newCommits.length,
-      phaseOneMatched: 0,
+      ...emptyBatchResult(lastEvolved, headHash, newCommits.length),
       phaseOneSkipped: newCommits.length,
-      phaseOneFailures: 0,
-      historicalSpecsEvaluated: 0,
-      specsUpdated: 0,
-      specsDeprecated: 0,
-      specsUnchanged: 0,
-      perCommitResults: [],
-      metaUpdated: false,
       skipped: true,
       skipReason: 'Phase 1 produced no matches and no LLM configured',
-      mineFallback: false,
     };
   }
 
@@ -468,17 +455,8 @@ async function mineStyleFallback(
     const hadResults = mineResult.specsGenerated > 0 || mineResult.specsWritten > 0;
 
     return {
-      fromCommit: lastEvolved,
-      toCommit: headHash,
-      commitsScanned: newCommits.length,
-      phaseOneMatched: 0,
+      ...emptyBatchResult(lastEvolved, headHash, newCommits.length),
       phaseOneSkipped: newCommits.length,
-      phaseOneFailures: 0,
-      historicalSpecsEvaluated: 0,
-      specsUpdated: 0,
-      specsDeprecated: 0,
-      specsUnchanged: 0,
-      perCommitResults: [],
       metaUpdated: hadResults,
       skipped: !hadResults,
       skipReason: hadResults ? undefined : 'Mine pipeline produced no specs',
@@ -489,18 +467,8 @@ async function mineStyleFallback(
       error: err instanceof Error ? err.message : String(err),
     });
     return {
-      fromCommit: lastEvolved,
-      toCommit: headHash,
-      commitsScanned: newCommits.length,
-      phaseOneMatched: 0,
+      ...emptyBatchResult(lastEvolved, headHash, newCommits.length),
       phaseOneSkipped: newCommits.length,
-      phaseOneFailures: 0,
-      historicalSpecsEvaluated: 0,
-      specsUpdated: 0,
-      specsDeprecated: 0,
-      specsUnchanged: 0,
-      perCommitResults: [],
-      metaUpdated: false,
       skipped: true,
       skipReason: `Mine pipeline failed: ${err instanceof Error ? err.message : String(err)}`,
       mineFallback: true,
@@ -720,7 +688,7 @@ export async function runEvolvePipeline(
     // ---- Stage 3: LLM evaluation + apply ----
     const client = config.llm ? new OpenAiLlmClient(config.llm) : undefined;
     const evolvedSpecsByCommit = await evaluateAndApply(
-      db, repoPath, meta.specStoragePath,
+      db, repoPath,
       affectedEntries, phaseOneResults, client,
     );
 

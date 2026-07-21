@@ -2192,7 +2192,7 @@ specCommand
 
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { runBuildPipeline } = await import('../spec/build/pipeline');
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
       const { resolveDbPath } = await import('../spec/utils');
 
       const dbPath = resolveDbPath(repoPath, options.dbPath);
@@ -2264,7 +2264,7 @@ specCommand
     try {
       const repoPath = path.resolve(options.path || process.cwd());
 
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
       const { loadSpecConfig } = await import('../spec/config');
       const { runMinePipeline } = await import('../spec/mine/pipeline');
       const { createDatabase } = await import('../db/sqlite-adapter');
@@ -2855,7 +2855,7 @@ evolveCommand
       const repoPath = resolveSpecProjectPath(options.path);
       const commitThreshold = options.commitThreshold ?? 3;
 
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -3018,7 +3018,7 @@ evolveCommand
     try {
       const repoPath = resolveSpecProjectPath(options.path);
 
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -3104,7 +3104,7 @@ evolveCommand
       const { initSpecSchema } = await import('../spec/db/schema');
       const { loadSpecConfig } = await import('../spec/config');
       const { runEvolvePipeline } = await import('../spec/evolve/pipeline');
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);

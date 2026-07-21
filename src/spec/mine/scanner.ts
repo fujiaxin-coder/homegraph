@@ -3,19 +3,25 @@
  *
  * For each commit in a range this module extracts changed files, AST-parses
  * both the old and new versions, and computes symbol-level (structural) diffs.
- * It reuses the existing `extractFromSource` and git utilities from
- * `spec/build/git-scanner.ts`.
+ * It reuses the existing `extractFromSource` and the git utilities from
+ * `spec/git`.
  *
  * @module spec/mine/scanner
  */
 
 import { execFileSync } from 'child_process';
-import { CommitInfo, getCommitRange } from '../build/git-scanner';
+import {
+  CommitInfo,
+  getCommitRange,
+  getCommitsUpTo,
+  getParentHashes,
+  gitExecOptions,
+} from '../git';
+import { listChangedFiles } from '../build/diff-parser';
 import { extractFromSource } from '../../extraction/tree-sitter';
 import { detectLanguage, isLanguageSupported } from '../../extraction/grammars';
 import { NodeKind, Language, Node, ExtractionResult } from '../../types';
 import { logDebug, logWarn } from '../../errors';
-import { gitExecOptions } from '../git-utils';
 import { isTestFile } from '../../search/query-utils';
 import type { MineProgressCallback } from './progress';
 
@@ -61,23 +67,6 @@ export interface CommitChange {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Get the parent hash(es) for a commit.
- * Returns an empty array for root commits or on failure.
- */
-function getParentHashes(repoPath: string, commitHash: string): string[] {
-  try {
-    const stdout = execFileSync(
-      'git',
-      ['log', '--pretty=%P', '-n', '1', commitHash],
-      gitExecOptions(repoPath),
-    );
-    return stdout.trim().split(/\s+/).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
 
 /**
  * Retrieve file content at a specific commit using `git show <hash>:<path>`.
@@ -267,41 +256,6 @@ function extractSignificantSymbols(result: ExtractionResult): ChangedSymbol[] {
   return symbols;
 }
 
-/**
- * Parse changed file paths from a unified diff string.
- *
- * Matches `--- a/path` and `+++ b/path` headers to identify files,
- * skipping `/dev/null`. Returns a list of unique changed file paths.
- *
- * Both headers are needed:
- * - `+++ b/` captures added and modified files.  For deletions the line is
- *   `+++ /dev/null`, which is skipped.
- * - `--- a/` captures deleted files.  For additions the line is
- *   `--- /dev/null`, which is skipped.
- */
-function parseChangedFiles(diff: string): string[] {
-  const files = new Set<string>();
-  const lines = diff.split('\n');
-  for (const line of lines) {
-    let match = /^\+\+\+ b\/(.+)$/.exec(line);
-    if (match) {
-      const fp = match[1]!;
-      if (fp !== '/dev/null') {
-        files.add(fp);
-      }
-      continue;
-    }
-    match = /^--- a\/(.+)$/.exec(line);
-    if (match) {
-      const fp = match[1]!;
-      if (fp !== '/dev/null') {
-        files.add(fp);
-      }
-    }
-  }
-  return Array.from(files);
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -376,30 +330,8 @@ export function scanCommits(
   if (fromHash) {
     commits = getCommitRange(repoPath, fromHash, toHash);
   } else {
-    // No anchor — get all commits then filter to toHash reachable.
-    // Use git log toHash directly.
-    try {
-      const stdout = execFileSync(
-        'git',
-        ['log', '--no-merges', '--reverse', `--format=%H%x00%aI%x00%an%x00%s%x00`, toHash],
-        gitExecOptions(repoPath),
-      );
-      const parts = stdout.replace(/\0+$/, '').trim().split('\0');
-      commits = [];
-      for (let i = 0; i + 3 < parts.length; i += 4) {
-        const hash = parts[i]!.trim();
-        if (!hash) continue;
-        const rawTs = new Date(parts[i + 1]!.trim()).getTime();
-        commits.push({
-          hash,
-          message: parts[i + 3]!.trim(),
-          author: parts[i + 2]!.trim(),
-          timestamp: isNaN(rawTs) ? 0 : rawTs,
-        });
-      }
-    } catch {
-      commits = [];
-    }
+    // No anchor — get all commits reachable from toHash.
+    commits = getCommitsUpTo(repoPath, toHash);
   }
 
   if (commits.length === 0) return [];
@@ -468,7 +400,7 @@ export function scanCommits(
 
       if (!diff) continue;
 
-      const changedFiles = parseChangedFiles(diff)
+      const changedFiles = listChangedFiles(diff)
         .filter(isDiffableFile)
         .filter((fp) => !isTestFile(fp))
         .filter((fp) => !seenFiles.has(fp));

@@ -79,6 +79,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS specs_fts USING fts5(
     subtitles
 );
 
+-- NOTE: `runSpecMigrations` in schema.ts mirrors some of this DDL to patch
+-- pre-existing databases. Keep the two in sync when adding migrations.
+
 CREATE VIRTUAL TABLE IF NOT EXISTS code_fragments_fts USING fts5(
     id,
     file_path,

@@ -12,21 +12,20 @@ import * as os from 'os';
 import { createDatabase, SqliteDatabase } from '../src/db/sqlite-adapter';
 import { silentLogger, setLogger } from '../src/errors';
 import { DEFAULT_CONFIG, SpecConfig } from '../src/spec/config';
-import { writeMeta } from '../src/spec/utils';
+import { writeMeta, discoverSpecs } from '../src/spec/utils';
 
 // ---------------------------------------------------------------------------
 // Module under test
 // ---------------------------------------------------------------------------
 import { analyzeCommitDiff, DiffFragment } from '../src/spec/build/diff-parser';
 import {
-  scan,
   getCommitInfo,
   getAllCommits,
   getCommitDiff,
   isGitRepo,
-  SpecCommitPair,
   CommitInfo,
-} from '../src/spec/build/git-scanner';
+} from '../src/spec/git';
+import { scan, SpecCommitPair } from '../src/spec/build/scan';
 import {
   extractSpecMetadata,
   extractMarkdownHeadings,
@@ -720,6 +719,7 @@ describe('scope-resolver — normalizeScope', () => {
 
 describe('scope-resolver — resolveScopeToSpec', () => {
   let specStorage: string;
+  let specIds: Set<string>;
 
   beforeEach(() => {
     specStorage = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-resolve-'));
@@ -729,25 +729,33 @@ describe('scope-resolver — resolveScopeToSpec', () => {
     if (fs.existsSync(specStorage)) fs.rmSync(specStorage, { recursive: true, force: true });
   });
 
+  const refreshSpecIds = (): void => {
+    specIds = new Set(discoverSpecs(specStorage).map((e) => e.specId));
+  };
+
   it('resolves existing spec on disk', () => {
     createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
-    const result = resolveScopeToSpec('feat(spec3): add feature', specStorage, DEFAULT_CONFIG);
+    refreshSpecIds();
+    const result = resolveScopeToSpec('feat(spec3): add feature', specIds, DEFAULT_CONFIG);
     expect(result).toBe('spec03');
   });
 
   it('returns null when spec does not exist on disk', () => {
-    const result = resolveScopeToSpec('feat(spec99): no spec', specStorage, DEFAULT_CONFIG);
+    refreshSpecIds();
+    const result = resolveScopeToSpec('feat(spec99): no spec', specIds, DEFAULT_CONFIG);
     expect(result).toBeNull();
   });
 
   it('returns null when no scope in message', () => {
-    const result = resolveScopeToSpec('update: no scope here', specStorage, DEFAULT_CONFIG);
+    refreshSpecIds();
+    const result = resolveScopeToSpec('update: no scope here', specIds, DEFAULT_CONFIG);
     expect(result).toBeNull();
   });
 
   it('resolves with review/ prefix', () => {
     createSpecOnDisk(specStorage, 'spec07', '# Spec 07\n');
-    const result = resolveScopeToSpec('feat(review/spec7): review', specStorage, DEFAULT_CONFIG);
+    refreshSpecIds();
+    const result = resolveScopeToSpec('feat(review/spec7): review', specIds, DEFAULT_CONFIG);
     expect(result).toBe('spec07');
   });
 });

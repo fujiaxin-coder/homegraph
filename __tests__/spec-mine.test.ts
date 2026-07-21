@@ -51,7 +51,7 @@ import { initSpecSchema } from '../src/spec/db/schema';
 import { findSpecById } from '../src/spec/db/spec-node';
 
 import { scanCommits, CommitChange, FileChange, ChangedSymbol } from '../src/spec/mine/scanner';
-import { clusterCommits, CommitCluster, ClusterResult } from '../src/spec/mine/clusterer';
+import { clusterCommits, CommitCluster, ClusterResult } from '../src/spec/mine/clustering';
 import { generateSpecs, GeneratedSpec, GenerationResult } from '../src/spec/mine/generator';
 import { persistToGraph, PersistResult } from '../src/spec/mine/persist';
 import { runMinePipeline, MinePipelineResult } from '../src/spec/mine/pipeline';

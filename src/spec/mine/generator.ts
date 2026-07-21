@@ -11,9 +11,11 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CommitCluster } from './clusterer';
+import { CommitCluster } from './clustering';
 import { LLMConfig } from '../config';
 import { OpenAiLlmClient } from '../llm/client';
+import { DEFAULT_SPEC_TEMPLATE, SPEC_GENERATION_SYSTEM_PROMPT } from '../llm/prompts';
+import { extractTitleFromMarkdown } from '../build/spec-extractor';
 import { writeFileContent } from '../utils';
 import { logDebug, logWarn } from '../../errors';
 import type { MineProgressCallback } from './progress';
@@ -37,53 +39,6 @@ export interface GenerationResult {
   skipped: number;
   errors: number;
 }
-
-// ---------------------------------------------------------------------------
-// Default Template
-// ---------------------------------------------------------------------------
-
-const DEFAULT_TEMPLATE = `# Spec: {{title}}
-
-## Summary
-{{summary}}
-
-## Motivation
-{{motivation}}
-
-## Specification
-
-### Functional Requirements
-{{functional_requirements}}
-
-### Acceptance Criteria (EARS format)
-{{acceptance_criteria}}
-
-## Implementation Notes
-
-### Related Commits
-{{commit_list}}
-
-### Affected Files
-{{file_list}}
-
-### Key Symbols
-{{symbol_list}}
-`;
-
-// ---------------------------------------------------------------------------
-// Default System Prompt
-// ---------------------------------------------------------------------------
-
-const SYSTEM_PROMPT = `You are a technical documentation writer specializing in software design specifications. Given a cluster of related Git commits, generate a design specification in markdown format.
-
-Guidelines:
-- Focus on WHAT was built, not HOW it was implemented
-- Use EARS (Easy Approach to Requirements Syntax) for acceptance criteria
-- Be specific — reference real symbols, files, and commit messages
-- Keep the spec concise but complete
-- Output ONLY the spec document, no preamble or commentary
-
-Output format — fill in the template exactly. Replace {{placeholders}} with real content. Do NOT include the placeholder braces in your output.`;
 
 // ---------------------------------------------------------------------------
 // Prompt Building
@@ -193,14 +148,6 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Extract title from LLM-generated markdown (first `# ` heading).
- */
-function extractTitle(content: string): string {
-  const match = /^#\s+(.+)$/m.exec(content);
-  return match ? match[1]!.trim() : 'Untitled Spec';
-}
-
-/**
  * Generate spec documents for a list of commit clusters.
  *
  * @param clusters - Clusters to generate specs for.
@@ -220,7 +167,7 @@ export async function generateSpecs(
   const client = new OpenAiLlmClient(llmConfig);
 
   // Use custom template if provided, otherwise use default
-  const effectiveTemplate = templateContent || DEFAULT_TEMPLATE;
+  const effectiveTemplate = templateContent || DEFAULT_SPEC_TEMPLATE;
 
   // Ensure output directory exists
   fs.mkdirSync(outputDir, { recursive: true });
@@ -249,7 +196,7 @@ export async function generateSpecs(
 
     let raw: string;
     try {
-      raw = await client.chat(SYSTEM_PROMPT, userPrompt);
+      raw = await client.chat(SPEC_GENERATION_SYSTEM_PROMPT, userPrompt);
     } catch (err) {
       logWarn(`LLM call failed for ${specId}`, {
         error: err instanceof Error ? err.message : String(err),
@@ -264,7 +211,7 @@ export async function generateSpecs(
       continue;
     }
 
-    const title = extractTitle(raw);
+    const title = extractTitleFromMarkdown(raw, 'Untitled Spec');
     const commitHashes = cluster.commits.map((c) => c.commitHash);
 
     const spec: GeneratedSpec = {
