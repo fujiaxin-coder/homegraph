@@ -12,6 +12,10 @@ vi.mock('openai', () => ({
   default: class MockOpenAI {},
 }));
 
+// Force the LLM factory down the OpenAiLlmClient path — the dev machine may
+// have Claude Code / Codex installed, and tests must never spawn real agents.
+process.env.HOMEGRAPH_SPEC_AGENT = 'none';
+
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';

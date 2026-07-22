@@ -29,7 +29,8 @@ import {
   isAncestor,
   CommitInfo,
 } from '../git';
-import { OpenAiLlmClient } from '../llm/client';
+import { createSpecLlmClient } from '../llm/factory';
+import { LlmClient } from '../llm/client';
 import { analyzeIncrementalCommits, CommitSpecAnalysis } from './commit-spec-analyzer';
 import { persistCommitSpecGraph, PersistResult } from './commit-spec-persister';
 import { locateAffectedSpecsWithCommits, AffectedSpecEntry } from './impact-locator';
@@ -272,7 +273,7 @@ async function processSingleCommit(
   }
 
   // Phase 3
-  const client = config.llm ? new OpenAiLlmClient(config.llm) : undefined;
+  const client = createSpecLlmClient(config.llm);
   const evolvedSpecsByCommit = await evaluateAndApply(
     db, repoPath, affectedEntries, phaseOneResults, client,
   );
@@ -299,7 +300,7 @@ async function evaluateAndApply(
   repoPath: string,
   affectedEntries: AffectedSpecEntry[],
   phaseOneResults: Map<string, PersistResult | { skipped: true; reason: string }>,
-  client?: OpenAiLlmClient,
+  client?: LlmClient,
 ): Promise<Map<string, EvolvedSpec[]>> {
   const evolvedSpecsByCommit = new Map<string, EvolvedSpec[]>();
 
@@ -417,9 +418,12 @@ async function mineStyleFallback(
   headHash: string,
   llmConfig: LLMConfig | undefined,
 ): Promise<BatchEvolveResult> {
-  if (!llmConfig) {
+  const client = createSpecLlmClient(llmConfig ?? null);
+
+  if (!client) {
     logWarn(
-      'Phase 1 produced no spec matches and no LLM is configured. ' +
+      'Phase 1 produced no spec matches and no LLM is available ' +
+      '(no coding agent detected, no LLM configured). ' +
       'No evolution can be performed. ' +
       'Consider running "homegraph spec build/mine" first, ' +
       'or configure an LLM in .homegraph/commit4spec/configs.json.',
@@ -428,7 +432,7 @@ async function mineStyleFallback(
       ...emptyBatchResult(lastEvolved, headHash, newCommits.length),
       phaseOneSkipped: newCommits.length,
       skipped: true,
-      skipReason: 'Phase 1 produced no matches and no LLM configured',
+      skipReason: 'Phase 1 produced no matches and no LLM available (no coding agent detected, no LLM configured)',
     };
   }
 
@@ -447,7 +451,7 @@ async function mineStyleFallback(
       skipLlm: false,
     }, true);
 
-    const mineResult = await runMinePipeline(repoPath, mineConfig, llmConfig, db);
+    const mineResult = await runMinePipeline(repoPath, mineConfig, llmConfig ?? null, db);
 
     // runMinePipeline already writes to meta.json and the same DB
     logDebug('mineStyleFallback: mine pipeline completed', { ...mineResult });
@@ -686,7 +690,7 @@ export async function runEvolvePipeline(
     });
 
     // ---- Stage 3: LLM evaluation + apply ----
-    const client = config.llm ? new OpenAiLlmClient(config.llm) : undefined;
+    const client = createSpecLlmClient(config.llm);
     const evolvedSpecsByCommit = await evaluateAndApply(
       db, repoPath,
       affectedEntries, phaseOneResults, client,

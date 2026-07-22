@@ -12,8 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CommitCluster } from './clustering';
-import { LLMConfig } from '../config';
-import { OpenAiLlmClient } from '../llm/client';
+import { LlmClient } from '../llm/client';
 import { DEFAULT_SPEC_TEMPLATE, SPEC_GENERATION_SYSTEM_PROMPT } from '../llm/prompts';
 import { extractTitleFromMarkdown } from '../build/spec-extractor';
 import { writeFileContent } from '../utils';
@@ -144,6 +143,47 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Markdown Extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the markdown spec document from a chat() response.
+ *
+ * Headless coding agents (and occasionally chat models) wrap the document
+ * in prose ("Here is the spec:") or a ```markdown fence — writing that
+ * verbatim would pollute the spec file. Since the spec template always
+ * starts with a heading, the extraction is:
+ * 1. If a fenced block contains a markdown heading, use its content.
+ * 2. Else strip any prose before the first heading line.
+ * 3. Otherwise return the response trimmed.
+ *
+ * Provider-agnostic: applies identically to coding-agent and OpenAI paths.
+ */
+export function extractMarkdown(raw: string): string {
+  const text = raw.trim();
+  if (!text) return '';
+
+  // Fast path: already a clean markdown document. Also guards against
+  // misfiring on code fences INSIDE a document (e.g. a bash comment like
+  // "# do something" would otherwise look like a wrapped document).
+  if (/^#\s/.test(text)) return text;
+
+  // 1. Whole-document fence wrapper containing a heading
+  const fenceMatch = /```(?:markdown|md)?\s*\n([\s\S]*?)```/.exec(text);
+  if (fenceMatch && /^#\s/m.test(fenceMatch[1]!)) {
+    return fenceMatch[1]!.trim();
+  }
+
+  // 2. Prose preamble before the first heading
+  const headingMatch = /^#\s.*$/m.exec(text);
+  if (headingMatch) {
+    return text.slice(headingMatch.index).trim();
+  }
+
+  return text;
+}
+
+// ---------------------------------------------------------------------------
 // Spec Generation
 // ---------------------------------------------------------------------------
 
@@ -151,7 +191,8 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
  * Generate spec documents for a list of commit clusters.
  *
  * @param clusters - Clusters to generate specs for.
- * @param llmConfig - LLM configuration (apiKey, model, etc.).
+ * @param client - Resolved LLM client (coding agent, configured LLM, or
+ *   a fallback composite — resolution happens in `llm/factory`).
  * @param outputDir - Directory to write generated spec files.
  * @param templateContent - Optional custom template string.
  * @param onProgress - Optional progress callback (called per cluster).
@@ -159,13 +200,11 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
  */
 export async function generateSpecs(
   clusters: CommitCluster[],
-  llmConfig: LLMConfig,
+  client: LlmClient,
   outputDir: string,
   templateContent?: string,
   onProgress?: MineProgressCallback,
 ): Promise<GenerationResult> {
-  const client = new OpenAiLlmClient(llmConfig);
-
   // Use custom template if provided, otherwise use default
   const effectiveTemplate = templateContent || DEFAULT_SPEC_TEMPLATE;
 
@@ -211,13 +250,21 @@ export async function generateSpecs(
       continue;
     }
 
-    const title = extractTitleFromMarkdown(raw, 'Untitled Spec');
+    // Unwrap fences / strip prose preamble before persisting
+    const content = extractMarkdown(raw);
+    if (!content) {
+      logWarn(`LLM response had no extractable markdown for ${specId}`);
+      skipped++;
+      continue;
+    }
+
+    const title = extractTitleFromMarkdown(content, 'Untitled Spec');
     const commitHashes = cluster.commits.map((c) => c.commitHash);
 
     const spec: GeneratedSpec = {
       specId,
       title,
-      content: raw,
+      content,
       clusterId: cluster.id,
       commitHashes,
     };
@@ -226,7 +273,7 @@ export async function generateSpecs(
     const fileName = `${specId}.md`;
     const outputPath = path.join(outputDir, fileName);
     try {
-      writeFileContent(outputPath, raw);
+      writeFileContent(outputPath, content);
       logDebug('Wrote spec file', { path: outputPath });
       specs.push(spec);
     } catch (err) {

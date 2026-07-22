@@ -2308,10 +2308,13 @@ specCommand
       // Load spec config for LLM setup
       const specConfig = loadSpecConfig(repoPath);
       const llmConfig = specConfig.llm;
+      const { resolveAgent } = await import('../spec/llm/agents');
+      const codingAgent = options.skipLlm ? null : resolveAgent();
 
-      if (!options.skipLlm && !llmConfig) {
+      if (!options.skipLlm && !llmConfig && !codingAgent) {
         info(
-          'No LLM configuration found. Set up "llm" in .homegraph/commit4spec/configs.json.\n' +
+          'No coding agent (Claude Code / Codex) detected and no LLM configuration found.\n' +
+          'Set up "llm" in .homegraph/commit4spec/configs.json.\n' +
           '\n' +
           'All available options (fields marked * are required):\n' +
           '{\n' +
@@ -2328,6 +2331,10 @@ specCommand
           '\n' +
           'Continuing with --skip-llm (clustering only).',
         );
+      } else if (!options.skipLlm && !llmConfig && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for spec generation — no LLM configuration needed.`);
+      } else if (!options.skipLlm && llmConfig && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for spec generation — configured LLM is kept as fallback.`);
       }
 
       const mineConfig = createMineConfig(
@@ -2339,7 +2346,7 @@ specCommand
           template: options.template,
           skipLlm: !!options.skipLlm,
         },
-        !!llmConfig,
+        !!llmConfig || codingAgent !== null,
       );
 
       if (options.verbose) {
@@ -3118,8 +3125,10 @@ evolveCommand
       initSpecSchema(db);
 
       const config = loadSpecConfig(repoPath);
-      if (!config.llm) {
-        warn('LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
+      const { resolveAgent } = await import('../spec/llm/agents');
+      const codingAgent = resolveAgent();
+      if (!config.llm && !codingAgent) {
+        warn('No coding agent (Claude Code / Codex) detected and LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
         warn('Phase 1 (commit-spec graph construction) will still run.');
         warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
           '{\n' +
@@ -3133,6 +3142,10 @@ evolveCommand
           '    "maxTokens":    20000              //   max output tokens (default: 20000)\n' +
           '  }\n' +
           '}');
+      } else if (!config.llm && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for phase 3 spec evolution — no LLM configuration needed.`);
+      } else if (config.llm && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for phase 3 spec evolution — configured LLM is kept as fallback.`);
       }
 
       const result = await runEvolvePipeline(repoPath, db, config);

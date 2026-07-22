@@ -23,6 +23,68 @@ export interface LlmClient {
 }
 
 // =============================================================================
+// Shared JSON extraction
+// =============================================================================
+
+/**
+ * Parse an LLM text response as a JSON object.
+ *
+ * Parsing strategy (tried in order):
+ * 1. Direct `JSON.parse(content)`.
+ * 2. Extract from `` ```json ... ``` `` fenced block.
+ * 3. Extract from `` ``` ... ``` `` fenced block.
+ * 4. Fallback: log a debug warning and return `{}`.
+ *
+ * Shared by OpenAiLlmClient and CodingAgentLlmClient so the chatJson
+ * contract is identical regardless of provider.
+ */
+export function parseJsonResponse(raw: string): Record<string, unknown> {
+  if (!raw) return {};
+
+  // 1. Direct parse
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through to fence extraction
+  }
+
+  // 2. ```json ... ``` fence
+  const jsonFenceMatch = /```json\s*([\s\S]*?)```/.exec(raw);
+  if (jsonFenceMatch) {
+    try {
+      const parsed = JSON.parse(jsonFenceMatch[1]!.trim());
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Fall through
+    }
+  }
+
+  // 3. ``` ... ``` fence
+  const fenceMatch = /```\s*([\s\S]*?)```/.exec(raw);
+  if (fenceMatch) {
+    try {
+      const parsed = JSON.parse(fenceMatch[1]!.trim());
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Fall through
+    }
+  }
+
+  // 4. Fallback
+  logDebug('parseJsonResponse: could not parse response as JSON', {
+    raw: raw.length > 200 ? raw.slice(0, 200) + '…' : raw,
+  });
+  return {};
+}
+
+// =============================================================================
 // OpenAiLlmClient
 // =============================================================================
 
@@ -135,64 +197,14 @@ export class OpenAiLlmClient implements LlmClient {
   // ===========================================================================
 
   /**
-   * Same as `chat()`, but parses the response as JSON.
-   *
-   * Parsing strategy (tried in order):
-   * 1. Direct `JSON.parse(content)`.
-   * 2. Extract from `` ```json ... ``` `` fenced block.
-   * 3. Extract from `` ``` ... ``` `` fenced block.
-   * 4. Fallback: log a debug warning and return `{}`.
-   *
-   * Empty or null content from `chat()` also returns `{}`.
+   * Same as `chat()`, but parses the response as JSON via
+   * {@link parseJsonResponse}. Empty content returns `{}`.
    */
   async chatJson(
     systemPrompt: string,
     userPrompt: string,
   ): Promise<Record<string, unknown>> {
     const raw = await this.chat(systemPrompt, userPrompt);
-
-    if (!raw) return {};
-
-    // 1. Direct parse
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Fall through to fence extraction
-    }
-
-    // 2. ```json ... ``` fence
-    const jsonFenceMatch = /```json\s*([\s\S]*?)```/.exec(raw);
-    if (jsonFenceMatch) {
-      try {
-        const parsed = JSON.parse(jsonFenceMatch[1]!.trim());
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          return parsed as Record<string, unknown>;
-        }
-      } catch {
-        // Fall through
-      }
-    }
-
-    // 3. ``` ... ``` fence
-    const fenceMatch = /```\s*([\s\S]*?)```/.exec(raw);
-    if (fenceMatch) {
-      try {
-        const parsed = JSON.parse(fenceMatch[1]!.trim());
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          return parsed as Record<string, unknown>;
-        }
-      } catch {
-        // Fall through
-      }
-    }
-
-    // 4. Fallback
-    logDebug('chatJson: could not parse response as JSON', {
-      raw: raw.length > 200 ? raw.slice(0, 200) + '…' : raw,
-    });
-    return {};
+    return parseJsonResponse(raw);
   }
 }
