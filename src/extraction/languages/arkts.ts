@@ -47,12 +47,16 @@ import {
 import type { QueryBuilder } from '../../db/queries';
 import { DatabaseConnection } from '../../db';
 import { QueryBuilder as QueryBuilderClass } from '../../db/queries';
+import { isHomeGraphDataDir } from '../../directory';
+import { loadExcludePatterns } from '../../project-config';
 import { bindExtractionContext, getExtractionProjectRoot, getExtractionQueries, reportArkTSBatchProgress, resetExtractionContext, setArktsBatchRunning } from '../context';
 import type { IndexProgress, IndexResult } from '../index';
+import { buildDefaultIgnore } from '../default-ignore';
 import { EXTRACTION_VERSION } from '../extraction-version';
 import { HomeGraphPackageVersion } from '../../mcp/version';
 import { generateNodeId } from '../tree-sitter-helpers';
 import { buildRelaunchArgv } from '../wasm-runtime-flags';
+import ignore, { type Ignore } from 'ignore';
 
 /** Primitive / void return types — not stored in nodes.return_type (inference-only column). */
 const ARKTS_NON_CLASS_RETURN = new Set([
@@ -234,8 +238,25 @@ function isCoLocatedArkTsFileName(name: string): boolean {
   return isArkAnalyzerSourcePath(name) && !isEtsFileName(name);
 }
 
+/**
+ * Ignore matchers aligned with `scanDirectoryWalk`'s base set (built-in defaults
+ * + root `.gitignore` + `homegraph.json` `exclude`).
+ */
+function arktsScanIgnoreMatchers(rootDir: string): Ignore[] {
+  const matchers: Ignore[] = [buildDefaultIgnore(rootDir)];
+  const exclude = loadExcludePatterns(rootDir);
+  if (exclude.length > 0) matchers.push(ignore().add(exclude));
+  return matchers;
+}
+
+function isArktsScanIgnored(relPath: string, isDir: boolean, matchers: Ignore[]): boolean {
+  const probe = isDir ? `${relPath.replace(/\/$/, '')}/` : relPath;
+  return matchers.some((ig) => ig.ignores(probe));
+}
+
 /** True when the tree looks like a HarmonyOS / ArkTS project (not a generic TS repo). */
 function hasHarmonyProjectMarkers(rootDir: string): boolean {
+  const matchers = arktsScanIgnoreMatchers(rootDir);
   const found: string[] = [];
   function walk(dir: string): void {
     if (found.length > 0) return;
@@ -247,12 +268,13 @@ function hasHarmonyProjectMarkers(rootDir: string): boolean {
     }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
+      const rel = path.relative(rootDir, full).replace(/\\/g, '/');
       if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') {
-          continue;
-        }
+        if (entry.name === '.git' || isHomeGraphDataDir(entry.name)) continue;
+        if (isArktsScanIgnored(rel, true, matchers)) continue;
         walk(full);
       } else if (entry.isFile() && (isEtsFileName(entry.name) || entry.name === 'module.json5')) {
+        if (isArktsScanIgnored(rel, false, matchers)) continue;
         found.push(full);
         return;
       }
@@ -306,9 +328,17 @@ function emptyResult(filePath: string, message: string, severity: ExtractionErro
   };
 }
 
-function scanEtsFiles(rootDir: string): string[] {
+/**
+ * Enumerate ArkAnalyzer sources under `rootDir`, using the same ignore rules as
+ * `scanDirectory` (defaults like `build/`/`dist/`, root `.gitignore`, exclude).
+ * Previously this walk only skipped `node_modules`/`.git`/`.homegraph`, so
+ * HarmonyOS build-output `.ets` files got written into the DB and non-git
+ * `homegraph status` reported them as Pending Removed.
+ */
+export function scanEtsFiles(rootDir: string): string[] {
   const etsFiles: string[] = [];
   const coLocated: string[] = [];
+  const matchers = arktsScanIgnoreMatchers(rootDir);
   function walk(dir: string): void {
     let entries: fs.Dirent[];
     try {
@@ -318,11 +348,13 @@ function scanEtsFiles(rootDir: string): string[] {
     }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
+      const rel = path.relative(rootDir, full).replace(/\\/g, '/');
       if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.homegraph') continue;
+        if (entry.name === '.git' || isHomeGraphDataDir(entry.name)) continue;
+        if (isArktsScanIgnored(rel, true, matchers)) continue;
         walk(full);
       } else if (entry.isFile()) {
-        const rel = path.relative(rootDir, full).replace(/\\/g, '/');
+        if (isArktsScanIgnored(rel, false, matchers)) continue;
         if (isEtsFileName(entry.name)) {
           etsFiles.push(rel);
         } else if (isCoLocatedArkTsFileName(entry.name)) {
