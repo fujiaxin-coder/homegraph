@@ -26,7 +26,7 @@ import { extractMarkdownHeadings, extractTitleFromMarkdown } from '../build/spec
 import { GeneratedSpec } from './generator';
 import { CommitCluster } from './clustering';
 import { logDebug, logWarn } from '../../errors';
-import type { MineProgressCallback } from './progress';
+import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,7 +63,7 @@ export function persistToGraph(
   specs: GeneratedSpec[],
   clusters: CommitCluster[],
   outputDir: string,
-  onProgress?: MineProgressCallback,
+  onProgress?: ProgressCallback,
 ): PersistResult {
   // Ensure schema exists (idempotent)
   initSpecSchema(db);

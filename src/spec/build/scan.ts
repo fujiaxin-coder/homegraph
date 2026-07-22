@@ -12,6 +12,7 @@
 import { SpecConfig } from '../config';
 import { CommitInfo, getAllCommits } from '../git';
 import { discoverSpecs } from '../utils';
+import type { ProgressCallback } from '../ui';
 import { resolveScopeToSpec } from './scope-resolver';
 import { extractSpecMetadata, SpecMetadata } from './spec-extractor';
 import { logDebug } from '../../errors';
@@ -81,6 +82,7 @@ export function scan(
   repoPath: string,
   specStoragePath: string,
   config: SpecConfig,
+  onProgress?: ProgressCallback,
 ): SpecCommitPair[] {
   const pairs = new Map<string, SpecCommitPair>();
 
@@ -88,8 +90,18 @@ export function scan(
   const specIds = new Set(discoverSpecs(specStoragePath).map((e) => e.specId));
 
   const commits = getAllCommits(repoPath);
+  const total = commits.length;
+  let current = 0;
 
   for (const commit of commits) {
+    current++;
+    onProgress?.({
+      phase: 'scanning',
+      current,
+      total,
+      message: `${commit.hash.slice(0, 7)} ${commit.message.split('\n')[0]}`,
+    });
+
     const { specId, metadata } = matchCommitToSpec(
       commit.message, specIds, specStoragePath, config,
     );

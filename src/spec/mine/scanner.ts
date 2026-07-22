@@ -23,7 +23,7 @@ import { detectLanguage, isLanguageSupported } from '../../extraction/grammars';
 import { NodeKind, Language, Node, ExtractionResult } from '../../types';
 import { logDebug, logWarn } from '../../errors';
 import { isTestFile } from '../../search/query-utils';
-import type { MineProgressCallback } from './progress';
+import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -323,7 +323,7 @@ export function scanCommits(
   fromHash: string,
   toHash: string,
   limit?: number,
-  onProgress?: MineProgressCallback,
+  onProgress?: ProgressCallback,
 ): CommitChange[] {
   let commits: CommitInfo[];
 

@@ -11,8 +11,8 @@
  */
 
 import { SqliteDatabase } from '../../db/sqlite-adapter';
-import { SpecConfig, loadSpecConfig } from '../config';
-import { writeMeta, discoverSpecs } from '../utils';
+import { loadSpecConfig } from '../config';
+import { writeMeta, discoverSpecs, readMeta } from '../utils';
 import { initSpecSchema } from '../db/schema';
 import { insertCommitNode } from '../db/commit-node';
 import { insertSpecCommitRelation } from '../db/relations';
@@ -21,6 +21,7 @@ import { scan } from './scan';
 import { getCommitDiff, getHeadHash } from '../git';
 import { analyzeCommitDiff } from './diff-parser';
 import { logDebug, logWarn } from '../../errors';
+import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,6 +34,7 @@ export interface BuildResult {
   relationsCreated: number;
   totalEntries: number;
   skippedEntries: Array<{ specId: string; reason: string }>;
+  upToDate?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,10 +72,28 @@ export function runBuildPipeline(
   repoPath: string,
   specStoragePath: string,
   db: SqliteDatabase,
-  config?: SpecConfig,
+  onProgress?: ProgressCallback,
 ): BuildResult {
-  // Resolve config once — guarantee a valid SpecConfig for downstream consumers.
-  const resolvedConfig = config ?? loadSpecConfig(repoPath);
+  // Pre-check: if meta.json exists and HEAD hasn't changed since the last
+  // build, the knowledge graph is already current — skip the full rebuild.
+  const existingMeta = readMeta(repoPath);
+  if (existingMeta?.currentCommitID) {
+    const headHash = getHeadHash(repoPath);
+    if (headHash && headHash === existingMeta.currentCommitID) {
+      logDebug('Skipping spec build: knowledge graph is up to date', {
+        currentCommitID: existingMeta.currentCommitID,
+      });
+      return {
+        specsFound: 0,
+        commitsFound: 0,
+        fragmentsFound: 0,
+        relationsCreated: 0,
+        totalEntries: discoverSpecs(specStoragePath).length,
+        skippedEntries: [],
+        upToDate: true,
+      };
+    }
+  }
 
   // ---- Step 1: init schema ----
   initSpecSchema(db);
@@ -83,7 +103,7 @@ export function runBuildPipeline(
   const totalEntries = allEntries.length;
 
   // ---- Step 3: scan for pairs ----
-  const pairs = scan(repoPath, specStoragePath, resolvedConfig);
+  const pairs = scan(repoPath, specStoragePath, loadSpecConfig(repoPath), onProgress);
 
   // ---- Step 4: sort by commit timestamp ascending (oldest first) ----
   // INSERT OR REPLACE is used for SpecNode — when the same spec appears
@@ -102,7 +122,18 @@ export function runBuildPipeline(
   let fragmentsFound = 0;
   let relationsCreated = 0;
 
+  const pairsTotal = pairs.length;
+  let pairsCurrent = 0;
+
   for (const pair of pairs) {
+    pairsCurrent++;
+    onProgress?.({
+      phase: 'persisting',
+      current: pairsCurrent,
+      total: pairsTotal,
+      message: `${pair.specId} @ ${pair.commitHash.slice(0, 7)}`,
+    });
+
     // Skip if no commit metadata (no data to insert).
     const cm = pair.commitMetadata;
     if (!cm) {
@@ -168,6 +199,8 @@ export function runBuildPipeline(
   // ---- Step 7: write meta ----
   const headHash = getHeadHash(repoPath) ?? undefined;
   writeMeta(repoPath, specStoragePath, headHash);
+
+  onProgress?.({ phase: 'done', current: 0, total: 0 });
 
   // ---- Step 8: return result ----
   return {

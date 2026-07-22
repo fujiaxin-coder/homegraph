@@ -22,7 +22,7 @@ import { generateSpecs } from './generator';
 import { logDebug, logWarn } from '../../errors';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { persistToGraph } from './persist';
-import type { MineProgressCallback } from './progress';
+import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,7 +62,7 @@ export async function runMinePipeline(
   config: MineConfig,
   llmConfig: LLMConfig | null,
   db: SqliteDatabase | null = null,
-  onProgress?: MineProgressCallback,
+  onProgress?: ProgressCallback,
 ): Promise<MinePipelineResult> {
   const errors: string[] = [];
 

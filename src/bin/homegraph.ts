@@ -2192,6 +2192,7 @@ specCommand
       const { runBuildPipeline } = await import('../spec/build/pipeline');
       const { isGitRepo } = await import('../spec/git');
       const { resolveDbPath } = await import('../spec/utils');
+      const { createBuildProgressHandler } = await import('../spec/ui');
 
       const dbPath = resolveDbPath(repoPath);
 
@@ -2206,8 +2207,28 @@ specCommand
         info(`Database: ${dbPath}`);
       }
 
+      // Progress reporting (mirrors `spec mine`):
+      // - JSON mode: no progress output (only final JSON).
+      // - Verbose mode: plain-text lines with timestamps.
+      // - TTY (default): ANSI progress bar with phase + item details.
+      // - Pipe / non-TTY: fall back to verbose (5 % stepping).
+      const onProgress = options.json
+        ? undefined
+        : createBuildProgressHandler(
+            options.verbose ? 'verbose' : process.stdout.isTTY ? 'bar' : 'verbose',
+          );
+
       const { db } = createDatabase(dbPath);
-      const result = runBuildPipeline(repoPath, specStoragePath, db);
+      const result = runBuildPipeline(repoPath, specStoragePath, db, onProgress);
+
+      if (result.upToDate) {
+        if (options.json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          info('Spec knowledge graph is up to date — nothing to build.');
+        }
+        return;
+      }
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -2267,7 +2288,7 @@ specCommand
       const { runMinePipeline } = await import('../spec/mine/pipeline');
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { resolveDbPath } = await import('../spec/utils');
-      const { createMineProgressHandler } = await import('../spec/mine/progress-handler');
+      const { createMineProgressHandler } = await import('../spec/ui');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2377,7 +2398,7 @@ specCommand
       // - Verbose mode: plain-text lines with timestamps.
       // - TTY (default): ANSI progress bar with phase + item details.
       // - Pipe / non-TTY: fall back to verbose (5 % stepping).
-      let onProgress: import('../spec/mine/progress').MineProgressCallback | undefined;
+      let onProgress: import('../spec/ui').ProgressCallback | undefined;
       if (!options.json) {
         onProgress = createMineProgressHandler(
           options.verbose ? 'verbose' : process.stdout.isTTY ? 'bar' : 'verbose',

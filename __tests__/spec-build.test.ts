@@ -22,6 +22,7 @@ import {
   getCommitInfo,
   getAllCommits,
   getCommitDiff,
+  getHeadHash,
   isGitRepo,
   CommitInfo,
 } from '../src/spec/git';
@@ -37,6 +38,7 @@ import {
   resolveScopeToSpec,
 } from '../src/spec/build/scope-resolver';
 import { runBuildPipeline, BuildResult } from '../src/spec/build/pipeline';
+import type { ProgressTick } from '../src/spec/ui';
 
 // Silence logger during tests
 setLogger(silentLogger);
@@ -374,6 +376,24 @@ describe('git-scanner — scan', () => {
     const uniqueKeys = new Set(spec01Pairs.map((p) => `${p.specId}|${p.commitHash}`));
     expect(uniqueKeys.size).toBe(2);
   });
+
+  it('reports scanning progress ticks', () => {
+    createSpecOnDisk(specStorage, 'spec01', '# Spec 01\n');
+    commitFile(repo, 'src/a.ts', 'x\n', 'feat(spec01): add feature');
+    commitFile(repo, 'src/b.ts', 'y\n', 'docs: unrelated');
+
+    const ticks: ProgressTick[] = [];
+    scan(repo, specStorage, DEFAULT_CONFIG, (t) => ticks.push(t));
+
+    // One tick per commit, all in the scanning phase
+    expect(ticks.length).toBe(2);
+    for (const [i, t] of ticks.entries()) {
+      expect(t.phase).toBe('scanning');
+      expect(t.current).toBe(i + 1);
+      expect(t.total).toBe(2);
+    }
+    expect(ticks.some((t) => t.message?.includes('feat(spec01)'))).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -574,7 +594,7 @@ describe('build pipeline — runBuildPipeline', () => {
   });
 
   it('empty pairs returns zero counts', () => {
-    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db);
     expect(result.specsFound).toBe(0);
     expect(result.commitsFound).toBe(0);
     expect(result.fragmentsFound).toBe(0);
@@ -589,7 +609,7 @@ describe('build pipeline — runBuildPipeline', () => {
     // Make a commit with matching scope
     commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): add');
 
-    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db);
     // There should be findings
     expect(result.specsFound).toBeGreaterThanOrEqual(0);
 
@@ -611,7 +631,7 @@ describe('build pipeline — runBuildPipeline', () => {
 
     const hash = commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): initial');
 
-    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db);
 
     expect(result.specsFound).toBe(1);
     expect(result.commitsFound).toBe(1);
@@ -633,7 +653,7 @@ describe('build pipeline — runBuildPipeline', () => {
     // Commit without matching scope but spec on disk
     commitFile(repo, 'src/lib.ts', 'lib\n', 'docs: some docs');
 
-    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db);
     expect(result.commitsFound).toBeGreaterThanOrEqual(0);
     // With no matching pairs, specsFound should be 0
     expect(result.specsFound).toBe(0);
@@ -644,11 +664,62 @@ describe('build pipeline — runBuildPipeline', () => {
     commitFile(repo, 'src/v1.ts', 'v1\n', 'feat(spec10): first');
     commitFile(repo, 'src/v2.ts', 'v2\n', 'feat(spec10): second');
 
-    const result = runBuildPipeline(repo, specStorage, db, DEFAULT_CONFIG);
+    const result = runBuildPipeline(repo, specStorage, db);
     expect(result.specsFound).toBe(1);
     expect(result.commitsFound).toBe(2);
     // relationsCreated should include 2 spec-commit relations + fragment relations
     expect(result.relationsCreated).toBeGreaterThanOrEqual(2);
+  });
+
+  it('reports scanning → persisting → done progress', () => {
+    createSpecOnDisk(specStorage, 'spec01', '# Spec 01\nContent.\n');
+    commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): add');
+
+    const ticks: ProgressTick[] = [];
+    runBuildPipeline(repo, specStorage, db, (t) => ticks.push(t));
+
+    const phases = ticks.map((t) => t.phase);
+    expect(phases[0]).toBe('scanning');
+    expect(phases[phases.length - 1]).toBe('done');
+    expect(phases).toContain('persisting');
+
+    // Persisting ticks: one per pair, monotonically increasing
+    const persisting = ticks.filter((t) => t.phase === 'persisting');
+    expect(persisting.length).toBe(1);
+    expect(persisting[0].current).toBe(1);
+    expect(persisting[0].total).toBe(1);
+    expect(persisting[0].message).toContain('spec01');
+  });
+
+  it('skips build when meta.json currentCommitID matches HEAD', () => {
+    // Need at least one commit for HEAD to resolve.
+    commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): add');
+    const headHash = getHeadHash(repo);
+    expect(headHash).toBeTruthy();
+
+    // Overwrite meta.json with current HEAD so pre-check triggers.
+    writeMeta(repo, specStorage, headHash!);
+
+    const result = runBuildPipeline(repo, specStorage, db);
+    expect(result.upToDate).toBe(true);
+    expect(result.specsFound).toBe(0);
+    expect(result.commitsFound).toBe(0);
+    expect(result.fragmentsFound).toBe(0);
+    expect(result.relationsCreated).toBe(0);
+    expect(result.totalEntries).toBe(0);
+    expect(result.skippedEntries).toEqual([]);
+  });
+
+  it('proceeds with build when meta.json currentCommitID differs from HEAD', () => {
+    createSpecOnDisk(specStorage, 'spec01', '# Spec 01\nContent.\n');
+    commitFile(repo, 'src/main.ts', 'const x = 1;\n', 'feat(spec01): add');
+    // Write a hash that definitely does not match HEAD.
+    writeMeta(repo, specStorage, '0000000000000000000000000000000000000000');
+
+    const result = runBuildPipeline(repo, specStorage, db);
+    expect(result.upToDate).toBeUndefined();
+    // Normal build proceeds — at least one commit is found.
+    expect(result.commitsFound).toBeGreaterThanOrEqual(1);
   });
 });
 

@@ -17,7 +17,7 @@ import { DEFAULT_SPEC_TEMPLATE, SPEC_GENERATION_SYSTEM_PROMPT } from '../llm/pro
 import { extractTitleFromMarkdown } from '../build/spec-extractor';
 import { writeFileContent } from '../utils';
 import { logDebug, logWarn } from '../../errors';
-import type { MineProgressCallback } from './progress';
+import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -203,7 +203,7 @@ export async function generateSpecs(
   client: LlmClient,
   outputDir: string,
   templateContent?: string,
-  onProgress?: MineProgressCallback,
+  onProgress?: ProgressCallback,
 ): Promise<GenerationResult> {
   // Use custom template if provided, otherwise use default
   const effectiveTemplate = templateContent || DEFAULT_SPEC_TEMPLATE;
