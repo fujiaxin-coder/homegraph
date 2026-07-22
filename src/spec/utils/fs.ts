@@ -110,45 +110,34 @@ export function discoverSpecs(specStoragePath: string): SpecEntry[] {
 // =============================================================================
 
 /**
- * Resolve the database path.
+ * Resolve the database path: `{repoPath}/${SPEC_DATA_DIR}/commit4spec.db`.
  *
- * Priority:
- * 1. If `explicitDbPath` is given, return it as-is (no side effects).
- * 2. If `repoPath` is given, default to `{repoPath}/${SPEC_DATA_DIR}/commit4spec.db`
- *    and ensure `${SPEC_DATA_DIR}/.gitignore` exists containing `"*"`.
- * 3. If neither is given, return `"./commit4spec.db"`.
+ * Also ensures the `${SPEC_DATA_DIR}` directory exists and contains a
+ * `.gitignore` with `"*"` so the database never gets committed.
  */
-export function resolveDbPath(repoPath?: string, explicitDbPath?: string): string {
-  if (explicitDbPath) {
-    return explicitDbPath;
+export function resolveDbPath(repoPath: string): string {
+  const commit4specDir = path.join(repoPath, SPEC_DATA_DIR);
+  const gitignorePath = path.join(commit4specDir, '.gitignore');
+  const dbPath = path.join(commit4specDir, 'commit4spec.db');
+
+  // Ensure ${SPEC_DATA_DIR} directory exists
+  try {
+    fs.mkdirSync(commit4specDir, { recursive: true });
+  } catch {
+    // Directory may already exist; ok.
   }
 
-  if (repoPath) {
-    const commit4specDir = path.join(repoPath, SPEC_DATA_DIR);
-    const gitignorePath = path.join(commit4specDir, '.gitignore');
-    const dbPath = path.join(commit4specDir, 'commit4spec.db');
-
-    // Ensure ${SPEC_DATA_DIR} directory exists
+  // Write .gitignore if it doesn't exist
+  if (!fs.existsSync(gitignorePath)) {
     try {
-      fs.mkdirSync(commit4specDir, { recursive: true });
-    } catch {
-      // Directory may already exist; ok.
+      fs.writeFileSync(gitignorePath, '*\n', 'utf-8');
+    } catch (err) {
+      logWarn(`Failed to write ${SPEC_DATA_DIR}/.gitignore`, {
+        path: gitignorePath,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-
-    // Write .gitignore if it doesn't exist
-    if (!fs.existsSync(gitignorePath)) {
-      try {
-        fs.writeFileSync(gitignorePath, '*\n', 'utf-8');
-      } catch (err) {
-        logWarn(`Failed to write ${SPEC_DATA_DIR}/.gitignore`, {
-          path: gitignorePath,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    return dbPath;
   }
 
-  return './commit4spec.db';
+  return dbPath;
 }

@@ -292,17 +292,7 @@ describe('resolveDbPath', () => {
     cleanupTempDir(tmpDir);
   });
 
-  it('should return explicitDbPath as-is when given', () => {
-    const result = resolveDbPath('/some/repo', '/custom/path/db.sqlite');
-    expect(result).toBe('/custom/path/db.sqlite');
-  });
-
-  it('should prioritize explicitDbPath over repoPath', () => {
-    const result = resolveDbPath('/some/repo', '/explicit/db.sqlite');
-    expect(result).toBe('/explicit/db.sqlite');
-  });
-
-  it(`should return <repoPath>/${SPEC_DATA_DIR}/commit4spec.db when repoPath given`, () => {
+  it(`should return <repoPath>/${SPEC_DATA_DIR}/commit4spec.db`, () => {
     const result = resolveDbPath(tmpDir);
     expect(result).toBe(path.join(tmpDir, SPEC_DATA_DIR, 'commit4spec.db'));
     // Verify the directory was created
@@ -324,16 +314,6 @@ describe('resolveDbPath', () => {
     // Second call should not overwrite
     resolveDbPath(tmpDir);
     expect(fs.readFileSync(gitignorePath, 'utf-8')).toBe('custom content\n');
-  });
-
-  it('should return ./commit4spec.db when neither repoPath nor explicitDbPath given', () => {
-    const result = resolveDbPath();
-    expect(result).toBe('./commit4spec.db');
-  });
-
-  it('should return ./commit4spec.db when repoPath is undefined and explicitDbPath is undefined', () => {
-    const result = resolveDbPath(undefined, undefined);
-    expect(result).toBe('./commit4spec.db');
   });
 });
 
