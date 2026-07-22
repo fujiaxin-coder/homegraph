@@ -17,6 +17,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- HarmonyOS / ArkTS indexing no longer walks `build/` (and other default-ignored dirs) when collecting `.ets` files for the Scene batch. That mismatch used to leave extra generated files in the index so non-git `homegraph status` reported Pending Removed right after a fresh `init`.
 - ArkTS Scene builds now run **in-process by default** (including large Windows repos). The isolated child + stack-size retry ladder is opt-in via `HOMEGRAPH_ARKTS_ISOLATED=1`, so `init`/`index` no longer burn minutes on failed isolated retries before users can get a working index.
 - SQLite prefers **better-sqlite3** (native) and falls back to **node-sqlite3-wasm** when the native binding is unavailable — no reliance on Node's built-in `node:sqlite`. `homegraph status` reports `native` or `wasm`.
 - Type / caller inventory only fires on **real survey intent** (子类 / callers / methods…call). Bare PascalCase callbacks like `OnSurfaceChangedCB` no longer get classified as empty type-inventory (that skipped compact and dumped a 15K full explore). Long NL explore anchors are capped and path/verb noise (`cpp`, `calls`, `render`…) is dropped so neighbor fan-out cannot balloon tokens.

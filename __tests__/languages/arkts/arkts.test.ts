@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { bindExtractionContext, resetExtractionContext } from '../../../src/extraction/context';
-import { ArkTSExtractor, isArkTSBatchPersisted, resetArkTSBatch, shouldUseIsolatedArkTSBuild } from '../../../src/extraction/languages/arkts';
+import {
+  ArkTSExtractor,
+  isArkTSBatchPersisted,
+  resetArkTSBatch,
+  scanEtsFiles,
+  shouldUseIsolatedArkTSBuild,
+} from '../../../src/extraction/languages/arkts';
 import { detectLanguage, isArkModuleJson5, isSourceFile } from '../../../src/extraction/grammars';
+import { scanDirectory } from '../../../src/extraction';
 import { cleanupArktsProjects, makeArktsProject, mockArktsQueries } from './helpers';
 
 afterEach(() => {
@@ -34,6 +41,23 @@ describe('languages/arkts', () => {
       if (prev === undefined) delete process.env.HOMEGRAPH_ARKTS_ISOLATED;
       else process.env.HOMEGRAPH_ARKTS_ISOLATED = prev;
     }
+  });
+
+  it('scanEtsFiles skips default-ignored dirs like build/ (same as scanDirectory)', () => {
+    const root = makeArktsProject({
+      'entry/src/main/ets/pages/Index.ets': 'export struct Index {}',
+      'entry/build/default/cache/generated.ets': 'export struct Generated {}',
+      'dist/out.ets': 'export struct DistOut {}',
+    });
+
+    const scanned = scanEtsFiles(root);
+    expect(scanned).toEqual(['entry/src/main/ets/pages/Index.ets']);
+    expect(scanned.some((f) => f.includes('/build/') || f.startsWith('dist/'))).toBe(false);
+
+    // Non-git status compares DB vs scanDirectory — ArkTS batch must not invent extras.
+    const mainScan = scanDirectory(root).map((f) => f.replace(/\\/g, '/'));
+    expect(mainScan).toContain('entry/src/main/ets/pages/Index.ets');
+    expect(mainScan.some((f) => f.includes('/build/') || f.startsWith('dist/'))).toBe(false);
   });
 
   it('builds a Scene, persists batch, and returns symbols + RTA calls', () => {
