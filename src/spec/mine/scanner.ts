@@ -363,7 +363,7 @@ export function scanCommits(
       phase: 'scanning',
       current: ci + 1,
       total: totalCommits,
-      message: `${commit.hash.slice(0, 7)} ${commit.message.slice(0, 50)}`,
+      message: `${commit.hash.slice(0, 7)} ${commit.message.slice(0, 30)}`,
     });
     logDebug('Mine scan: processing commit', {
       hash: commit.hash.slice(0, 7),

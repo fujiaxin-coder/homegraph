@@ -20,7 +20,7 @@ import { upsertSpecFromMetadata, persistCommitFragments } from '../db/persist';
 import { scan } from './scan';
 import { getCommitDiff, getHeadHash } from '../git';
 import { analyzeCommitDiff } from './diff-parser';
-import { logDebug, logWarn } from '../../errors';
+import { logDebug } from '../../errors';
 import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
@@ -189,12 +189,6 @@ export function runBuildPipeline(
   const skippedEntries = allEntries
     .filter((e) => !writtenSpecIds.has(e.specId))
     .map((e) => ({ specId: e.specId, reason: 'No matching commits found' }));
-
-  for (const skipped of skippedEntries) {
-    logWarn('Spec discovered on disk but no matching commits found', {
-      specId: skipped.specId,
-    });
-  }
 
   // ---- Step 7: write meta ----
   const headHash = getHeadHash(repoPath) ?? undefined;
