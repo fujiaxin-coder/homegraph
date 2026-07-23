@@ -38,6 +38,24 @@ export interface SupplementaryDoc {
 const HEADING_RE = /^(#{1,6})\s+(.*)/;
 
 // ---------------------------------------------------------------------------
+// extractTitleFromMarkdown
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a title from markdown content: the first `# ` heading with any
+ * trailing `SPEC` suffix stripped. Falls back to `fallback` when no usable
+ * heading is found.
+ */
+export function extractTitleFromMarkdown(content: string, fallback: string): string {
+  const firstH1Match = content.match(/^#\s+(.*)/m);
+  if (firstH1Match && firstH1Match[1]) {
+    const title = firstH1Match[1].trim().replace(/\s*SPEC\s*$/i, '');
+    if (title) return title;
+  }
+  return fallback;
+}
+
+// ---------------------------------------------------------------------------
 // extractMarkdownHeadings
 // ---------------------------------------------------------------------------
 
@@ -237,14 +255,7 @@ function _buildMetadata(
   config: SpecDiscoveryConfig,
 ): SpecMetadata {
   // ---- title ----
-  let title = specId;
-  const firstH1Match = content.match(/^#\s+(.*)/m);
-  if (firstH1Match && firstH1Match[1]) {
-    title = firstH1Match[1].trim().replace(/\s*SPEC\s*$/i, '');
-    if (!title) {
-      title = specId;
-    }
-  }
+  const title = extractTitleFromMarkdown(content, specId);
 
   // ---- subtitles from primary doc ----
   const subtitles = extractMarkdownHeadings(content);
@@ -332,19 +343,10 @@ export function extractSpecMetadata(
     if (content !== null) {
       logDebug('Discovered flat-file spec', { specDirName, path: flatFilePath });
 
-      let title = specDirName;
-      const firstH1Match = content.match(/^#\s+(.*)/m);
-      if (firstH1Match && firstH1Match[1]) {
-        title = firstH1Match[1].trim().replace(/\s*SPEC\s*$/i, '');
-        if (!title) title = specDirName;
-      }
-
-      const subtitles = extractMarkdownHeadings(content);
-
       return {
         specId: specDirName,
-        title,
-        subtitles,
+        title: extractTitleFromMarkdown(content, specDirName),
+        subtitles: extractMarkdownHeadings(content),
         filePath: flatFilePath,
         type: 'flat-file',
       };

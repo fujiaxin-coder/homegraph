@@ -32,6 +32,8 @@
 
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { SpecSearchResult } from '../types';
+import { parseSubtitlesJson } from './spec-node';
+import { escapeLike } from './sql-utils';
 
 // ===========================================================================
 // CJK Segmentation
@@ -147,20 +149,13 @@ function searchSpecsFts(
 
   const scored: Array<{ score: number; result: SpecSearchResult }> = [];
   for (const row of rows) {
-    let subtitles: string[];
-    try {
-      subtitles = JSON.parse(row.subtitles || '[]');
-    } catch {
-      subtitles = [];
-    }
-
     const boost = scoreTitleMatch(row.title, query);
     scored.push({
       score: boost,
       result: {
         id: row.id,
         title: row.title,
-        subtitles,
+        subtitles: parseSubtitlesJson(row.subtitles),
         _score: boost,
         _method: 'fts5',
       },
@@ -188,8 +183,7 @@ function searchSpecsLike(
   excludeIds: Set<string>
 ): SpecSearchResult[] {
   // Escape LIKE metacharacters so '%' and '_' are treated as literals
-  const escaped = query.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-  const likePat = `%${escaped}%`;
+  const likePat = `%${escapeLike(query)}%`;
 
   const rows = db
     .prepare(
@@ -203,13 +197,6 @@ function searchSpecsLike(
   for (const row of rows) {
     if (excludeIds.has(row.id)) continue;
 
-    let subtitles: string[];
-    try {
-      subtitles = JSON.parse(row.subtitles || '[]');
-    } catch {
-      subtitles = [];
-    }
-
     const [score, tier] = likeScore(row.title, query);
     scored.push({
       score,
@@ -217,7 +204,7 @@ function searchSpecsLike(
       result: {
         id: row.id,
         title: row.title,
-        subtitles,
+        subtitles: parseSubtitlesJson(row.subtitles),
         _score: score,
         _method: 'like',
         _tier: tier as SpecSearchResult['_tier'],
@@ -247,21 +234,13 @@ function discoveryFallback(db: SqliteDatabase, limit: number): SpecSearchResult[
     )
     .all(limit) as SpecFtsRow[];
 
-  return rows.map((row) => {
-    let subtitles: string[];
-    try {
-      subtitles = JSON.parse(row.subtitles || '[]');
-    } catch {
-      subtitles = [];
-    }
-    return {
-      id: row.id,
-      title: row.title,
-      subtitles,
-      _score: 0.0,
-      _method: 'discovery' as const,
-    };
-  });
+  return rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    subtitles: parseSubtitlesJson(row.subtitles),
+    _score: 0.0,
+    _method: 'discovery' as const,
+  }));
 }
 
 // ===========================================================================
@@ -292,21 +271,13 @@ export function searchSpecs(
       .prepare('SELECT id, title, subtitles FROM spec_nodes ORDER BY id LIMIT ?')
       .all(limit) as SpecFtsRow[];
 
-    return rows.map((row) => {
-      let subtitles: string[];
-      try {
-        subtitles = JSON.parse(row.subtitles || '[]');
-      } catch {
-        subtitles = [];
-      }
-      return {
-        id: row.id,
-        title: row.title,
-        subtitles,
-        _score: 0.0,
-        _method: 'all' as const,
-      };
-    });
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      subtitles: parseSubtitlesJson(row.subtitles),
+      _score: 0.0,
+      _method: 'all' as const,
+    }));
   }
 
   // Stage 1: FTS5 weighted search

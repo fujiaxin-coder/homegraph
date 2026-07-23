@@ -8,10 +8,11 @@
  */
 
 import { SpecConfig } from '../config';
-import { CommitInfo, getCommitDiff } from '../build/git-scanner';
-import { resolveScopeToSpec } from '../build/scope-resolver';
-import { extractSpecMetadata, SpecMetadata } from '../build/spec-extractor';
+import { CommitInfo, getCommitDiff } from '../git';
+import { matchCommitToSpec } from '../build/scan';
+import { SpecMetadata } from '../build/spec-extractor';
 import { analyzeCommitDiff, DiffFragment } from '../build/diff-parser';
+import { discoverSpecs } from '../utils';
 
 // =============================================================================
 // Types
@@ -67,9 +68,14 @@ export function analyzeIncrementalCommits(
 ): CommitSpecAnalysis[] {
   const results: CommitSpecAnalysis[] = [];
 
+  // Hoist the directory read out of the per-commit loop.
+  const specIds = new Set(discoverSpecs(specStoragePath).map((e) => e.specId));
+
   for (const commit of commits) {
-    // 1. Scope resolution
-    const specId = resolveScopeToSpec(commit.message, specStoragePath, config);
+    // 1. Scope resolution + spec metadata
+    const { specId, metadata } = matchCommitToSpec(
+      commit.message, specIds, specStoragePath, config,
+    );
     if (!specId) {
       results.push({
         commit,
@@ -79,8 +85,6 @@ export function analyzeIncrementalCommits(
       continue;
     }
 
-    // 2. Extract spec metadata
-    const metadata = extractSpecMetadata(specStoragePath, specId, config);
     if (!metadata) {
       results.push({
         commit,

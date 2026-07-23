@@ -11,12 +11,13 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { CommitCluster } from './clusterer';
-import { LLMConfig } from '../config';
-import { OpenAiLlmClient } from '../llm/client';
+import { CommitCluster } from './clustering';
+import { LlmClient } from '../llm/client';
+import { DEFAULT_SPEC_TEMPLATE, SPEC_GENERATION_SYSTEM_PROMPT } from '../llm/prompts';
+import { extractTitleFromMarkdown } from '../build/spec-extractor';
 import { writeFileContent } from '../utils';
 import { logDebug, logWarn } from '../../errors';
-import type { MineProgressCallback } from './progress';
+import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,53 +38,6 @@ export interface GenerationResult {
   skipped: number;
   errors: number;
 }
-
-// ---------------------------------------------------------------------------
-// Default Template
-// ---------------------------------------------------------------------------
-
-const DEFAULT_TEMPLATE = `# Spec: {{title}}
-
-## Summary
-{{summary}}
-
-## Motivation
-{{motivation}}
-
-## Specification
-
-### Functional Requirements
-{{functional_requirements}}
-
-### Acceptance Criteria (EARS format)
-{{acceptance_criteria}}
-
-## Implementation Notes
-
-### Related Commits
-{{commit_list}}
-
-### Affected Files
-{{file_list}}
-
-### Key Symbols
-{{symbol_list}}
-`;
-
-// ---------------------------------------------------------------------------
-// Default System Prompt
-// ---------------------------------------------------------------------------
-
-const SYSTEM_PROMPT = `You are a technical documentation writer specializing in software design specifications. Given a cluster of related Git commits, generate a design specification in markdown format.
-
-Guidelines:
-- Focus on WHAT was built, not HOW it was implemented
-- Use EARS (Easy Approach to Requirements Syntax) for acceptance criteria
-- Be specific — reference real symbols, files, and commit messages
-- Keep the spec concise but complete
-- Output ONLY the spec document, no preamble or commentary
-
-Output format — fill in the template exactly. Replace {{placeholders}} with real content. Do NOT include the placeholder braces in your output.`;
 
 // ---------------------------------------------------------------------------
 // Prompt Building
@@ -189,22 +143,56 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Spec Generation
+// Markdown Extraction
 // ---------------------------------------------------------------------------
 
 /**
- * Extract title from LLM-generated markdown (first `# ` heading).
+ * Extract the markdown spec document from a chat() response.
+ *
+ * Headless coding agents (and occasionally chat models) wrap the document
+ * in prose ("Here is the spec:") or a ```markdown fence — writing that
+ * verbatim would pollute the spec file. Since the spec template always
+ * starts with a heading, the extraction is:
+ * 1. If a fenced block contains a markdown heading, use its content.
+ * 2. Else strip any prose before the first heading line.
+ * 3. Otherwise return the response trimmed.
+ *
+ * Provider-agnostic: applies identically to coding-agent and OpenAI paths.
  */
-function extractTitle(content: string): string {
-  const match = /^#\s+(.+)$/m.exec(content);
-  return match ? match[1]!.trim() : 'Untitled Spec';
+export function extractMarkdown(raw: string): string {
+  const text = raw.trim();
+  if (!text) return '';
+
+  // Fast path: already a clean markdown document. Also guards against
+  // misfiring on code fences INSIDE a document (e.g. a bash comment like
+  // "# do something" would otherwise look like a wrapped document).
+  if (/^#\s/.test(text)) return text;
+
+  // 1. Whole-document fence wrapper containing a heading
+  const fenceMatch = /```(?:markdown|md)?\s*\n([\s\S]*?)```/.exec(text);
+  if (fenceMatch && /^#\s/m.test(fenceMatch[1]!)) {
+    return fenceMatch[1]!.trim();
+  }
+
+  // 2. Prose preamble before the first heading
+  const headingMatch = /^#\s.*$/m.exec(text);
+  if (headingMatch) {
+    return text.slice(headingMatch.index).trim();
+  }
+
+  return text;
 }
+
+// ---------------------------------------------------------------------------
+// Spec Generation
+// ---------------------------------------------------------------------------
 
 /**
  * Generate spec documents for a list of commit clusters.
  *
  * @param clusters - Clusters to generate specs for.
- * @param llmConfig - LLM configuration (apiKey, model, etc.).
+ * @param client - Resolved LLM client (coding agent, configured LLM, or
+ *   a fallback composite — resolution happens in `llm/factory`).
  * @param outputDir - Directory to write generated spec files.
  * @param templateContent - Optional custom template string.
  * @param onProgress - Optional progress callback (called per cluster).
@@ -212,15 +200,13 @@ function extractTitle(content: string): string {
  */
 export async function generateSpecs(
   clusters: CommitCluster[],
-  llmConfig: LLMConfig,
+  client: LlmClient,
   outputDir: string,
   templateContent?: string,
-  onProgress?: MineProgressCallback,
+  onProgress?: ProgressCallback,
 ): Promise<GenerationResult> {
-  const client = new OpenAiLlmClient(llmConfig);
-
   // Use custom template if provided, otherwise use default
-  const effectiveTemplate = templateContent || DEFAULT_TEMPLATE;
+  const effectiveTemplate = templateContent || DEFAULT_SPEC_TEMPLATE;
 
   // Ensure output directory exists
   fs.mkdirSync(outputDir, { recursive: true });
@@ -249,7 +235,7 @@ export async function generateSpecs(
 
     let raw: string;
     try {
-      raw = await client.chat(SYSTEM_PROMPT, userPrompt);
+      raw = await client.chat(SPEC_GENERATION_SYSTEM_PROMPT, userPrompt);
     } catch (err) {
       logWarn(`LLM call failed for ${specId}`, {
         error: err instanceof Error ? err.message : String(err),
@@ -264,13 +250,21 @@ export async function generateSpecs(
       continue;
     }
 
-    const title = extractTitle(raw);
+    // Unwrap fences / strip prose preamble before persisting
+    const content = extractMarkdown(raw);
+    if (!content) {
+      logWarn(`LLM response had no extractable markdown for ${specId}`);
+      skipped++;
+      continue;
+    }
+
+    const title = extractTitleFromMarkdown(content, 'Untitled Spec');
     const commitHashes = cluster.commits.map((c) => c.commitHash);
 
     const spec: GeneratedSpec = {
       specId,
       title,
-      content: raw,
+      content,
       clusterId: cluster.id,
       commitHashes,
     };
@@ -279,7 +273,7 @@ export async function generateSpecs(
     const fileName = `${specId}.md`;
     const outputPath = path.join(outputDir, fileName);
     try {
-      writeFileContent(outputPath, raw);
+      writeFileContent(outputPath, content);
       logDebug('Wrote spec file', { path: outputPath });
       specs.push(spec);
     } catch (err) {

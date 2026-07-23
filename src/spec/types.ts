@@ -164,6 +164,44 @@ export interface CommitReference {
 }
 
 // =============================================================================
+// LLM Cluster Context Types
+// =============================================================================
+
+/** Per-commit summary within a cluster context. */
+export interface CommitSummary {
+  /** Full commit hash (40 chars) — used for git operations like getCommitDiff. */
+  fullHash: string;
+  /** Short hash (7 chars) — used for display in LLM prompts. */
+  shortHash: string;
+  /** First line of commit message. */
+  message: string;
+  /** Changed file paths. */
+  changedFiles: string[];
+  /** Aggregated and truncated diff for this commit (populated by caller). */
+  truncatedDiff: string;
+}
+
+/**
+ * Cluster-level context for LLM spec evaluation — aggregated summaries of a
+ * group of commits affecting the same spec.
+ */
+export interface ClusterContext {
+  /** Number of commits in the cluster. */
+  commitCount: number;
+  /** Individual commit summaries. */
+  commitSummaries: CommitSummary[];
+  /** Top-N most frequently changed files across all commits. */
+  primaryFiles: string[];
+}
+
+/** Minimal info about a commit needed to build the cluster context. */
+export interface CommitContextInput {
+  commitHash: string;
+  message?: string;
+  filePaths: string[];
+}
+
+// =============================================================================
 // Search Types
 // =============================================================================
 

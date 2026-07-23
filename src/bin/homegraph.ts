@@ -2175,27 +2175,26 @@ specCommand
   .command('build')
   .description('Build spec knowledge graph from scanned Git history')
   .option('-p, --path <path>', 'Path to the repository')
-  .option('--spec-storage-path <path>', 'Path to the .spec directory')
-  .option('--db-path <path>', 'Path to the SQLite database file')
+  .option('--spec-dir <path>', 'Path to the .spec directory')
   .option('-v, --verbose', 'Show detailed output')
   .option('-j, --json', 'Output as JSON')
   .action(async (options: {
     path?: string;
-    specStoragePath?: string;
-    dbPath?: string;
+    specDir?: string;
     verbose?: boolean;
     json?: boolean;
   }) => {
     try {
       const repoPath = path.resolve(options.path || process.cwd());
-      const specStoragePath = path.resolve(repoPath, options.specStoragePath || '.spec');
+      const specStoragePath = path.resolve(repoPath, options.specDir || '.spec');
 
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { runBuildPipeline } = await import('../spec/build/pipeline');
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
       const { resolveDbPath } = await import('../spec/utils');
+      const { createBuildProgressHandler } = await import('../spec/ui');
 
-      const dbPath = resolveDbPath(repoPath, options.dbPath);
+      const dbPath = resolveDbPath(repoPath);
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2208,8 +2207,28 @@ specCommand
         info(`Database: ${dbPath}`);
       }
 
+      // Progress reporting (mirrors `spec mine`):
+      // - JSON mode: no progress output (only final JSON).
+      // - Verbose mode: plain-text lines with timestamps.
+      // - TTY (default): ANSI progress bar with phase + item details.
+      // - Pipe / non-TTY: fall back to verbose (5 % stepping).
+      const onProgress = options.json
+        ? undefined
+        : createBuildProgressHandler(
+            options.verbose ? 'verbose' : process.stdout.isTTY ? 'bar' : 'verbose',
+          );
+
       const { db } = createDatabase(dbPath);
-      const result = runBuildPipeline(repoPath, specStoragePath, db);
+      const result = runBuildPipeline(repoPath, specStoragePath, db, onProgress);
+
+      if (result.upToDate) {
+        if (options.json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          info('Spec knowledge graph is up to date — nothing to build.');
+        }
+        return;
+      }
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -2264,12 +2283,12 @@ specCommand
     try {
       const repoPath = path.resolve(options.path || process.cwd());
 
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
       const { loadSpecConfig } = await import('../spec/config');
       const { runMinePipeline } = await import('../spec/mine/pipeline');
       const { createDatabase } = await import('../db/sqlite-adapter');
       const { resolveDbPath } = await import('../spec/utils');
-      const { createMineProgressHandler } = await import('../spec/mine/progress-handler');
+      const { createMineProgressHandler } = await import('../spec/ui');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2308,10 +2327,13 @@ specCommand
       // Load spec config for LLM setup
       const specConfig = loadSpecConfig(repoPath);
       const llmConfig = specConfig.llm;
+      const { resolveAgent } = await import('../spec/llm/agents');
+      const codingAgent = options.skipLlm ? null : resolveAgent();
 
-      if (!options.skipLlm && !llmConfig) {
+      if (!options.skipLlm && !llmConfig && !codingAgent) {
         info(
-          'No LLM configuration found. Set up "llm" in .homegraph/commit4spec/configs.json.\n' +
+          'No coding agent (Claude Code / Codex) detected and no LLM configuration found.\n' +
+          'Set up "llm" in .homegraph/commit4spec/configs.json.\n' +
           '\n' +
           'All available options (fields marked * are required):\n' +
           '{\n' +
@@ -2328,6 +2350,10 @@ specCommand
           '\n' +
           'Continuing with --skip-llm (clustering only).',
         );
+      } else if (!options.skipLlm && !llmConfig && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for spec generation — no LLM configuration needed.`);
+      } else if (!options.skipLlm && llmConfig && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for spec generation — configured LLM is kept as fallback.`);
       }
 
       const mineConfig = createMineConfig(
@@ -2339,7 +2365,7 @@ specCommand
           template: options.template,
           skipLlm: !!options.skipLlm,
         },
-        !!llmConfig,
+        !!llmConfig || codingAgent !== null,
       );
 
       if (options.verbose) {
@@ -2372,7 +2398,7 @@ specCommand
       // - Verbose mode: plain-text lines with timestamps.
       // - TTY (default): ANSI progress bar with phase + item details.
       // - Pipe / non-TTY: fall back to verbose (5 % stepping).
-      let onProgress: import('../spec/mine/progress').MineProgressCallback | undefined;
+      let onProgress: import('../spec/ui').ProgressCallback | undefined;
       if (!options.json) {
         onProgress = createMineProgressHandler(
           options.verbose ? 'verbose' : process.stdout.isTTY ? 'bar' : 'verbose',
@@ -2422,13 +2448,11 @@ specCommand
   .command('match <text>')
   .description('Search the spec knowledge graph for a term or phrase')
   .option('-p, --path <path>', 'Path to the repository')
-  .option('--db-path <path>', 'Path to the SQLite database file')
   .option('--top-k <number>', 'Number of results to return', '5')
   .option('--no-fragments', 'Exclude code fragments from results')
   .option('-j, --json', 'Output as JSON')
   .action(async (text: string, options: {
     path?: string;
-    dbPath?: string;
     topK?: string;
     fragments?: boolean;
     json?: boolean;
@@ -2441,7 +2465,7 @@ specCommand
       const { resolveDbPath, computeBudgetProfile } = await import('../spec/utils');
       const { searchAndGetContext } = await import('../spec/graph/queries');
 
-      const dbPath = resolveDbPath(repoPath, options.dbPath);
+      const dbPath = resolveDbPath(repoPath);
 
       if (!fs.existsSync(dbPath)) {
         error(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`);
@@ -2517,11 +2541,9 @@ specCommand
   .command('find <filePath>')
   .description('Find specs related to the given file path via code-fragment matching')
   .option('-p, --path <path>', 'Path to the repository')
-  .option('--db-path <path>', 'Path to the SQLite database file')
   .option('-j, --json', 'Output as JSON')
   .action(async (filePath: string, options: {
     path?: string;
-    dbPath?: string;
     json?: boolean;
   }) => {
     let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
@@ -2532,7 +2554,7 @@ specCommand
       const { resolveDbPath } = await import('../spec/utils');
       const { findSpecsByFilePath } = await import('../spec/graph/queries');
 
-      const dbPath = resolveDbPath(repoPath, options.dbPath);
+      const dbPath = resolveDbPath(repoPath);
 
       if (!fs.existsSync(dbPath)) {
         error(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`);
@@ -2584,14 +2606,12 @@ specCommand
   .option('-f, --file <path>', 'File path for symbol disambiguation')
   .option('-l, --line <number>', 'Line number for symbol disambiguation')
   .option('-p, --path <path>', 'Path to the repository')
-  .option('--db-path <path>', 'Path to the SQLite database file')
   .option('--top-k <number>', 'Number of results to return', '10')
   .option('-j, --json', 'Output as JSON')
   .action(async (symbol: string, options: {
     file?: string;
     line?: string;
     path?: string;
-    dbPath?: string;
     topK?: string;
     json?: boolean;
   }) => {
@@ -2682,7 +2702,7 @@ specCommand
       const { findSpecsByCodeSymbol } = await import('../spec/graph/queries');
       const { initSpecSchema, runSpecMigrations, getCurrentSpecVersion, CURRENT_SPEC_SCHEMA_VERSION } = await import('../spec/db/schema');
 
-      const dbPath = resolveDbPath(repoPath, options.dbPath);
+      const dbPath = resolveDbPath(repoPath);
       if (!fs.existsSync(dbPath)) {
         console.log(chalk.yellow(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`));
         return;
@@ -2771,11 +2791,9 @@ specCommand
   .command('stats')
   .description('Show statistics about the spec knowledge graph')
   .option('-p, --path <path>', 'Path to the repository')
-  .option('--db-path <path>', 'Path to the SQLite database file')
   .option('-j, --json', 'Output as JSON')
   .action(async (options: {
     path?: string;
-    dbPath?: string;
     json?: boolean;
   }) => {
     let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
@@ -2786,7 +2804,7 @@ specCommand
       const { resolveDbPath } = await import('../spec/utils');
       const { getSpecStats } = await import('../spec/graph/queries');
 
-      const dbPath = resolveDbPath(repoPath, options.dbPath);
+      const dbPath = resolveDbPath(repoPath);
 
       if (!fs.existsSync(dbPath)) {
         error(`Database not found at ${dbPath}. Run 'homegraph spec build/mine' first.`);
@@ -2836,10 +2854,9 @@ evolveCommand
   .description('Install a git post-commit hook that triggers spec evolution')
   .option('-p, --path <path>', 'Path to the repository')
   .option('-f, --force', 'Overwrite existing hook without prompting')
-  .option('--db-path <path>', 'Custom path to the SQLite database (default: .homegraph/commit4spec/commit4spec.db in repo)')
   .option(
     '-t, --commit-threshold <n>',
-    'Number of pending commits to accumulate before triggering evolve (default: 3)',
+    'Number of pending commits to accumulate before triggering evolve',
     (v: string) => {
       const n = parseInt(v, 10);
       if (isNaN(n) || n < 1) {
@@ -2850,12 +2867,12 @@ evolveCommand
     },
     3
   )
-  .action(async (options: { path?: string; force?: boolean; dbPath?: string; commitThreshold?: number }) => {
+  .action(async (options: { path?: string; force?: boolean; commitThreshold?: number }) => {
     try {
       const repoPath = resolveSpecProjectPath(options.path);
       const commitThreshold = options.commitThreshold ?? 3;
 
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -2933,7 +2950,6 @@ evolveCommand
         `THRESHOLD=${commitThreshold}`,
         `LOGS_DIR="${SPEC_DATA_DIR}/logs"`,
         `META_FILE="${SPEC_DATA_DIR}/meta.json"`,
-        `DB_PATH=${options.dbPath ? JSON.stringify(options.dbPath) : '""'}`,
         '',
         '# Ensure logs directory exists',
         'mkdir -p "$LOGS_DIR"',
@@ -2964,10 +2980,8 @@ evolveCommand
         '# Threshold reached — trigger evolution (async, non-blocking)',
         '# Runtime guard: skip if homegraph is not available',
         `HOMEGRAPH_BIN="${homegraphBin}"`,
-        'DB_ARGS=""',
-        'if [ -n "$DB_PATH" ]; then DB_ARGS="--db-path $DB_PATH"; fi',
         'if [ -x "$HOMEGRAPH_BIN" ] || command -v homegraph >/dev/null 2>&1; then',
-        '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" $DB_ARGS --json \\',
+        '  "${HOMEGRAPH_BIN:-homegraph}" spec evolve process --path "$(pwd)" --json \\',
         `      >> "$LOGS_DIR"/evolve-hook.log 2>&1 &`,
         'fi',
         MARKER_END,
@@ -3018,7 +3032,7 @@ evolveCommand
     try {
       const repoPath = resolveSpecProjectPath(options.path);
 
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
@@ -3088,11 +3102,9 @@ evolveCommand
   .command('process')
   .description('Process commits through the spec self-evolve pipeline since last evolve')
   .option('-p, --path <path>', 'Path to the repository')
-  .option('--db-path <path>', 'Path to the SQLite database file')
   .option('-j, --json', 'Output as JSON')
   .action(async (options: {
     path?: string;
-    dbPath?: string;
     json?: boolean;
   }) => {
     let db: import('../db/sqlite-adapter').SqliteDatabase | undefined;
@@ -3104,22 +3116,24 @@ evolveCommand
       const { initSpecSchema } = await import('../spec/db/schema');
       const { loadSpecConfig } = await import('../spec/config');
       const { runEvolvePipeline } = await import('../spec/evolve/pipeline');
-      const { isGitRepo } = await import('../spec/build/git-scanner');
+      const { isGitRepo } = await import('../spec/git');
 
       if (!isGitRepo(repoPath)) {
         error(`Not a git repository: ${repoPath}`);
         process.exit(1);
       }
 
-      const dbPath = resolveDbPath(repoPath, options.dbPath);
+      const dbPath = resolveDbPath(repoPath);
 
       const created = createDatabase(dbPath);
       db = created.db;
       initSpecSchema(db);
 
       const config = loadSpecConfig(repoPath);
-      if (!config.llm) {
-        warn('LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
+      const { resolveAgent } = await import('../spec/llm/agents');
+      const codingAgent = resolveAgent();
+      if (!config.llm && !codingAgent) {
+        warn('No coding agent (Claude Code / Codex) detected and LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
         warn('Phase 1 (commit-spec graph construction) will still run.');
         warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
           '{\n' +
@@ -3133,6 +3147,10 @@ evolveCommand
           '    "maxTokens":    20000              //   max output tokens (default: 20000)\n' +
           '  }\n' +
           '}');
+      } else if (!config.llm && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for phase 3 spec evolution — no LLM configuration needed.`);
+      } else if (config.llm && codingAgent) {
+        info(`Using ${codingAgent.displayName} (headless) for phase 3 spec evolution — configured LLM is kept as fallback.`);
       }
 
       const result = await runEvolvePipeline(repoPath, db, config);

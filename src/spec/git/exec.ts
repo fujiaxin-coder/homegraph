@@ -1,3 +1,9 @@
+/**
+ * Shared `execFileSync` options for all Git calls across the spec module.
+ *
+ * @module spec/git/exec
+ */
+
 import { type StdioOptions } from 'child_process';
 
 /** Shared options for all `execFileSync` Git calls across the spec module. */

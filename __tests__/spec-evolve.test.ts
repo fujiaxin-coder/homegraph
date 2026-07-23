@@ -12,6 +12,10 @@ vi.mock('openai', () => ({
   default: class MockOpenAI {},
 }));
 
+// Force the LLM factory down the OpenAiLlmClient path — the dev machine may
+// have Claude Code / Codex installed, and tests must never spawn real agents.
+process.env.HOMEGRAPH_SPEC_AGENT = 'none';
+
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -431,7 +435,7 @@ describe('spec-rewriter — applyUpdate', () => {
       plan_content: '# New Spec\nUpdated content.\n',
     };
 
-    const result = applyUpdate(db, specStorage, oldSpecId, oldFilePath, 1, decision, 'd'.repeat(40));
+    const result = applyUpdate(db, oldSpecId, oldFilePath, 1, decision, 'd'.repeat(40));
     expect(result.newSpecId).toBe(oldSpecId);
     expect(result.newVersion).toBe(2);
 
@@ -486,7 +490,7 @@ describe('spec-rewriter — applyUpdate', () => {
       // No plan_content — writes empty string
     };
 
-    const result = applyUpdate(db, specStorage, oldSpecId, oldFilePath, 1, decision, 'e'.repeat(40));
+    const result = applyUpdate(db, oldSpecId, oldFilePath, 1, decision, 'e'.repeat(40));
     expect(result.newVersion).toBe(2);
 
     // plan.md should have been written with empty content

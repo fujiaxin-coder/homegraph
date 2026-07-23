@@ -48,6 +48,10 @@ export function getCurrentSpecVersion(db: SqliteDatabase): number {
 /**
  * Run pending migrations.
  *
+ * NOTE: migration DDL mirrors statements in `schema.sql` (fresh databases
+ * get everything from the .sql file; migrations only patch pre-existing
+ * databases). Keep the two in sync when adding future migrations.
+ *
  * v1 → v2: Create code_fragments_fts virtual table and populate it
  * from existing code_fragment_nodes data.
  */

@@ -17,6 +17,7 @@ export {
   deleteSpec,
   listAllSpecs,
   countSpecsByStatus,
+  parseSubtitlesJson,
 } from './spec-node';
 
 export {
@@ -43,11 +44,31 @@ export {
   deleteSimilarToRelations,
   transferSpecSpecRelations,
   countAllRelations,
+  findSpecIdsByFragmentPath,
+  findSpecsByFilePath,
+  FindSpecsByFilePathResult,
+  findSpecCandidatesByFilePath,
+  SpecCandidate,
+  findSpecIdsByFragmentIds,
+  findFragmentPathsBySpec,
+  findActiveSpecIds,
 } from './relations';
 
 // FTS5 Search
 export {
   searchSpecs,
+  searchCodeFragments,
   escapeFtsQuery,
   segmentCjk,
 } from './fts';
+
+// SQL helpers
+export { escapeLike } from './sql-utils';
+
+// Composed writes
+export {
+  upsertSpecFromMetadata,
+  persistCommitFragments,
+  SpecMetadataInput,
+  FragmentInput,
+} from './persist';

@@ -9,7 +9,7 @@
  * @module spec/build/diff-parser
  */
 
-import { getCommitDiff } from './git-scanner';
+import { getCommitDiff } from '../git';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -50,11 +50,50 @@ export function analyzeCommitDiff(
   if (!diff) {
     return [];
   }
-  return _parseDiff(diff);
+  return parseDiff(diff);
 }
 
 // ---------------------------------------------------------------------------
-// _parseDiff
+// listChangedFiles
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse changed file paths from a unified diff string.
+ *
+ * Matches `--- a/path` and `+++ b/path` headers to identify files,
+ * skipping `/dev/null`. Returns a list of unique changed file paths.
+ *
+ * Both headers are needed:
+ * - `+++ b/` captures added and modified files.  For deletions the line is
+ *   `+++ /dev/null`, which is skipped.
+ * - `--- a/` captures deleted files.  For additions the line is
+ *   `--- /dev/null`, which is skipped.
+ */
+export function listChangedFiles(diff: string): string[] {
+  const files = new Set<string>();
+  const lines = diff.split('\n');
+  for (const line of lines) {
+    let match = /^\+\+\+ b\/(.+)$/.exec(line);
+    if (match) {
+      const fp = match[1]!;
+      if (fp !== '/dev/null') {
+        files.add(fp);
+      }
+      continue;
+    }
+    match = /^--- a\/(.+)$/.exec(line);
+    if (match) {
+      const fp = match[1]!;
+      if (fp !== '/dev/null') {
+        files.add(fp);
+      }
+    }
+  }
+  return Array.from(files);
+}
+
+// ---------------------------------------------------------------------------
+// parseDiff
 // ---------------------------------------------------------------------------
 
 /**
@@ -65,7 +104,7 @@ export function analyzeCommitDiff(
  * `DiffFragment` each time a new `diff --git` section begins (or when the
  * input is exhausted).
  */
-function _parseDiff(diff: string): DiffFragment[] {
+export function parseDiff(diff: string): DiffFragment[] {
   const lines = diff.split('\n');
 
   // ---- state ----

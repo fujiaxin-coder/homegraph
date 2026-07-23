@@ -11,18 +11,18 @@
  * @module spec/mine/pipeline
  */
 
-import { execFileSync } from 'child_process';
 import * as path from 'path';
 import { LLMConfig, MineConfig } from '../config';
-import { isGitRepo } from '../build/git-scanner';
+import { isGitRepo, getHeadHash, isAncestor } from '../git';
+import { createSpecLlmClient } from '../llm/factory';
 import { readMeta, writeMeta } from '../utils';
 import { scanCommits } from './scanner';
-import { clusterCommits } from './clusterer';
+import { clusterCommits } from './clustering';
 import { generateSpecs } from './generator';
 import { logDebug, logWarn } from '../../errors';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { persistToGraph } from './persist';
-import type { MineProgressCallback } from './progress';
+import type { ProgressCallback } from '../ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,55 +43,6 @@ export interface MinePipelineResult {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Check whether `ancestor` is an ancestor of `descendant` in the git history.
- */
-function isAncestor(
-  repoPath: string,
-  ancestor: string,
-  descendant: string,
-): boolean {
-  try {
-    execFileSync(
-      'git',
-      ['merge-base', '--is-ancestor', ancestor, descendant],
-      {
-        cwd: repoPath,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        windowsHide: true,
-      },
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Get the current HEAD commit hash.
- */
-function getHeadHash(repoPath: string): string {
-  try {
-    return execFileSync(
-      'git',
-      ['rev-parse', 'HEAD'],
-      {
-        cwd: repoPath,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        windowsHide: true,
-      },
-    ).trim();
-  } catch {
-    return '';
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
 
@@ -100,7 +51,8 @@ function getHeadHash(repoPath: string): string {
  *
  * @param repoPath - Path to the git repository.
  * @param config - Reverse pipeline configuration.
- * @param llmConfig - LLM configuration (required unless skipLlm is true).
+ * @param llmConfig - LLM configuration (may be null when a coding agent
+ *   — Claude Code / Codex — is available, or when skipLlm is true).
  * @param db - Optional SQLite database handle for persistence.
  * @param onProgress - Optional progress callback for real-time feedback.
  * @returns Pipeline result with stats.
@@ -110,7 +62,7 @@ export async function runMinePipeline(
   config: MineConfig,
   llmConfig: LLMConfig | null,
   db: SqliteDatabase | null = null,
-  onProgress?: MineProgressCallback,
+  onProgress?: ProgressCallback,
 ): Promise<MinePipelineResult> {
   const errors: string[] = [];
 
@@ -218,7 +170,9 @@ export async function runMinePipeline(
   let relationsWritten = 0;
   let shouldAdvanceMeta = false;
 
-  if (!config.skipLlm && llmConfig) {
+  const client = config.skipLlm ? undefined : createSpecLlmClient(llmConfig);
+
+  if (!config.skipLlm && client) {
     // Read custom template if provided
     let templateContent: string | undefined;
     if (config.template) {
@@ -238,7 +192,7 @@ export async function runMinePipeline(
 
     const genResult = await generateSpecs(
       clusterResult.clusters,
-      llmConfig,
+      client,
       config.outputDir,
       templateContent,
       onProgress,
@@ -281,9 +235,9 @@ export async function runMinePipeline(
     if (!persistFailed && genResult.specs.length > 0) {
       shouldAdvanceMeta = true;
     }
-  } else if (!config.skipLlm && !llmConfig) {
+  } else if (!config.skipLlm && !client) {
     errors.push(
-      'LLM generation skipped — no LLM configuration found. Set up llm in configs.json or use --skip-llm.',
+      'LLM generation skipped — no coding agent (Claude Code / Codex) detected and no LLM configuration found. Set up llm in configs.json or use --skip-llm.',
     );
   }
 
