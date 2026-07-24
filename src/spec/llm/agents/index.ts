@@ -19,17 +19,19 @@
 import { AgentAdapter } from './types';
 import { claudeCodeAdapter } from './claude-code';
 import { codexAdapter } from './codex';
+import { devecoCodeAdapter } from './deveco-code';
 
 export type { AgentAdapter, AgentInvocation, AgentRunResult } from './types';
 export { claudeCodeAdapter } from './claude-code';
 export { codexAdapter } from './codex';
+export { devecoCodeAdapter } from './deveco-code';
 
 /**
  * Registry in priority order — the first installed adapter wins.
  * Claude Code ranks first: its headless mode offers native system-prompt
  * support, a clean JSON output envelope, and reliable tool disabling.
  */
-const REGISTRY: AgentAdapter[] = [claudeCodeAdapter, codexAdapter];
+const REGISTRY: AgentAdapter[] = [claudeCodeAdapter, codexAdapter, devecoCodeAdapter];
 
 let cachedResolution: AgentAdapter | null | undefined;
 

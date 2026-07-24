@@ -2332,7 +2332,7 @@ specCommand
 
       if (!options.skipLlm && !llmConfig && !codingAgent) {
         info(
-          'No coding agent (Claude Code / Codex) detected and no LLM configuration found.\n' +
+          'No coding agent (Claude Code / Codex / DevEco Code) detected and no LLM configuration found.\n' +
           'Set up "llm" in .homegraph/commit4spec/configs.json.\n' +
           '\n' +
           'All available options (fields marked * are required):\n' +
@@ -3133,7 +3133,7 @@ evolveCommand
       const { resolveAgent } = await import('../spec/llm/agents');
       const codingAgent = resolveAgent();
       if (!config.llm && !codingAgent) {
-        warn('No coding agent (Claude Code / Codex) detected and LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
+        warn('No coding agent (Claude Code / Codex / DevEco Code) detected and LLM not configured — phase 3 (LLM-based spec evolution) will be skipped.');
         warn('Phase 1 (commit-spec graph construction) will still run.');
         warn('Configure LLM in .homegraph/commit4spec/configs.json for full functionality:\n' +
           '{\n' +

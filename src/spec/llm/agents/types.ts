@@ -43,7 +43,7 @@ export interface AgentFailure {
  */
 export interface AgentAdapter {
   /** Stable id, also used by the HOMEGRAPH_SPEC_AGENT test override. */
-  readonly id: 'claude-code' | 'codex';
+  readonly id: 'claude-code' | 'codex' | 'deveco-code';
   /** Human-readable name for log lines. */
   readonly displayName: string;
   /** CLI binary name resolved against PATH. */

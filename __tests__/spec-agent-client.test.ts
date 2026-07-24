@@ -17,6 +17,7 @@ import { silentLogger, setLogger } from '../src/errors';
 import { resolveAgent, resetAgentResolutionCache } from '../src/spec/llm/agents';
 import { claudeCodeAdapter } from '../src/spec/llm/agents/claude-code';
 import { codexAdapter } from '../src/spec/llm/agents/codex';
+import { devecoCodeAdapter } from '../src/spec/llm/agents/deveco-code';
 import { AgentAdapter, AgentFailure } from '../src/spec/llm/agents/types';
 import { CodingAgentLlmClient } from '../src/spec/llm/agent-client';
 import { FallbackLlmClient, createSpecLlmClient } from '../src/spec/llm/factory';
@@ -191,6 +192,46 @@ describe('agents — detection & resolution', () => {
 
     expect(resolveAgent()?.id).toBe('codex');
   });
+
+  it('resolves deveco-code when only deveco is on PATH', () => {
+    writeScript(tmpDir, 'deveco', '#!/bin/sh\nexit 0\n');
+    process.env.PATH = tmpDir;
+    process.env.HOME = tmpDir;
+    delete process.env.HOMEGRAPH_SPEC_AGENT;
+    resetAgentResolutionCache();
+
+    expect(resolveAgent()?.id).toBe('deveco-code');
+  });
+
+  it('detects deveco via well-known install path when not on PATH', () => {
+    writeScript(path.join(tmpDir, '.local', 'bin'), 'deveco', '#!/bin/sh\nexit 0\n');
+    process.env.PATH = tmpDir;
+    process.env.HOME = tmpDir;
+    delete process.env.HOMEGRAPH_SPEC_AGENT;
+    resetAgentResolutionCache();
+
+    expect(resolveAgent()?.id).toBe('deveco-code');
+  });
+
+  it("HOMEGRAPH_SPEC_AGENT='deveco-code' forces deveco-code without detection", () => {
+    process.env.PATH = tmpDir;
+    process.env.HOME = tmpDir;
+    process.env.HOMEGRAPH_SPEC_AGENT = 'deveco-code';
+    resetAgentResolutionCache();
+
+    expect(resolveAgent()?.id).toBe('deveco-code');
+  });
+
+  it('claude-code preferred over deveco-code when both are on PATH', () => {
+    writeScript(tmpDir, 'claude', '#!/bin/sh\nexit 0\n');
+    writeScript(tmpDir, 'deveco', '#!/bin/sh\nexit 0\n');
+    process.env.PATH = tmpDir;
+    process.env.HOME = tmpDir;
+    delete process.env.HOMEGRAPH_SPEC_AGENT;
+    resetAgentResolutionCache();
+
+    expect(resolveAgent()?.id).toBe('claude-code');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -303,6 +344,92 @@ describe('CodexAdapter', () => {
     const stdout401 = '{"type":"error","message":"unexpected status 401 Unauthorized: Incorrect API key"}';
     expect(codexAdapter.classifyFailure({ exitCode: 1, stdout: stdout401, stderr: '' })).toBe('terminal');
     expect(codexAdapter.classifyFailure({ exitCode: 1, stdout: '', stderr: 'unexpected crash' })).toBe('retryable');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DevEco Code adapter
+// ---------------------------------------------------------------------------
+
+describe('DevecoCodeAdapter', () => {
+  it('buildInvocation uses explore agent, JSON output, stdin prompt', () => {
+    const inv = devecoCodeAdapter.buildInvocation('SYS', 'USER');
+    // Mode
+    expect(inv.args[0]).toBe('run');
+    // Read-only agent
+    expect(inv.args).toContain('--agent');
+    expect(inv.args[inv.args.indexOf('--agent') + 1]).toBe('explore');
+    // JSON output
+    expect(inv.args).toContain('--format');
+    expect(inv.args[inv.args.indexOf('--format') + 1]).toBe('json');
+    // System prompt embedded (no native flag)
+    expect(inv.stdin).toContain('<instructions>\nSYS\n</instructions>');
+    expect(inv.stdin).toContain('USER');
+    // Prompt delivered via stdin, not as positional arg
+    expect(inv.args.filter(a => a.includes('<instructions>')).length).toBe(0);
+  });
+
+  it('extractOutput concatenates text events from the JSONL stream', () => {
+    const stdout = [
+      '{"type":"text","timestamp":1000,"sessionID":"s1",'
+        + '"part":{"type":"text","text":"# Spec Title"}}',
+      '{"type":"tool_use","timestamp":1001,"sessionID":"s1",'
+        + '"part":{"type":"tool","tool":"read","state":{"status":"completed"}}}',
+      '{"type":"text","timestamp":1002,"sessionID":"s1",'
+        + '"part":{"type":"text","text":"\\n\\nBody content."}}',
+      '{"type":"step_finish","timestamp":1003,"sessionID":"s1",'
+        + '"part":{"type":"step-finish","reason":"stop"}}',
+    ].join('\n');
+    expect(devecoCodeAdapter.extractOutput({ stdout, stderr: '' }))
+      .toBe('# Spec Title\n\nBody content.');
+  });
+
+  it('extractOutput ignores reasoning events and non-text events', () => {
+    const stdout = [
+      '{"type":"reasoning","timestamp":1000,"sessionID":"s1",'
+        + '"part":{"type":"reasoning","text":"Let me think..."}}',
+      '{"type":"text","timestamp":1001,"sessionID":"s1",'
+        + '"part":{"type":"text","text":"Final answer."}}',
+    ].join('\n');
+    expect(devecoCodeAdapter.extractOutput({ stdout, stderr: '' }))
+      .toBe('Final answer.');
+  });
+
+  it('extractOutput returns empty when events contain no text', () => {
+    const stdout = '{"type":"error","timestamp":1000,"sessionID":"s1",'
+      + '"error":{"name":"SomeError"}}';
+    expect(devecoCodeAdapter.extractOutput({ stdout, stderr: '' })).toBe('');
+  });
+
+  it('extractOutput falls back to noise-stripped stdout for non-JSONL output', () => {
+    const out = devecoCodeAdapter.extractOutput({
+      stdout: 'deveco: initializing\nplain output\ndeveco: done\n',
+      stderr: '',
+    });
+    expect(out).toBe('plain output');
+  });
+
+  it('classifyFailure: spawn failure is terminal', () => {
+    expect(devecoCodeAdapter.classifyFailure({
+      exitCode: null, stdout: '', stderr: '',
+    })).toBe('terminal');
+  });
+
+  it('classifyFailure: auth/quota stderr is terminal', () => {
+    expect(devecoCodeAdapter.classifyFailure({
+      exitCode: 1, stdout: '',
+      stderr: 'Error: not logged in, please run /login',
+    })).toBe('terminal');
+    expect(devecoCodeAdapter.classifyFailure({
+      exitCode: 1, stdout: '',
+      stderr: 'usage limit exceeded for this period',
+    })).toBe('terminal');
+  });
+
+  it('classifyFailure: generic non-zero exit is retryable', () => {
+    expect(devecoCodeAdapter.classifyFailure({
+      exitCode: 1, stdout: '', stderr: 'unexpected crash',
+    })).toBe('retryable');
   });
 });
 
