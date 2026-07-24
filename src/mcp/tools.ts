@@ -6375,21 +6375,22 @@ export class ToolHandler {
       `**Database size:** ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`,
     );
 
-    // Surface the active SQLite backend. Prefer better-sqlite3; wasm is the
-    // fallback when the native binding is unavailable (no WAL — slower / lock-prone).
+    // Surface the active SQLite backend: node:sqlite → better-sqlite3 → wasm.
     const backend = cg.getBackend();
-    if (backend === 'native') {
+    if (backend === 'node-sqlite') {
+      lines.push(`**Backend:** node-sqlite (built-in)`);
+    } else if (backend === 'native') {
       lines.push(`**Backend:** native (better-sqlite3)`);
     } else {
       lines.push(
-        `**Backend:** ⚠ wasm (better-sqlite3 unavailable) — ` +
-        `5-10x slower than native. Fix: ${WASM_FALLBACK_FIX_RECIPE}`
+        `**Backend:** ⚠ wasm (no WAL backend available) — ` +
+        `5-10x slower than WAL. Fix: ${WASM_FALLBACK_FIX_RECIPE}`
       );
     }
 
     // Effective journal mode. 'wal' ⇒ concurrent reads never block on a writer;
-    // anything else ⇒ they can ("database is locked"). Native supports WAL;
-    // wasm remaps to DELETE.
+    // anything else ⇒ they can ("database is locked"). node:sqlite / native
+    // support WAL; wasm remaps to DELETE.
     const journalMode = cg.getJournalMode();
     if (journalMode === 'wal') {
       lines.push(`**Journal mode:** wal (concurrent reads safe)`);

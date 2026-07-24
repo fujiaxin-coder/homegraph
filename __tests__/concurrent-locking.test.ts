@@ -48,14 +48,14 @@ describe('issue #238 — connection PRAGMAs (#1)', () => {
   });
 
   it('runs in WAL mode — the mode that lets readers proceed during a write', () => {
-    // WASM remaps journal_mode=WAL → DELETE; only assert WAL on native.
-    if (conn.getBackend() !== 'native') return;
+    // WASM remaps journal_mode=WAL → DELETE; only assert WAL on real backends.
+    if (conn.getBackend() === 'wasm') return;
     const mode = String(pragmaValue(conn.getDb().pragma('journal_mode'), 'journal_mode')).toLowerCase();
     expect(mode).toBe('wal');
   });
 
   it('getJournalMode() surfaces the effective mode for status triage', () => {
-    if (conn.getBackend() !== 'native') {
+    if (conn.getBackend() === 'wasm') {
       expect(conn.getJournalMode()).toBe('delete');
       return;
     }

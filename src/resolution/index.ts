@@ -862,7 +862,30 @@ export class ReferenceResolver {
     }
 
     // Strategy 2: Try import-based resolution
-    const importResult = this.gateLanguage(resolveViaImport(ref, this.context), ref);
+    // ArkTS:
+    //  - `instantiates`: never via import — `import { Foo }` + a constructor
+    //    seed would mint a `new Foo` edge for every false CFG constructor in
+    //    that file (99k instantiates on scene_board). Same-file / unique-class
+    //    exact-match in matchReference only.
+    //  - dotted `Class.method`: import → static member (cross-module path;
+    //    Strategy 1 is same-file only).
+    //  - bare calls: only when the import local maps to a function/method.
+    let importResult = this.gateLanguage(resolveViaImport(ref, this.context), ref);
+    if (
+      importResult &&
+      ref.language === 'arkts' &&
+      (ref.referenceKind === 'calls' || ref.referenceKind === 'instantiates')
+    ) {
+      if (ref.referenceKind === 'instantiates') {
+        importResult = null;
+      } else {
+        const target = this.queries.getNodeById(importResult.targetNodeId);
+        const ok =
+          target &&
+          (target.kind === 'function' || target.kind === 'method');
+        if (!ok) importResult = null;
+      }
+    }
     if (importResult) {
       if (importResult.confidence >= 0.9) return importResult;
       candidates.push(importResult);

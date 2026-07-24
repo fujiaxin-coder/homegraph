@@ -127,9 +127,8 @@ describe('index completeness marker (index_state)', () => {
     // Simulate a kill between the start-marker write and completion: the
     // marker a dead process leaves behind is exactly 'indexing'. Written
     // straight into the DB — the process that died can't have cleaned it up.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require('better-sqlite3');
-    const db = new Database(path.join(tempDir, '.homegraph', 'homegraph.db'));
+    const { createDatabase } = await import('../src/db/sqlite-adapter');
+    const { db } = createDatabase(path.join(tempDir, '.homegraph', 'homegraph.db'));
     db.prepare(
       "INSERT INTO project_metadata (key, value, updated_at) VALUES ('index_state', 'indexing', 0) " +
         "ON CONFLICT(key) DO UPDATE SET value = 'indexing'"

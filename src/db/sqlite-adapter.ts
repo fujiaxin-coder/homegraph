@@ -1,9 +1,13 @@
 /**
  * SQLite Adapter
  *
- * Prefers better-sqlite3 (native — real SQLite with WAL + FTS5). Falls back to
- * node-sqlite3-wasm when the native binding is unavailable (optionalDependency
- * install failed / no prebuild / no local compile toolchain).
+ * Three-tier selection (first success wins):
+ *   1. `node:sqlite` (`DatabaseSync`) — real SQLite + WAL + FTS5, Node ≥22.5
+ *   2. `better-sqlite3` — native addon (optionalDependency)
+ *   3. `node-sqlite3-wasm` — last-resort fallback (no WAL; slower / lock-prone)
+ *
+ * Library hosts on Node 20–22.4 land on (2) or (3). Node ≥22.5 prefers (1) and
+ * skips the native build. Override with `HOMEGRAPH_SQLITE_BACKEND=node-sqlite|native|wasm`.
  */
 
 export interface SqliteStatement {
@@ -27,43 +31,41 @@ export interface SqliteDatabase {
   readonly open: boolean;
 }
 
-/** `native` = better-sqlite3; `wasm` = node-sqlite3-wasm fallback. */
-export type SqliteBackend = 'native' | 'wasm';
+/** Active SQLite backend after {@link createDatabase}. */
+export type SqliteBackend = 'node-sqlite' | 'native' | 'wasm';
 
 /**
  * One-line recovery hint when WASM is active (no WAL — slower / lock-prone).
  */
 export const WASM_FALLBACK_FIX_RECIPE =
-  '`xcode-select --install` (macOS) or `apt install build-essential` (Debian/Ubuntu), ' +
-  'then `npm rebuild better-sqlite3`, or `npm install better-sqlite3 --save` to force-include it.';
+  'upgrade to Node.js 22.5+ (uses built-in node:sqlite), or ' +
+  '`xcode-select --install` (macOS) / `apt install build-essential` (Debian/Ubuntu) ' +
+  'then `npm rebuild better-sqlite3`.';
 
 /**
- * Banner shown to stderr when falling back to WASM (better-sqlite3 unavailable).
+ * Banner shown to stderr when falling back to WASM.
  */
-export function buildWasmFallbackBanner(nativeError?: string): string {
+export function buildWasmFallbackBanner(priorErrors?: string): string {
   const sep = '─'.repeat(72);
   const lines = [
     sep,
-    '[HomeGraph] WASM SQLite fallback active (better-sqlite3 unavailable)',
+    '[HomeGraph] WASM SQLite fallback active (node:sqlite + better-sqlite3 unavailable)',
     sep,
-    'Indexing and sync will be 5-10x slower than the native backend.',
+    'Indexing and sync will be 5-10x slower than a WAL backend, and concurrent',
+    'reads can hit "database is locked". Prefer Node 22.5+ or better-sqlite3.',
     '',
-    'Fix on macOS:',
-    '  xcode-select --install        # install C build tools',
-    '  npm rebuild better-sqlite3    # rebuild native binding for current Node',
+    'Fix — use built-in SQLite (best when you can):',
+    '  Use Node.js 22.5 or newer, then restart homegraph',
     '',
-    'Fix on Linux:',
-    '  sudo apt install build-essential python3 make    # Debian/Ubuntu',
-    '  # or: sudo yum groupinstall "Development Tools"  # RHEL/Fedora',
-    '  npm rebuild better-sqlite3',
+    'Fix — native better-sqlite3:',
+    '  macOS:  xcode-select --install && npm rebuild better-sqlite3',
+    '  Linux:  sudo apt install build-essential python3 make && npm rebuild better-sqlite3',
+    '  Any:    npm install better-sqlite3 --save',
     '',
-    'Or force-include as a hard dependency on any platform:',
-    '  npm install better-sqlite3 --save',
-    '',
-    'Verify after fix: `homegraph status` should show `Backend: native`.',
+    'Verify after fix: `homegraph status` should show Backend: node-sqlite or native.',
   ];
-  if (nativeError) {
-    lines.push('', `Native load error: ${nativeError}`);
+  if (priorErrors) {
+    lines.push('', `Prior load errors: ${priorErrors}`);
   }
   lines.push(sep);
   return lines.join('\n');
@@ -131,6 +133,17 @@ function withBusyRetry<T>(fn: () => T, attempts = 10, baseDelayMs = 50): T {
   throw last;
 }
 
+/** True when `require('node:sqlite').DatabaseSync` succeeds. */
+export function isNodeSqliteAvailable(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('node:sqlite');
+    return typeof mod?.DatabaseSync === 'function';
+  } catch {
+    return false;
+  }
+}
+
 /** True when `require('better-sqlite3')` succeeds. */
 export function isNativeSqliteAvailable(): boolean {
   try {
@@ -139,6 +152,93 @@ export function isNativeSqliteAvailable(): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Wraps Node's built-in `node:sqlite` (`DatabaseSync`) to match the
+ * better-sqlite3 interface the rest of the code expects.
+ */
+class NodeSqliteAdapter implements SqliteDatabase {
+  private _db: any;
+  private _txDepth = 0;
+
+  constructor(dbPath: string) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite');
+    this._db = new DatabaseSync(dbPath);
+  }
+
+  get open(): boolean {
+    return this._db.isOpen;
+  }
+
+  prepare(sql: string): SqliteStatement {
+    const stmt = this._db.prepare(sql);
+    return {
+      run(...params: any[]) {
+        const r = stmt.run(...params);
+        return {
+          changes: Number(r?.changes ?? 0),
+          lastInsertRowid: r?.lastInsertRowid ?? 0,
+        };
+      },
+      get(...params: any[]) {
+        return stmt.get(...params);
+      },
+      all(...params: any[]) {
+        return stmt.all(...params);
+      },
+      iterate(...params: any[]) {
+        return stmt.iterate(...params);
+      },
+    };
+  }
+
+  exec(sql: string): void {
+    this._db.exec(sql);
+  }
+
+  pragma(str: string, options?: { simple?: boolean }): any {
+    const trimmed = str.trim();
+    if (trimmed.includes('=')) {
+      this._db.exec(`PRAGMA ${trimmed}`);
+      return;
+    }
+    const row = this._db.prepare(`PRAGMA ${trimmed}`).get();
+    if (options?.simple) {
+      return row && typeof row === 'object' ? Object.values(row)[0] : row;
+    }
+    return row;
+  }
+
+  transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T {
+    return (...args: any[]) => {
+      if (this._txDepth > 0) {
+        this._txDepth++;
+        try {
+          return fn(...args);
+        } finally {
+          this._txDepth--;
+        }
+      }
+      this._db.exec('BEGIN');
+      this._txDepth = 1;
+      try {
+        const result = fn(...args);
+        this._db.exec('COMMIT');
+        this._txDepth = 0;
+        return result;
+      } catch (error) {
+        this._db.exec('ROLLBACK');
+        this._txDepth = 0;
+        throw error;
+      }
+    };
+  }
+
+  close(): void {
+    if (this._db.isOpen) this._db.close();
   }
 }
 
@@ -254,34 +354,54 @@ class WasmDatabaseAdapter implements SqliteDatabase {
   }
 }
 
+function resolveBackendOrder(): SqliteBackend[] {
+  const raw = process.env.HOMEGRAPH_SQLITE_BACKEND?.trim().toLowerCase();
+  if (raw === 'node-sqlite' || raw === 'native' || raw === 'wasm') {
+    return [raw];
+  }
+  return ['node-sqlite', 'native', 'wasm'];
+}
+
+function tryOpenBackend(
+  backend: SqliteBackend,
+  dbPath: string
+): { db: SqliteDatabase; backend: SqliteBackend } | { error: string } {
+  try {
+    if (backend === 'node-sqlite') {
+      return { db: new NodeSqliteAdapter(dbPath), backend: 'node-sqlite' };
+    }
+    if (backend === 'native') {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const Database = require('better-sqlite3');
+      return { db: new Database(dbPath) as SqliteDatabase, backend: 'native' };
+    }
+    return { db: new WasmDatabaseAdapter(dbPath), backend: 'wasm' };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /**
  * Create a database connection.
- * Prefer better-sqlite3; fall back to node-sqlite3-wasm when unavailable.
+ * Order: node:sqlite → better-sqlite3 → node-sqlite3-wasm (unless overridden).
  */
 export function createDatabase(dbPath: string): { db: SqliteDatabase; backend: SqliteBackend } {
-  let nativeError: string | undefined;
-  let wasmError: string | undefined;
+  const order = resolveBackendOrder();
+  const errors: string[] = [];
 
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require('better-sqlite3');
-    const db = new Database(dbPath);
-    return { db: db as SqliteDatabase, backend: 'native' };
-  } catch (error) {
-    nativeError = error instanceof Error ? error.message : String(error);
-  }
-
-  try {
-    const db = new WasmDatabaseAdapter(dbPath);
-    console.warn(buildWasmFallbackBanner(nativeError));
-    return { db, backend: 'wasm' };
-  } catch (error) {
-    wasmError = error instanceof Error ? error.message : String(error);
+  for (const backend of order) {
+    const result = tryOpenBackend(backend, dbPath);
+    if ('db' in result) {
+      if (result.backend === 'wasm') {
+        console.warn(buildWasmFallbackBanner(errors.join(' | ') || undefined));
+      }
+      return result;
+    }
+    errors.push(`${backend}: ${result.error}`);
   }
 
   throw new Error(
-    `Failed to load any SQLite backend.\n` +
-      `  Native (better-sqlite3): ${nativeError}\n` +
-      `  WASM (node-sqlite3-wasm): ${wasmError}`
+    `Failed to load any SQLite backend (tried ${order.join(' → ')}).\n` +
+      errors.map(e => `  ${e}`).join('\n')
   );
 }

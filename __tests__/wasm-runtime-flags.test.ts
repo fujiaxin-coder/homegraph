@@ -9,7 +9,7 @@
  * line — `setFlagsFromString`, worker `execArgv`, and `NODE_OPTIONS` all fail.
  * These tests pin that contract so it can't silently regress.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -17,7 +17,11 @@ import * as path from 'path';
 import {
   WASM_RUNTIME_FLAGS,
   processHasWasmRuntimeFlags,
+  processHasRequiredRuntimeFlags,
   buildRelaunchArgv,
+  maxOldSpaceSizeFlag,
+  resolveMaxOldSpaceSizeMb,
+  PROCESS_RSS_CAP_MB,
 } from '../src/extraction/wasm-runtime-flags';
 
 describe('WASM_RUNTIME_FLAGS', () => {
@@ -54,20 +58,55 @@ describe('processHasWasmRuntimeFlags', () => {
   });
 });
 
+describe('resolveMaxOldSpaceSizeMb', () => {
+  const prev = process.env.HOMEGRAPH_MAX_OLD_SPACE_MB;
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.HOMEGRAPH_MAX_OLD_SPACE_MB;
+    else process.env.HOMEGRAPH_MAX_OLD_SPACE_MB = prev;
+  });
+
+  it('defaults to process RSS cap minus native headroom', () => {
+    delete process.env.HOMEGRAPH_MAX_OLD_SPACE_MB;
+    expect(resolveMaxOldSpaceSizeMb()).toBe(PROCESS_RSS_CAP_MB - 512);
+    expect(maxOldSpaceSizeFlag()).toBe('--max-old-space-size=3584');
+  });
+});
+
+describe('processHasRequiredRuntimeFlags', () => {
+  it('requires liftoff-only and a max-old-space-size cap', () => {
+    expect(processHasRequiredRuntimeFlags(['--liftoff-only'])).toBe(false);
+    expect(
+      processHasRequiredRuntimeFlags(['--liftoff-only', '--max-old-space-size=4096'])
+    ).toBe(true);
+  });
+});
+
 describe('buildRelaunchArgv', () => {
-  it('places the wasm flags first, then the script and its args', () => {
+  it('places the wasm flags and heap cap first, then the script and its args', () => {
     expect(buildRelaunchArgv('/x/homegraph.js', ['index', '/repo'], [])).toEqual([
       '--liftoff-only',
+      maxOldSpaceSizeFlag(),
       '/x/homegraph.js',
       'index',
       '/repo',
     ]);
   });
 
-  it('preserves other existing node flags without duplicating ours', () => {
+  it('preserves other existing node flags without duplicating ours or the heap cap', () => {
     expect(
-      buildRelaunchArgv('/x/homegraph.js', ['status'], ['--liftoff-only', '--enable-source-maps'])
-    ).toEqual(['--liftoff-only', '--enable-source-maps', '/x/homegraph.js', 'status']);
+      buildRelaunchArgv('/x/homegraph.js', ['status'], [
+        '--liftoff-only',
+        '--max-old-space-size=4096',
+        '--enable-source-maps',
+      ])
+    ).toEqual([
+      '--liftoff-only',
+      '--max-old-space-size=4096',
+      '--enable-source-maps',
+      '/x/homegraph.js',
+      'status',
+    ]);
   });
 
   it('produces an argv that actually launches node WITH the flag applied', () => {
@@ -79,7 +118,9 @@ describe('buildRelaunchArgv', () => {
       fs.writeFileSync(harness, 'process.stdout.write(JSON.stringify(process.execArgv));');
       const res = spawnSync(process.execPath, buildRelaunchArgv(harness, []), { encoding: 'utf8' });
       expect(res.status, res.stderr).toBe(0);
-      expect(JSON.parse(res.stdout)).toContain('--liftoff-only');
+      const argv = JSON.parse(res.stdout) as string[];
+      expect(argv).toContain('--liftoff-only');
+      expect(argv.some((a) => a.startsWith('--max-old-space-size='))).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

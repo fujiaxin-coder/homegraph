@@ -2,10 +2,19 @@
  * ArkTS (.ets) extraction via ArkAnalyzer.
  *
  * Unlike tree-sitter languages, ArkTS is batch-complete: the first `.ets`
- * parse builds one Scene for the whole project, runs RTA, persists every
- * `.ets` file (nodes, edges, cross-file RTA calls) directly to the DB, then
- * returns the requested file's result. Later `.ets` hits in the same batch
- * short-circuit (orchestrator store skips via matching content hash).
+ * parse builds a Scene, runs RTA, persists every `.ets` file (nodes, edges,
+ * cross-file RTA calls) directly to the DB, then returns the requested file's
+ * result. Later `.ets` hits in the same batch short-circuit (orchestrator store
+ * skips via matching content hash).
+ *
+ * HarmonyOS multi-module projects (`build-profile.json5`) use
+ * `Scene.analyseByModule` so each HAP/HSP/HAR is the atomic unit (like a file
+ * for tree-sitter languages): symbols + ViewTree + **intra-module RTA** while
+ * the module has BODIES. CFG does **not** stitch same-module calls (that
+ * densified past unlimited RTA). Cross-module edges come from RTA with an exact
+ * MethodSignature map, plus a CFG `%unk` bridge that recovers Class.method /
+ * free functions from stmt text, UnclearReferenceType names, or PascalCase base
+ * locals (import + unique target + fan-out blocklist). Deps load to SIGNATURES.
  */
 
 import * as crypto from 'crypto';
@@ -21,7 +30,12 @@ import {
   ArkField,
   ArkFile,
   ArkMethod,
+  ArkModule,
   ArkNamespace,
+  ModuleAnalysisConfig,
+  ModuleDepthLevel,
+  ModuleLoadState,
+  ModuleType,
   ANONYMOUS_METHOD_PREFIX,
   DEFAULT_ARK_METHOD_NAME,
   INSTANCE_INIT_METHOD_NAME,
@@ -52,7 +66,7 @@ import type { IndexProgress, IndexResult } from '../index';
 import { EXTRACTION_VERSION } from '../extraction-version';
 import { HomeGraphPackageVersion } from '../../mcp/version';
 import { generateNodeId } from '../tree-sitter-helpers';
-import { buildRelaunchArgv } from '../wasm-runtime-flags';
+import { buildRelaunchArgv, maxOldSpaceSizeFlag, resolveMaxOldSpaceSizeMb } from '../wasm-runtime-flags';
 
 /** Primitive / void return types — not stored in nodes.return_type (inference-only column). */
 const ARKTS_NON_CLASS_RETURN = new Set([
@@ -211,6 +225,38 @@ export function shouldUseIsolatedArkTSBuild(): boolean {
   return mode === '1' || mode === 'true';
 }
 
+/**
+ * Scene eviction budget sits below the V8 heap cap (heap default 3584MB so process
+ * RSS stays near 4GB — native memory sits outside the heap). Small reserve only.
+ */
+const ARKTS_HOMEGRAPH_RESERVE_MB = 256;
+/** Default Scene `memoryLimitMB`. Override with HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB. */
+function defaultArkTSSceneMemoryLimitMB(): number {
+  return Math.max(512, resolveMaxOldSpaceSizeMb() - ARKTS_HOMEGRAPH_RESERVE_MB);
+}
+
+/**
+ * RSS limit passed to ArkAnalyzer `SceneOptions.memoryLimitMB`.
+ * When exceeded, `analyseByModule` evicts cached modules before loading the next.
+ * Set `HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB=0` to disable Scene eviction.
+ */
+function resolveArkTSSceneMemoryLimitMB(): number {
+  const raw = process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB?.trim();
+  if (raw !== undefined && raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  return defaultArkTSSceneMemoryLimitMB();
+}
+
+/** Prefer modular Scene build when the project has Harmony module metadata. */
+function shouldUseModularArkTSBuild(rootDir: string): boolean {
+  const mode = process.env.HOMEGRAPH_ARKTS_MODULAR?.trim();
+  if (mode === '0' || mode === 'false') return false;
+  if (mode === '1' || mode === 'true') return true;
+  return fs.existsSync(path.join(rootDir, 'build-profile.json5'));
+}
+
 function homegraphDbPath(rootDir: string): string {
   return path.join(rootDir, '.homegraph', 'homegraph.db');
 }
@@ -218,6 +264,10 @@ function homegraphDbPath(rootDir: string): string {
 const ARK_PROVENANCE = 'heuristic';
 /** Virtual file path for ArkAnalyzer's in-scene dummy entry (not on disk). */
 const ARKANALYZER_DUMMY_FILE = '@dummyFile.ets';
+
+function fieldSigKey(classSig: string, fieldName: string): string {
+  return `${classSig}::${fieldName}`;
+}
 
 /** HarmonyOS sources indexed via ArkAnalyzer Scene batch (`.ets`, `.ts`, `.d.ts`). */
 export function isArkAnalyzerSourcePath(filePath: string): boolean {
@@ -572,12 +622,16 @@ function spawnIsolatedArkTSBatchWorker(
 
   for (const stackKb of resolveArkTSWorkerStackSizesKb()) {
     process.stderr.write(
-      `\n\x1b[33m    ArkTS: full Scene build in isolated process (--stack-size=${stackKb} KB, enableMethodBodyBuild=true)...\x1b[0m\n`
+      `\n\x1b[33m    ArkTS: Scene build in isolated process (--stack-size=${stackKb} KB; modular if build-profile.json5)...\x1b[0m\n`
     );
     const argv = buildRelaunchArgv(
       workerPath,
       [rootDir, dbPath, triggerFile],
-      [`--stack-size=${stackKb}`]
+      [
+        ...process.execArgv,
+        `--stack-size=${stackKb}`,
+        maxOldSpaceSizeFlag(),
+      ]
     );
     const result = spawnSync(process.execPath, argv, {
       stdio: 'inherit',
@@ -1126,20 +1180,22 @@ interface RtaEntryResolution {
   dummyMain: ArkMethod | null;
 }
 
-function collectComponentScope(scene: Scene): ArkClass[] {
+function collectComponentScopeFromFiles(files: Iterable<ArkFile>): ArkClass[] {
   const scope: ArkClass[] = [];
-  for (const cls of scene.getClasses()) {
-    if (cls.isDefaultArkClass()) continue;
-    if (cls.hasComponentDecorator()) {
-      scope.push(cls);
+  for (const file of files) {
+    for (const cls of file.getClasses()) {
+      if (cls.isDefaultArkClass()) continue;
+      if (cls.hasComponentDecorator()) {
+        scope.push(cls);
+      }
     }
   }
   return scope;
 }
 
-function collectNonUiRtaEntryPoints(scene: Scene): MethodSignature[] {
+function collectNonUiRtaEntryPointsFromFiles(files: Iterable<ArkFile>): MethodSignature[] {
   const entries: MethodSignature[] = [];
-  for (const file of scene.getFiles()) {
+  for (const file of files) {
     const defaultClass = file.getDefaultClass();
     for (const method of defaultClass.getMethods()) {
       if (shouldSkipArkMethod(method)) continue;
@@ -1153,14 +1209,19 @@ function collectNonUiRtaEntryPoints(scene: Scene): MethodSignature[] {
 }
 
 function resolveRtaEntryPoints(scene: Scene): RtaEntryResolution {
+  return resolveRtaEntryPointsFromFiles(scene, scene.getFiles());
+}
+
+/** RTA entries scoped to the given files (one Harmony module while it is loaded). */
+function resolveRtaEntryPointsFromFiles(scene: Scene, files: ArkFile[]): RtaEntryResolution {
   const explicit = scene.getEntryPoints();
   if (explicit.length > 0) {
     return { entryPoints: explicit, dummyMain: null };
   }
 
-  if (sceneHasArkUiEntries(scene)) {
+  if (filesHaveArkUiEntries(files)) {
     try {
-      const componentScope = collectComponentScope(scene);
+      const componentScope = collectComponentScopeFromFiles(files);
       const dummy = new DummyMainCreater(
         scene,
         undefined,
@@ -1175,12 +1236,12 @@ function resolveRtaEntryPoints(scene: Scene): RtaEntryResolution {
     }
   }
 
-  const fallback = collectNonUiRtaEntryPoints(scene);
+  const fallback = collectNonUiRtaEntryPointsFromFiles(files);
   return { entryPoints: fallback, dummyMain: null };
 }
 
-function sceneHasArkUiEntries(scene: Scene): boolean {
-  for (const file of scene.getFiles()) {
+function filesHaveArkUiEntries(files: Iterable<ArkFile>): boolean {
+  for (const file of files) {
     for (const cls of file.getClasses()) {
       if (cls.isDefaultArkClass()) continue;
       if (cls.hasComponentDecorator()) return true;
@@ -1235,6 +1296,18 @@ interface ViewTreeIndexerContext {
     parentId: string
   ): string | null;
   resolveClassNodeId(cls: ArkClass): string | null;
+  /**
+   * Already-indexed class/component id by signature (works after module unload).
+   * Unclear (`%unk`) signatures also fall back to class name / importer.
+   */
+  resolveClassIdBySig(sig: ClassSignature, importer?: ArkClass): string | null;
+  /**
+   * Already-indexed method id by signature (works after module unload).
+   * Unclear declaring-class signatures fall back to `ClassName::methodName`.
+   */
+  resolveMethodIdBySig(sig: MethodSignature, importer?: ArkClass): string | null;
+  /** Already-indexed field id (live map, then classSig::name). */
+  resolveFieldNodeId(field: ArkField): string | null;
   markFieldStateDecorators?: (field: ArkField, fieldNodeId: string, result: ExtractionResult) => void;
 }
 
@@ -1243,13 +1316,322 @@ function viewTreeLineFromStmt(stmt: Stmt | undefined): number {
 }
 
 function isViewTreeClassSignature(sig: ClassSignature | MethodSignature): sig is ClassSignature {
-  return sig instanceof ClassSignature;
+  // Prefer instanceof; duck-type fallback if duplicate arkanalyzer copies break instanceof.
+  if (sig instanceof ClassSignature) return true;
+  if (sig instanceof MethodSignature) return false;
+  const anySig = sig as {
+    getClassName?: unknown;
+    getMethodSubSignature?: unknown;
+    getDeclaringFileSignature?: unknown;
+  };
+  // Require ClassSignature shape — MethodSignature-like and other sigs must not enter getClass().
+  return (
+    typeof anySig.getClassName === 'function' &&
+    typeof anySig.getDeclaringFileSignature === 'function' &&
+    typeof anySig.getMethodSubSignature !== 'function'
+  );
 }
 
-function walkViewTree(node: ViewTreeNode, visit: (node: ViewTreeNode) => void): void {
+/** Skip anonymous / synthetic Ark names for name→id fallback maps. */
+function isUsableArkTypeName(name: string): boolean {
+  return !!name && !name.startsWith('%') && !name.startsWith('<');
+}
+
+/** Escape a literal for use inside a RegExp source. */
+function escapeRegExpLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * ArkUI framework IR receivers — `View.create` / `Column.pop` / `If.branch`
+ * are synthesizer noise, not project call sites. Never seed name-match from them.
+ */
+const ARKUI_IR_CALL_RECEIVERS = new Set([
+  'View',
+  'If',
+  'ForEach',
+  'LazyForEach',
+  'Repeat',
+  'Column',
+  'Row',
+  'Stack',
+  'Flex',
+  'Grid',
+  'List',
+  'Swiper',
+  'Tabs',
+  'TabContent',
+  'Button',
+  'Text',
+  'Image',
+  'Scroll',
+  'WaterFlow',
+  'RelativeContainer',
+  'Blank',
+  'Divider',
+  'Span',
+  'Canvas',
+  'XComponent',
+]);
+
+const ARKUI_IR_CALL_METHODS = new Set(['create', 'pop', 'branch', 'iterator']);
+
+const ARKTS_STDLIB_CALL_RECEIVERS = new Set([
+  'Array',
+  'Map',
+  'Set',
+  'Object',
+  'Promise',
+  'JSON',
+  'String',
+  'Number',
+  'Boolean',
+  'Error',
+  'Date',
+  'Math',
+  'RegExp',
+  'Symbol',
+]);
+
+function isJunkArkCallSeed(className: string, methodName: string): boolean {
+  if (ARKTS_STDLIB_CALL_RECEIVERS.has(className)) return true;
+  if (ARKUI_IR_CALL_RECEIVERS.has(className) && ARKUI_IR_CALL_METHODS.has(methodName)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * CFG must not name-link these across modules: each is a unique `Class::method`
+ * key that still fans out to tens of thousands of invoke sites (singletons,
+ * loggers, constructors) — far denser than RTA reachability on unlimited indexes.
+ */
+const ARKTS_CFG_CROSS_MODULE_METHOD_BLOCKLIST = new Set([
+  'getInstance',
+  'constructor',
+  'toString',
+  'valueOf',
+  'showInfo',
+  'showError',
+  'showWarn',
+  'showDebug',
+  'show',
+  'create',
+  'pop',
+  'push',
+  'splice',
+  'isEmpty',
+  'getContext',
+  'copyFrom',
+  // High fan-out helpers seen densifying same-module CFG on scene_board
+  'getGridOccupyStatus',
+  'isInStatusForGrid',
+  'isInStatus',
+  'getStatus',
+  'isOccupied',
+  'isFree',
+  'markStatus',
+  'markGridForCellAndSpan',
+  'createRelativePath',
+  'dealWantParams',
+  'getPreviewContentWidth',
+  'getIconArray',
+  'getSizeX',
+  'getSizeY',
+]);
+
+/**
+ * When ArkAnalyzer leaves a cross-module static call as `%unk/.use()`, recover
+ * `Lib.use` from the invoke's original source. Only PascalCase receivers — so
+ * `obj.foo()` / `this.bar()` stay unresolved rather than bare-method magnets.
+ *
+ * Trust short snippets only. Allow `return` / simple `const|let|var x =` prefixes
+ * (`const x = Lib.use(b)` is the common modular IR original-text shape).
+ */
+function recoverClassMethodFromStmt(stmt: Stmt | undefined, methodName: string): string | null {
+  if (!stmt || !methodName) return null;
+  let text: string | undefined;
+  try {
+    text = stmt.getOriginalText?.();
+  } catch {
+    text = undefined;
+  }
+  if (!text) return null;
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > 160) return null;
+  // Mock / matcher wrappers are not real call seeds.
+  if (/^(?:when|mock|spyOn)\s*\(/i.test(trimmed)) return null;
+  const re = new RegExp(
+    `(?:^|(?:return\\s+)|(?:(?:const|let|var)\\s+[\\w$]+\\s*=\\s*))([A-Z][\\w$]*)\\.${escapeRegExpLiteral(methodName)}\\s*\\(`
+  );
+  const m = trimmed.match(re);
+  return m?.[1] ? `${m[1]}.${methodName}` : null;
+}
+
+/**
+ * Free-function call left as `%unk/.getOpaque()`: short text still contains
+ * `getOpaque(` (not `Class.getOpaque`). Caller must import-gate + unique name.
+ */
+function recoverFreeFunctionFromStmt(stmt: Stmt | undefined, methodName: string): string | null {
+  if (!stmt || !methodName) return null;
+  if (!/^[a-z][\w$]*$/.test(methodName)) return null;
+  let text: string | undefined;
+  try {
+    text = stmt.getOriginalText?.();
+  } catch {
+    text = undefined;
+  }
+  if (!text) return null;
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > 160) return null;
+  if (/^(?:when|mock|spyOn)\s*\(/i.test(trimmed)) return null;
+  // Reject Class.method — that path belongs to recoverClassMethodFromStmt.
+  if (new RegExp(`[A-Z][\\w$]*\\.${escapeRegExpLiteral(methodName)}\\s*\\(`).test(trimmed)) {
+    return null;
+  }
+  const re = new RegExp(`(?:^|[^\\w.$])${escapeRegExpLiteral(methodName)}\\s*\\(`);
+  return re.test(trimmed) ? methodName : null;
+}
+
+/**
+ * Instance invoke whose MethodSignature is `%unk` may still carry a typed base:
+ * ClassType (full sig) or UnclearReferenceType (type name string only — common
+ * when deps are SIGNATURES-only).
+ */
+function recoverClassMethodFromInstanceType(invoke: unknown, methodName: string): string | null {
+  if (!invoke || !methodName) return null;
+  try {
+    const base = (invoke as { getBase?: () => Local }).getBase?.();
+    if (!base) return null;
+    const type = base.getType?.();
+    if (!type) return null;
+    const fromClassSig =
+      (type as { getClassSignature?: () => ClassSignature }).getClassSignature?.()?.getClassName?.() ??
+      '';
+    if (isUsableArkTypeName(fromClassSig) && !fromClassSig.includes('%')) {
+      return `${fromClassSig}.${methodName}`;
+    }
+    // UnclearReferenceType: getName() === "Base" (no file path).
+    const fromName =
+      (type as { getName?: () => string }).getName?.() ??
+      '';
+    if (isUsableArkTypeName(fromName) && !fromName.includes('%') && /^[A-Z]/.test(fromName)) {
+      return `${fromName}.${methodName}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Modular IR often models `Lib.use` as an instance invoke with base Local named
+ * `Lib` and type unknown — recover from the PascalCase base name.
+ */
+function recoverClassMethodFromBaseName(invoke: unknown, methodName: string): string | null {
+  if (!invoke || !methodName) return null;
+  try {
+    const base = (invoke as { getBase?: () => Local }).getBase?.();
+    if (!base) return null;
+    const baseName = base.getName?.() ?? '';
+    if (!isUsableArkTypeName(baseName) || !/^[A-Z]/.test(baseName) || baseName.includes('%')) {
+      return null;
+    }
+    return `${baseName}.${methodName}`;
+  } catch {
+    return null;
+  }
+}
+
+export type CfgBridgeCallRef =
+  | { name: string; kind: 'calls' | 'instantiates'; freeFunction?: false }
+  | { name: string; kind: 'calls'; freeFunction: true };
+
+/**
+ * Cross-module `%unk` invoke → `Class.method`, free function name, or
+ * `instantiates` class. Never emit a bare instance-method name alone.
+ */
+function callReferenceNameFromSig(
+  sig: MethodSignature,
+  opts?: { stmt?: Stmt; invoke?: unknown }
+): CfgBridgeCallRef | null {
+  try {
+    const methodName = sig.getMethodSubSignature()?.getMethodName?.() ?? '';
+    if (!methodName || methodName.startsWith('%') || methodName.startsWith('<')) return null;
+    const className = sig.getDeclaringClassSignature()?.getClassName?.() ?? '';
+    if (isUsableArkTypeName(className) && !className.includes('%')) {
+      if (methodName === 'constructor') {
+        return { name: className, kind: 'instantiates' };
+      }
+      if (isJunkArkCallSeed(className, methodName)) return null;
+      return { name: `${className}.${methodName}`, kind: 'calls' };
+    }
+    if (methodName === 'constructor') return null;
+    const recovered =
+      recoverClassMethodFromStmt(opts?.stmt, methodName) ??
+      recoverClassMethodFromInstanceType(opts?.invoke, methodName) ??
+      recoverClassMethodFromBaseName(opts?.invoke, methodName);
+    if (recovered) {
+      const dot = recovered.indexOf('.');
+      if (dot > 0 && isJunkArkCallSeed(recovered.slice(0, dot), recovered.slice(dot + 1))) {
+        return null;
+      }
+      return { name: recovered, kind: 'calls' };
+    }
+    const free = recoverFreeFunctionFromStmt(opts?.stmt, methodName);
+    if (free) return { name: free, kind: 'calls', freeFunction: true };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a ClassSignature still has ArkAnalyzer's placeholder file
+ * (`%unk`) — common on ViewTree stubs after a dependency was evicted before
+ * type inference could rewrite `new LiveCardListView` to a real file path.
+ */
+export function isUnclearArkClassSignature(sig: ClassSignature): boolean {
+  try {
+    const fileSig = sig.getDeclaringFileSignature();
+    const fileName = fileSig.getFileName();
+    const projectName = fileSig.getProjectName();
+    if (fileName === '%unk' || projectName === '%unk') return true;
+    if (fileName.includes('%unk') || projectName.includes('%unk')) return true;
+    return sig.toString().includes('%unk');
+  } catch {
+    return true;
+  }
+}
+
+export function isUnclearArkMethodSignature(sig: MethodSignature): boolean {
+  try {
+    return isUnclearArkClassSignature(sig.getDeclaringClassSignature());
+  } catch {
+    return true;
+  }
+}
+
+/** Among candidate node ids, prefer a single `component` over same-name struct/class. */
+export function pickPreferredClassNodeId(
+  candidateIds: Iterable<string>,
+  isComponent: (id: string) => boolean
+): string | null {
+  const ids = [...candidateIds];
+  if (ids.length === 0) return null;
+  if (ids.length === 1) return ids[0] ?? null;
+  const components = ids.filter((id) => isComponent(id));
+  if (components.length === 1) return components[0] ?? null;
+  return null;
+}
+
+/** Walk ViewTree with cycle protection (shared/cloned nodes can form graphs). */
+function walkViewTree(node: ViewTreeNode, visit: (node: ViewTreeNode) => void, seen = new Set<ViewTreeNode>()): void {
+  if (seen.has(node)) return;
+  seen.add(node);
   visit(node);
   for (const child of node.children) {
-    walkViewTree(child, visit);
+    walkViewTree(child, visit, seen);
   }
 }
 
@@ -1289,7 +1671,7 @@ function indexViewTreeForClass(
   };
 
   for (const [field] of viewTree.getStateValues()) {
-    const fieldId = ctx.fieldToId.get(field);
+    const fieldId = ctx.resolveFieldNodeId(field);
     if (fieldId) {
       ctx.markFieldStateDecorators?.(field, fieldId, result);
       const line =
@@ -1303,43 +1685,64 @@ function indexViewTreeForClass(
   walkViewTree(root, (node) => {
     const sig = node.signature;
     if (sig) {
-      if (isViewTreeClassSignature(sig)) {
-        const childCls = ctx.scene.getClass(sig);
-        if (childCls) {
-          const childId = ctx.resolveClassNodeId(childCls);
+      try {
+        if (isViewTreeClassSignature(sig)) {
+          // Stub or live: prefer already-indexed sig→id (works after dep unload);
+          // %unk stubs also fall back to class name / parent-file import.
+          // Then fall back to live IR object maps when the class is still resident.
+          // Guard getClass — a mis-typed signature must not abort the whole ViewTree walk.
+          let childCls: ArkClass | null = null;
+          try {
+            childCls = ctx.scene.getClass(sig);
+          } catch {
+            childCls = null;
+          }
+          const childId =
+            ctx.resolveClassIdBySig(sig, cls) ??
+            (childCls ? ctx.resolveClassNodeId(childCls) : null);
           if (childId) {
-            const firstAttr = node.attributes.values().next().value;
-            const line = firstAttr
-              ? viewTreeLineFromStmt(firstAttr[0])
-              : buildMethod.getImplOriginFullPosition()?.getFirstLine() ?? 1;
+            let line = buildMethod.getImplOriginFullPosition()?.getFirstLine() ?? 1;
+            try {
+              const firstAttr = node.attributes?.values()?.next()?.value;
+              if (firstAttr) line = viewTreeLineFromStmt(firstAttr[0]);
+            } catch {
+              // keep build() line
+            }
             link(buildId, childId, 'references', 'child-component', line);
           }
-        }
-      } else {
-        const builderMethod = ctx.scene.getMethod(sig);
-        if (builderMethod) {
-          const builderId = ctx.ensureMethodNode(builderMethod, relativePath, result, classNodeId);
+        } else {
+          // MethodSignature: builder stub (sig only) or live ArkMethod.
+          let builderMethod: ArkMethod | null = null;
+          try {
+            builderMethod = ctx.scene.getMethod(sig as MethodSignature);
+          } catch {
+            builderMethod = null;
+          }
+          const builderId =
+            ctx.resolveMethodIdBySig(sig as MethodSignature, cls) ??
+            (builderMethod
+              ? ctx.ensureMethodNode(builderMethod, relativePath, result, classNodeId)
+              : null);
           if (builderId) {
-            link(
-              buildId,
-              builderId,
-              'references',
-              'builder',
-              builderMethod.getImplOriginFullPosition()?.getFirstLine() ?? 1
-            );
+            const line = builderMethod
+              ? builderMethod.getImplOriginFullPosition()?.getFirstLine() ?? 1
+              : buildMethod.getImplOriginFullPosition()?.getFirstLine() ?? 1;
+            link(buildId, builderId, 'references', 'builder', line);
           }
         }
+      } catch {
+        // Skip this node's signature edge; keep walking siblings/children.
       }
     }
 
     if (node.stateValuesTransfer) {
       for (const [childField, parentValue] of node.stateValuesTransfer) {
-        const childFieldId = ctx.fieldToId.get(childField);
+        const childFieldId = ctx.resolveFieldNodeId(childField);
         if (parentValue instanceof ArkField) {
           const via = stateTransferViaForField(childField);
           if (!via || !childFieldId) continue;
           ctx.markFieldStateDecorators?.(childField, childFieldId, result);
-          const parentFieldId = ctx.fieldToId.get(parentValue);
+          const parentFieldId = ctx.resolveFieldNodeId(parentValue);
           if (parentFieldId) {
             ctx.markFieldStateDecorators?.(parentValue, parentFieldId, result);
             link(
@@ -1351,7 +1754,14 @@ function indexViewTreeForClass(
             );
           }
         } else if (parentValue instanceof ArkMethod) {
-          const builderId = ctx.ensureMethodNode(parentValue, relativePath, result, classNodeId);
+          let builderId = ctx.ensureMethodNode(parentValue, relativePath, result, classNodeId);
+          if (!builderId) {
+            try {
+              builderId = ctx.resolveMethodIdBySig(parentValue.getSignature());
+            } catch {
+              builderId = null;
+            }
+          }
           if (childFieldId && builderId) {
             link(
               builderId,
@@ -1369,10 +1779,16 @@ function indexViewTreeForClass(
       if (!VIEWTREE_CALLBACK_ATTRS.has(attr)) continue;
       const line = viewTreeLineFromStmt(stmt);
       for (const v of values) {
-        if (!(v instanceof MethodSignature)) continue;
-        const handler = ctx.scene.getMethod(v);
-        if (!handler) continue;
-        const handlerId = ctx.ensureMethodNode(handler, relativePath, result, classNodeId);
+        const isMethodSig =
+          v instanceof MethodSignature ||
+          (v != null &&
+            typeof (v as { getMethodSubSignature?: unknown }).getMethodSubSignature === 'function');
+        if (!isMethodSig) continue;
+        const methodSig = v as MethodSignature;
+        const handler = ctx.scene.getMethod(methodSig);
+        const handlerId =
+          ctx.resolveMethodIdBySig(methodSig, cls) ??
+          (handler ? ctx.ensureMethodNode(handler, relativePath, result, classNodeId) : null);
         if (handlerId) link(buildId, handlerId, 'references', attr, line);
       }
     }
@@ -1387,9 +1803,29 @@ class ArkTSAdapter {
   private readonly classToId = new Map<ArkClass, string>();
   private readonly componentToId = new Map<ArkClass, string>();
   private readonly fieldToId = new Map<ArkField, string>();
+  /** Stable across module unload — signature string → HomeGraph node id. */
+  private readonly methodSigToId = new Map<string, string>();
+  private readonly classSigToId = new Map<string, string>();
+  private readonly fieldSigToId = new Map<string, string>();
+  /**
+   * Name → candidate node ids for ViewTree stub stitch when the signature is still
+   * `@%unk/%unk: ClassName` after dependency eviction. Prefer `component` over
+   * same-name struct/class; ambiguous multi-component names use the importer.
+   */
+  private readonly classNameToIds = new Map<string, Set<string>>();
+  private readonly classIdFilePath = new Map<string, string>();
+  private readonly classIdIsComponent = new Map<string, boolean>();
+  /** `ClassName::methodName` → candidate method node ids (unclear MethodSignature stubs). */
+  private readonly methodNameKeyToIds = new Map<string, Set<string>>();
+  /** Bare default-class function name → ids (unique import-gated CFG bridge). */
+  private readonly functionNameToIds = new Map<string, Set<string>>();
+  private readonly methodIdFilePath = new Map<string, string>();
+  private readonly emittedEdgeKeys = new Set<string>();
   private readonly nodeIds = new Set<string>();
   private readonly fileResults = new Map<string, ExtractionResult>();
   private readonly crossFileEdges: Edge[] = [];
+  /** Per-module `@dummyMain@…` created during analyseByModule (for scene aggregator). */
+  private readonly moduleDummyMains: ArkMethod[] = [];
 
   constructor(rootDir: string, scannedFiles: Iterable<string>) {
     this.rootDir = rootDir;
@@ -1398,91 +1834,489 @@ class ArkTSAdapter {
 
   build(scene: Scene): ArkTSBatchIndex {
     this.scene = scene;
-    const { entryPoints, dummyMain } = resolveRtaEntryPoints(scene);
 
     for (const arkFile of scene.getFiles()) {
-      const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
-      if (!this.scanned.has(relativePath)) continue;
-      if (!isArkAnalyzerSourcePath(relativePath)) continue;
-      this.indexFile(arkFile);
+      this.indexScannedFile(arkFile);
     }
+    this.indexViewTreesFromFiles(scene.getFiles());
+    this.finalizeCallGraph(scene);
 
-    for (const cls of scene.getClasses()) {
-      if (!cls.hasViewTree()) continue;
-      const arkFile = cls.getDeclaringArkFile();
+    return this.toBatchIndex();
+  }
+
+  /**
+   * Index one Harmony module while loaded (baseline = this module):
+   * symbols → rebind resident deps → ViewTree/RTA from this module (B→A via
+   * live IR or sig→id maps for already-indexed unloaded deps).
+   */
+  indexModule(module: ArkModule, scene: Scene): void {
+    this.scene = scene;
+    const files = [...module.getFilesMap().values()];
+    const moduleFiles = new Set(
+      files.map((f) => normalizeRelPath(this.rootDir, f.getFilePath())).filter(Boolean)
+    );
+    for (const arkFile of files) {
+      this.indexScannedFile(arkFile);
+    }
+    // Rebind still-resident deps so live getClass/getMethod works when topo kept them warm.
+    this.bindLiveMapsFromResident(scene);
+    this.indexViewTreesFromFiles(files);
+    this.ingestModuleCallGraph(scene, module, files, moduleFiles);
+    // CFG: only narrow `%unk` cross-module bridge (no same-module CFG calls).
+    this.stitchModuleCfgCallsAndRefs(files, moduleFiles);
+    // Drop live IR object keys so ArkAnalyzer can GC unloaded modules; keep sig→id maps.
+    this.releaseLiveIrMaps();
+  }
+
+  private bindLiveMapsFromResident(scene: Scene): void {
+    const cache = scene.getModuleCache();
+    if (!cache) return;
+    const files: ArkFile[] = [];
+    for (const id of cache.getLoadedModules()) {
+      const mod = scene.getModule(id);
+      if (!mod || mod.getModuleType() === ModuleType.SDK) continue;
+      if (mod.getLoadState() < ModuleLoadState.SIGNATURES) continue;
+      files.push(...mod.getFilesMap().values());
+    }
+    if (files.length > 0) this.bindLiveMapsFromFiles(files);
+  }
+
+  /** Re-attach live Ark* objects to already-indexed HomeGraph node ids (sig maps). */
+  private bindLiveMapsFromFiles(files: Iterable<ArkFile>): void {
+    for (const arkFile of files) {
       const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
       if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) continue;
-      const result = this.fileResults.get(relativePath);
-      if (!result) continue;
-      try {
-        indexViewTreeForClass(this.viewTreeContext(), cls, result, relativePath);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        result.errors.push({
-          message: `ViewTree indexing skipped for ${cls.getName()}: ${message}`,
-          filePath: relativePath,
-          severity: 'warning',
-        });
+
+      this.bindLiveClass(arkFile.getDefaultClass());
+      for (const cls of arkFile.getClasses()) {
+        this.bindLiveClass(cls);
+      }
+      for (const ns of arkFile.getNamespaces()) {
+        this.bindLiveNamespace(ns);
       }
     }
+  }
+
+  private bindLiveNamespace(ns: ArkNamespace): void {
+    this.bindLiveClass(ns.getDefaultClass());
+    for (const cls of ns.getClasses()) {
+      this.bindLiveClass(cls);
+    }
+    for (const child of ns.getNamespaces()) {
+      this.bindLiveNamespace(child);
+    }
+  }
+
+  private bindLiveClass(cls: ArkClass): void {
+    try {
+      const classSig = cls.getSignature().toString();
+      const classId = this.classSigToId.get(classSig);
+      if (classId) {
+        this.classToId.set(cls, classId);
+        if (cls.hasComponentDecorator()) {
+          this.componentToId.set(cls, classId);
+        }
+      }
+      for (const method of cls.getMethods(true)) {
+        try {
+          const mid = this.methodSigToId.get(method.getSignature().toString());
+          if (mid) this.methodToId.set(method, mid);
+        } catch {
+          // skip
+        }
+      }
+      for (const field of cls.getFields()) {
+        const fid = this.fieldSigToId.get(fieldSigKey(classSig, field.getName()));
+        if (fid) this.fieldToId.set(field, fid);
+      }
+    } catch {
+      // signature unavailable
+    }
+  }
+
+  finalizeCallGraph(scene: Scene): void {
+    this.scene = scene;
+
+    // Modular path: intra-module RTA already ran per module. Do NOT run a
+    // scene aggregator RTA — that re-walks overlapping reachable sets and was
+    // a major wall-clock cost. Cross-module gaps link only via exact
+    // signature / unique Class.method maps (no unresolved name-match seeds).
+    if (this.moduleDummyMains.length > 0) {
+      try {
+        for (const m of this.moduleDummyMains) {
+          this.indexArkanalyzerDummyMain(m);
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    const { entryPoints, dummyMain } = resolveRtaEntryPoints(scene);
 
     if (dummyMain) {
       this.indexArkanalyzerDummyMain(dummyMain);
     }
 
+    if (entryPoints.length === 0) return;
     let callGraph;
     try {
-      callGraph =
-        entryPoints.length > 0 ? scene.makeCallGraphRTA(entryPoints) : null;
+      callGraph = scene.makeCallGraphRTA(entryPoints);
     } catch {
-      callGraph = null;
+      return;
+    }
+    this.ingestCallGraph(callGraph, null);
+  }
+
+  private ingestModuleCallGraph(
+    scene: Scene,
+    module: ArkModule,
+    files: ArkFile[],
+    moduleFiles: Set<string>
+  ): void {
+    let entryPoints: MethodSignature[] = [];
+    let dummyMain: ArkMethod | null = null;
+
+    try {
+      const creater = DummyMainCreater.forModule(scene, module, true);
+      creater.createDummyMain();
+      dummyMain = creater.getDummyMain();
+      entryPoints = [dummyMain.getSignature()];
+      this.moduleDummyMains.push(dummyMain);
+    } catch {
+      // Fall back to file-scoped DummyMain (components only) if forModule fails.
+      const resolved = resolveRtaEntryPointsFromFiles(scene, files);
+      entryPoints = resolved.entryPoints;
+      dummyMain = resolved.dummyMain;
     }
 
-    if (callGraph) {
-      for (const edge of callGraph.getCallEdges()) {
-        const caller = callGraph.getArkMethodByFuncID(edge.getSrcID());
-        const callee = callGraph.getArkMethodByFuncID(edge.getDstID());
-        if (!caller || !callee) continue;
-        if (
-          shouldSkipArkMethod(caller) &&
-          !isAnonymousArkMethod(caller) &&
-          !caller.getDeclaringArkClass().isDefaultArkClass() &&
-          !caller.isGenerated()
-        ) {
-          continue;
+    if (dummyMain) {
+      this.indexArkanalyzerDummyMain(dummyMain);
+    }
+    if (entryPoints.length === 0) return;
+    let callGraph;
+    try {
+      callGraph = scene.makeCallGraphRTA(entryPoints);
+    } catch {
+      return;
+    }
+    this.ingestCallGraph(callGraph, moduleFiles);
+  }
+
+  /**
+   * Keep ArkAnalyzer RTA edges whose **caller** is in the current module.
+   *
+   * - Same-module: live IR id, exact MethodSignature map, or unique Class.method
+   *   name fallback (path-drift).
+   * - Cross-module: **exact MethodSignature string or live callee only** — no
+   *   Class.method name fallback (that + CFG densified scene_board to ~400k
+   *   ark calls vs ~76k on an unlimited RTA index).
+   */
+  private ingestCallGraph(
+    callGraph: NonNullable<ReturnType<Scene['makeCallGraphRTA']>>,
+    moduleFiles: Set<string> | null
+  ): void {
+    for (const edge of callGraph.getCallEdges()) {
+      const callerArk = callGraph.getArkMethodByFuncID(edge.getSrcID());
+      const calleeArk = callGraph.getArkMethodByFuncID(edge.getDstID());
+      const callerSig = callGraph.getMethodByFuncID(edge.getSrcID());
+      const calleeSig = callGraph.getMethodByFuncID(edge.getDstID());
+
+      if (
+        callerArk &&
+        shouldSkipArkMethod(callerArk) &&
+        !isAnonymousArkMethod(callerArk) &&
+        !callerArk.getDeclaringArkClass().isDefaultArkClass() &&
+        !callerArk.isGenerated()
+      ) {
+        continue;
+      }
+
+      const callerFile =
+        (callerArk ? relPathForArkFile(this.rootDir, callerArk.getDeclaringArkFile()) : null) ??
+        (callerSig ? this.relPathFromMethodSignature(callerSig) : null) ??
+        '';
+
+      if (moduleFiles && callerFile && !moduleFiles.has(callerFile)) {
+        continue;
+      }
+
+      const calleeFile =
+        (calleeArk ? relPathForArkFile(this.rootDir, calleeArk.getDeclaringArkFile()) : null) ??
+        (calleeSig ? this.relPathFromMethodSignature(calleeSig) : null);
+
+      const callerId =
+        (callerArk ? this.resolveMethodNodeId(callerArk) : null) ??
+        (callerSig ? this.resolveMethodIdBySigExact(callerSig) : null);
+      if (!callerId) continue;
+
+      const sameModule =
+        !!moduleFiles && !!calleeFile && moduleFiles.has(calleeFile);
+      const dispatch = edge.hasDirectCall() ? 'direct' : 'indirect';
+
+      // Full-scene path (no moduleFiles): keep prior resolveMethodIdBySig behavior.
+      if (!moduleFiles) {
+        const calleeId =
+          (calleeArk ? this.resolveMethodNodeId(calleeArk) : null) ??
+          (calleeSig ? this.resolveMethodIdBySig(calleeSig) : null);
+        if (!calleeId) continue;
+        this.emitArkCallEdge(callerId, calleeId, callerFile, dispatch, callerArk);
+        continue;
+      }
+
+      if (!sameModule) {
+        const calleeId =
+          (calleeArk ? this.resolveMethodNodeId(calleeArk) : null) ??
+          (calleeSig ? this.resolveMethodIdBySigExact(calleeSig) : null);
+        if (calleeId) {
+          this.emitArkCallEdge(callerId, calleeId, callerFile, dispatch, callerArk);
         }
+        continue;
+      }
 
-        const callerId = this.resolveMethodNodeId(caller);
-        const calleeId = this.resolveMethodNodeId(callee);
-        if (!callerId || !calleeId) continue;
+      const calleeId =
+        (calleeArk ? this.resolveMethodNodeId(calleeArk) : null) ??
+        (calleeSig ? this.resolveMethodIdBySig(calleeSig) : null);
+      if (!calleeId) continue;
+      this.emitArkCallEdge(callerId, calleeId, callerFile, dispatch, callerArk);
+    }
+  }
 
-        const callerFile = relPathForArkFile(this.rootDir, caller.getDeclaringArkFile());
-        const callEdge = arkEdge(callerId, calleeId, 'calls', {
-          metadata: {
-            synthesizedBy: 'arkanalyzer',
-            dispatch: edge.hasDirectCall() ? 'direct' : 'indirect',
-            sourceFile: callerFile,
-            rtaEntry: caller.isGenerated?.() && caller.getName() === '@dummyMain'
-              ? '@dummyMain'
-              : undefined,
-          },
-        });
+  /**
+   * CFG call stitch (modular): no same-module CFG call edges (those were the
+   * ~150k `direct` flood past unlimited RTA). Only the narrow cross-module
+   * `%unk` bridge for `return Lib.use(…)`-style static calls.
+   */
+  private stitchModuleCfgCallsAndRefs(files: ArkFile[], _moduleFiles: Set<string>): void {
+    for (const arkFile of files) {
+      const callerFile = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+      const visitClass = (cls: ArkClass) => {
+        for (const method of cls.getMethods(true)) {
+          if (
+            shouldSkipArkMethod(method) &&
+            !isAnonymousArkMethod(method) &&
+            !method.isGenerated()
+          ) {
+            continue;
+          }
+          const callerId =
+            this.resolveMethodNodeId(method) ??
+            (() => {
+              try {
+                return this.methodSigToId.get(method.getSignature().toString()) ?? null;
+              } catch {
+                return null;
+              }
+            })();
+          if (!callerId) continue;
+          let cfg;
+          try {
+            cfg = method.getCfg();
+          } catch {
+            continue;
+          }
+          if (!cfg) continue;
+          for (const stmt of cfg.getStmts()) {
+            let invoke;
+            try {
+              invoke = stmt.getInvokeExpr();
+            } catch {
+              continue;
+            }
+            if (!invoke) continue;
+            let calleeSig: MethodSignature;
+            try {
+              calleeSig = invoke.getMethodSignature();
+            } catch {
+              continue;
+            }
+            if (!calleeSig) continue;
 
-        const callerResult = this.fileResults.get(callerFile);
-        if (callerResult && this.nodeInFile(calleeId, callerFile)) {
-          callerResult.edges.push(callEdge);
-        } else {
-          this.crossFileEdges.push(callEdge);
+            // Skip clear same-module paths — RTA owns those. Only `%unk` /
+            // missing-path invokes may take the narrow cross-module bridge.
+            const calleeFile = this.relPathFromMethodSignature(calleeSig);
+            if (calleeFile) continue;
+
+            this.tryLinkCfgCrossModuleUnk(
+              callerId,
+              callerFile,
+              calleeSig,
+              method,
+              stmt,
+              invoke,
+              arkFile
+            );
+          }
         }
+      };
+
+      visitClass(arkFile.getDefaultClass());
+      for (const cls of arkFile.getClasses()) visitClass(cls);
+      const walkNs = (ns: ArkNamespace) => {
+        visitClass(ns.getDefaultClass());
+        for (const cls of ns.getClasses()) visitClass(cls);
+        for (const child of ns.getNamespaces()) walkNs(child);
+      };
+      for (const ns of arkFile.getNamespaces()) walkNs(ns);
+    }
+  }
+
+  private emitArkCallEdge(
+    callerId: string,
+    calleeId: string,
+    callerFile: string,
+    dispatch: string,
+    callerArk: ArkMethod | null
+  ): void {
+    const edgeKey = `${callerId}\0${calleeId}\0calls\0${dispatch}`;
+    if (this.emittedEdgeKeys.has(edgeKey)) return;
+    if (this.emittedEdgeKeys.has(`${callerId}\0${calleeId}\0calls\0direct`)) return;
+    if (this.emittedEdgeKeys.has(`${callerId}\0${calleeId}\0calls\0indirect`)) return;
+    this.emittedEdgeKeys.add(edgeKey);
+
+    const callEdge = arkEdge(callerId, calleeId, 'calls', {
+      metadata: {
+        synthesizedBy: 'arkanalyzer',
+        dispatch,
+        sourceFile: callerFile || undefined,
+        rtaEntry:
+          callerArk?.isGenerated?.() && callerArk.getName() === '@dummyMain'
+            ? '@dummyMain'
+            : undefined,
+      },
+    });
+
+    const callerResult = callerFile ? this.fileResults.get(callerFile) : undefined;
+    if (callerResult && this.nodeInFile(calleeId, callerFile)) {
+      callerResult.edges.push(callEdge);
+    } else {
+      this.crossFileEdges.push(callEdge);
+    }
+  }
+
+  /**
+   * CFG `%unk` bridge: recover Class.method / free function from invoke crumbs
+   * (stmt text, UnclearReferenceType name, PascalCase base local), require
+   * import + unique indexed target, skip fan-out blocklist. No unresolved refs.
+   */
+  private tryLinkCfgCrossModuleUnk(
+    callerId: string,
+    callerFile: string,
+    calleeSig: MethodSignature,
+    callerArk: ArkMethod | null,
+    stmt: Stmt,
+    invoke: unknown,
+    arkFile: ArkFile
+  ): void {
+    // Only for unclear / %unk signatures — clear typed cross-module invokes
+    // stay RTA-only so we do not densify past unlimited RTA.
+    if (!isUnclearArkMethodSignature(calleeSig)) {
+      try {
+        const className = calleeSig.getDeclaringClassSignature()?.getClassName?.() ?? '';
+        if (isUsableArkTypeName(className) && !className.includes('%')) return;
+      } catch {
+        // treat as unclear
       }
     }
 
+    const parsed = callReferenceNameFromSig(calleeSig, { stmt, invoke });
+    if (!parsed || parsed.kind !== 'calls') return;
+
+    if (parsed.freeFunction) {
+      const fnName = parsed.name;
+      if (!fnName || ARKTS_CFG_CROSS_MODULE_METHOD_BLOCKLIST.has(fnName)) return;
+      if (!this.fileImportsLocalName(arkFile, fnName)) return;
+      const calleeId = this.resolveFunctionIdByName(fnName);
+      if (!calleeId) return;
+      this.emitArkCallEdge(callerId, calleeId, callerFile, 'direct', callerArk);
+      return;
+    }
+
+    const dot = parsed.name.indexOf('.');
+    if (dot <= 0) return;
+    const className = parsed.name.slice(0, dot);
+    const methodName = parsed.name.slice(dot + 1);
+    if (!className || !methodName) return;
+    if (ARKTS_CFG_CROSS_MODULE_METHOD_BLOCKLIST.has(methodName)) return;
+    if (isJunkArkCallSeed(className, methodName)) return;
+    if (!this.fileImportsLocalName(arkFile, className)) return;
+
+    const calleeId = this.resolveMethodIdByName(className, methodName);
+    if (!calleeId) return;
+    this.emitArkCallEdge(callerId, calleeId, callerFile, 'direct', callerArk);
+  }
+
+  private fileImportsLocalName(arkFile: ArkFile, localName: string): boolean {
+    try {
+      return !!arkFile.getImportInfoBy(localName);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Exact MethodSignature.toString() → node id (no Class.method name fallback). */
+  private resolveMethodIdBySigExact(sig: MethodSignature): string | null {
+    try {
+      return this.methodSigToId.get(sig.toString()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Project-relative path from a MethodSignature's declaring file (may be %unk). */
+  private relPathFromMethodSignature(sig: MethodSignature): string | null {
+    try {
+      const fileName = sig.getDeclaringClassSignature().getDeclaringFileSignature().getFileName();
+      if (!fileName || fileName === '%unk' || fileName.includes('%unk')) return null;
+      return normalizeRelPath(this.rootDir, fileName);
+    } catch {
+      return null;
+    }
+  }
+
+  private releaseLiveIrMaps(): void {
+    this.methodToId.clear();
+    this.classToId.clear();
+    this.componentToId.clear();
+    this.fieldToId.clear();
+  }
+
+  toBatchIndex(errors: ExtractionError[] = []): ArkTSBatchIndex {
     return {
       fileResults: this.fileResults,
       crossFileEdges: this.crossFileEdges,
       nodeIds: this.nodeIds,
-      errors: [],
+      errors: [...errors],
     };
+  }
+
+  private indexScannedFile(arkFile: ArkFile): void {
+    const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+    if (!this.scanned.has(relativePath)) return;
+    if (!isArkAnalyzerSourcePath(relativePath)) return;
+    this.indexFile(arkFile);
+  }
+
+  private indexViewTreesFromFiles(files: Iterable<ArkFile>): void {
+    for (const arkFile of files) {
+      const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+      if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) continue;
+      const result = this.fileResults.get(relativePath);
+      if (!result) continue;
+      for (const cls of arkFile.getClasses()) {
+        if (!cls.hasViewTree()) continue;
+        try {
+          indexViewTreeForClass(this.viewTreeContext(), cls, result, relativePath);
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          result.errors.push({
+            message: `ViewTree indexing skipped for ${cls.getName()}: ${message}`,
+            filePath: relativePath,
+            severity: 'warning',
+          });
+        }
+      }
+    }
   }
 
   /** Index ArkAnalyzer's in-scene @dummyMain (DummyMainCreater output), not a HomeGraph synthetic node. */
@@ -1707,6 +2541,12 @@ class ArkTSAdapter {
     });
     this.addNode(result, classNode);
     this.classToId.set(cls, classNode.id);
+    try {
+      this.classSigToId.set(cls.getSignature().toString(), classNode.id);
+    } catch {
+      // signature unavailable
+    }
+    this.rememberClassName(displayName, classNode.id, relativePath, false);
     result.edges.push(arkEdge(parentId, classNode.id, 'contains'));
     this.indexDecorators(result, classNode.id, cls, relativePath, language, line);
 
@@ -1739,6 +2579,12 @@ class ArkTSAdapter {
       );
       this.addNode(result, componentNode);
       this.componentToId.set(cls, componentNode.id);
+      try {
+        this.classSigToId.set(cls.getSignature().toString(), componentNode.id);
+      } catch {
+        // signature unavailable
+      }
+      this.rememberClassName(displayName, componentNode.id, relativePath, true);
       result.edges.push(arkEdge(classNode.id, componentNode.id, 'contains'));
     }
 
@@ -1848,6 +2694,11 @@ class ArkTSAdapter {
     });
     this.addNode(result, fieldNode);
     this.fieldToId.set(field, fieldNode.id);
+    try {
+      this.fieldSigToId.set(fieldSigKey(cls.getSignature().toString(), name), fieldNode.id);
+    } catch {
+      // signature unavailable
+    }
     result.edges.push(arkEdge(parentId, fieldNode.id, 'contains'));
     this.indexDecorators(result, fieldNode.id, field, relativePath, language, line);
   }
@@ -1880,6 +2731,11 @@ class ArkTSAdapter {
         parentId: string
       ) => this.ensureMethodNode(method, relativePath, result, parentId),
       resolveClassNodeId: (cls: ArkClass) => this.resolveClassNodeId(cls),
+      resolveClassIdBySig: (sig: ClassSignature, importer?: ArkClass) =>
+        this.resolveClassIdBySig(sig, importer),
+      resolveMethodIdBySig: (sig: MethodSignature, importer?: ArkClass) =>
+        this.resolveMethodIdBySig(sig, importer),
+      resolveFieldNodeId: (field: ArkField) => this.resolveFieldNodeId(field),
       markFieldStateDecorators: (field: ArkField, fieldNodeId: string, result: ExtractionResult) => {
         const kinds = stateDecoratorKinds(field);
         if (kinds.length === 0) return;
@@ -1890,7 +2746,173 @@ class ArkTSAdapter {
   }
 
   private resolveClassNodeId(cls: ArkClass): string | null {
-    return this.componentToId.get(cls) ?? this.classToId.get(cls) ?? null;
+    const live = this.componentToId.get(cls) ?? this.classToId.get(cls);
+    if (live) return live;
+    try {
+      return this.classSigToId.get(cls.getSignature().toString()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private rememberClassName(
+    name: string,
+    nodeId: string,
+    filePath: string,
+    isComponent: boolean
+  ): void {
+    if (!isUsableArkTypeName(name)) return;
+    let set = this.classNameToIds.get(name);
+    if (!set) {
+      set = new Set();
+      this.classNameToIds.set(name, set);
+    }
+    set.add(nodeId);
+    this.classIdFilePath.set(nodeId, filePath);
+    if (isComponent) this.classIdIsComponent.set(nodeId, true);
+  }
+
+  private rememberMethodName(
+    className: string,
+    methodName: string,
+    nodeId: string,
+    filePath: string
+  ): void {
+    const key = `${className}::${methodName}`;
+    let set = this.methodNameKeyToIds.get(key);
+    if (!set) {
+      set = new Set();
+      this.methodNameKeyToIds.set(key, set);
+    }
+    set.add(nodeId);
+    this.methodIdFilePath.set(nodeId, filePath);
+  }
+
+  private rememberFunctionName(functionName: string, nodeId: string, filePath: string): void {
+    if (!isUsableArkTypeName(functionName) || !/^[a-z]/.test(functionName)) return;
+    let set = this.functionNameToIds.get(functionName);
+    if (!set) {
+      set = new Set();
+      this.functionNameToIds.set(functionName, set);
+    }
+    set.add(nodeId);
+    this.methodIdFilePath.set(nodeId, filePath);
+  }
+
+  private resolveFunctionIdByName(functionName: string): string | null {
+    const ids = this.functionNameToIds.get(functionName);
+    if (!ids || ids.size !== 1) return null;
+    return [...ids][0] ?? null;
+  }
+
+  private resolveClassIdByName(className: string, importer?: ArkClass): string | null {
+    const ids = this.classNameToIds.get(className);
+    if (!ids || ids.size === 0) return null;
+
+    let candidates = [...ids];
+    // Same-file components (ForEach item builders, local @Component) have no import —
+    // prefer ids from the importer's file before treating the name as ambiguous.
+    if (importer) {
+      try {
+        const importerPath = normalizeRelPath(
+          this.rootDir,
+          importer.getDeclaringArkFile().getFilePath()
+        );
+        const sameFile = candidates.filter((id) => this.classIdFilePath.get(id) === importerPath);
+        if (sameFile.length > 0) candidates = sameFile;
+      } catch {
+        // keep full candidate set
+      }
+    }
+
+    const preferred = pickPreferredClassNodeId(candidates, (id) => !!this.classIdIsComponent.get(id));
+    if (preferred) return preferred;
+
+    if (!importer) return null;
+    try {
+      const importInfo = importer.getDeclaringArkFile().getImportInfoBy(className);
+      if (!importInfo) return null;
+
+      const exportInfo = importInfo.getLazyExportInfo?.() ?? null;
+      const arkExport = exportInfo?.getArkExport?.() ?? null;
+      if (arkExport instanceof ArkClass) {
+        const byLive = this.resolveClassNodeId(arkExport);
+        if (byLive) return byLive;
+      }
+
+      const from = importInfo.getFrom?.();
+      if (!from) return null;
+      const fromBase = path.basename(from).replace(/\.(ets|ts|d\.ts)$/i, '');
+      const byPath = [...ids].filter((id) => {
+        const fp = this.classIdFilePath.get(id);
+        if (!fp) return false;
+        const norm = fp.replace(/\\/g, '/');
+        const fromNorm = from.replace(/\\/g, '/');
+        return (
+          norm.includes(fromNorm) ||
+          fromNorm.includes(norm) ||
+          path.basename(norm, path.extname(norm)) === fromBase ||
+          path.basename(norm, path.extname(norm)) === className
+        );
+      });
+      return pickPreferredClassNodeId(byPath, (id) => !!this.classIdIsComponent.get(id));
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveMethodIdByName(className: string, methodName: string): string | null {
+    const key = `${className}::${methodName}`;
+    const ids = this.methodNameKeyToIds.get(key);
+    if (!ids || ids.size !== 1) return null;
+    return [...ids][0] ?? null;
+  }
+
+  private resolveClassIdBySig(sig: ClassSignature, importer?: ArkClass): string | null {
+    try {
+      const exact = this.classSigToId.get(sig.toString());
+      if (exact) return exact;
+    } catch {
+      // fall through to name fallback when possible
+    }
+    // Name fallback for %unk stubs AND clear-but-unmapped sig strings (path drift).
+    // Same-file / import disambiguation happens inside resolveClassIdByName.
+    try {
+      const className = sig.getClassName();
+      return className ? this.resolveClassIdByName(className, importer) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveMethodIdBySig(sig: MethodSignature, _importer?: ArkClass): string | null {
+    try {
+      const exact = this.methodSigToId.get(sig.toString());
+      if (exact) return exact;
+    } catch {
+      // fall through
+    }
+    // Name fallback for %unk stubs AND path-drifted but clear signatures so
+    // RTA edges to signature-only / unloaded callees still map to indexed nodes.
+    try {
+      const className = sig.getDeclaringClassSignature().getClassName();
+      const methodName = sig.getMethodSubSignature().getMethodName();
+      if (!className || !methodName) return null;
+      return this.resolveMethodIdByName(className, methodName);
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveFieldNodeId(field: ArkField): string | null {
+    const live = this.fieldToId.get(field);
+    if (live) return live;
+    try {
+      const classSig = field.getDeclaringArkClass().getSignature().toString();
+      return this.fieldSigToId.get(fieldSigKey(classSig, field.getName())) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /** Parent node id for a method: owning class/component, or file for default-class methods. */
@@ -1913,6 +2935,15 @@ class ArkTSAdapter {
   private resolveMethodNodeId(method: ArkMethod): string | null {
     const existing = this.methodToId.get(method);
     if (existing) return existing;
+    try {
+      const bySig = this.methodSigToId.get(method.getSignature().toString());
+      if (bySig) {
+        this.methodToId.set(method, bySig);
+        return bySig;
+      }
+    } catch {
+      // fall through
+    }
 
     if (shouldSkipArkMethod(method) && !isAnonymousArkMethod(method)) return null;
 
@@ -1946,6 +2977,10 @@ class ArkTSAdapter {
     via: string,
     line: number
   ): void {
+    const edgeKey = `${source}\0${target}\0${kind}\0${via}`;
+    if (this.emittedEdgeKeys.has(edgeKey)) return;
+    this.emittedEdgeKeys.add(edgeKey);
+
     const edge = arkEdge(source, target, kind, {
       metadata: {
         synthesizedBy: 'viewtree',
@@ -1968,6 +3003,15 @@ class ArkTSAdapter {
   ): string | null {
     const existing = this.methodToId.get(method);
     if (existing) return existing;
+    try {
+      const bySig = this.methodSigToId.get(method.getSignature().toString());
+      if (bySig) {
+        this.methodToId.set(method, bySig);
+        return bySig;
+      }
+    } catch {
+      // fall through
+    }
 
     if (shouldSkipArkMethod(method) && !isAnonymousArkMethod(method)) return null;
 
@@ -2005,6 +3049,21 @@ class ArkTSAdapter {
     });
     this.addNode(result, methodNode);
     this.methodToId.set(method, methodNode.id);
+    try {
+      this.methodSigToId.set(method.getSignature().toString(), methodNode.id);
+    } catch {
+      // signature unavailable
+    }
+    try {
+      const ownerName = classDisplayName(cls);
+      if (isUsableArkTypeName(ownerName) && isUsableArkTypeName(displayName)) {
+        this.rememberMethodName(ownerName, displayName, methodNode.id, relativePath);
+      } else if (cls.isDefaultArkClass() && kind === 'function') {
+        this.rememberFunctionName(displayName, methodNode.id, relativePath);
+      }
+    } catch {
+      // class name unavailable
+    }
     result.edges.push(arkEdge(parentId, methodNode.id, 'contains'));
     this.indexDecorators(result, methodNode.id, method, relativePath, language, line);
     this.indexNativeNapiCalls(method, methodNode.id, relativePath, language, result);
@@ -2108,10 +3167,11 @@ export function drainArkTSIndexNotices(): ExtractionError[] {
   return out;
 }
 
-function buildSceneConfig(rootDir: string) {
+function buildSceneConfig(rootDir: string, extra?: { memoryLimitMB?: number }) {
   return buildSceneConfigFromProject(rootDir, process.env.OHOS_SDK_HOME, {
     supportFileExts: ['.ets', '.ts', '.d.ts'],
     enableMethodBodyBuild: true,
+    ...(extra?.memoryLimitMB !== undefined ? { memoryLimitMB: extra.memoryLimitMB } : {}),
   });
 }
 
@@ -2138,22 +3198,120 @@ function emptyArkTSBatchIndex(errors: ExtractionError[]): ArkTSBatchIndex {
   };
 }
 
-function buildArkTSIndex(rootDir: string, scannedFiles: Iterable<string>): ArkTSBatchIndex {
-  const { scene, errors } = tryBuildArkScene(rootDir);
-  if (!scene) {
+/**
+ * Harmony multi-module path: load each PROJECT module to BODIES, index into
+ * HomeGraph structures in the callback, let ArkAnalyzer evict under memoryLimitMB.
+ */
+function buildArkTSIndexByModule(
+  rootDir: string,
+  scannedFiles: Iterable<string>
+): ArkTSBatchIndex {
+  const errors: ExtractionError[] = [];
+  const memoryLimitMB = resolveArkTSSceneMemoryLimitMB();
+  const sceneConfig = buildSceneConfig(rootDir, { memoryLimitMB });
+  const scene = new Scene();
+  const adapter = new ArkTSAdapter(rootDir, scannedFiles);
+  let modulesIndexed = 0;
+
+  try {
+    scene.config(sceneConfig);
+
+    const config = new ModuleAnalysisConfig();
+    config.setIncludeType(ModuleType.PROJECT, true);
+    config.setLoadLevel(ModuleDepthLevel.BODIES);
+    // SIGNATURES is enough for ViewTree stubs / types; BODIES on deps caused
+    // each module's RTA to re-walk shared library CFGs (multi-hour indexes).
+    config.setDependencyLoadLevel(ModuleDepthLevel.SIGNATURES);
+
+    process.stderr.write(
+      `\n\x1b[33m    ArkTS: analyseByModule (PROJECT→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB}, maxOldSpace=${resolveMaxOldSpaceSizeMb()})...\x1b[0m\n`
+    );
+
+    scene.analyseByModule((module, scn) => {
+      adapter.indexModule(module, scn);
+      modulesIndexed++;
+      const name = module.getModuleName() || path.basename(module.getModulePath());
+      process.stderr.write(`\x1b[33m    ArkTS: indexed module ${modulesIndexed}: ${name}\x1b[0m\n`);
+    }, config);
+
+    if (modulesIndexed === 0) {
+      errors.push({
+        message:
+          'ArkTS analyseByModule found no PROJECT modules (check build-profile.json5); falling back to full Scene build',
+        severity: 'warning',
+      });
+      return emptyArkTSBatchIndex(errors);
+    }
+
+    try {
+      adapter.finalizeCallGraph(scene);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      errors.push({
+        message: `ArkTS modular leftover RTA skipped: ${message}`,
+        severity: 'warning',
+      });
+    }
+
+    const index = adapter.toBatchIndex(errors);
+    if (index.fileResults.size === 0) {
+      errors.push({
+        message: 'ArkTS analyseByModule indexed modules but no scanned source files matched',
+        severity: 'warning',
+      });
+      return emptyArkTSBatchIndex(errors);
+    }
+    return index;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    errors.push({
+      message: `ArkTS analyseByModule failed: ${message}; falling back to full Scene build`,
+      severity: 'warning',
+    });
     return emptyArkTSBatchIndex(errors);
+  } finally {
+    try {
+      scene.dispose();
+    } catch {
+      // ignore dispose failures
+    }
+  }
+}
+
+function buildArkTSIndexFull(
+  rootDir: string,
+  scannedFiles: Iterable<string>,
+  priorErrors: ExtractionError[] = []
+): ArkTSBatchIndex {
+  const { scene, errors } = tryBuildArkScene(rootDir);
+  const allErrors = [...priorErrors, ...errors];
+  if (!scene) {
+    return emptyArkTSBatchIndex(allErrors);
   }
 
   try {
     const adapter = new ArkTSAdapter(rootDir, scannedFiles);
     const index = adapter.build(scene);
-    index.errors.push(...errors);
+    index.errors.push(...allErrors);
     return index;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    errors.push({ message: `ArkTS adapter failed: ${message}`, severity: 'error' });
-    return emptyArkTSBatchIndex(errors);
+    allErrors.push({ message: `ArkTS adapter failed: ${message}`, severity: 'error' });
+    return emptyArkTSBatchIndex(allErrors);
   }
+}
+
+function buildArkTSIndex(rootDir: string, scannedFiles: Iterable<string>): ArkTSBatchIndex {
+  if (shouldUseModularArkTSBuild(rootDir)) {
+    const modular = buildArkTSIndexByModule(rootDir, scannedFiles);
+    const fatal = modular.errors.find((e) => e.severity === 'error');
+    if (modular.fileResults.size > 0 && !fatal) {
+      return modular;
+    }
+    // Warnings like "no PROJECT modules" / modular failure → full Scene fallback.
+    return buildArkTSIndexFull(rootDir, scannedFiles, modular.errors);
+  }
+  return buildArkTSIndexFull(rootDir, scannedFiles);
 }
 
 // =============================================================================

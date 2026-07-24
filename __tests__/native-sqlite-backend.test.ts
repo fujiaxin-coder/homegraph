@@ -1,5 +1,5 @@
 /**
- * Native better-sqlite3 backend — real index + queries (skipped when unavailable).
+ * WAL backends (node:sqlite or better-sqlite3) — real index + queries.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -7,15 +7,17 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import HomeGraph from '../src';
-import { isNativeSqliteAvailable } from '../src/db/sqlite-adapter';
+import { isNativeSqliteAvailable, isNodeSqliteAvailable } from '../src/db/sqlite-adapter';
 import { removeTempDir } from './helpers/fs';
 
-describe.skipIf(!isNativeSqliteAvailable())('native better-sqlite3 backend — real index + queries', () => {
+const hasWalBackend = isNodeSqliteAvailable() || isNativeSqliteAvailable();
+
+describe.skipIf(!hasWalBackend)('WAL SQLite backend — real index + queries', () => {
   let dir: string;
   let cg: HomeGraph;
 
   beforeAll(async () => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-native-sqlite-'));
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-wal-sqlite-'));
     fs.writeFileSync(path.join(dir, 'a.ts'), 'export function helper(): number { return 1; }\n');
     fs.writeFileSync(
       path.join(dir, 'b.ts'),
@@ -29,8 +31,8 @@ describe.skipIf(!isNativeSqliteAvailable())('native better-sqlite3 backend — r
     removeTempDir(dir);
   });
 
-  it('uses the native backend', () => {
-    expect(cg.getBackend()).toBe('native');
+  it('uses a WAL-capable backend', () => {
+    expect(['node-sqlite', 'native']).toContain(cg.getBackend());
   });
 
   it('runs in WAL mode', () => {

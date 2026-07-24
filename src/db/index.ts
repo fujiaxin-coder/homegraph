@@ -11,7 +11,7 @@ import { SchemaVersion } from '../types';
 import { runMigrations, getCurrentVersion, CURRENT_SCHEMA_VERSION } from './migrations';
 import { getHomeGraphDir } from '../directory';
 
-export { SqliteDatabase, SqliteBackend, WASM_FALLBACK_FIX_RECIPE } from './sqlite-adapter';
+export { SqliteDatabase, SqliteBackend, WASM_FALLBACK_FIX_RECIPE, isNodeSqliteAvailable, isNativeSqliteAvailable } from './sqlite-adapter';
 
 /**
  * Apply connection-level PRAGMAs. Shared by `initialize` and `open` so the two
@@ -23,7 +23,7 @@ export { SqliteDatabase, SqliteBackend, WASM_FALLBACK_FIX_RECIPE } from './sqlit
  * the lock instead of throwing "database is locked" immediately. See issue #238.
  *
  * The 5s window (was 120s) rides out a normal incremental sync; the old
- * 2-minute wait presented as a frozen, hung agent. With WAL (native
+ * 2-minute wait presented as a frozen, hung agent. With WAL (node:sqlite or
  * better-sqlite3), reads never block on a writer, so this timeout only governs
  * cross-process write contention. The WASM fallback remaps WAL → DELETE.
  */
@@ -259,10 +259,16 @@ export class DatabaseConnection {
         const { workerData, parentPort } = require('node:worker_threads');
         let row = null;
         try {
-          // Prefer better-sqlite3 (same as createDatabase). Skip if unavailable —
-          // maintenance is best-effort; WAL checkpoint only applies on native.
-          const Database = require('better-sqlite3');
-          const db = new Database(workerData.dbPath);
+          // Mirror createDatabase preference: node:sqlite → better-sqlite3.
+          // Best-effort; WAL checkpoint only applies on WAL backends.
+          let db = null;
+          try {
+            const { DatabaseSync } = require('node:sqlite');
+            db = new DatabaseSync(workerData.dbPath);
+          } catch {
+            const Database = require('better-sqlite3');
+            db = new Database(workerData.dbPath);
+          }
           try { row = db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get(); } catch {}
           try { db.close(); } catch {}
         } catch {}
@@ -354,8 +360,14 @@ export class DatabaseConnection {
       const workerSource = `
         const { workerData, parentPort } = require('node:worker_threads');
         try {
-          const Database = require('better-sqlite3');
-          const db = new Database(workerData.dbPath);
+          let db = null;
+          try {
+            const { DatabaseSync } = require('node:sqlite');
+            db = new DatabaseSync(workerData.dbPath);
+          } catch {
+            const Database = require('better-sqlite3');
+            db = new Database(workerData.dbPath);
+          }
           for (const p of workerData.pragmas) { try { db.exec(p); } catch {} }
           try { db.close(); } catch {}
         } catch {}

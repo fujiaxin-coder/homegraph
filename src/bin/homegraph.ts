@@ -910,10 +910,13 @@ program
       console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
       console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
       console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
-      // Prefer better-sqlite3; wasm is the fallback when native is unavailable.
-      const backendLabel = backend === 'native'
-        ? chalk.green('native')
-        : chalk.yellow(`wasm ${getGlyphs().dash} slower fallback; run \`npm rebuild better-sqlite3\``);
+      // Prefer node:sqlite → better-sqlite3; wasm is last-resort (no WAL).
+      const backendLabel =
+        backend === 'node-sqlite' ? chalk.green('node-sqlite')
+        : backend === 'native' ? chalk.green('native (better-sqlite3)')
+        : chalk.yellow(
+            `wasm ${getGlyphs().dash} slower fallback; use Node 22.5+ or \`npm rebuild better-sqlite3\``
+          );
       console.log(`  Backend:   ${backendLabel}`);
       const journalLabel = journalMode === 'wal'
         ? chalk.green('wal')

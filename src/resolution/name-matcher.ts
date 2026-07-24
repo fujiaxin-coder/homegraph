@@ -1575,13 +1575,31 @@ export function matchMethodCall(
   // with a `Logger` in both `a/` and `b/`), try the class in the call site's
   // own file first — otherwise the first-indexed class wins and a call in `b/`
   // resolves to `a/`'s method (#1079).
-  const classCandidates = preferCallSiteFile(
+  //
+  // ArkTS: same-file OR imported local name only. Unrestricted project-wide
+  // matches welded every CFG `Foo.getInstance` seed onto one method; requiring
+  // `import { Foo }` (or a same-file class) keeps cross-module `Lib.use` while
+  // dropping ambient / unimported stubs.
+  let classCandidates = preferCallSiteFile(
     context.getNodesByName(objectOrClass!),
     ref.filePath,
   );
+  if (ref.language === 'arkts') {
+    const imported = context
+      .getImportMappings(ref.filePath, ref.language)
+      .some((i) => i.localName === objectOrClass);
+    classCandidates = classCandidates.filter(
+      (n) => n.filePath === ref.filePath || imported
+    );
+  }
 
   for (const classNode of classCandidates) {
-    if (classNode.kind === 'class' || classNode.kind === 'struct' || classNode.kind === 'interface') {
+    if (
+      classNode.kind === 'class' ||
+      classNode.kind === 'struct' ||
+      classNode.kind === 'interface' ||
+      (ref.language === 'arkts' && classNode.kind === 'component')
+    ) {
       // Skip cross-language class matches
       if (classNode.language !== ref.language) continue;
 
@@ -1606,8 +1624,10 @@ export function matchMethodCall(
 
   // Strategy 2: Instance variable receiver - try capitalized form to find class
   // e.g., "permissionEngine" → look for classes containing "PermissionEngine"
+  // ArkTS: skip — cross-module seeds are already `Class.method`; capitalizing
+  // locals caused wrong bindings on large Harmony trees.
   const capitalizedReceiver = objectOrClass!.charAt(0).toUpperCase() + objectOrClass!.slice(1);
-  if (capitalizedReceiver !== objectOrClass) {
+  if (ref.language !== 'arkts' && capitalizedReceiver !== objectOrClass) {
     const fuzzyClassCandidates = preferCallSiteFile(
       context.getNodesByName(capitalizedReceiver),
       ref.filePath,
@@ -1640,6 +1660,12 @@ export function matchMethodCall(
   // Strategy 3: Find methods by name across the codebase, match by receiver
   // name similarity with the containing class. Handles abbreviated variable
   // names like permissionEngine → PermissionRuleEngine.
+  // ArkTS: never — unique/score fallthrough turns `Foo.getInstance` into a
+  // project-wide getInstance magnet when Class is wrong/missing.
+  if (ref.language === 'arkts') {
+    return null;
+  }
+
   if (methodName) {
     const methodCandidates = context.getNodesByName(methodName!);
     // Ubiquitous-method ceiling (#999): a method name re-declared across a
@@ -2017,6 +2043,38 @@ export function matchReference(
   // 2. Method call pattern
   result = matchMethodCall(ref, context);
   if (result) return result;
+
+  // ArkTS calls / instantiates: no bare exact-match or fuzzy. Cross-module
+  // seeds are `Class.method` (handled above) or a class name for `new`
+  // (`instantiates`). Falling through previously linked every `when`/`toString`
+  // invoke to a single same-named symbol (100k+ false edges on scene_board).
+  if (
+    ref.language === 'arkts' &&
+    (ref.referenceKind === 'calls' || ref.referenceKind === 'instantiates')
+  ) {
+    if (ref.referenceKind === 'instantiates' && !ref.referenceName.includes('.')) {
+      // Same-file only — project-wide unique class still over-links constructor
+      // seeds (`GridOccupyStatus` × thousands). Cross-module `new Foo` stays
+      // unresolved rather than guessed (import path is also disabled above).
+      const sameFile = context
+        .getNodesByName(ref.referenceName)
+        .filter(
+          (n) =>
+            n.language === 'arkts' &&
+            n.filePath === ref.filePath &&
+            (n.kind === 'class' || n.kind === 'struct' || n.kind === 'component')
+        );
+      if (sameFile.length === 1) {
+        return {
+          original: ref,
+          targetNodeId: sameFile[0]!.id,
+          confidence: 0.9,
+          resolvedBy: 'exact-match',
+        };
+      }
+    }
+    return null;
+  }
 
   // 3. Exact name match
   result = matchByExactName(ref, context);
