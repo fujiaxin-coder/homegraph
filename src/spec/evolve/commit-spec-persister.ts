@@ -12,12 +12,10 @@
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { CommitSpecAnalysis } from './commit-spec-analyzer';
 import { insertCommitNode } from '../db/commit-node';
-import { insertSpecNode } from '../db/spec-node';
-import { insertCodeFragment } from '../db/fragment-node';
 import {
   insertSpecCommitRelation,
-  insertCommitFragmentRelation,
 } from '../db/relations';
+import { upsertSpecFromMetadata, persistCommitFragments } from '../db/persist';
 import { logDebug, logWarn } from '../../errors';
 
 // =============================================================================
@@ -88,34 +86,16 @@ export function persistCommitSpecGraph(
     });
 
     // 2. SpecNode (idempotent — INSERT OR REPLACE, last write wins for timestamp)
-    insertSpecNode(db, {
-      id: metadata.specId,
-      title: metadata.title,
-      subtitles: metadata.subtitles,
-      status: 'active',
-      version: 1,
-      filePath: metadata.filePath,
-      timestamp: commit.timestamp,
-    });
+    upsertSpecFromMetadata(db, metadata, commit.timestamp);
 
     // 3. GENERATE relation (idempotent — INSERT OR IGNORE)
     insertSpecCommitRelation(db, metadata.specId, commit.hash, 'GENERATE');
     relationsCreated++;
 
     // 4. CodeFragment nodes + CONTAINS relations
-    for (const frag of fragments) {
-      const inserted = insertCodeFragment(db, {
-        id: '', // auto-generated
-        changeType: frag.changeType,
-        filePath: frag.filePath,
-        startLine: frag.startLine,
-        endLine: frag.endLine,
-        codeDiff: frag.codeDiff,
-      });
-      fragmentsInserted++;
-      insertCommitFragmentRelation(db, commit.hash, inserted.id, 'CONTAINS');
-      relationsCreated++;
-    }
+    const persisted = persistCommitFragments(db, commit.hash, fragments);
+    fragmentsInserted += persisted.fragmentsInserted;
+    relationsCreated += persisted.relationsCreated;
 
     db.exec('COMMIT');
 

@@ -3,83 +3,49 @@
  *
  * Replaces `commit4spec/graph/queries.py`. Provides spec context retrieval,
  * stats, and search+traverse functionality.
+ *
+ * This is a pure COMPOSITION layer — following the HomeGraph convention of
+ * `src/graph` (zero SQL outside the db layer), every function here is built
+ * by composing the primitives in `../db`. Scoring, sorting, and result
+ * assembly live here; data access does not.
  */
 
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import {
   SpecNode,
-  CommitNode,
-  CodeFragmentNode,
   SpecContext,
   SpecCommitContext,
   SpecStats,
+  RelationType,
 } from '../types';
+import { findSpecById, countSpecsByStatus } from '../db/spec-node';
+import { countCommits } from '../db/commit-node';
+import { countFragments, findFragmentsByCommit } from '../db/fragment-node';
+import {
+  findCommitsBySpec,
+  countAllRelations,
+  findSpecIdsByFragmentPath,
+  findSpecCandidatesByFilePath,
+  findSpecIdsByFragmentIds,
+} from '../db/relations';
 import { searchSpecs, searchCodeFragments } from '../db/fts';
 
+// Re-export so existing consumers of the graph layer keep their imports.
+export {
+  findSpecsByFilePath,
+  FindSpecsByFilePathResult,
+} from '../db/relations';
+
 // ===========================================================================
-// Row shapes from SQLite (snake_case column names)
+// getSpecContext
 // ===========================================================================
 
-interface SpecNodeRow {
-  id: string;
-  title: string;
-  subtitles: string;
-  status: string;
-  version: number;
-  file_path: string;
-  timestamp: number;
+/** Relation-type priority for commit ordering (lower = earlier). */
+function relationPriority(relationType: RelationType): number {
+  if (relationType === 'GENERATE') return 0;
+  if (relationType === 'SUMMARIZED_FROM') return 1;
+  return 2;
 }
-
-interface CommitRow {
-  hash: string;
-  message: string;
-  author: string;
-  timestamp: number;
-  relation_type: string;
-}
-
-interface FragmentRow {
-  id: string;
-  change_type: string;
-  file_path: string;
-  start_line: number;
-  end_line: number;
-  code_diff: string;
-}
-
-// ===========================================================================
-// Private helpers
-// ===========================================================================
-
-/**
- * Parse a JSON string into a string array, returning [] on any failure.
- */
-function _parseSubtitles(raw: string): string[] {
-  try {
-    return JSON.parse(raw || '[]');
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Convert a DB row (snake_case keys) to a SpecNode (camelCase).
- */
-function _rowToSpecNode(row: SpecNodeRow): SpecNode {
-  return {
-    id: row.id,
-    title: row.title,
-    subtitles: _parseSubtitles(row.subtitles),
-    status: row.status as SpecNode['status'],
-    version: row.version,
-    filePath: row.file_path,
-    timestamp: row.timestamp,
-  };
-}
-
-// ===========================================================================
-// Public API
-// ===========================================================================
 
 /**
  * Retrieve full context for a Spec — the spec node itself, all linked
@@ -102,79 +68,36 @@ export function getSpecContext(
   maxCommits: number = 5,
   includeFragments: boolean = true
 ): SpecContext | null {
-  // 1. Look up the spec by id
-  const specRow = db
-    .prepare(
-      `SELECT id, title, subtitles, status, version, file_path, timestamp
-       FROM spec_nodes
-       WHERE id = ?`
-    )
-    .get(specId) as SpecNodeRow | undefined;
+  const spec: SpecNode | null = findSpecById(db, specId);
+  if (!spec) return null;
 
-  if (!specRow) return null;
+  const linked = findCommitsBySpec(db, specId);
 
-  const spec = _rowToSpecNode(specRow);
+  // Order by relation-type priority, then timestamp descending.
+  const sorted = [...linked].sort((a, b) => {
+    const pa = relationPriority(a.relationType);
+    const pb = relationPriority(b.relationType);
+    if (pa !== pb) return pa - pb;
+    return b.timestamp - a.timestamp;
+  });
 
-  // 2. Query linked commits with priority ordering
-  const commitRows = db
-    .prepare(
-      `SELECT c.hash, c.message, c.author, c.timestamp, r.relation_type
-       FROM spec_commit_relations r
-       JOIN commit_nodes c ON c.hash = r.commit_hash
-       WHERE r.spec_id = ?
-       ORDER BY
-         CASE r.relation_type
-           WHEN 'GENERATE' THEN 0
-           WHEN 'SUMMARIZED_FROM' THEN 1
-           ELSE 2
-         END,
-         c.timestamp DESC
-       LIMIT ?`
-    )
-    .all(specId, maxCommits) as CommitRow[];
-
-  // 3. Build commit contexts (with optional fragments)
-  const commits: SpecCommitContext[] = [];
-  for (const crow of commitRows) {
-    const commit: CommitNode = {
-      hash: crow.hash,
-      message: crow.message,
-      author: crow.author,
-      timestamp: crow.timestamp,
-    };
-
-    let fragments: CodeFragmentNode[] = [];
-    if (includeFragments) {
-      const fragRows = db
-        .prepare(
-          `SELECT f.id, f.change_type, f.file_path, f.start_line,
-                  f.end_line, f.code_diff
-           FROM commit_fragment_relations r
-           JOIN code_fragment_nodes f ON f.id = r.fragment_id
-           WHERE r.commit_hash = ?
-           ORDER BY f.file_path, f.start_line`
-        )
-        .all(crow.hash) as FragmentRow[];
-
-      fragments = fragRows.map((fr) => ({
-        id: fr.id,
-        changeType: fr.change_type as CodeFragmentNode['changeType'],
-        filePath: fr.file_path,
-        startLine: fr.start_line,
-        endLine: fr.end_line,
-        codeDiff: fr.code_diff,
-      }));
-    }
-
-    commits.push({
-      commit,
-      relationType: crow.relation_type as SpecCommitContext['relationType'],
-      fragments,
-    });
-  }
+  const commits: SpecCommitContext[] = sorted.slice(0, maxCommits).map((row) => ({
+    commit: {
+      hash: row.commitHash,
+      message: row.message,
+      author: row.author,
+      timestamp: row.timestamp,
+    },
+    relationType: row.relationType,
+    fragments: includeFragments ? findFragmentsByCommit(db, row.commitHash) : [],
+  }));
 
   return { spec, commits };
 }
+
+// ===========================================================================
+// findSpecsByFragmentPath
+// ===========================================================================
 
 /**
  * Find all spec IDs related to code fragments whose file path matches
@@ -188,118 +111,12 @@ export function findSpecsByFragmentPath(
   db: SqliteDatabase,
   filePath: string
 ): string[] {
-  const pattern = `%${filePath}%`;
-  const rows = db
-    .prepare(
-      `SELECT DISTINCT r.spec_id
-       FROM spec_commit_relations r
-       JOIN commit_fragment_relations cfr ON cfr.commit_hash = r.commit_hash
-       JOIN code_fragment_nodes cf ON cf.id = cfr.fragment_id
-       WHERE cf.file_path LIKE ?`
-    )
-    .all(pattern) as Array<{ spec_id: string }>;
-
-  return rows.map((r) => r.spec_id);
+  return findSpecIdsByFragmentPath(db, filePath);
 }
 
 // ===========================================================================
-// findSpecsByFilePath
+// getSpecStats
 // ===========================================================================
-
-/** Default max results returned by findSpecsByFilePath. */
-const DEFAULT_MAX_SPEC_FIND_RESULTS = 100;
-
-/** Result container returned by findSpecsByFilePath. */
-export interface FindSpecsByFilePathResult {
-  /** Matching spec entries (capped at maxResults). */
-  results: Array<{
-    id: string;
-    title: string;
-    status: string;
-    version: number;
-    filePath: string;
-  }>;
-  /** Number of results actually returned (<= maxResults). */
-  matched_count: number;
-  /** True when more results exist beyond the cap. */
-  truncated: boolean;
-}
-
-/**
- * Find specs whose code fragments reference the given file path.
- *
- * Traverses: filePath -> code_fragment_nodes -> commit_fragment_relations
- * -> commit_nodes -> spec_commit_relations -> spec_nodes.
- *
- * Uses LIKE matching against code_fragment_nodes.file_path, so partial
- * paths work (e.g. `src/auth.ts` matches `src/auth/login.ts` and
- * `app/src/auth.ts`).  LIKE metacharacters (`%`, `_`, `\`) in the
- * filePath are automatically escaped.
- *
- * An empty or whitespace-only filePath is rejected with an error
- * (it would match every spec in the graph).
- *
- * @param db         Active SQLite database handle.
- * @param filePath   File path to search for (substring LIKE match).
- * @param maxResults Maximum number of results to return (default 100).
- * @returns FindSpecsByFilePathResult with .results, .matched_count, and .truncated.
- */
-export function findSpecsByFilePath(
-  db: SqliteDatabase,
-  filePath: string,
-  maxResults: number = DEFAULT_MAX_SPEC_FIND_RESULTS,
-): FindSpecsByFilePathResult {
-  // Guard against empty input that would match every spec
-  if (!filePath || filePath.trim().length === 0) {
-    throw new Error(
-      'Empty file path is not allowed -- it would match every spec in the knowledge graph. ' +
-      'Provide a concrete file path (e.g. "src/auth.ts") or a partial path (e.g. "src/auth").',
-    );
-  }
-
-  // Escape LIKE metacharacters (SQLite ESCAPE '\' is used in the query)
-  const escaped = filePath
-    .replace(/\\/g, '\\\\') // literal backslash
-    .replace(/%/g, '\\%')   // percent wildcard
-    .replace(/_/g, '\\_');  // underscore wildcard
-
-  const pattern = `%${escaped}%`;
-
-  const rows = db
-    .prepare(
-      `SELECT DISTINCT s.id, s.title, s.status, s.version, s.file_path
-       FROM spec_nodes s
-       JOIN spec_commit_relations scr ON scr.spec_id = s.id
-       JOIN commit_fragment_relations cfr ON cfr.commit_hash = scr.commit_hash
-       JOIN code_fragment_nodes cf ON cf.id = cfr.fragment_id
-       WHERE cf.file_path LIKE ? ESCAPE '\\'
-       ORDER BY s.id
-       LIMIT ?`,
-    )
-    .all(pattern, maxResults + 1) as Array<{
-      id: string;
-      title: string;
-      status: string;
-      version: number;
-      file_path: string;
-    }>;
-
-  const truncated = rows.length > maxResults;
-  const slice = truncated ? rows.slice(0, maxResults) : rows;
-
-  return {
-    results: slice.map((r) => ({
-      id: r.id,
-      title: r.title,
-      status: r.status,
-      version: r.version,
-      filePath: r.file_path,
-    })),
-    matched_count: slice.length,
-    truncated,
-  };
-}
-
 
 /**
  * Compute statistics about the Spec knowledge graph.
@@ -308,59 +125,21 @@ export function findSpecsByFilePath(
  * @returns SpecStats with entity counts and relation totals.
  */
 export function getSpecStats(db: SqliteDatabase): SpecStats {
-  const specCount = (
-    db.prepare('SELECT COUNT(*) as cnt FROM spec_nodes').get() as { cnt: number }
-  ).cnt;
-
-  const commitCount = (
-    db.prepare('SELECT COUNT(*) as cnt FROM commit_nodes').get() as { cnt: number }
-  ).cnt;
-
-  const fragmentCount = (
-    db
-      .prepare('SELECT COUNT(*) as cnt FROM code_fragment_nodes')
-      .get() as { cnt: number }
-  ).cnt;
-
-  const scrCount = (
-    db
-      .prepare('SELECT COUNT(*) as cnt FROM spec_commit_relations')
-      .get() as { cnt: number }
-  ).cnt;
-
-  const cfrCount = (
-    db
-      .prepare('SELECT COUNT(*) as cnt FROM commit_fragment_relations')
-      .get() as { cnt: number }
-  ).cnt;
-
-  const ssrCount = (
-    db
-      .prepare('SELECT COUNT(*) as cnt FROM spec_spec_relations')
-      .get() as { cnt: number }
-  ).cnt;
-
-  const activeSpecCount = (
-    db
-      .prepare("SELECT COUNT(*) as cnt FROM spec_nodes WHERE status = 'active'")
-      .get() as { cnt: number }
-  ).cnt;
-
-  const deprecatedSpecCount = (
-    db
-      .prepare("SELECT COUNT(*) as cnt FROM spec_nodes WHERE status = 'deprecated'")
-      .get() as { cnt: number }
-  ).cnt;
+  const { active, deprecated } = countSpecsByStatus(db);
 
   return {
-    specCount,
-    commitCount,
-    fragmentCount,
-    relationCount: scrCount + cfrCount + ssrCount,
-    activeSpecCount,
-    deprecatedSpecCount,
+    specCount: active + deprecated,
+    commitCount: countCommits(db),
+    fragmentCount: countFragments(db),
+    relationCount: countAllRelations(db),
+    activeSpecCount: active,
+    deprecatedSpecCount: deprecated,
   };
 }
+
+// ===========================================================================
+// searchAndGetContext
+// ===========================================================================
 
 /**
  * Full-text search for specs and return full context for each match.
@@ -472,16 +251,6 @@ const WEIGHTS = {
 const MAX_CANDIDATES = 200;
 
 /**
- * Escape LIKE metacharacters in a string, also escaping the escape character.
- */
-function escapeLike(str: string): string {
-  return str
-    .replace(/\\/g, '\\\\')
-    .replace(/%/g, '\\%')
-    .replace(/_/g, '\\_');
-}
-
-/**
  * Find Specs associated with a code entity by multi-dimensional scoring:
  *
  * 1. File path match (weight 0.30) — most stable anchor; function rarely changes file
@@ -504,82 +273,21 @@ export function findSpecsByCodeSymbol(
   entity: CodeEntityInfo,
   topK: number = 10,
 ): FindSpecsByCodeSymbolResult {
-  const pathEscaped = escapeLike(entity.filePath);
-  const likePattern = `%${pathEscaped}%`;
-  const suffixLikePattern = `%${pathEscaped}`; // cf.file_path ends with entity's path
-
   // -----------------------------------------------------------------------
   // 1. Gather candidates: all specs whose fragments touch the entity's file
   // -----------------------------------------------------------------------
-
-  const candidateRows = specDb
-    .prepare(`
-      SELECT
-          s.id, s.title, s.status, s.version, s.file_path, s.timestamp,
-          MAX(
-            MIN(cf.end_line, @entityEnd) - MAX(cf.start_line, @entityStart) + 1,
-            0
-          ) AS overlap_lines,
-          COUNT(DISTINCT cf.id) AS fragment_count,
-          COUNT(DISTINCT scr.commit_hash) AS commit_count,
-          MAX(CASE
-            WHEN cf.file_path = @exactFilePath THEN 3
-            WHEN cf.file_path LIKE @suffixLikePattern ESCAPE '\\' THEN 2
-            ELSE 1
-          END) AS file_path_match_level
-      FROM spec_nodes s
-      JOIN spec_commit_relations scr ON scr.spec_id = s.id
-      JOIN commit_fragment_relations cfr ON cfr.commit_hash = scr.commit_hash
-      JOIN code_fragment_nodes cf ON cf.id = cfr.fragment_id
-      WHERE s.status = 'active'
-        AND cf.file_path LIKE @likePattern ESCAPE '\\'
-      GROUP BY s.id
-      ORDER BY s.timestamp DESC
-      LIMIT @maxCandidates
-    `)
-    .all({
-      entityEnd: entity.endLine,
-      entityStart: entity.startLine,
-      exactFilePath: entity.filePath,
-      suffixLikePattern,
-      likePattern,
-      maxCandidates: MAX_CANDIDATES,
-    }) as Array<{
-      id: string;
-      title: string;
-      status: string;
-      version: number;
-      file_path: string;
-      timestamp: number;
-      overlap_lines: number;
-      fragment_count: number;
-      commit_count: number;
-      file_path_match_level: number;
-    }>;
+  const candidateRows = findSpecCandidatesByFilePath(specDb, {
+    filePath: entity.filePath,
+    startLine: entity.startLine,
+    endLine: entity.endLine,
+    maxCandidates: MAX_CANDIDATES,
+  });
 
   // -----------------------------------------------------------------------
   // 2. Content-match signal: search code_fragments_fts for the entity name
   // -----------------------------------------------------------------------
-  const contentFragmentIds = new Set(
-    searchCodeFragments(specDb, entity.name, 50),
-  );
-
-  // Map from spec_id → whether any of its fragments matched in content search
-  const contentSpecIds = new Set<string>();
-  if (contentFragmentIds.size > 0) {
-    const fragsIn = [...contentFragmentIds].map(() => '?').join(',');
-    const contentSpecRows = specDb
-      .prepare(`
-        SELECT DISTINCT scr.spec_id
-        FROM commit_fragment_relations cfr
-        JOIN spec_commit_relations scr ON scr.commit_hash = cfr.commit_hash
-        WHERE cfr.fragment_id IN (${fragsIn})
-      `)
-      .all(...contentFragmentIds) as Array<{ spec_id: string }>;
-    for (const r of contentSpecRows) {
-      contentSpecIds.add(r.spec_id);
-    }
-  }
+  const contentFragmentIds = searchCodeFragments(specDb, entity.name, 50);
+  const contentSpecIds = new Set(findSpecIdsByFragmentIds(specDb, contentFragmentIds));
 
   // -----------------------------------------------------------------------
   // 3. Name-match signal: search specs_fts for the entity name
@@ -599,9 +307,9 @@ export function findSpecsByCodeSymbol(
 
   const scored = candidateRows.map((row) => {
     // 4a. File-path score — derived from the best-matching fragment's file_path
-    // (computed in SQL as file_path_match_level: 3=exact, 2=suffix, 1=LIKE)
-    const filePathScore = row.file_path_match_level === 3 ? 1.0
-      : row.file_path_match_level === 2 ? 0.8
+    // (computed in SQL as filePathMatchLevel: 3=exact, 2=suffix, 1=LIKE)
+    const filePathScore = row.filePathMatchLevel === 3 ? 1.0
+      : row.filePathMatchLevel === 2 ? 0.8
       : 0.6;
 
     // 4b. Content score
@@ -610,13 +318,12 @@ export function findSpecsByCodeSymbol(
     // 4c. Name score
     const nameScore = nameScoreMap.get(row.id) ?? 0;
 
-    // 4d. Recency score: MapSpec(timestamp, 0, maxTs)MapSpec => [0, 1]
+    // 4d. Recency score — decays to 0.5 after ~180 days
     const daysSinceUpdate = (now - row.timestamp) / (1000 * 60 * 60 * 24);
     const recencyScore = 1 / (1 + Math.max(0, daysSinceUpdate) / 180);
 
     // 4e. Overlap score
-    const overlapRatio = Math.min(1.0, row.overlap_lines / entityLength);
-    const overlapScore = overlapRatio;
+    const overlapScore = Math.min(1.0, row.overlapLines / entityLength);
 
     const score =
       filePathScore * WEIGHTS.filePath +
@@ -631,7 +338,7 @@ export function findSpecsByCodeSymbol(
         title: row.title,
         status: row.status,
         version: row.version,
-        filePath: row.file_path,
+        filePath: row.filePath,
         timestamp: row.timestamp,
       },
       score,
@@ -642,8 +349,8 @@ export function findSpecsByCodeSymbol(
         recencyScore,
         overlapScore,
       },
-      fragmentCount: row.fragment_count,
-      commitCount: row.commit_count,
+      fragmentCount: row.fragmentCount,
+      commitCount: row.commitCount,
     };
   });
 

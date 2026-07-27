@@ -5,41 +5,16 @@
  * context aggregation pattern, but uses simpler data (diff-based instead of
  * AST-based) since evolve works with unified diffs.
  *
+ * The ClusterContext / CommitSummary / CommitContextInput types live in
+ * `../types` so the LLM layer can depend on them without importing from a
+ * pipeline module.
+ *
  * @module spec/evolve/cluster-context
  */
 
-// =============================================================================
-// Types
-// =============================================================================
+import { ClusterContext, CommitSummary, CommitContextInput } from '../types';
 
-interface CommitSummary {
-  /** Full commit hash (40 chars) — used for git operations like getCommitDiff. */
-  fullHash: string;
-  /** Short hash (7 chars) — used for display in LLM prompts. */
-  shortHash: string;
-  /** First line of commit message. */
-  message: string;
-  /** Changed file paths. */
-  changedFiles: string[];
-  /** Aggregated and truncated diff for this commit (populated by caller). */
-  truncatedDiff: string;
-}
-
-export interface ClusterContext {
-  /** Number of commits in the cluster. */
-  commitCount: number;
-  /** Individual commit summaries. */
-  commitSummaries: CommitSummary[];
-  /** Top-N most frequently changed files across all commits. */
-  primaryFiles: string[];
-}
-
-/** Minimal info about a commit needed to build the cluster context. */
-export interface CommitContextInput {
-  commitHash: string;
-  message?: string;
-  filePaths: string[];
-}
+export type { ClusterContext, CommitSummary, CommitContextInput };
 
 // =============================================================================
 // Constants

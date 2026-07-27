@@ -151,8 +151,8 @@ homegraph spec build           # 从已有 .spec 目录（或用户指定目录�
 homegraph spec mine            # 从 Git 历史挖掘设计Spec文档（AST 分析 + LLM 聚类生成）
 homegraph spec match <文本>     # 全文搜索相似历史Spec
 homegraph spec find <文件>      # 查找与指定文件关联的Spec
-homegraph spec trace <符号>     # 追溯代码符号关联的设计Spec
-homegraph spec stats           # 查看Spec知识图谱统计
+homegraph spec trace <符号>     # 追溯代码符号关联的Spec
+homegraph spec stats           # 查看Spec知识图谱状态
 homegraph spec evolve install  # 安装 post-commit 钩子（默认累计 3 次提交后触发演进）
 homegraph spec evolve uninstall# 移除 post-commit 钩子
 homegraph spec evolve process  # 手动触发一次Spec演化
@@ -182,7 +182,7 @@ Agent 侧工具名前缀为 `homegraph_`。
 | `homegraph_status` | 索引健康状态（调试用） |
 | `homegraph_spec_match` | 将新需求描述与 Commit4Spec 知识图谱做全文匹配，返回相似历史Spec及关联提交与代码片段 |
 | `homegraph_spec_find` | 根据文件路径反向查找关联的Spec |
-| `homegraph_spec_trace` | 将代码符号追溯回关联的设计Spec |
+| `homegraph_spec_trace` | 根据代码符号追溯回关联的Spec |
 
 ### Commit4Spec（Spec知识图谱）
 
@@ -198,7 +198,7 @@ Commit4Spec 提供两条互补路径将设计Spec与 Git 历史关联，存入 `
 
 支持增量模式（`meta.json` 记录已处理范围）、commit过滤和聚类输出模式（`--skip-llm`）。
 
-`spec mine`逆向挖掘和`spec evolve process`演化更新涉及到模型访问，需用户自主配置模型服务，编辑配置文件`.homegraph/commit4spec/configs.json`
+`spec mine`逆向挖掘和`spec evolve process`演化更新涉及到模型访问，优先选择用户本地已有的Agent平台（Claude Code >> Codex >> 用户配置LLM），若未安装Claude Code或Codex，则需用户自主配置模型服务，编辑配置文件`.homegraph/commit4spec/configs.json`
 
 ```json
 // All available options (fields marked * are required):

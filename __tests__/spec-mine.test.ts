@@ -41,6 +41,10 @@ vi.mock('../src/spec/utils', async () => {
   };
 });
 
+// Force the LLM factory down the OpenAiLlmClient path — the dev machine may
+// have Claude Code / Codex installed, and tests must never spawn real agents.
+process.env.HOMEGRAPH_SPEC_AGENT = 'none';
+
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -51,8 +55,8 @@ import { initSpecSchema } from '../src/spec/db/schema';
 import { findSpecById } from '../src/spec/db/spec-node';
 
 import { scanCommits, CommitChange, FileChange, ChangedSymbol } from '../src/spec/mine/scanner';
-import { clusterCommits, CommitCluster, ClusterResult } from '../src/spec/mine/clusterer';
-import { generateSpecs, GeneratedSpec, GenerationResult } from '../src/spec/mine/generator';
+import { clusterCommits, CommitCluster, ClusterResult } from '../src/spec/mine/clustering';
+import { generateSpecs, extractMarkdown, GeneratedSpec, GenerationResult } from '../src/spec/mine/generator';
 import { persistToGraph, PersistResult } from '../src/spec/mine/persist';
 import { runMinePipeline, MinePipelineResult } from '../src/spec/mine/pipeline';
 import { MineConfig } from '../src/spec/config';
@@ -546,7 +550,7 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(0), makeCluster(1)];
-    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
     expect(result.specs.length).toBe(2);
     expect(result.skipped).toBe(0);
     expect(result.errors).toBe(0);
@@ -559,7 +563,7 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(0)];
-    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
     expect(result.specs.length).toBe(1);
 
     const specId = result.specs[0]!.specId;
@@ -576,7 +580,7 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(0)];
-    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
     expect(result.specs.length).toBe(1);
     expect(result.specs[0]!.title).toBe('Auth Module');
   });
@@ -588,7 +592,7 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(0)];
-    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
     expect(result.specs.length).toBe(1);
     expect(result.specs[0]!.title).toBe('Untitled Spec');
   });
@@ -600,7 +604,7 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(0)];
-    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
     expect(result.specs.length).toBe(0);
     expect(result.skipped).toBe(1);
   });
@@ -612,7 +616,7 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(0), makeCluster(1)];
-    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
     // Both clusters should fail
     expect(result.errors).toBe(2);
     expect(result.specs.length).toBe(0);
@@ -625,10 +629,70 @@ describe('generator — generateSpecs', () => {
     }));
 
     const clusters = [makeCluster(3)];
-    const result = await generateSpecs(clusters, llmConfig, outputDir);
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
     expect(result.specs.length).toBe(1);
     // specId is generated as spec_${cluster.timeRange.end}
     expect(result.specs[0]!.specId).toMatch(/^spec_\d+$/);
+  });
+
+  it('fenced LLM response is unwrapped before writing to disk', async () => {
+    vi.mocked(OpenAiLlmClient).mockImplementation(() => ({
+      chat: vi.fn().mockResolvedValue('Sure! Here is the spec:\n\n```markdown\n# Fenced Feature\n\nBody.\n```\n\nHope this helps.'),
+      chatJson: vi.fn().mockResolvedValue({}),
+    }));
+
+    const clusters = [makeCluster(0)];
+    const result = await generateSpecs(clusters, new OpenAiLlmClient(llmConfig), outputDir);
+    expect(result.specs.length).toBe(1);
+    expect(result.specs[0]!.title).toBe('Fenced Feature');
+    expect(result.specs[0]!.content).toBe('# Fenced Feature\n\nBody.');
+
+    const specFile = path.join(outputDir, `${result.specs[0]!.specId}.md`);
+    expect(fs.readFileSync(specFile, 'utf-8')).toBe('# Fenced Feature\n\nBody.');
+  });
+});
+
+// ===========================================================================
+// Section C2: generator — extractMarkdown
+// ===========================================================================
+
+describe('generator — extractMarkdown', () => {
+  it('returns plain markdown unchanged (trimmed)', () => {
+    expect(extractMarkdown('  # Spec\n\nBody.  ')).toBe('# Spec\n\nBody.');
+  });
+
+  it('unwraps a ```markdown fence containing a heading', () => {
+    const raw = 'Here is the spec:\n\n```markdown\n# Auth\n\nLogin flow.\n```\n\nLet me know.';
+    expect(extractMarkdown(raw)).toBe('# Auth\n\nLogin flow.');
+  });
+
+  it('unwraps a bare ``` fence containing a heading', () => {
+    const raw = '```\n# Title\n\nContent.\n```';
+    expect(extractMarkdown(raw)).toBe('# Title\n\nContent.');
+  });
+
+  it('strips prose preamble before the first heading', () => {
+    const raw = 'I generated the following spec for you.\n\n# Spec Title\n\nBody.';
+    expect(extractMarkdown(raw)).toBe('# Spec Title\n\nBody.');
+  });
+
+  it('keeps fence-free content without a leading heading untouched', () => {
+    const raw = 'No heading here, just text.';
+    expect(extractMarkdown(raw)).toBe(raw);
+  });
+
+  it('ignores fences without a heading (not a document wrapper)', () => {
+    const raw = '# Spec\n\nExample:\n```\ncode sample\n```';
+    expect(extractMarkdown(raw)).toBe(raw);
+  });
+
+  it('does not unwrap heading-looking lines inside a code fence within a document', () => {
+    const raw = '# Spec\n\n```sh\n# this is a bash comment, not a document\necho hi\n```';
+    expect(extractMarkdown(raw)).toBe(raw);
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(extractMarkdown('   ')).toBe('');
   });
 });
 

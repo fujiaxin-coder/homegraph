@@ -20,13 +20,16 @@ import {
   transferSpecSpecRelations,
   deleteSimilarToRelations,
 } from '../db/relations';
-import { extractSpecMetadata } from '../build/spec-extractor';
+import {
+  extractTitleFromMarkdown,
+  extractMarkdownHeadings,
+} from '../build/spec-extractor';
 import { LlmClient } from '../llm/client';
 import {
   SPEC_EVALUATION_CLUSTER_SYSTEM_PROMPT,
   buildClusterSpecEvaluationUserPrompt,
 } from '../llm/prompts';
-import { ClusterContext } from './cluster-context';
+import { ClusterContext } from '../types';
 import { logDebug, logWarn } from '../../errors';
 
 // =============================================================================
@@ -137,7 +140,6 @@ export async function evaluateSpecWithCluster(
  */
 export function applyUpdate(
   db: SqliteDatabase,
-  specStoragePath: string,
   oldSpecId: string,
   oldFilePath: string,
   oldVersion: number,
@@ -145,13 +147,14 @@ export function applyUpdate(
   commitHash: string,
 ): { newSpecId: string; newVersion: number } {
   // ---- Step 1: Write new plan content to temp file ----
+  const newContent = decision.plan_content || '';
   const tmpPath = oldFilePath + '.new';
-  writeFileContent(tmpPath, decision.plan_content || '');
+  writeFileContent(tmpPath, newContent);
 
-  // ---- Step 2: Extract new metadata from the temp file ----
-  const metadata = extractSpecMetadata(specStoragePath, oldSpecId);
-  const metadataTitle = metadata?.title;
-  const metadataSubtitles = metadata?.subtitles;
+  // ---- Step 2: Extract metadata from the NEW content ----
+  // (parsed from the rewritten plan, not the stale on-disk original)
+  const newTitle = extractTitleFromMarkdown(newContent, '');
+  const newSubtitles = extractMarkdownHeadings(newContent);
 
   // ---- Step 3: Read old spec data ----
   const oldSpec = findSpecById(db, oldSpecId);
@@ -187,8 +190,8 @@ export function applyUpdate(
   const newVersion = oldVersion + 1;
   insertSpecNode(db, {
     id: oldSpecId,
-    title: decision.title || metadataTitle || oldSpecId,
-    subtitles: decision.subtitles || metadataSubtitles || [],
+    title: decision.title || newTitle || oldSpec.title || oldSpecId,
+    subtitles: decision.subtitles || (newSubtitles.length > 0 ? newSubtitles : oldSpec.subtitles),
     status: 'active',
     version: newVersion,
     filePath: oldFilePath,

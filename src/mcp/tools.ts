@@ -868,10 +868,6 @@ export const tools: ToolDefinition[] = [
           description: 'Whether to include full code diffs per commit (default: true).',
           default: true,
         },
-        dbPath: {
-          type: 'string',
-          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
-        },
       },
       required: ['query'],
     },
@@ -894,10 +890,6 @@ export const tools: ToolDefinition[] = [
         repoPath: {
           type: 'string',
           description: 'Path to the repository root. Defaults to the current working directory.',
-        },
-        dbPath: {
-          type: 'string',
-          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
         },
       },
       required: ['filePath'],
@@ -937,10 +929,6 @@ export const tools: ToolDefinition[] = [
           type: 'number',
           description: 'Maximum number of matching Specs to return (default: 10).',
           default: 10,
-        },
-        dbPath: {
-          type: 'string',
-          description: 'Explicit path to the Commit4Spec database. Overrides repoPath-based resolution.',
         },
       },
       required: ['symbol'],
@@ -6664,7 +6652,6 @@ export class ToolHandler {
     if (typeof query !== 'string') return query;
 
     const repoPath = args.repoPath as string | undefined;
-    const explicitDbPath = args.dbPath as string | undefined;
     const topKRaw = Number(args.topK);
     const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 5 : topKRaw, 50));
     const includeFragments = args.includeFragments !== false;
@@ -6680,7 +6667,7 @@ export class ToolHandler {
     } = require('../spec/utils') as typeof import('../spec/utils');
 
     // Resolve the database path.
-    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+    const dbPath = resolveDbPath(repoPath || process.cwd());
 
     // Open the database.
     let db: SqliteDatabase;
@@ -6800,7 +6787,6 @@ export class ToolHandler {
     if (typeof filePath !== 'string') return filePath;
 
     const repoPath = args.repoPath as string | undefined;
-    const explicitDbPath = args.dbPath as string | undefined;
 
     // Lazily require spec modules so the MCP startup path stays lean.
     const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
@@ -6808,7 +6794,7 @@ export class ToolHandler {
     const { findSpecsByFilePath } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
 
     // Resolve the database path.
-    const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+    const dbPath = resolveDbPath(repoPath || process.cwd());
 
     // Open the database.
     let db: SqliteDatabase;
@@ -6876,7 +6862,6 @@ export class ToolHandler {
     const file: string | undefined = fileRaw;
     const line = typeof args.line === 'number' ? args.line : undefined;
     const repoPath = args.repoPath as string | undefined;
-    const explicitDbPath = args.dbPath as string | undefined;
     const topKRaw = Number(args.topK);
     const topK = Math.max(1, Math.min(isNaN(topKRaw) ? 10 : topKRaw, 50));
 
@@ -6940,7 +6925,7 @@ export class ToolHandler {
       }
 
       // Step 2: Resolve the Spec database path
-      const dbPath = resolveDbPath(repoPath || process.cwd(), explicitDbPath);
+      const dbPath = resolveDbPath(repoPath || process.cwd());
 
       // Step 3: Open the Spec database
       let db: SqliteDatabase;

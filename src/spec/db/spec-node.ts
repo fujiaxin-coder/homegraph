@@ -27,17 +27,23 @@ interface SpecNodeRow {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function rowToSpec(row: SpecNodeRow): SpecNode {
-  let subtitles: string[];
+/**
+ * Parse a JSON-encoded subtitles array, returning [] on any failure.
+ * Shared by every query that reads `spec_nodes.subtitles`.
+ */
+export function parseSubtitlesJson(raw: string): string[] {
   try {
-    subtitles = JSON.parse(row.subtitles || '[]');
+    return JSON.parse(raw || '[]');
   } catch {
-    subtitles = [];
+    return [];
   }
+}
+
+function rowToSpec(row: SpecNodeRow): SpecNode {
   return {
     id: row.id,
     title: row.title,
-    subtitles,
+    subtitles: parseSubtitlesJson(row.subtitles),
     status: row.status as SpecNode['status'],
     version: row.version,
     filePath: row.file_path,
