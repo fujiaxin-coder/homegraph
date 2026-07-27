@@ -2010,13 +2010,34 @@ class ArkTSAdapter {
     let dummyMain: ArkMethod | null = null;
 
     try {
-      const creater = DummyMainCreater.forModule(scene, module, true);
+      // Prefer AA's forModule when present; otherwise DIY with the public ctor
+      // (module-scoped name + this module's classes).
+      const forModule = (
+        DummyMainCreater as unknown as {
+          forModule?: (s: Scene, m: ArkModule, extra?: boolean) => DummyMainCreater;
+        }
+      ).forModule;
+      let creater: DummyMainCreater;
+      if (typeof forModule === 'function') {
+        creater = forModule(scene, module, true);
+      } else {
+        const classScope = collectComponentScopeFromFiles(files);
+        const moduleName = module.getModuleName() || 'module';
+        creater = new DummyMainCreater(
+          scene,
+          `@dummyMain@${moduleName}`,
+          classScope.length > 0 ? classScope : undefined,
+          true
+        );
+      }
       creater.createDummyMain();
       dummyMain = creater.getDummyMain();
-      entryPoints = [dummyMain.getSignature()];
-      this.moduleDummyMains.push(dummyMain);
+      if (dummyMain) {
+        entryPoints = [dummyMain.getSignature()];
+        this.moduleDummyMains.push(dummyMain);
+      }
     } catch {
-      // Fall back to file-scoped DummyMain (components only) if forModule fails.
+      // Fall back to file-scoped DummyMain (components only) if creation fails.
       const resolved = resolveRtaEntryPointsFromFiles(scene, files);
       entryPoints = resolved.entryPoints;
       dummyMain = resolved.dummyMain;
