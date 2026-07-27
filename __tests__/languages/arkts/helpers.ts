@@ -36,6 +36,7 @@ export function mockArktsQueries() {
     insertUnresolvedRefsBatch: () => {},
     upsertFile: () => {},
     deleteArkTSCrossFileCallEdges: () => 0,
+    getCrossFileIncomingEdgesWithTarget: () => [],
   };
 }
 

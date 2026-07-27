@@ -15,6 +15,11 @@
  * MethodSignature map, plus a CFG `%unk` bridge that recovers Class.method /
  * free functions from stmt text, UnclearReferenceType names, or PascalCase base
  * locals (import + unique target + fan-out blocklist). Deps load to SIGNATURES.
+ *
+ * Sync can re-index a **dirty module subset** (`primeArkTSBatch` + `changedFiles`)
+ * via `ModuleAnalysisConfig.setTargetModuleIds`, instead of rebuilding every
+ * PROJECT module. Unchanged modules stay in the DB; incoming cross-file edges
+ * into dirty files are snapshotted and re-bound like file-level sync (#899).
  */
 
 import * as crypto from 'crypto';
@@ -261,6 +266,120 @@ function shouldUseModularArkTSBuild(rootDir: string): boolean {
   return fs.existsSync(path.join(rootDir, 'build-profile.json5'));
 }
 
+/** One PROJECT module from root `build-profile.json5`. */
+export interface HarmonyModuleRef {
+  name: string;
+  /** Project-relative POSIX path (no `./` prefix, no trailing slash). */
+  srcPath: string;
+}
+
+/** Normalize build-profile `srcPath` / relative file paths for prefix matching. */
+export function normalizeHarmonyModuleSrcPath(srcPath: string): string {
+  return srcPath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
+}
+
+/**
+ * Read PROJECT modules from root `build-profile.json5` (name + srcPath).
+ * Returns [] when missing or unparsable — callers should fall back to full Scene.
+ */
+export function listHarmonyProjectModules(rootDir: string): HarmonyModuleRef[] {
+  const profilePath = path.join(rootDir, 'build-profile.json5');
+  if (!fs.existsSync(profilePath)) return [];
+  let raw: unknown;
+  try {
+    raw = parseJson5Minimal(fs.readFileSync(profilePath, 'utf-8'));
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const modules = (raw as { modules?: unknown }).modules;
+  if (!Array.isArray(modules)) return [];
+  const out: HarmonyModuleRef[] = [];
+  for (const entry of modules) {
+    if (!entry || typeof entry !== 'object') continue;
+    const rec = entry as { name?: unknown; srcPath?: unknown };
+    if (typeof rec.name !== 'string' || typeof rec.srcPath !== 'string') continue;
+    const srcPath = normalizeHarmonyModuleSrcPath(rec.srcPath);
+    if (!srcPath) continue;
+    out.push({ name: rec.name, srcPath });
+  }
+  return out;
+}
+
+function findLongestHarmonyModule(
+  fileRel: string,
+  modules: HarmonyModuleRef[]
+): HarmonyModuleRef | null {
+  const file = normIndexPath(fileRel);
+  let best: HarmonyModuleRef | null = null;
+  for (const mod of modules) {
+    const src = mod.srcPath;
+    if (file === src || file.startsWith(`${src}/`)) {
+      if (!best || mod.srcPath.length > best.srcPath.length) best = mod;
+    }
+  }
+  return best;
+}
+
+export type DirtyHarmonyModuleResolution =
+  | { mode: 'full'; reason: string }
+  | { mode: 'modules'; moduleSrcPaths: string[] }
+  | { mode: 'none' };
+
+/**
+ * Map changed/removed paths to Harmony modules for incremental ArkTS sync.
+ * Structural project files (`build-profile.json5`, root `oh-package.json5`) or
+ * ArkAnalyzer sources outside every module force a full rebuild.
+ */
+export function resolveDirtyHarmonyModules(
+  rootDir: string,
+  changedFiles: Iterable<string>
+): DirtyHarmonyModuleResolution {
+  if (!shouldUseModularArkTSBuild(rootDir)) {
+    return { mode: 'full', reason: 'non-modular ArkTS project' };
+  }
+  const modules = listHarmonyProjectModules(rootDir);
+  if (modules.length === 0) {
+    return { mode: 'full', reason: 'no PROJECT modules in build-profile.json5' };
+  }
+
+  const changed = [...changedFiles].map(normIndexPath).filter(Boolean);
+  if (changed.length === 0) return { mode: 'none' };
+
+  for (const f of changed) {
+    if (f === 'build-profile.json5' || f.endsWith('/build-profile.json5')) {
+      return { mode: 'full', reason: 'build-profile.json5 changed' };
+    }
+    if (f === 'oh-package.json5') {
+      return { mode: 'full', reason: 'root oh-package.json5 changed' };
+    }
+  }
+
+  const dirty = new Set<string>();
+  const unmatched: string[] = [];
+  for (const f of changed) {
+    // Virtual ArkAnalyzer paths are batch artifacts, not Harmony module sources.
+    if (f.startsWith('@')) continue;
+
+    const isModuleMeta = f.endsWith('/module.json5') || f.endsWith('/oh-package.json5');
+    const isArkSrc = isArkAnalyzerSourcePath(f);
+    if (!isArkSrc && !isModuleMeta) continue;
+
+    const match = findLongestHarmonyModule(f, modules);
+    if (match) dirty.add(match.srcPath);
+    else if (isArkSrc) unmatched.push(f);
+  }
+
+  if (unmatched.length > 0) {
+    return {
+      mode: 'full',
+      reason: `ArkTS sources outside modules: ${unmatched.slice(0, 5).join(', ')}`,
+    };
+  }
+  if (dirty.size === 0) return { mode: 'none' };
+  return { mode: 'modules', moduleSrcPaths: [...dirty].sort() };
+}
+
 function homegraphDbPath(rootDir: string): string {
   return path.join(rootDir, '.homegraph', 'homegraph.db');
 }
@@ -450,13 +569,20 @@ function persistFileResult(
   filePath: string,
   content: string,
   stats: fs.Stats,
-  result: ExtractionResult
+  result: ExtractionResult,
+  options?: { force?: boolean }
 ): void {
   const contentHash = hashContent(content);
   const existingFile = queries.getFileByPath(filePath);
-  if (existingFile?.contentHash === contentHash) {
+  if (!options?.force && existingFile?.contentHash === contentHash) {
     return;
   }
+
+  const crossFileIncomingEdges =
+    existingFile && typeof queries.getCrossFileIncomingEdgesWithTarget === 'function'
+      ? queries.getCrossFileIncomingEdgesWithTarget(filePath)
+      : [];
+
   if (existingFile) {
     queries.deleteFile(filePath);
   }
@@ -473,6 +599,31 @@ function persistFileResult(
     );
     if (validEdges.length > 0) {
       queries.insertEdges(validEdges);
+    }
+  }
+
+  if (crossFileIncomingEdges.length > 0) {
+    const newNodesByKindName = new Map<string, string>();
+    for (const n of validNodes) {
+      newNodesByKindName.set(`${n.kind}\0${n.name}`, n.id);
+    }
+    const reinserted: Edge[] = [];
+    for (const e of crossFileIncomingEdges) {
+      const newTargetId = newNodesByKindName.get(`${e.targetKind}\0${e.targetName}`);
+      if (newTargetId) {
+        reinserted.push({
+          source: e.source,
+          target: newTargetId,
+          kind: e.kind,
+          metadata: e.metadata,
+          line: e.line,
+          column: e.column,
+          provenance: e.provenance,
+        });
+      }
+    }
+    if (reinserted.length > 0) {
+      queries.insertEdges(reinserted);
     }
   }
 
@@ -501,6 +652,27 @@ function persistFileResult(
     errors: result.errors.length > 0 ? result.errors : undefined,
   };
   queries.upsertFile(fileRecord);
+}
+
+/** Force-rewrite every file in an incremental module index (edges may change without content). */
+function persistIncrementalModuleResults(
+  rootDir: string,
+  queries: QueryBuilder,
+  index: ArkTSBatchIndex
+): void {
+  const persistTotal = index.fileResults.size;
+  let persistIndex = 0;
+  for (const [filePath, fileResult] of index.fileResults) {
+    persistIndex++;
+    reportBatchProgress('persist', persistIndex, persistTotal, filePath);
+    const isVirtual = filePath.startsWith('@');
+    const full = path.join(rootDir, filePath);
+    const content = isVirtual ? '' : fs.readFileSync(full, 'utf-8');
+    const stats = isVirtual
+      ? ({ size: 0, mtimeMs: Date.now() } as fs.Stats)
+      : fs.statSync(full);
+    persistFileResult(queries, filePath, content, stats, fileResult, { force: true });
+  }
 }
 
 async function persistBatchResultsAsync(
@@ -794,17 +966,50 @@ function runArkTSBatch(rootDir: string, queries: QueryBuilder, triggerFile: stri
   return runArkTSBatchFull(rootDir, queries, normalizedTrigger, etsFiles, batchKey);
 }
 
+/** Async batch build with parallel file reads during persist (used by indexAll / sync). */
+export interface PrimeArkTSBatchOptions {
+  /**
+   * Changed or removed ArkAnalyzer sources (and module meta). When set on a
+   * multi-module Harmony project, only dirty modules are re-analysed.
+   */
+  changedFiles?: Iterable<string>;
+}
+
 /** Async batch build with parallel file reads during persist (used by indexAll). */
 export async function primeArkTSBatch(
   rootDir: string,
   queries: QueryBuilder,
-  triggerFile: string
+  triggerFile: string,
+  options?: PrimeArkTSBatchOptions
 ): Promise<void> {
   const normalizedTrigger = normIndexPath(triggerFile);
   const etsFiles = scanEtsFiles(rootDir);
-  const cached = tryReturnCachedBatch(rootDir, normalizedTrigger, etsFiles);
-  if (cached) {
-    return;
+
+  const changed = options?.changedFiles
+    ? [...options.changedFiles].map(normIndexPath).filter(Boolean)
+    : null;
+
+  if (changed) {
+    const resolution = resolveDirtyHarmonyModules(rootDir, changed);
+    if (resolution.mode === 'none') {
+      return;
+    }
+    if (resolution.mode === 'modules') {
+      await runArkTSBatchIncrementalModules(
+        rootDir,
+        queries,
+        normalizedTrigger,
+        etsFiles,
+        resolution.moduleSrcPaths
+      );
+      return;
+    }
+    // mode === 'full': fall through to full rebuild (ignore in-memory cache).
+  } else {
+    const cached = tryReturnCachedBatch(rootDir, normalizedTrigger, etsFiles);
+    if (cached) {
+      return;
+    }
   }
 
   const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
@@ -844,6 +1049,74 @@ export async function primeArkTSBatch(
     }
 
     commitArkTSBatch(rootDir, batchKey, etsFiles, index, normalizedTrigger);
+  } finally {
+    setArktsBatchRunning(false);
+  }
+}
+
+async function runArkTSBatchIncrementalModules(
+  rootDir: string,
+  queries: QueryBuilder,
+  triggerFile: string,
+  etsFiles: string[],
+  moduleSrcPaths: string[]
+): Promise<void> {
+  // Isolated worker has no module-subset protocol yet — fall back to full.
+  if (shouldUseIsolatedArkTSBuild()) {
+    const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
+    runArkTSBatchFull(rootDir, queries, triggerFile, etsFiles, batchKey);
+    return;
+  }
+
+  batchTriggerFile = null;
+  batchPersistedPaths = new Set();
+
+  setArktsBatchRunning(true);
+  try {
+    reportBatchProgress('scene', 0, etsFiles.length);
+    const index = buildArkTSIndexByModule(rootDir, etsFiles, { targetModuleSrcPaths: moduleSrcPaths });
+    if (index.fileResults.size === 0) {
+      const fatal = index.errors.find((e) => e.severity === 'error');
+      // Fall back to full project batch when the subset produced nothing.
+      const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
+      if (fatal) {
+        process.stderr.write(
+          `\n\x1b[33m    ArkTS: incremental modules failed (${fatal.message}); full rebuild\x1b[0m\n`
+        );
+      }
+      const full = buildArkTSIndex(rootDir, etsFiles);
+      if (full.fileResults.size === 0) {
+        throw new Error(fatal?.message ?? 'ArkTS incremental batch produced no indexed files');
+      }
+      queries.deleteArkTSCrossFileCallEdges();
+      await persistBatchResultsAsync(rootDir, queries, full);
+      if (full.crossFileEdges.length > 0) {
+        const valid = full.crossFileEdges.filter(
+          (e) => full.nodeIds.has(e.source) && full.nodeIds.has(e.target)
+        );
+        if (valid.length > 0) queries.insertEdges(valid);
+      }
+      commitArkTSBatch(rootDir, batchKey, etsFiles, full, triggerFile);
+      return;
+    }
+
+    persistIncrementalModuleResults(rootDir, queries, index);
+
+    if (index.crossFileEdges.length > 0) {
+      const valid = index.crossFileEdges.filter(
+        (e) => index.nodeIds.has(e.source) && index.nodeIds.has(e.target)
+      );
+      if (valid.length > 0) {
+        queries.insertEdges(valid);
+      }
+    }
+
+    // Unique key so a partial index is never mistaken for a full-project cache hit.
+    const batchKey = `incremental:${moduleSrcPaths.join(',')}`;
+    commitArkTSBatch(rootDir, batchKey, etsFiles, index, triggerFile);
+    process.stderr.write(
+      `\n\x1b[33m    ArkTS: incremental module reindex done (${moduleSrcPaths.join(', ')})\x1b[0m\n`
+    );
   } finally {
     setArktsBatchRunning(false);
   }
@@ -1892,12 +2165,42 @@ class ArkTSAdapter {
     }
     // Rebind still-resident deps so live getClass/getMethod works when topo kept them warm.
     this.bindLiveMapsFromResident(scene);
+    // Incremental / first-in-topo: populate sig→id maps from other loaded modules
+    // (deps at SIGNATURES) without persisting those files into this batch.
+    this.seedMapsFromOtherLoadedFiles(scene, moduleFiles);
     this.indexViewTreesFromFiles(files);
     this.ingestModuleCallGraph(scene, module, files, moduleFiles);
     // CFG: only narrow `%unk` cross-module bridge (no same-module CFG calls).
     this.stitchModuleCfgCallsAndRefs(files, moduleFiles);
     // Drop live IR object keys so ArkAnalyzer can GC unloaded modules; keep sig→id maps.
     this.releaseLiveIrMaps();
+  }
+
+  /**
+   * Index symbols from already-loaded non-target modules into sig/name maps only.
+   * Used so incremental BODIES targets can still resolve cross-module RTA/ViewTree
+   * edges against deps that stay at SIGNATURES (and are not re-persisted).
+   */
+  private seedMapsFromOtherLoadedFiles(scene: Scene, excludeFiles: Set<string>): void {
+    const seeded: string[] = [];
+    for (const mod of scene.getModules()) {
+      let filesMap: Map<string, ArkFile>;
+      try {
+        filesMap = mod.getFilesMap();
+      } catch {
+        continue;
+      }
+      for (const arkFile of filesMap.values()) {
+        const rel = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+        if (!rel || excludeFiles.has(rel) || this.fileResults.has(rel)) continue;
+        if (!this.scanned.has(rel) || !isArkAnalyzerSourcePath(rel)) continue;
+        this.indexScannedFile(arkFile);
+        if (this.fileResults.has(rel)) seeded.push(rel);
+      }
+    }
+    for (const rel of seeded) {
+      this.fileResults.delete(rel);
+    }
   }
 
   private bindLiveMapsFromResident(scene: Scene): void {
@@ -3254,10 +3557,13 @@ function emptyArkTSBatchIndex(errors: ExtractionError[]): ArkTSBatchIndex {
 /**
  * Harmony multi-module path: load each PROJECT module to BODIES, index into
  * HomeGraph structures in the callback, let ArkAnalyzer evict under memoryLimitMB.
+ * When `targetModuleSrcPaths` is set, only those modules are BODIES targets
+ * (deps still load at SIGNATURES) — used for incremental sync.
  */
 function buildArkTSIndexByModule(
   rootDir: string,
-  scannedFiles: Iterable<string>
+  scannedFiles: Iterable<string>,
+  options?: { targetModuleSrcPaths?: string[] }
 ): ArkTSBatchIndex {
   const errors: ExtractionError[] = [];
   const memoryLimitMB = resolveArkTSSceneMemoryLimitMB();
@@ -3265,20 +3571,61 @@ function buildArkTSIndexByModule(
   const scene = new Scene();
   const adapter = new ArkTSAdapter(rootDir, scannedFiles);
   let modulesIndexed = 0;
+  const targetSrc = options?.targetModuleSrcPaths?.map(normalizeHarmonyModuleSrcPath);
+  const targetSrcSet = targetSrc && targetSrc.length > 0 ? new Set(targetSrc) : null;
 
   try {
     scene.config(sceneConfig);
 
     const config = new ModuleAnalysisConfig();
-    config.setIncludeType(ModuleType.PROJECT, true);
     config.setLoadLevel(ModuleDepthLevel.BODIES);
     // SIGNATURES is enough for ViewTree stubs / types; BODIES on deps caused
     // each module's RTA to re-walk shared library CFGs (multi-hour indexes).
     config.setDependencyLoadLevel(ModuleDepthLevel.SIGNATURES);
 
-    process.stderr.write(
-      `\n\x1b[33m    ArkTS: analyseByModule (PROJECT→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB}, maxOldSpace=${resolveMaxOldSpaceSizeMb()})...\x1b[0m\n`
-    );
+    if (targetSrcSet) {
+      // Prep + SDK only (no PROJECT targets) so we can resolve ModuleIDs.
+      scene.analyseByModule(() => {}, new ModuleAnalysisConfig());
+      const wantAbs = new Set(
+        [...targetSrcSet].map((src) => {
+          const resolved = path.resolve(rootDir, src);
+          try {
+            return fs.realpathSync(resolved).toLowerCase();
+          } catch {
+            return resolved.toLowerCase();
+          }
+        })
+      );
+      const ids: number[] = [];
+      for (const mod of scene.getModules()) {
+        if (mod.getModuleType() !== ModuleType.PROJECT) continue;
+        let modAbs: string;
+        try {
+          modAbs = fs.realpathSync(mod.getModulePath());
+        } catch {
+          modAbs = path.resolve(mod.getModulePath());
+        }
+        if (wantAbs.has(modAbs.toLowerCase())) {
+          ids.push(scene.getModuleId(mod));
+        }
+      }
+      if (ids.length === 0) {
+        errors.push({
+          message: `ArkTS incremental: no modules matched [${[...targetSrcSet].join(', ')}]`,
+          severity: 'warning',
+        });
+        return emptyArkTSBatchIndex(errors);
+      }
+      config.setTargetModuleIds(ids);
+      process.stderr.write(
+        `\n\x1b[33m    ArkTS: analyseByModule incremental (${ids.length} module(s)→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB})...\x1b[0m\n`
+      );
+    } else {
+      config.setIncludeType(ModuleType.PROJECT, true);
+      process.stderr.write(
+        `\n\x1b[33m    ArkTS: analyseByModule (PROJECT→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB}, maxOldSpace=${resolveMaxOldSpaceSizeMb()})...\x1b[0m\n`
+      );
+    }
 
     scene.analyseByModule((module, scn) => {
       adapter.indexModule(module, scn);

@@ -39,6 +39,7 @@ import {
   primeArkTSBatch,
   resetArkTSBatch,
   drainArkTSIndexNotices,
+  isArkAnalyzerSourcePath,
 } from './languages/arkts';
 
 /**
@@ -2204,9 +2205,16 @@ export class ExtractionOrchestrator {
     // file deleted from disk but not yet staged, so set membership alone misses it.
     // `reconcileChecks` drives the cooperative yield shared with the adds/mods loop
     // below (see SYNC_RECONCILE_YIELD_INTERVAL / issue #905).
+    const removedArkAnalyzerFiles: string[] = [];
     let reconcileChecks = 0;
     for (const tracked of trackedFiles) {
       if (!currentSet.has(tracked.path) || !fs.existsSync(path.join(this.rootDir, tracked.path))) {
+        // Virtual ArkAnalyzer artifacts (e.g. @dummyFile.ets) are not on disk —
+        // leaving them avoids false "removed" churn and preserves incremental
+        // module sync (a phantom @dummyFile delete used to force a full rebuild).
+        if (tracked.path.startsWith('@')) {
+          continue;
+        }
         // Before the cascade deletes them, resurrect incoming cross-file
         // resolution edges as their original refs (#1240 removal case).
         const incoming = this.queries.getCrossFileIncomingEdgesWithTarget(tracked.path);
@@ -2217,6 +2225,9 @@ export class ExtractionOrchestrator {
           if (resurrected.length > 0) {
             this.queries.insertUnresolvedRefsBatch(resurrected);
           }
+        }
+        if (isArkAnalyzerSourcePath(tracked.path)) {
+          removedArkAnalyzerFiles.push(tracked.path);
         }
         this.queries.deleteFile(tracked.path);
         filesRemoved++;
@@ -2295,7 +2306,25 @@ export class ExtractionOrchestrator {
     const total = filesToIndex.length;
     const overrides = loadExtensionOverrides(this.rootDir);
     const needsArkTS = filesToIndex.some((f) => detectLanguage(f, undefined, overrides) === 'arkts');
-    if (needsArkTS) {
+    const arktsChangedForBatch = [
+      ...removedArkAnalyzerFiles,
+      ...filesToIndex.filter(
+        (f) =>
+          isArkAnalyzerSourcePath(f) ||
+          f.endsWith('module.json5') ||
+          f.endsWith('oh-package.json5') ||
+          f === 'build-profile.json5' ||
+          f.endsWith('/build-profile.json5')
+      ),
+    ];
+    // Removals alone can still dirty a Harmony module (RTA for remaining files).
+    const needsArkTSBatch =
+      needsArkTS ||
+      removedArkAnalyzerFiles.length > 0 ||
+      arktsChangedForBatch.some(
+        (f) => f === 'build-profile.json5' || f.endsWith('/build-profile.json5')
+      );
+    if (needsArkTSBatch && arktsChangedForBatch.length > 0) {
       setArkTSBatchProgressCallback((batchProgress) => {
         onProgress?.({
           phase: 'arkts-batch',
@@ -2305,10 +2334,13 @@ export class ExtractionOrchestrator {
           subphase: batchProgress.subphase,
         });
       });
-      const firstEts = filesToIndex.find(
-        (f) => detectLanguage(f, undefined, overrides) === 'arkts'
-      )!;
-      await primeArkTSBatch(this.rootDir, this.queries, firstEts);
+      const firstEts =
+        filesToIndex.find((f) => detectLanguage(f, undefined, overrides) === 'arkts') ??
+        arktsChangedForBatch.find((f) => isArkAnalyzerSourcePath(f)) ??
+        arktsChangedForBatch[0]!;
+      await primeArkTSBatch(this.rootDir, this.queries, firstEts, {
+        changedFiles: arktsChangedForBatch,
+      });
     }
     try {
       for (let i = 0; i < filesToIndex.length; i++) {
@@ -2333,7 +2365,7 @@ export class ExtractionOrchestrator {
         nodesUpdated += result.nodes.length;
       }
     } finally {
-      if (needsArkTS) {
+      if (needsArkTSBatch) {
         setArkTSBatchProgressCallback(null);
       }
     }
