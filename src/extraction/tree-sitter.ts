@@ -361,6 +361,30 @@ const INSTANTIATION_KINDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * tree-sitter node types (across grammars) for literal expressions in method-
+ * call RECEIVER position. A literal's methods are the language's builtins —
+ * `", ".join`, `"x".toUpperCase()`, `5.times`, `[].concat` — never project
+ * symbols, so a member call on one must not emit a `calls` ref that bare-name
+ * matching could bind to an unrelated same-named project function (#1230).
+ */
+const LITERAL_RECEIVER_TYPES = new Set([
+  // strings
+  'string', 'string_literal', 'interpreted_string_literal', 'raw_string_literal',
+  'template_string', 'concatenated_string', 'formatted_string', 'f_string',
+  'line_string_literal', 'string_content', 'heredoc_body',
+  // numbers
+  'number', 'number_literal', 'integer', 'integer_literal', 'float',
+  'float_literal', 'int_literal', 'decimal_integer_literal', 'real_literal',
+  // chars / runes / regex / booleans / null-likes
+  'char_literal', 'character_literal', 'rune_literal', 'regex', 'regex_literal',
+  'true', 'false', 'boolean_literal', 'bool_literal', 'none', 'null', 'nil',
+  'null_literal', 'undefined',
+  // collection literals
+  'list', 'list_literal', 'array', 'array_literal', 'array_creation_expression',
+  'dictionary', 'dict_literal', 'object', 'tuple', 'set',
+]);
+
+/**
  * TreeSitterExtractor - Main extraction class
  */
 export class TreeSitterExtractor {
@@ -4278,6 +4302,16 @@ export class TreeSitterExtractor {
               getChildByField(func, 'operand') ||
               getChildByField(func, 'argument') ||
               func.namedChild(0);
+            // A LITERAL receiver — `", ".join(...)`, `"x".toUpperCase()`,
+            // `5.times`, `[].concat(...)` — calls a builtin of the literal's
+            // type, never a project symbol. The bare-name fallback below let
+            // these exact-match an unrelated same-named project function
+            // (`", ".join` bound to a local `join` defined inside a DIFFERENT
+            // function, #1230). Emit nothing: a silent miss, never a wrong
+            // edge. Nested calls in the arguments are visited independently.
+            if (receiver && LITERAL_RECEIVER_TYPES.has(receiver.type)) {
+              return;
+            }
             const SKIP_RECEIVERS = new Set(['self', 'this', 'cls', 'super']);
             if (receiver && (receiver.type === 'identifier' || receiver.type === 'simple_identifier' || receiver.type === 'field_identifier')) {
               const receiverName = getNodeText(receiver, this.source);
@@ -4358,6 +4392,21 @@ export class TreeSitterExtractor {
               // scope keywords: such calls previously emitted a bare method
               // name, which either failed to resolve or resolved ambiguously.
               calleeName = `${getNodeText(receiver, this.source)}.${methodName}`;
+            } else if (
+              this.language === 'go' &&
+              receiver &&
+              receiver.type === 'selector_expression' &&
+              /^[A-Za-z_]\w*\.[A-Za-z_]\w*$/.test(getNodeText(receiver, this.source).replace(/\s+/g, ''))
+            ) {
+              // Go 2-hop field chain `target.conn.Exec(...)`: keep the
+              // receiver chain so resolution can infer `conn`'s declared type
+              // from the Target struct. Previously this emitted the bare
+              // method name, and when the field's type is EXTERNAL (sql.DB)
+              // the bare name exact-matched an unrelated same-named local
+              // method — a fabricated internal dependency (#1276). Chained
+              // Go receivers resolve strictly via validated field-hop
+              // inference (see matchGoFieldChainCall) or stay unresolved.
+              calleeName = `${getNodeText(receiver, this.source).replace(/\s+/g, '')}.${methodName}`;
             } else {
               calleeName = methodName;
             }

@@ -4594,4 +4594,198 @@ in
       expect(importedFilePaths('main.nix')).toEqual([]);
     });
   });
+
+  describe('Literal receivers and nested-local scope (#1230)', () => {
+    it("str-literal builtin calls don't bind to project symbols; nested locals only resolve from inside their container", async () => {
+      fs.writeFileSync(
+        path.join(tempDir, 'repro.py'),
+        `def format_fields(values):
+    def join(vals):
+        return "-".join(sorted(vals))
+
+    return join(values)
+
+
+def report_missing(unresolved):
+    missing_list = ", ".join(sorted(unresolved))
+    return f"Could not resolve: {missing_list}"
+`
+      );
+
+      cg = await HomeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const join = cg.searchNodes('join', { limit: 5 }).find(
+        (r) => r.node.kind === 'function' && r.node.name === 'join'
+      );
+      expect(join).toBeDefined();
+
+      const callers = cg.getCallers(join!.node.id);
+      expect(callers.map((c) => c.node.name)).toEqual(['format_fields']);
+
+      const reportMissing = cg.searchNodes('report_missing', { limit: 5 }).find(
+        (r) => r.node.kind === 'function'
+      );
+      const callees = cg.getCallees(reportMissing!.node.id);
+      expect(callees.filter((c) => c.node.name === 'join')).toHaveLength(0);
+    }, 30000);
+  });
+
+  describe('Go field-chain receiver calls (#1276)', () => {
+    it('external receiver types produce no edge; in-project field chains resolve correctly', async () => {
+      fs.writeFileSync(path.join(tempDir, 'go.mod'), 'module example.com/app\n\ngo 1.22\n');
+      fs.mkdirSync(path.join(tempDir, 'flow'));
+      fs.writeFileSync(
+        path.join(tempDir, 'flow', 'flow.go'),
+        `package flow
+
+import "database/sql"
+
+type InternalStore interface {
+	Exec(string, ...any) (sql.Result, error)
+	QueryRow(string, ...any) *sql.Row
+}
+
+type Target struct{ conn *sql.DB }
+
+func (target *Target) Write() error {
+	_, err := target.conn.Exec("insert")
+	return err
+}
+
+func (target *Target) Read() *sql.Row {
+	return target.conn.QueryRow("select")
+}
+
+type Store struct{}
+
+func (s *Store) Put(key string) {}
+
+type Repo struct{ db *Store }
+
+func (r *Repo) Save() {
+	r.db.Put("k")
+}
+`
+      );
+
+      cg = await HomeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const execDecl = cg.searchNodes('Exec', { limit: 10 }).find(
+        (r) => r.node.kind === 'method'
+      );
+      if (execDecl) {
+        const execCallers = cg.getCallers(execDecl.node.id);
+        expect(execCallers.map((c) => c.node.name)).not.toContain('Write');
+      }
+      const qrDecl = cg.searchNodes('QueryRow', { limit: 10 }).find(
+        (r) => r.node.kind === 'method'
+      );
+      if (qrDecl) {
+        const qrCallers = cg.getCallers(qrDecl.node.id);
+        expect(qrCallers.map((c) => c.node.name)).not.toContain('Read');
+      }
+
+      const put = cg.searchNodes('Put', { limit: 10 }).find(
+        (r) => r.node.kind === 'method' && r.node.qualifiedName?.includes('Store')
+      );
+      expect(put).toBeDefined();
+      const putCallers = cg.getCallers(put!.node.id);
+      expect(putCallers.map((c) => c.node.name)).toContain('Save');
+    }, 30000);
+
+    it('unexported field types resolve; stdlib-qualified types never bind a same-named local decoy', async () => {
+      fs.writeFileSync(path.join(tempDir, 'go.mod'), 'module example.com/b\n\ngo 1.22\n');
+      fs.writeFileSync(
+        path.join(tempDir, 'm.go'),
+        `package m
+
+import "net/http"
+
+type node struct{}
+
+func (n *node) InsertRoute(path string) {}
+
+type Handler func()
+
+func (h Handler) ServeHTTP() {}
+
+type Mux struct {
+	handler http.Handler
+	tree    *node
+}
+
+func (mx *Mux) handle(path string) {
+	mx.tree.InsertRoute(path)
+}
+
+func (mx *Mux) dispatch() {
+	mx.handler.ServeHTTP(nil, nil)
+}
+`
+      );
+
+      cg = await HomeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const insert = cg.searchNodes('InsertRoute', { limit: 5 }).find(
+        (r) => r.node.kind === 'method'
+      );
+      expect(insert).toBeDefined();
+      const insertCallers = cg.getCallers(insert!.node.id);
+      expect(insertCallers.map((c) => c.node.name)).toContain('handle');
+
+      const serve = cg.searchNodes('ServeHTTP', { limit: 5 }).find(
+        (r) => r.node.kind === 'method'
+      );
+      if (serve) {
+        const serveCallers = cg.getCallers(serve.node.id);
+        expect(serveCallers.map((c) => c.node.name)).not.toContain('dispatch');
+      }
+    }, 30000);
+  });
+
+  describe('Imported singleton instance-method calls (#1292)', () => {
+    it('cross-file call through an imported singleton resolves to the class method', async () => {
+      fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'src', 'store.ts'),
+        `export class ReproStore {
+  notifyJoinGuildStatus(): void {
+    console.log('notified');
+  }
+}
+
+export const reproStore = new ReproStore();
+
+export function callInDefinitionFile(): void {
+  reproStore.notifyJoinGuildStatus();
+}
+`
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'src', 'caller.ts'),
+        `import { reproStore } from './store';
+
+export function callFromImportedFile(): void {
+  reproStore.notifyJoinGuildStatus();
+}
+`
+      );
+
+      cg = await HomeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const method = cg.searchNodes('notifyJoinGuildStatus', { limit: 5 }).find(
+        (r) => r.node.kind === 'method'
+      );
+      expect(method).toBeDefined();
+
+      const callers = cg.getCallers(method!.node.id);
+      const callerNames = callers.map((c) => c.node.name).sort();
+      expect(callerNames).toContain('callInDefinitionFile');
+      expect(callerNames).toContain('callFromImportedFile');
+    }, 30000);
+  });
 });

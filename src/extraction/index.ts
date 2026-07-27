@@ -18,10 +18,13 @@ import {
   Edge,
   UnresolvedReference,
   ReferenceKind,
+  Node,
 } from '../types';
 import { QueryBuilder } from '../db/queries';
 import { extractFromSource } from './tree-sitter';
 import { ParseWorkerPool, resolveParsePoolSize } from './parse-pool';
+import { StoreWriter, StoreBundle, finalizeStoreBundle } from './store-writer';
+import { createYielder, type MaybeYield } from '../resolution/cooperative-yield';
 import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, requiresInProcessExtraction, initGrammars, loadGrammarsForLanguages } from './grammars';
 import { loadExtensionOverrides, loadIncludeIgnoredPatterns, loadExcludePatterns, loadIncludePatterns } from '../project-config';
 import { isHomeGraphDataDir } from '../directory';
@@ -1362,7 +1365,9 @@ export class ExtractionOrchestrator {
   async indexAll(
     onProgress?: (progress: IndexProgress) => void,
     signal?: AbortSignal,
-    verbose?: boolean
+    verbose?: boolean,
+    walBackpressure?: () => Promise<void> | null,
+    storeWriterOpts?: { dbPath: string; fastInit: boolean } | null
   ): Promise<IndexResult> {
     await initGrammars();
     const startTime = Date.now();
@@ -1478,6 +1483,18 @@ export class ExtractionOrchestrator {
       await loadGrammarsForLanguages(neededLanguages);
     }
 
+    const storeWorkerPath = path.join(__dirname, 'store-worker.js');
+    let storeWriter: StoreWriter | null = null;
+    if (
+      storeWriterOpts &&
+      process.env.HOMEGRAPH_NO_STORE_WORKER !== '1' &&
+      fs.existsSync(storeWorkerPath)
+    ) {
+      storeWriter = new StoreWriter(storeWorkerPath, storeWriterOpts.dbPath, storeWriterOpts.fastInit);
+      log('Store writer thread active');
+    }
+    const STORE_WRITER_WINDOW = 64;
+
     /**
      * Parse one file: on the pool when available (the promise REJECTS on a worker
      * crash/timeout — the caller records it and the retry pass re-attempts), or
@@ -1511,13 +1528,22 @@ export class ExtractionOrchestrator {
     let nextToStore = 0;   // cursor: next sequence to commit
     let aborted = false;
 
-    const storeResult = (filePath: string, content: string, stats: fs.Stats, result: ExtractionResult): void => {
+    const commitYield = createYielder();
+
+    const storeResult = async (filePath: string, content: string, stats: fs.Stats, result: ExtractionResult): Promise<void> => {
       processed++;
 
-      // Store in database on main thread (SQLite is not thread-safe)
+      const bp = walBackpressure?.();
+      if (bp) await bp;
+
       if (result.nodes.length > 0 || result.errors.length === 0) {
         const language = detectLanguage(filePath, content, overrides);
-        this.storeExtractionResult(filePath, content, language, stats, result);
+        if (storeWriter) {
+          storeWriter.send(this.buildFreshStoreBundle(filePath, content, language, stats, result));
+          await storeWriter.waitBelow(STORE_WRITER_WINDOW);
+        } else {
+          await this.storeExtractionResult(filePath, content, language, stats, result, commitYield);
+        }
       }
 
       if (result.errors.length > 0) {
@@ -1534,9 +1560,6 @@ export class ExtractionOrchestrator {
       } else if (result.errors.some((e) => e.severity === 'error')) {
         filesErrored++;
       } else {
-        // Files with no symbols but no errors (yaml, twig, properties) are
-        // tracked at the file level — count them as indexed so the CLI doesn't
-        // misleadingly report "No files found to index".
         const lang = detectLanguage(filePath, content, overrides);
         if (isFileLevelOnlyLanguage(lang)) {
           filesIndexed++;
@@ -1560,19 +1583,24 @@ export class ExtractionOrchestrator {
       onProgress?.({ phase: 'parsing', current: processed, total });
     };
 
-    // Commit buffered parses to the DB in file order, advancing the cursor over
-    // contiguous completed results. Runs after each parse settles (and once more
-    // after the drain). storeResult / recordParseFailure run here single-threaded,
-    // so shared counters and SQLite writes never race despite parallel parsing.
-    const flushOrdered = (): void => {
-      if (aborted) return;
-      while (completed.has(nextToStore)) {
-        const item = completed.get(nextToStore)!;
-        completed.delete(nextToStore);
-        nextToStore++;
-        if (item.ok) storeResult(item.filePath, item.content, item.stats, item.result);
-        else recordParseFailure(item.filePath, item.err);
-      }
+    let flushChain: Promise<void> = Promise.resolve();
+    let flushError: unknown = null;
+    const flushOrdered = (): Promise<void> => {
+      flushChain = flushChain.then(async () => {
+        if (aborted || flushError) return;
+        try {
+          while (completed.has(nextToStore)) {
+            const item = completed.get(nextToStore)!;
+            completed.delete(nextToStore);
+            nextToStore++;
+            if (item.ok) await storeResult(item.filePath, item.content, item.stats, item.result);
+            else recordParseFailure(item.filePath, item.err);
+          }
+        } catch (err) {
+          flushError = err;
+        }
+      });
+      return flushChain;
     };
 
     // Dispatch one file's parse (parses run concurrently across the pool), tagged
@@ -1595,10 +1623,13 @@ export class ExtractionOrchestrator {
       // buffered), not just in-flight: a slow file sitting at the commit cursor
       // lets later parses finish and buffer, which would otherwise grow without
       // bound. Wait for parses to settle (each may advance the cursor) until the
-      // window has room. `inFlight.size > 0` guards against an empty race — the
-      // cursor file is always still in flight when the window is full.
-      while (nextSeq - nextToStore >= windowSize && inFlight.size > 0) {
-        await Promise.race(inFlight);
+      // window has room. When nothing is in flight but the window is still full,
+      // the async commit chain is what's behind — await it so the cursor
+      // advances (buffered items hold whole file contents, so this bound is
+      // load-bearing for memory).
+      while (nextSeq - nextToStore >= windowSize) {
+        if (inFlight.size > 0) await Promise.race(inFlight);
+        else await flushOrdered();
       }
     };
 
@@ -1710,10 +1741,23 @@ export class ExtractionOrchestrator {
     // then commit any results the cursor hasn't reached yet.
     if (!aborted) {
       await Promise.all(inFlight);
-      flushOrdered();
+      await flushOrdered();
+      if (flushError) {
+        if (storeWriter) await storeWriter.close();
+        throw flushError;
+      }
+      if (storeWriter) {
+        try {
+          await storeWriter.drain();
+        } finally {
+          await storeWriter.close();
+          storeWriter = null;
+        }
+      }
     }
 
     if (signal?.aborted || aborted) {
+      if (storeWriter) await storeWriter.close();
       if (pool) await pool.destroy();
       return {
         success: false,
@@ -1782,7 +1826,7 @@ export class ExtractionOrchestrator {
         if (result.nodes.length > 0 || result.errors.length === 0) {
           const language = detectLanguage(filePath, content, overrides);
           const stats = await fsp.stat(path.join(this.rootDir, filePath));
-          this.storeExtractionResult(filePath, content, language, stats, result);
+          await this.storeExtractionResult(filePath, content, language, stats, result, createYielder());
 
           const idx = errors.indexOf(errEntry);
           if (idx >= 0) errors.splice(idx, 1);
@@ -1832,7 +1876,7 @@ export class ExtractionOrchestrator {
           if (result.nodes.length > 0 || result.errors.length === 0) {
             const language = detectLanguage(filePath, fullContent, overrides);
             const stats = await fsp.stat(path.join(this.rootDir, filePath));
-            this.storeExtractionResult(filePath, fullContent, language, stats, result);
+            await this.storeExtractionResult(filePath, fullContent, language, stats, result, createYielder());
 
             const idx = errors.indexOf(errEntry);
             if (idx >= 0) errors.splice(idx, 1);
@@ -2024,7 +2068,7 @@ export class ExtractionOrchestrator {
 
     // Store in database
     if (result.nodes.length > 0 || result.errors.length === 0) {
-      this.storeExtractionResult(relativePath, content, language, stats, result);
+      await this.storeExtractionResult(relativePath, content, language, stats, result, createYielder());
     }
 
     return result;
@@ -2033,116 +2077,90 @@ export class ExtractionOrchestrator {
   /**
    * Store extraction result in database
    */
-  private storeExtractionResult(
+  private async storeExtractionResult(
     filePath: string,
     content: string,
     language: Language,
     stats: fs.Stats,
-    result: ExtractionResult
-  ): void {
+    result: ExtractionResult,
+    onYield?: MaybeYield
+  ): Promise<void> {
+    const STORE_CHUNK = 2000;
     const contentHash = hashContent(content);
 
-    // Check if file already exists and hasn't changed
     const existingFile = this.queries.getFileByPath(filePath);
     if (existingFile && existingFile.contentHash === contentHash) {
-      return; // No changes
+      return;
     }
 
-    // Snapshot incoming cross-file edges BEFORE deleting this file's nodes.
-    // `deleteFile` cascades to delete every edge whose source OR target is a
-    // node in this file (edges.FK ... ON DELETE CASCADE). Edges whose SOURCE is
-    // in this file are re-emitted by the extractor below, but edges whose SOURCE
-    // is in a *different* (unchanged) file are not — they would be silently
-    // dropped, which is issue #899: re-indexing a callee file severs `calls`/
-    // `references` edges from callers that import it via module-attribute
-    // access (`pkg.mod.fn(...)`).
-    //
-    // We snapshot the edge plus the target node's (name, kind) so we can
-    // re-resolve to the re-indexed target's NEW id. Node ids are
-    // `sha256(filePath:kind:name:line)`, so any line shift in the callee file
-    // (e.g. a docstring-only edit above the symbol) changes every target id and
-    // a naive re-insert by old id would silently drop every edge. Matching by
-    // (filePath, kind, name) is stable across line shifts; if the symbol was
-    // renamed/removed, no match is found and the edge stays dropped (correct).
     const crossFileIncomingEdges = existingFile
       ? this.queries.getCrossFileIncomingEdgesWithTarget(filePath)
       : [];
 
-    // Delete existing data for this file
     if (existingFile) {
       this.queries.deleteFile(filePath);
     }
 
-    // Filter out nodes with missing required fields before insertion.
-    // This prevents FK violations when edges reference nodes that would
-    // be silently skipped by insertNode() (see issue #42).
     const validNodes = result.nodes.filter((n) => n.id && n.kind && n.name && n.filePath && n.language);
+    const insertedIds = new Set(validNodes.map((n) => n.id));
+    const validEdges = result.edges.filter(
+      (e) => insertedIds.has(e.source) && insertedIds.has(e.target)
+    );
+    const validRefs = result.unresolvedReferences
+      .filter((ref) => insertedIds.has(ref.fromNodeId))
+      .map((ref) => ({
+        ...ref,
+        filePath: ref.filePath ?? filePath,
+        language: ref.language ?? language,
+      }));
 
-    // Insert nodes
-    if (validNodes.length > 0) {
-      this.queries.insertNodes(validNodes);
+    const fitsOneChunk =
+      validNodes.length <= STORE_CHUNK &&
+      validEdges.length <= STORE_CHUNK &&
+      validRefs.length <= STORE_CHUNK;
+    if (fitsOneChunk) {
+      this.queries.storeFileBundle({
+        nodes: validNodes,
+        edges: validEdges,
+        refs: validRefs,
+        file: {
+          path: filePath,
+          contentHash,
+          language,
+          size: stats.size,
+          modifiedAt: stats.mtimeMs,
+          indexedAt: Date.now(),
+          nodeCount: result.nodes.length,
+          errors: result.errors.length > 0 ? result.errors : undefined,
+        },
+      });
+      if (crossFileIncomingEdges.length > 0) {
+        this.reattachCrossFileEdges(crossFileIncomingEdges, validNodes);
+      }
+      return;
     }
 
-    // Filter edges to only reference nodes that were actually inserted
-    if (result.edges.length > 0) {
-      const insertedIds = new Set(validNodes.map((n) => n.id));
-      const validEdges = result.edges.filter(
-        (e) => insertedIds.has(e.source) && insertedIds.has(e.target)
-      );
-      if (validEdges.length > 0) {
-        this.queries.insertEdges(validEdges);
+    for (let i = 0; i < validNodes.length; i += STORE_CHUNK) {
+      this.queries.insertNodes(validNodes.slice(i, i + STORE_CHUNK));
+      await onYield?.();
+    }
+
+    if (validEdges.length > 0) {
+      for (let i = 0; i < validEdges.length; i += STORE_CHUNK) {
+        this.queries.insertEdges(validEdges.slice(i, i + STORE_CHUNK));
+        await onYield?.();
       }
     }
 
-    // Re-insert cross-file incoming edges snapshotted before the delete,
-    // re-resolving each edge's target to the re-indexed node's new id by
-    // (filePath, kind, name). Node ids include the source line, so any line
-    // shift in the callee file (e.g. a docstring-only edit above the symbol)
-    // changes every target id and a naive re-insert by old id would drop them
-    // all. `insertEdges` still filters to endpoints that exist, so edges whose
-    // caller (source) was deleted, or whose callee (target) was renamed/removed
-    // during the re-index (no match in `newTargetIds`), are dropped. This
-    // closes the #899 edge-drop on `sync`.
     if (crossFileIncomingEdges.length > 0) {
-      const newNodesByKindName = new Map<string, string>();
-      for (const n of validNodes) {
-        newNodesByKindName.set(`${n.kind}\0${n.name}`, n.id);
-      }
-      const reinserted: Edge[] = [];
-      const resurrected: UnresolvedReference[] = [];
-      for (const e of crossFileIncomingEdges) {
-        const newTargetId = newNodesByKindName.get(`${e.targetKind}\0${e.targetName}`);
-        if (newTargetId) {
-          reinserted.push({ source: e.source, target: newTargetId, kind: e.kind, metadata: e.metadata, line: e.line, column: e.column, provenance: e.provenance });
-        } else {
-          const ref = resurrectRefFromDroppedEdge(e);
-          if (ref) resurrected.push(ref);
-        }
-      }
-      if (reinserted.length > 0) {
-        this.queries.insertEdges(reinserted);
-      }
-      if (resurrected.length > 0) {
-        this.queries.insertUnresolvedRefsBatch(resurrected);
-      }
+      this.reattachCrossFileEdges(crossFileIncomingEdges, validNodes);
     }
 
-    // Insert unresolved references in batch with denormalized filePath/language
-    if (result.unresolvedReferences.length > 0) {
-      const insertedIds = new Set(validNodes.map((n) => n.id));
-      const refsWithContext = result.unresolvedReferences
-        .filter((ref) => insertedIds.has(ref.fromNodeId))
-        .map((ref) => ({
-          ...ref,
-          filePath: ref.filePath ?? filePath,
-          language: ref.language ?? language,
-        }));
-      if (refsWithContext.length > 0) {
-        this.queries.insertUnresolvedRefsBatch(refsWithContext);
-      }
+    for (let i = 0; i < validRefs.length; i += STORE_CHUNK) {
+      this.queries.insertUnresolvedRefsBatch(validRefs.slice(i, i + STORE_CHUNK));
+      await onYield?.();
     }
 
-    // Insert file record
     const fileRecord: FileRecord = {
       path: filePath,
       contentHash,
@@ -2156,6 +2174,68 @@ export class ExtractionOrchestrator {
     this.queries.upsertFile(fileRecord);
   }
 
+  private buildFileRecord(
+    filePath: string,
+    content: string,
+    language: Language,
+    stats: fs.Stats,
+    nodeCount: number,
+    resultErrors: ExtractionResult['errors']
+  ): FileRecord {
+    return {
+      path: filePath,
+      contentHash: hashContent(content),
+      language,
+      size: stats.size,
+      modifiedAt: stats.mtimeMs,
+      indexedAt: Date.now(),
+      nodeCount,
+      errors: resultErrors.length > 0 ? resultErrors : undefined,
+    };
+  }
+
+  private buildFreshStoreBundle(
+    filePath: string,
+    content: string,
+    language: Language,
+    stats: fs.Stats,
+    result: ExtractionResult
+  ): StoreBundle {
+    return finalizeStoreBundle(
+      result,
+      filePath,
+      language,
+      this.buildFileRecord(filePath, content, language, stats, result.nodes.length, result.errors)
+    );
+  }
+
+  private reattachCrossFileEdges(
+    crossFileIncomingEdges: Array<Edge & { targetKind: string; targetName: string; sourceFilePath: string; sourceLanguage: Language }>,
+    validNodes: Node[]
+  ): void {
+    const newNodesByKindName = new Map<string, string>();
+    for (const n of validNodes) {
+      newNodesByKindName.set(`${n.kind}\0${n.name}`, n.id);
+    }
+    const reinserted: Edge[] = [];
+    const resurrected: UnresolvedReference[] = [];
+    for (const e of crossFileIncomingEdges) {
+      const newTargetId = newNodesByKindName.get(`${e.targetKind}\0${e.targetName}`);
+      if (newTargetId) {
+        reinserted.push({ source: e.source, target: newTargetId, kind: e.kind, metadata: e.metadata, line: e.line, column: e.column, provenance: e.provenance });
+      } else {
+        const ref = resurrectRefFromDroppedEdge(e);
+        if (ref) resurrected.push(ref);
+      }
+    }
+    if (reinserted.length > 0) {
+      this.queries.insertEdges(reinserted);
+    }
+    if (resurrected.length > 0) {
+      this.queries.insertUnresolvedRefsBatch(resurrected);
+    }
+  }
+
   /**
    * Sync the index with the current file state.
    *
@@ -2164,7 +2244,10 @@ export class ExtractionOrchestrator {
    * changes. This works in non-git projects and catches committed changes from
    * `git pull`/`checkout`/`merge`/`rebase` that `git status` cannot see.
    */
-  async sync(onProgress?: (progress: IndexProgress) => void): Promise<SyncResult> {
+  async sync(
+    onProgress?: (progress: IndexProgress) => void,
+    scopedPaths?: string[]
+  ): Promise<SyncResult> {
     await initGrammars(); // Initialize WASM runtime (grammars loaded lazily below)
     const startTime = Date.now();
     let filesChecked = 0;
@@ -2181,42 +2264,35 @@ export class ExtractionOrchestrator {
     });
 
     const filesToIndex: string[] = [];
-    // === Filesystem reconcile (git-independent) ===
-    // The source of truth for "what changed" is the filesystem vs the indexed
-    // state — never git. We enumerate the current source files and reconcile
-    // each against the DB. A cheap (size, mtime) stat pre-filter skips unchanged
-    // files without reading or hashing them, so the expensive read+hash+parse
-    // only runs for files that actually changed. This catches edits/adds/deletes
-    // whether or not the project uses git, and crucially also catches committed
-    // changes from `git pull`/`checkout`/`merge`/`rebase` — which `git status`
-    // cannot see, because the working tree is clean afterward.
-    const currentFiles = await scanDirectoryAsync(this.rootDir);
-    filesChecked = currentFiles.length;
+    let currentFiles: string[];
+    let trackedFiles: FileRecord[];
+    if (scopedPaths && scopedPaths.length > 0) {
+      const unique = [...new Set(scopedPaths)];
+      currentFiles = unique.filter((p) => fs.existsSync(path.join(this.rootDir, p)));
+      trackedFiles = [];
+      for (const p of unique) {
+        const rec = this.queries.getFileByPath(p);
+        if (rec) trackedFiles.push(rec);
+      }
+      filesChecked = unique.length;
+    } else {
+      currentFiles = await scanDirectoryAsync(this.rootDir);
+      filesChecked = currentFiles.length;
+      trackedFiles = this.queries.getAllFiles();
+    }
     const currentSet = new Set(currentFiles);
-
-    const trackedFiles = this.queries.getAllFiles();
     const trackedMap = new Map<string, FileRecord>();
     for (const f of trackedFiles) {
       trackedMap.set(f.path, f);
     }
 
-    // Removals: tracked in the DB but no longer a present source file. Check the
-    // filesystem directly — `scanDirectory` (via `git ls-files`) still lists a
-    // file deleted from disk but not yet staged, so set membership alone misses it.
-    // `reconcileChecks` drives the cooperative yield shared with the adds/mods loop
-    // below (see SYNC_RECONCILE_YIELD_INTERVAL / issue #905).
     const removedArkAnalyzerFiles: string[] = [];
     let reconcileChecks = 0;
     for (const tracked of trackedFiles) {
       if (!currentSet.has(tracked.path) || !fs.existsSync(path.join(this.rootDir, tracked.path))) {
-        // Virtual ArkAnalyzer artifacts (e.g. @dummyFile.ets) are not on disk —
-        // leaving them avoids false "removed" churn and preserves incremental
-        // module sync (a phantom @dummyFile delete used to force a full rebuild).
         if (tracked.path.startsWith('@')) {
           continue;
         }
-        // Before the cascade deletes them, resurrect incoming cross-file
-        // resolution edges as their original refs (#1240 removal case).
         const incoming = this.queries.getCrossFileIncomingEdgesWithTarget(tracked.path);
         if (incoming.length > 0) {
           const resurrected = incoming
@@ -2239,9 +2315,6 @@ export class ExtractionOrchestrator {
 
     // Adds / modifications.
     for (const filePath of currentFiles) {
-      // Same cooperative yield as the removals loop — this is the other O(files)
-      // synchronous-stat loop that wedges the main thread on a large repo (#905).
-      // Yield at the top of the body so the `continue` fast-paths below still hit it.
       if (++reconcileChecks % SYNC_RECONCILE_YIELD_INTERVAL === 0) {
         onProgress?.({
           phase: 'scanning',

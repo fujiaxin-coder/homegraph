@@ -31,7 +31,7 @@ import {
 } from '../src/sync/watcher';
 import HomeGraph from '../src/index';
 
-type SyncFn = () => Promise<{ filesChanged: number; durationMs: number }>;
+type SyncFn = (paths?: string[]) => Promise<{ filesChanged: number; durationMs: number }>;
 
 /**
  * Helper to wait for a condition with timeout. Used for assertions that depend
@@ -438,8 +438,11 @@ describe('FileWatcher', () => {
       watcher.start();
       await watcher.waitUntilReady();
 
-      // A non-source-file event — FileWatcher's `isSourceFile` gate must drop
-      // it before scheduling sync.
+      // An EXISTING non-source file changing — FileWatcher's `isSourceFile`
+      // gate must drop it before scheduling sync. (It must exist on disk:
+      // a VANISHED non-source path is the deleted-directory shape, which
+      // deliberately schedules a sync — #1285.)
+      fs.writeFileSync(path.join(testDir, 'src', 'readme.md'), '# docs\n');
       __emitWatchEventForTests(testDir, 'src/readme.md');
 
       // Wait a bit longer than debounce — sync should NOT trigger.
@@ -447,6 +450,57 @@ describe('FileWatcher', () => {
       expect(syncFn).not.toHaveBeenCalled();
 
       watcher.stop();
+    });
+
+    it('a deleted directory schedules a sync so child records get removed (#1285)', async () => {
+      const syncFn = vi.fn().mockResolvedValue({ filesChanged: 0, durationMs: 0 });
+      const watcher = newWatcher(syncFn, { debounceMs: 100 });
+      watcher.start();
+      await watcher.waitUntilReady();
+
+      const sub = path.join(testDir, 'docs');
+      fs.mkdirSync(path.join(sub, 'nested'), { recursive: true });
+      fs.writeFileSync(path.join(sub, 'nested', 'mod.ts'), 'export const q = 1;');
+      fs.rmSync(sub, { recursive: true, force: true });
+      __emitWatchEventForTests(testDir, 'docs');
+
+      await waitFor(() => syncFn.mock.calls.length > 0);
+      expect(syncFn).toHaveBeenCalled();
+
+      watcher.stop();
+    });
+
+    it('end-to-end: deleting a subdirectory removes its files from the index via watch sync (#1285)', async () => {
+      fs.writeFileSync(path.join(testDir, 'root.ts'), 'export const r = 1;');
+      const deep = path.join(testDir, 'docs', 'a', 'b');
+      fs.mkdirSync(deep, { recursive: true });
+      fs.writeFileSync(path.join(deep, 'inner.ts'), 'export const i = 2;');
+
+      const hg = HomeGraph.initSync(testDir);
+      await hg.indexAll();
+      const before = hg.getFiles().map((f) => f.path);
+      expect(before).toContain('docs/a/b/inner.ts');
+
+      const syncFn = vi.fn(async () => {
+        const r = await hg.sync();
+        return { filesChanged: r.filesAdded + r.filesModified + r.filesRemoved, durationMs: r.durationMs };
+      });
+      const watcher = newWatcher(syncFn, { debounceMs: 100 });
+      watcher.start();
+      await watcher.waitUntilReady();
+
+      fs.rmSync(path.join(testDir, 'docs'), { recursive: true, force: true });
+      __emitWatchEventForTests(testDir, 'docs');
+
+      await waitFor(() => syncFn.mock.calls.length > 0, 5000);
+      await waitFor(() => !hg.getFiles().some((f) => f.path.startsWith('docs/')), 5000);
+
+      const after = hg.getFiles().map((f) => f.path);
+      expect(after).toContain('root.ts');
+      expect(after.some((p) => p.startsWith('docs/'))).toBe(false);
+
+      watcher.stop();
+      hg.close();
     });
 
     it('should ignore .homegraph directory changes', async () => {
@@ -707,6 +761,55 @@ describe('FileWatcher', () => {
       expect(results.length).toBeGreaterThan(0);
 
       cg.unwatch();
+    });
+  });
+
+  describe('scoped sync fast path (#watcher-scoped)', () => {
+    it('passes the exact pending paths to syncFn for plain file events', async () => {
+      const calls: (string[] | undefined)[] = [];
+      const syncFn: SyncFn = async (paths?: string[]) => {
+        calls.push(paths);
+        return { filesChanged: 1, durationMs: 5 };
+      };
+      const watcher = newWatcher(syncFn, { debounceMs: 30 });
+      expect(watcher.start()).toBe(true);
+      fs.writeFileSync(path.join(testDir, 'src', 'a.ts'), 'export const a = 1;');
+      __emitWatchEventForTests(testDir, 'src/a.ts');
+      await new Promise((r) => setTimeout(r, 500));
+      watcher.stop();
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls[0]).toEqual(['src/a.ts']);
+    });
+
+    it('falls back to a full sync (undefined paths) after a directory removal event', async () => {
+      const calls: (string[] | undefined)[] = [];
+      const syncFn: SyncFn = async (paths?: string[]) => {
+        calls.push(paths);
+        return { filesChanged: 0, durationMs: 5 };
+      };
+      const watcher = newWatcher(syncFn, { debounceMs: 30 });
+      expect(watcher.start()).toBe(true);
+      __emitWatchEventForTests(testDir, 'src/removed-dir');
+      await new Promise((r) => setTimeout(r, 500));
+      watcher.stop();
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls[0]).toBeUndefined();
+    });
+
+    it('a lone file event fires on the quick window, well before the full debounce', async () => {
+      const calls: (string[] | undefined)[] = [];
+      const syncFn: SyncFn = async (paths?: string[]) => {
+        calls.push(paths);
+        return { filesChanged: 1, durationMs: 1 };
+      };
+      const watcher = newWatcher(syncFn, { debounceMs: 30_000 });
+      expect(watcher.start()).toBe(true);
+      fs.writeFileSync(path.join(testDir, 'src', 'quick.ts'), 'export const q = 1;');
+      __emitWatchEventForTests(testDir, 'src/quick.ts');
+      await new Promise((r) => setTimeout(r, 1500));
+      watcher.stop();
+      expect(calls.length).toBe(1);
+      expect(calls[0]).toEqual(['src/quick.ts']);
     });
   });
 });

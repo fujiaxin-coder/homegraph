@@ -163,10 +163,10 @@ class NodeSqliteAdapter implements SqliteDatabase {
   private _db: any;
   private _txDepth = 0;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, opts?: { readOnly?: boolean }) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DatabaseSync } = require('node:sqlite');
-    this._db = new DatabaseSync(dbPath);
+    this._db = opts?.readOnly ? new DatabaseSync(dbPath, { readOnly: true }) : new DatabaseSync(dbPath);
   }
 
   get open(): boolean {
@@ -245,11 +245,12 @@ class NodeSqliteAdapter implements SqliteDatabase {
 class WasmDatabaseAdapter implements SqliteDatabase {
   private _db: any;
   private _openStmts = new Set<any>();
+  private _txDepth = 0;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, opts?: { readOnly?: boolean }) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Database } = require('node-sqlite3-wasm');
-    this._db = new Database(dbPath);
+    this._db = opts?.readOnly ? new Database(dbPath, 'readonly') : new Database(dbPath);
   }
 
   get open(): boolean {
@@ -329,13 +330,24 @@ class WasmDatabaseAdapter implements SqliteDatabase {
 
   transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T {
     return (...args: any[]) => {
+      if (this._txDepth > 0) {
+        this._txDepth++;
+        try {
+          return fn(...args);
+        } finally {
+          this._txDepth--;
+        }
+      }
       this._db.exec('BEGIN');
+      this._txDepth = 1;
       try {
         const result = fn(...args);
         this._db.exec('COMMIT');
+        this._txDepth = 0;
         return result;
       } catch (error) {
         this._db.exec('ROLLBACK');
+        this._txDepth = 0;
         throw error;
       }
     };
@@ -364,18 +376,20 @@ function resolveBackendOrder(): SqliteBackend[] {
 
 function tryOpenBackend(
   backend: SqliteBackend,
-  dbPath: string
+  dbPath: string,
+  opts?: { readOnly?: boolean }
 ): { db: SqliteDatabase; backend: SqliteBackend } | { error: string } {
   try {
     if (backend === 'node-sqlite') {
-      return { db: new NodeSqliteAdapter(dbPath), backend: 'node-sqlite' };
+      return { db: new NodeSqliteAdapter(dbPath, opts), backend: 'node-sqlite' };
     }
     if (backend === 'native') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const Database = require('better-sqlite3');
-      return { db: new Database(dbPath) as SqliteDatabase, backend: 'native' };
+      const db = opts?.readOnly ? new Database(dbPath, { readonly: true }) : new Database(dbPath);
+      return { db: db as SqliteDatabase, backend: 'native' };
     }
-    return { db: new WasmDatabaseAdapter(dbPath), backend: 'wasm' };
+    return { db: new WasmDatabaseAdapter(dbPath, opts), backend: 'wasm' };
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
@@ -385,12 +399,15 @@ function tryOpenBackend(
  * Create a database connection.
  * Order: node:sqlite → better-sqlite3 → node-sqlite3-wasm (unless overridden).
  */
-export function createDatabase(dbPath: string): { db: SqliteDatabase; backend: SqliteBackend } {
+export function createDatabase(
+  dbPath: string,
+  opts?: { readOnly?: boolean }
+): { db: SqliteDatabase; backend: SqliteBackend } {
   const order = resolveBackendOrder();
   const errors: string[] = [];
 
   for (const backend of order) {
-    const result = tryOpenBackend(backend, dbPath);
+    const result = tryOpenBackend(backend, dbPath, opts);
     if ('db' in result) {
       if (result.backend === 'wasm') {
         console.warn(buildWasmFallbackBanner(errors.join(' | ') || undefined));

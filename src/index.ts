@@ -22,8 +22,10 @@ import {
   BuildContextOptions,
   FindRelevantContextOptions,
   SegmentMatch,
+  NodeKind,
 } from './types';
 import { DatabaseConnection, getDatabasePath, removeDatabaseFiles } from './db';
+import { WalCheckpointValve, resolveWalValveMb } from './db/wal-valve';
 import { QueryBuilder } from './db/queries';
 import {
   isInitialized,
@@ -63,6 +65,7 @@ import { getHomeGraphDir } from './directory';
 import { deriveProjectNameTokens } from './search/query-utils';
 import { segmentLookupVariants, splitIdentifierSegments } from './search/identifier-segments';
 import { createYielder } from './resolution/cooperative-yield';
+import { minRefsForPool } from './resolution/resolver-pool';
 import { HomeGraphPackageVersion } from './mcp/version';
 
 // Re-export types for consumers
@@ -134,6 +137,9 @@ export interface IndexOptions {
 
   /** Enable verbose logging (worker lifecycle, memory, timeouts) */
   verbose?: boolean;
+
+  /** Watcher fast path: reconcile ONLY these project-relative paths (see ExtractionOrchestrator.sync). */
+  paths?: string[];
 }
 
 /**
@@ -450,33 +456,81 @@ export class HomeGraph {
       } catch {
         return { success: false, filesIndexed: 0, filesSkipped: 0, filesErrored: 0, nodesCreated: 0, edgesCreated: 0, errors: [{ message: 'Could not acquire file lock - another process may be indexing', severity: 'error' as const }], durationMs: 0 };
       }
+      const freshDb = this.queries.getNodeAndEdgeCount().nodes === 0;
+      const fastInit = process.env.HOMEGRAPH_NO_FAST_INIT !== '1' && freshDb;
+      if (fastInit) {
+        try {
+          this.db.getDb().pragma('journal_mode = MEMORY');
+          this.db.getDb().pragma('synchronous = OFF');
+        } catch { /* keep WAL */ }
+      }
+      const deferWal = !fastInit && process.env.HOMEGRAPH_NO_WAL_DEFER !== '1' && this.db.getJournalMode() === 'wal';
+      let walValve: WalCheckpointValve | null = null;
+      let priorAutocheckpoint = 1000;
+      let restoreAutocheckpoint = false;
+      if (deferWal) {
+        priorAutocheckpoint = this.db.getWalAutocheckpoint();
+        this.db.setWalAutocheckpoint(0);
+        walValve = new WalCheckpointValve(
+          this.db,
+          resolveWalValveMb(process.env.HOMEGRAPH_WAL_VALVE_MB, this.db.getDbFileSizeBytes()),
+          undefined,
+          options.verbose ? (m) => console.log(`[wal-valve] ${m}`) : undefined
+        );
+        walValve.start();
+      }
       try {
         const before = this.queries.getNodeAndEdgeCount();
-        // Mark the index as in-flight BEFORE any writes: a run killed mid-index
-        // leaves this marker behind so `homegraph status` can tell a truncated
-        // index from a completed one.
         try { this.queries.setMetadata('index_state', 'indexing'); } catch { /* metadata is advisory */ }
         try { this.queries.clearNameSegmentVocab(); } catch { /* vocab is advisory — never fail an index over it */ }
-        const result = await this.orchestrator.indexAll(options.onProgress, options.signal, options.verbose);
+        this.db.beginBulkNodeLoad();
+        if (freshDb) this.db.beginBulkParseLoad();
+        let result: IndexResult;
+        try {
+          result = await this.orchestrator.indexAll(
+            options.onProgress,
+            options.signal,
+            options.verbose,
+            walValve ? () => walValve!.backpressure() : undefined,
+            freshDb ? { dbPath: this.db.getPath(), fastInit } : null
+          );
+        } finally {
+          if (freshDb) {
+            const tIdx = Date.now();
+            await this.db.endBulkParseLoad();
+            if (process.env.HOMEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] parse-index-rebuild: ${Date.now() - tIdx}ms`);
+          }
+          const tFts = Date.now();
+          this.db.endBulkNodeLoad();
+          if (process.env.HOMEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] fts-rebuild: ${Date.now() - tFts}ms`);
+        }
 
-        // Re-detect frameworks now that the index is populated. The resolver
-        // is constructed with createResolver() before any files exist, so
-        // framework resolvers whose detect() consults the indexed file list
-        // (e.g. UIKit/SwiftUI scanning for imports, swift-objc-bridge looking
-        // for both Swift and ObjC files) all return false on that initial pass
-        // and silently drop themselves. Re-initializing here gives them a
-        // chance to see the actual project before resolution runs.
+        if (walValve) await walValve.foldNow();
+
         if (result.success && result.filesIndexed > 0) {
           this.resolver.initialize();
-          // Cross-file finalization (e.g. NestJS RouterModule prefixes). Runs
-          // before resolution so updated names show up in subsequent reads.
           this.resolver.runPostExtract();
         }
 
-        // Resolve references to create call/import/extends edges
         if (result.success && result.filesIndexed > 0) {
-          // Get count without loading all refs into memory
           const unresolvedCount = this.queries.getUnresolvedReferencesCount();
+
+          if (fastInit && unresolvedCount >= minRefsForPool()) {
+            try {
+              this.db.getDb().pragma('synchronous = NORMAL');
+              this.db.getDb().pragma('journal_mode = WAL');
+              priorAutocheckpoint = this.db.getWalAutocheckpoint();
+              this.db.setWalAutocheckpoint(0);
+              restoreAutocheckpoint = true;
+              walValve = new WalCheckpointValve(
+                this.db,
+                undefined,
+                undefined,
+                options.verbose ? (m) => console.log(`[wal-valve] ${m}`) : undefined
+              );
+              walValve.start();
+            } catch { /* keep current mode; resolution still works sequentially */ }
+          }
 
           options.onProgress?.({
             phase: 'resolving',
@@ -484,44 +538,39 @@ export class HomeGraph {
             total: unresolvedCount,
           });
 
-          await this.resolveReferencesBatched((current, total) => {
-            options.onProgress?.({
-              phase: 'resolving',
-              current,
-              total,
-            });
-          });
+          await this.resolveReferencesBatched(
+            (current, total) => {
+              options.onProgress?.({
+                phase: 'resolving',
+                current,
+                total,
+              });
+            },
+            (done, totalPasses) => {
+              options.onProgress?.({
+                phase: 'linking',
+                current: done,
+                total: totalPasses,
+              });
+            },
+            walValve ? () => walValve!.backpressure() : undefined
+          );
 
-          // Second pass: chained calls whose method lives on a supertype the
-          // receiver conforms to (protocol-extension / inherited / default-
-          // interface). Needs the implements/extends edges the main pass just
-          // built, so it runs after resolution (#750).
           await this.resolver.resolveChainedCallsViaConformance();
-          // Same lifecycle for `this.<member>` callback registrations whose
-          // member is inherited from a supertype (#808).
           await this.resolver.resolveDeferredThisMemberRefs();
         }
 
-        // Refresh planner stats + checkpoint the WAL after bulk writes.
-        // Cheap and non-blocking; never load-bearing for correctness.
         if (result.success && result.filesIndexed > 0) {
-          this.db.runMaintenance();
+          if (walValve) { walValve.stop(); await walValve.drain(); }
+          await this.db.runMaintenance();
         }
 
-        // The orchestrator only sees extraction-phase counts; resolution and
-        // synthesizer edges (often >50% of the graph on JVM repos) come later.
-        // Recompute against the DB so the CLI summary reports the true totals.
         if (result.success && result.filesIndexed > 0) {
           const after = this.queries.getNodeAndEdgeCount();
           result.nodesCreated = after.nodes - before.nodes;
           result.edgesCreated = after.edges - before.edges;
         }
 
-        // Stamp the index with the engine that built it, so `homegraph status`
-        // and `homegraph upgrade` can recommend a re-index when the running
-        // engine produces richer extraction than the one on disk. Only on a
-        // real full index — a sync touches a subset, so it must NOT advance the
-        // extraction stamp (the bulk would still be stale). See extraction-version.ts.
         if (result.success && result.filesIndexed > 0) {
           try {
             this.queries.setMetadata('indexed_with_version', HomeGraphPackageVersion);
@@ -537,7 +586,6 @@ export class HomeGraph {
           }
         }
 
-        // Reconcile the scan's ground truth against what the pipeline accounted for.
         try {
           if (!result.success) {
             this.queries.setMetadata('index_state', 'failed');
@@ -566,6 +614,16 @@ export class HomeGraph {
 
         return result;
       } finally {
+        if (walValve) { walValve.stop(); await walValve.drain(); }
+        if (deferWal || restoreAutocheckpoint) {
+          try { this.db.setWalAutocheckpoint(priorAutocheckpoint); } catch { /* connection may be closing */ }
+        }
+        if (fastInit) {
+          try {
+            this.db.getDb().pragma('synchronous = NORMAL');
+            this.db.getDb().pragma('journal_mode = WAL');
+          } catch { /* connection may be closing */ }
+        }
         this.fileLock.release();
       }
     });
@@ -603,39 +661,39 @@ export class HomeGraph {
       } catch {
         return { filesChecked: 0, filesAdded: 0, filesModified: 0, filesRemoved: 0, nodesUpdated: 0, durationMs: 0 };
       }
+      const deferWal = process.env.HOMEGRAPH_NO_WAL_DEFER !== '1' && this.db.getJournalMode() === 'wal';
+      let walValve: WalCheckpointValve | null = null;
+      let priorAutocheckpoint = 1000;
+      if (deferWal) {
+        priorAutocheckpoint = this.db.getWalAutocheckpoint();
+        this.db.setWalAutocheckpoint(0);
+        walValve = new WalCheckpointValve(
+          this.db,
+          resolveWalValveMb(process.env.HOMEGRAPH_WAL_VALVE_MB, this.db.getDbFileSizeBytes()),
+          undefined,
+          options.verbose ? (m) => console.log(`[wal-valve] ${m}`) : undefined
+        );
+        walValve.start();
+      }
       try {
-        // Captured BEFORE the sync runs: the sync's own incremental writes
-        // populate vocab rows for the files it touches, so an end-of-sync
-        // emptiness check would see "non-empty" and skip the backfill forever,
-        // leaving every unchanged file's names unsegmented.
         const vocabWasEmpty = (() => {
           try { return this.queries.isNameSegmentVocabEmpty(); } catch { return false; }
         })();
 
-        const result = await this.orchestrator.sync(options.onProgress);
+        const result = await this.orchestrator.sync(options.onProgress, options.paths);
 
-        // Cross-file finalization (e.g. NestJS RouterModule prefixes). Run on
-        // every sync that touched files so edits to `app.module.ts` propagate
-        // to controllers in unchanged files. The pass is idempotent and cheap
-        // (regex over *.module.ts only).
+        if (walValve) await walValve.foldNow();
+
         if (result.filesAdded > 0 || result.filesModified > 0) {
           this.resolver.runPostExtract();
         } else if (result.filesRemoved > 0) {
-          // A pure-removal sync still resolves refs below — the deletion path
-          // resurrects the removed file's incoming edges as pending refs
-          // (#1240 removal case) and the orphan sweep consumes them. In a
-          // long-lived process (daemon) the resolver's name caches were
-          // warmed against the pre-removal graph; drop them so resolution
-          // sees the post-removal state. (runPostExtract above clears caches
-          // itself, so the changed-files branch is already covered.)
           this.resolver.clearCaches();
         }
 
-        // Resolve references if files were updated
         const filesChanged = result.filesAdded > 0 || result.filesModified > 0;
+        const backpressure = walValve ? () => walValve!.backpressure() : undefined;
         if (filesChanged) {
           if (result.changedFilePaths) {
-            // Scope resolution to changed files (git fast path — bounded set)
             const tRefLoad = Date.now();
             const unresolvedRefs = this.queries.getUnresolvedReferencesByFiles(result.changedFilePaths);
             if (process.env.HOMEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] sync-ref-load: ${Date.now() - tRefLoad}ms (${unresolvedRefs.length} refs)`);
@@ -654,15 +712,6 @@ export class HomeGraph {
               });
             });
 
-            // Retry previously-failed refs the changed files may now satisfy
-            // (#1240). Scoped resolution above only re-resolves refs FROM the
-            // changed files — but when a changed file gains an export/symbol,
-            // refs in UNCHANGED files that failed against the old graph can
-            // now resolve, and nothing else ever revisits them (their rows
-            // were parked as status='failed' by an earlier completed pass).
-            // Look them up by the symbol names the changed files now carry
-            // and re-resolve just that set. On a sync where no failed ref
-            // matches, this is one indexed lookup.
             const tRetry = Date.now();
             const retryable = this.queries.getRetryableFailedReferences(
               this.queries.getNodeNamesByFiles(result.changedFilePaths)
@@ -682,7 +731,6 @@ export class HomeGraph {
             }
             if (process.env.HOMEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] sync-failed-ref-retry: ${Date.now() - tRetry}ms (${retryable.length} refs)`);
           } else {
-            // No git info — use batched resolution to avoid OOM
             const unresolvedCount = this.queries.getUnresolvedReferencesCount();
 
             options.onProgress?.({
@@ -705,24 +753,12 @@ export class HomeGraph {
                   current: done,
                   total: totalPasses,
                 });
-              }
+              },
+              backpressure
             );
           }
         }
 
-        // Orphan sweep (#1187). A resolution pass that dies mid-run — the #850
-        // daemon liveness watchdog's SIGKILL (#1122), Ctrl-C, a crash — leaves
-        // the refs it never reached in unresolved_refs, and the git-scoped fast
-        // path above never revisits them (it reads only the changed files'
-        // rows). Those files' call edges were then missing PERMANENTLY, with
-        // nothing to see except a too-small blast radius, until a full
-        // re-index. A completed pass takes every row it processed out of the
-        // PENDING set (resolved rows are deleted, unresolvable ones parked as
-        // status='failed' for the #1240 retry above), so any pending row now
-        // is such an orphan — or a row from an older engine's scoped pass.
-        // Grind them down with the batched resolver; this also makes a bare
-        // `homegraph sync` the recovery command for a wedged index. On a
-        // healthy index this is one COUNT query.
         const orphanCount = this.queries.getUnresolvedReferencesCount();
         if (orphanCount > 0) {
           options.onProgress?.({
@@ -745,32 +781,20 @@ export class HomeGraph {
                 current: done,
                 total: totalPasses,
               });
-            }
+            },
+            backpressure
           );
         }
 
         if (filesChanged || orphanCount > 0) {
-          // Second pass: chained calls whose method lives on a supertype the
-          // receiver conforms to (protocol-extension / inherited). Needs the
-          // implements/extends edges built above (#750).
           await this.resolver.resolveChainedCallsViaConformance();
-          // Same lifecycle for `this.<member>` callback registrations whose
-          // member is inherited from a supertype (#808).
           await this.resolver.resolveDeferredThisMemberRefs();
         }
 
-        // Refresh planner stats + checkpoint the WAL after bulk writes.
-        // Off-thread — see indexAll's call site.
         if (filesChanged || result.filesRemoved > 0 || orphanCount > 0) {
           await this.db.runMaintenance();
         }
 
-        // Heal the segment vocabulary on indexes built before the table
-        // existed (upgrade path): incremental writes above only cover changed
-        // files, so a vocab that was empty when this sync STARTED means the
-        // bulk was never segmented — backfill it (INSERT OR IGNORE, so the
-        // rows the sync just wrote are fine). Batched + yielding — sync can
-        // run on the daemon's liveness-watchdog thread (#850/#1091).
         try {
           if (vocabWasEmpty && this.queries.getNodeAndEdgeCount().nodes > 0) {
             await this.rebuildNameSegmentVocab();
@@ -779,6 +803,10 @@ export class HomeGraph {
 
         return result;
       } finally {
+        if (walValve) { walValve.stop(); await walValve.drain(); }
+        if (deferWal) {
+          try { this.db.setWalAutocheckpoint(priorAutocheckpoint); } catch { /* connection may be closing */ }
+        }
         this.fileLock.release();
       }
     });
@@ -809,8 +837,8 @@ export class HomeGraph {
 
     this.watcher = new FileWatcher(
       this.projectRoot,
-      async () => {
-        const result = await this.sync();
+      async (paths?: string[]) => {
+        const result = await this.sync({ paths });
         // sync() returns this exact zero-shape iff it failed to acquire the
         // file lock (a real empty sync always has filesChecked > 0 because
         // scanDirectory ran). Surface that to the watcher as a typed error
@@ -994,9 +1022,21 @@ export class HomeGraph {
    */
   async resolveReferencesBatched(
     onProgress?: (current: number, total: number) => void,
-    onSynthesisProgress?: (done: number, total: number) => void
+    onSynthesisProgress?: (done: number, total: number) => void,
+    backpressure?: () => Promise<void> | null
   ): Promise<ResolutionResult> {
-    return this.resolver.resolveAndPersistBatched(onProgress, undefined, onSynthesisProgress);
+    return this.resolver.resolveAndPersistBatched(onProgress, undefined, onSynthesisProgress, {
+      dbPath: this.db.getPath(),
+      bulkEdgeLoad: {
+        begin: () => this.db.beginBulkEdgeLoad(),
+        end: () => this.db.endBulkEdgeLoad(),
+      },
+      refIndexLoad: {
+        begin: () => this.db.beginBulkRefLoad(),
+        end: () => this.db.endBulkRefLoad(),
+      },
+      backpressure,
+    });
   }
 
   /**
@@ -1088,6 +1128,20 @@ export class HomeGraph {
    */
   getNodesByName(name: string): Node[] {
     return this.queries.getNodesByName(name);
+  }
+
+  /**
+   * Nodes whose name CONTAINS `substring` (LIKE scan, ASCII-case-insensitive,
+   * shortest-first). The camel-infix lookup FTS can't do — `profileInfo`
+   * inside `getProfileInfoV2` is one FTS token (#1196).
+   */
+  getNodesByNameSubstring(
+    substring: string,
+    options: { kinds?: NodeKind[]; limit?: number; excludePrefix?: boolean } = {}
+  ): Node[] {
+    return this.queries
+      .findNodesByNameSubstring(substring, options)
+      .map((r) => r.node);
   }
 
   /**

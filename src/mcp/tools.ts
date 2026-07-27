@@ -4619,7 +4619,7 @@ export class ToolHandler {
         // homegraph_node's findSymbolMatches.) Qualified tokens keep findAllSymbols.
         const isQual = /[.\/]|::/.test(t);
         const raw = isQual ? this.findAllSymbols(cg, t).nodes : cg.getNodesByName(t);
-        const cands = raw
+        let cands = raw
           .filter((n) => SEED_KINDS.has(n.kind) && !isTestPath(n.filePath))
           .sort((a, b) => {
             // Prefer callables over types when both share a name, then body size.
@@ -4628,6 +4628,26 @@ export class ToolHandler {
             if (ac !== bc) return bc - ac;
             return (bodyLines(b) > 1 ? 1 : 0) - (bodyLines(a) > 1 ? 1 : 0) || bodyLines(b) - bodyLines(a);
           });
+        // Field-name seeding fallback (#1196): a camelCase token that names NO
+        // definition of its own is usually an object-literal key / API field —
+        // seed its camel-infix callable definers instead.
+        if (cands.length === 0 && !isQual && /[a-z][A-Z]/.test(t)) {
+          const lcToken = t.toLowerCase();
+          cands = cg
+            .getNodesByNameSubstring(t, {
+              kinds: ['function', 'method', 'component'],
+              limit: 60,
+            })
+            .filter((n) => CALLABLE.has(n.kind) && !isTestPath(n.filePath))
+            .filter((n) => {
+              const idx = n.name.toLowerCase().indexOf(lcToken);
+              if (idx < 0) return false;
+              if (idx === 0) return n.name.length > t.length;
+              return /[A-Z]/.test(n.name.charAt(idx));
+            })
+            .sort((a, b) => a.name.length - b.name.length)
+            .slice(0, 3);
+        }
         // A specific name (<=3 defs) injects all its defs. An overloaded name
         // (`validate` = 10, `request` = 44) would flood the subgraph, so inject
         // only: the overloads whose file/class the query ALSO names (the agent
