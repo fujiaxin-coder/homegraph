@@ -44,7 +44,7 @@
     "node-sqlite3-wasm": "^0.8.30",
     "tree-sitter-wasms": "^0.1.11",
     "web-tree-sitter": "^0.25.3",
-    "arkanalyzer": "file:../../master_aa/arkanalyzer"
+    "arkanalyzer": "^1.0.91"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
