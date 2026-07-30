@@ -22,6 +22,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- Large HarmonyOS / ArkTS projects no longer get killed mid-index with "Main thread unresponsive" while ArkAnalyzer is still building the Scene. That work is native and can block the event loop for well over a minute between modules on a big multi-module tree; the safety watchdog now pauses for the Scene build and arms again afterward, so a healthy index finishes without needing `HOMEGRAPH_NO_WATCHDOG` or a raised timeout. A genuinely stuck process outside that span is still caught as before.
 - HarmonyOS / ArkTS indexing no longer walks `build/` (and other default-ignored dirs) when collecting `.ets` files for the Scene batch. That mismatch used to leave extra generated files in the index so non-git `homegraph status` reported Pending Removed right after a fresh `init`.
 - ArkTS Scene builds now run **in-process by default** (including large Windows repos). The isolated child + stack-size retry ladder is opt-in via `HOMEGRAPH_ARKTS_ISOLATED=1`, so `init`/`index` no longer burn minutes on failed isolated retries before users can get a working index.
 - SQLite picks a backend in order: built-in **`node:sqlite`** (Node 22.5+, real WAL), then **better-sqlite3**, then **node-sqlite3-wasm** as last resort so library hosts on older Node still work. `homegraph status` reports `node-sqlite`, `native`, or `wasm`. Override with `HOMEGRAPH_SQLITE_BACKEND`.

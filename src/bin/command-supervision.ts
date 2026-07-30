@@ -23,10 +23,13 @@
  * SYNCHRONOUSLY on this thread, and on a large repo that is legitimately many
  * seconds of work. So those spans yield cooperatively to the event loop
  * (`src/resolution/cooperative-yield.ts`) to keep the heartbeat alive; without
- * that the watchdog would SIGKILL a valid, in-progress index (#1091). The
- * distinction it must preserve — kill a TRUE wedge, spare slow-but-progressing
- * work — is exactly what cooperative yielding buys: a genuinely stuck span never
- * reaches its next yield, so it still trips the timeout.
+ * that the watchdog would SIGKILL a valid, in-progress index (#1091). ArkTS
+ * Scene builds cannot yield (opaque native ArkAnalyzer work), so they
+ * temporarily suspend the watchdog via `runWithoutLivenessWatchdog` instead.
+ * The distinction it must preserve — kill a TRUE wedge, spare slow-but-progressing
+ * work — is exactly what cooperative yielding (and scoped suspend) buys: a
+ * genuinely stuck JS span never reaches its next yield, so it still trips the
+ * timeout.
  */
 import { installMainThreadWatchdog } from '../mcp/liveness-watchdog';
 import { supervisionLostReason, parsePpidPollMs, parseHostPpid } from '../mcp/ppid-watchdog';

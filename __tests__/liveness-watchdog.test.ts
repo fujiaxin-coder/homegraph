@@ -6,6 +6,8 @@ import {
   parseWatchdogTimeoutMs,
   deriveCheckIntervalMs,
   installMainThreadWatchdog,
+  suspendLivenessWatchdog,
+  runWithoutLivenessWatchdog,
   DEFAULT_WATCHDOG_TIMEOUT_MS,
 } from '../src/mcp/liveness-watchdog';
 
@@ -35,6 +37,18 @@ describe('installMainThreadWatchdog opt-out', () => {
       if (prev === undefined) delete process.env.HOMEGRAPH_NO_WATCHDOG;
       else process.env.HOMEGRAPH_NO_WATCHDOG = prev;
     }
+  });
+});
+
+describe('suspendLivenessWatchdog (in-process)', () => {
+  it('resume is safe when nothing was armed', () => {
+    const resume = suspendLivenessWatchdog();
+    expect(() => resume()).not.toThrow();
+    expect(() => resume()).not.toThrow(); // idempotent
+  });
+
+  it('runWithoutLivenessWatchdog returns the callback result', () => {
+    expect(runWithoutLivenessWatchdog(() => 42)).toBe(42);
   });
 });
 
@@ -193,5 +207,64 @@ describe('liveness watchdog (spawned, real watchdog process)', () => {
     // signal=null is insufficient on Windows, where a kill also reports null.)
     expect(signal).toBeNull();
     expect(code).toBe(3);
+  }, 12000);
+
+  // --- opaque native-span suspend (ArkTS Scene builds): JS cannot yield inside
+  // ArkAnalyzer, so those spans disarm the watchdog and re-arm after. ---
+
+  it('does NOT kill a blocked loop while the watchdog is suspended', async () => {
+    const { code, signal } = await runChild(
+      { HOMEGRAPH_WATCHDOG_TIMEOUT_MS: '500' },
+      `
+        const { suspendLivenessWatchdog } = require(${JSON.stringify(MODULE)});
+        const resume = suspendLivenessWatchdog();
+        setTimeout(() => {
+          const end = Date.now() + 1500;
+          while (Date.now() < end) {}
+          resume();
+          process.exit(4);
+        }, 150);
+      `,
+      8000
+    );
+    expect(signal).toBeNull();
+    expect(code).toBe(4);
+  }, 12000);
+
+  it('SIGKILLs again after suspend resumes (re-armed)', async () => {
+    const r = await runChild(
+      { HOMEGRAPH_WATCHDOG_TIMEOUT_MS: '500' },
+      `
+        const { suspendLivenessWatchdog } = require(${JSON.stringify(MODULE)});
+        const resume = suspendLivenessWatchdog();
+        // Brief suspended block, then resume and wedge — the re-armed watchdog
+        // must still catch the post-resume hang.
+        setTimeout(() => {
+          const end = Date.now() + 200;
+          while (Date.now() < end) {}
+          resume();
+          while (true) {}
+        }, 100);
+      `,
+      8000
+    );
+    expectKilled(r);
+  }, 12000);
+
+  it('runWithoutLivenessWatchdog is a no-op when nothing is armed', async () => {
+    const { code, signal } = await runChild(
+      { HOMEGRAPH_WATCHDOG_TIMEOUT_MS: '500', HOMEGRAPH_NO_WATCHDOG: '1' },
+      `
+        const { runWithoutLivenessWatchdog } = require(${JSON.stringify(MODULE)});
+        runWithoutLivenessWatchdog(() => {
+          const end = Date.now() + 200;
+          while (Date.now() < end) {}
+        });
+        process.exit(9);
+      `,
+      8000
+    );
+    expect(signal).toBeNull();
+    expect(code).toBe(9);
   }, 12000);
 });

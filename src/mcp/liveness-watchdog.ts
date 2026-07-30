@@ -49,6 +49,15 @@
  * coinciding with unrelated file activity — or I/O hung beyond all reason —
  * still dies. A true wedge with no disk progress dies at the base timeout,
  * exactly as before.
+ *
+ * **Opaque native spans (`suspendLivenessWatchdog` / `runWithoutLivenessWatchdog`).**
+ * ArkAnalyzer Scene builds (`analyseByModule` / full Scene) run synchronous
+ * native work on this thread with no JS yield points — a single module's BODIES
+ * load can exceed the 60s window while the process is healthy. Cooperative
+ * yielding can't help (the stall is between callbacks, inside native code), and
+ * disk-progress deferral's hard cap is too short for multi-module Harmony
+ * indexes. Those spans suspend the watchdog for the duration and re-arm after;
+ * prefer yielding for any JS-owned loop.
  */
 import * as fs from 'fs';
 import * as os from 'os';
@@ -169,15 +178,51 @@ export interface WatchdogOptions {
   progressPaths?: string[];
 }
 
-/**
- * Install the main-thread liveness watchdog for a long-lived process. Returns a
- * handle to stop it, or `null` when disabled or when the child can't be spawned
- * (degraded, never throws — a missing watchdog must never keep a process from
- * starting).
- */
-export function installMainThreadWatchdog(options: WatchdogOptions = {}): WatchdogHandle | null {
-  if (isEnvTruthy(process.env.HOMEGRAPH_NO_WATCHDOG)) return null;
+/** One armed generation: disarm tears down the child + heartbeat. */
+interface ArmedWatchdog {
+  disarm: () => void;
+  options: WatchdogOptions;
+}
 
+/**
+ * Process-wide armed watchdog. `install` / `suspend` / `stop` all mutate this
+ * so a handle returned before a suspend+re-arm still stops the *current*
+ * generation (CLI supervision and the MCP server hold the handle across
+ * ArkTS Scene builds that suspend).
+ */
+let active: ArmedWatchdog | null = null;
+/** Nested `suspendLivenessWatchdog` depth; disarm only at 0→1, re-arm at 1→0. */
+let suspendDepth = 0;
+/** Options to re-arm with after the outermost resume; cleared by `stop()`. */
+let optionsWhileSuspended: WatchdogOptions | null = null;
+
+/** Stable handle: always stops whatever generation is current (or pending re-arm). */
+const SHARED_HANDLE: WatchdogHandle = {
+  stop(): void {
+    suspendDepth = 0;
+    optionsWhileSuspended = null;
+    disarmActive();
+  },
+};
+
+function copyOptions(options: WatchdogOptions): WatchdogOptions {
+  return {
+    progressPaths: options.progressPaths ? [...options.progressPaths] : undefined,
+  };
+}
+
+function disarmActive(): void {
+  if (!active) return;
+  try {
+    active.disarm();
+  } catch {
+    /* best-effort teardown */
+  }
+  active = null;
+}
+
+/** Spawn the watchdog child; returns a disarm fn, or null on spawn failure. */
+function armWatchdog(options: WatchdogOptions): (() => void) | null {
   const timeoutMs = parseWatchdogTimeoutMs(process.env.HOMEGRAPH_WATCHDOG_TIMEOUT_MS);
   const checkMs = deriveCheckIntervalMs(timeoutMs);
   const capMs = timeoutMs * PROGRESS_CAP_MULTIPLIER;
@@ -230,13 +275,85 @@ export function installMainThreadWatchdog(options: WatchdogOptions = {}): Watchd
   debug(`armed (child pid ${child.pid ?? '?'}): timeoutMs=${timeoutMs} checkMs=${checkMs} progressPaths=${progressPaths.length}`);
 
   let stopped = false;
-  return {
-    stop(): void {
-      if (stopped) return;
-      stopped = true;
-      clearInterval(heartbeat);
-      try { stdin.end(); } catch { /* ignore */ } // EOF -> child exits cleanly
-      try { child.kill(); } catch { /* ignore */ } // belt-and-suspenders
-    },
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(heartbeat);
+    try { stdin.end(); } catch { /* ignore */ } // EOF -> child exits cleanly
+    try { child.kill(); } catch { /* ignore */ } // belt-and-suspenders
   };
+}
+
+function rearmFromOptions(options: WatchdogOptions): void {
+  const disarm = armWatchdog(options);
+  if (!disarm) return;
+  active = { disarm, options: copyOptions(options) };
+}
+
+/**
+ * Install the main-thread liveness watchdog for a long-lived process. Returns a
+ * handle to stop it, or `null` when disabled or when the child can't be spawned
+ * (degraded, never throws — a missing watchdog must never keep a process from
+ * starting).
+ *
+ * The returned handle is process-wide and stable across
+ * {@link suspendLivenessWatchdog} re-arms — `stop()` always tears down the
+ * current generation.
+ */
+export function installMainThreadWatchdog(options: WatchdogOptions = {}): WatchdogHandle | null {
+  if (isEnvTruthy(process.env.HOMEGRAPH_NO_WATCHDOG)) return null;
+
+  // Replace any prior generation (including a mid-suspend pending re-arm).
+  suspendDepth = 0;
+  optionsWhileSuspended = null;
+  disarmActive();
+
+  const disarm = armWatchdog(options);
+  if (!disarm) return null;
+  active = { disarm, options: copyOptions(options) };
+  return SHARED_HANDLE;
+}
+
+/**
+ * Suspend the armed liveness watchdog for an opaque synchronous span that
+ * cannot cooperatively yield (ArkAnalyzer Scene builds). Returns an idempotent
+ * resume function. Nested calls refcount; a `stop()` while suspended cancels
+ * the pending re-arm.
+ *
+ * No-op when nothing is armed (tests, `HOMEGRAPH_NO_WATCHDOG`, library embeds).
+ */
+export function suspendLivenessWatchdog(): () => void {
+  suspendDepth++;
+  if (suspendDepth === 1 && active) {
+    optionsWhileSuspended = active.options;
+    disarmActive();
+    debug('suspended for opaque sync span');
+  }
+  let resumed = false;
+  return () => {
+    if (resumed) return;
+    resumed = true;
+    if (suspendDepth <= 0) return;
+    suspendDepth--;
+    if (suspendDepth > 0) return;
+    if (optionsWhileSuspended) {
+      const opts = optionsWhileSuspended;
+      optionsWhileSuspended = null;
+      rearmFromOptions(opts);
+      debug('resumed after opaque sync span');
+    }
+  };
+}
+
+/**
+ * Run `fn` with the liveness watchdog suspended, then resume. Use for native
+ * spans with no JS yield points; prefer cooperative yielding for JS-owned loops.
+ */
+export function runWithoutLivenessWatchdog<T>(fn: () => T): T {
+  const resume = suspendLivenessWatchdog();
+  try {
+    return fn();
+  } finally {
+    resume();
+  }
 }

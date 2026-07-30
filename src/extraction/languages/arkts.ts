@@ -76,6 +76,7 @@ import type { IndexProgress, IndexResult } from '../index';
 import { buildDefaultIgnore } from '../default-ignore';
 import { EXTRACTION_VERSION } from '../extraction-version';
 import { HomeGraphPackageVersion } from '../../mcp/version';
+import { runWithoutLivenessWatchdog } from '../../mcp/liveness-watchdog';
 import { generateNodeId } from '../tree-sitter-helpers';
 import { buildRelaunchArgv, maxOldSpaceSizeFlag, resolveMaxOldSpaceSizeMb } from '../wasm-runtime-flags';
 import ignore, { type Ignore } from 'ignore';
@@ -3705,8 +3706,20 @@ function emptyArkTSBatchIndex(errors: ExtractionError[]): ArkTSBatchIndex {
  * HomeGraph structures in the callback, let ArkAnalyzer evict under memoryLimitMB.
  * When `targetModuleSrcPaths` is set, only those modules are BODIES targets
  * (deps still load at SIGNATURES) — used for incremental sync.
+ *
+ * Runs with the #850 liveness watchdog suspended: ArkAnalyzer's native BODIES
+ * load between module callbacks routinely exceeds the 60s heartbeat window on
+ * large Harmony projects, and there is no JS yield point inside that span.
  */
 function buildArkTSIndexByModule(
+  rootDir: string,
+  scannedFiles: Iterable<string>,
+  options?: { targetModuleSrcPaths?: string[] }
+): ArkTSBatchIndex {
+  return runWithoutLivenessWatchdog(() => buildArkTSIndexByModuleInner(rootDir, scannedFiles, options));
+}
+
+function buildArkTSIndexByModuleInner(
   rootDir: string,
   scannedFiles: Iterable<string>,
   options?: { targetModuleSrcPaths?: string[] }
@@ -3829,22 +3842,25 @@ function buildArkTSIndexFull(
   scannedFiles: Iterable<string>,
   priorErrors: ExtractionError[] = []
 ): ArkTSBatchIndex {
-  const { scene, errors } = tryBuildArkScene(rootDir);
-  const allErrors = [...priorErrors, ...errors];
-  if (!scene) {
-    return emptyArkTSBatchIndex(allErrors);
-  }
+  // Full Scene build is the same opaque native stall as analyseByModule.
+  return runWithoutLivenessWatchdog(() => {
+    const { scene, errors } = tryBuildArkScene(rootDir);
+    const allErrors = [...priorErrors, ...errors];
+    if (!scene) {
+      return emptyArkTSBatchIndex(allErrors);
+    }
 
-  try {
-    const adapter = new ArkTSAdapter(rootDir, scannedFiles);
-    const index = adapter.build(scene);
-    index.errors.push(...allErrors);
-    return index;
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    allErrors.push({ message: `ArkTS adapter failed: ${message}`, severity: 'error' });
-    return emptyArkTSBatchIndex(allErrors);
-  }
+    try {
+      const adapter = new ArkTSAdapter(rootDir, scannedFiles);
+      const index = adapter.build(scene);
+      index.errors.push(...allErrors);
+      return index;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      allErrors.push({ message: `ArkTS adapter failed: ${message}`, severity: 'error' });
+      return emptyArkTSBatchIndex(allErrors);
+    }
+  });
 }
 
 function buildArkTSIndex(rootDir: string, scannedFiles: Iterable<string>): ArkTSBatchIndex {
