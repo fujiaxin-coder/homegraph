@@ -4,6 +4,12 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // Cap both ends: Vitest 2 defaults minWorkers≈maxWorkers≈os.availableParallelism()
+    // (28 here). Uncapped forks OOM with `Fatal process out of memory: Zone` on
+    // Node 24/Windows; `--maxWorkers=N` alone leaves minWorkers high → Tinypool
+    // "minThreads and maxThreads must not conflict".
+    maxWorkers: 4,
+    minWorkers: 1,
     include: ['__tests__/**/*.test.ts'],
     exclude: ['__tests__/evaluation/**'],
     /**

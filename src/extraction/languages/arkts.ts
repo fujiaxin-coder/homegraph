@@ -10,11 +10,14 @@
  * HarmonyOS multi-module projects (`build-profile.json5`) use
  * `Scene.analyseByModule` so each HAP/HSP/HAR is the atomic unit (like a file
  * for tree-sitter languages): symbols + ViewTree + **intra-module RTA** while
- * the module has BODIES. CFG does **not** stitch same-module calls (that
- * densified past unlimited RTA). Cross-module edges come from RTA with an exact
- * MethodSignature map, plus a CFG `%unk` bridge that recovers Class.method /
- * free functions from stmt text, UnclearReferenceType names, or PascalCase base
- * locals (import + unique target + fan-out blocklist). Deps load to SIGNATURES.
+ * the module has BODIES. Per-module RTA entries = DummyMain (Ability/Component
+ * lifecycle) **plus the module export surface** (exported functions and methods
+ * of exported classes), so non-UI libraries still grow reachable call edges.
+ * CFG does **not** stitch same-module calls (that densified past unlimited RTA).
+ * Cross-module edges come from RTA with an exact MethodSignature map, plus a
+ * CFG `%unk` bridge that recovers Class.method / free functions from stmt text,
+ * UnclearReferenceType names, or PascalCase base locals (import + unique target
+ * + fan-out blocklist). Deps load to SIGNATURES.
  *
  * Sync can re-index a **dirty module subset** (`primeArkTSBatch` + `changedFiles`)
  * via `ModuleAnalysisConfig.setTargetModuleIds`, instead of rebuilding every
@@ -1513,6 +1516,142 @@ function collectNonUiRtaEntryPointsFromFiles(files: Iterable<ArkFile>): MethodSi
   return entries;
 }
 
+/**
+ * Methods another module can call into: module `export` surface as RTA entries.
+ * - exported function/method → itself
+ * - exported class/struct → all of its non-skip methods (with body)
+ * Skips `export … from` re-exports (not this module's IR).
+ */
+export function collectExportedRtaEntryPointsFromFiles(
+  files: Iterable<ArkFile>
+): MethodSignature[] {
+  const seen = new Set<string>();
+  const out: MethodSignature[] = [];
+
+  const addMethod = (method: ArkMethod): void => {
+    if (shouldSkipArkMethod(method)) return;
+    try {
+      if (!method.getCfg()) return;
+    } catch {
+      return;
+    }
+    try {
+      const sig = method.getSignature();
+      const key = sig.toString();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(sig);
+    } catch {
+      // signature unavailable
+    }
+  };
+
+  const addClass = (cls: ArkClass): void => {
+    try {
+      for (const method of cls.getMethods(true)) {
+        addMethod(method);
+      }
+    } catch {
+      // class IR unavailable
+    }
+  };
+
+  const visitExportInfos = (infos: Iterable<{ getFrom?: () => string | undefined; getArkExport?: () => unknown }>): void => {
+    for (const info of infos) {
+      try {
+        if (info.getFrom?.()) continue;
+      } catch {
+        continue;
+      }
+      let arkExport: unknown;
+      try {
+        arkExport = info.getArkExport?.() ?? null;
+      } catch {
+        continue;
+      }
+      if (!arkExport || typeof arkExport !== 'object') continue;
+
+      const exp = arkExport as {
+        getExportType?: () => number;
+        getMethods?: (all?: boolean) => ArkMethod[];
+        getClasses?: () => ArkClass[];
+        getExportInfos?: () => unknown[];
+        getDeclaringArkClass?: () => ArkClass;
+        getSignature?: () => MethodSignature;
+        getCfg?: () => unknown;
+      };
+
+      // Prefer ExportType when present (METHOD=2, CLASS=1, NAME_SPACE=0).
+      let exportType: number | undefined;
+      try {
+        exportType = exp.getExportType?.();
+      } catch {
+        exportType = undefined;
+      }
+
+      if (exportType === 2 || (exportType === undefined && typeof exp.getDeclaringArkClass === 'function' && typeof exp.getCfg === 'function')) {
+        addMethod(arkExport as ArkMethod);
+        continue;
+      }
+      if (exportType === 1 || (exportType === undefined && typeof exp.getMethods === 'function')) {
+        addClass(arkExport as ArkClass);
+        continue;
+      }
+      if (exportType === 0 || typeof exp.getClasses === 'function') {
+        try {
+          for (const cls of exp.getClasses?.() ?? []) {
+            addClass(cls);
+          }
+        } catch {
+          // ignore
+        }
+        const nested = exp.getExportInfos?.();
+        if (nested) visitExportInfos(nested as Iterable<{ getFrom?: () => string | undefined; getArkExport?: () => unknown }>);
+      }
+    }
+  };
+
+  for (const file of files) {
+    try {
+      visitExportInfos(file.getExportInfos());
+    } catch {
+      // ignore
+    }
+    try {
+      for (const ns of file.getNamespaces()) {
+        try {
+          visitExportInfos(ns.getExportInfos());
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return out;
+}
+
+/** Merge RTA entry signatures, preserving order and dropping duplicates. */
+function mergeRtaEntryPoints(...groups: MethodSignature[][]): MethodSignature[] {
+  const seen = new Set<string>();
+  const out: MethodSignature[] = [];
+  for (const group of groups) {
+    for (const sig of group) {
+      try {
+        const key = sig.toString();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(sig);
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return out;
+}
+
 function resolveRtaEntryPoints(scene: Scene): RtaEntryResolution {
   return resolveRtaEntryPointsFromFiles(scene, scene.getFiles());
 }
@@ -2349,6 +2488,13 @@ class ArkTSAdapter {
     if (dummyMain) {
       this.indexArkanalyzerDummyMain(dummyMain);
     }
+    // Export surface = cross-module call-ins; seed them as RTA entries so
+    // non-UI libraries (Manager.getInstance → …) grow intra-module edges
+    // without waiting for a Component DummyMain to reach them.
+    entryPoints = mergeRtaEntryPoints(
+      entryPoints,
+      collectExportedRtaEntryPointsFromFiles(files)
+    );
     if (entryPoints.length === 0) return;
     let callGraph;
     try {

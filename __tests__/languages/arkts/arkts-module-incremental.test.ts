@@ -191,3 +191,55 @@ export function helperExtra(): string {
     ).toEqual({ mode: 'modules', moduleSrcPaths: ['entry'] });
   });
 });
+
+describe('languages/arkts module RTA — export entries', () => {
+  it('indexes calls from exported non-UI methods (export-as-entry)', async () => {
+    // Library has no @Component — DummyMain alone would not reach Manager.
+    // Export surface must seed getInstance/load as RTA entries.
+    const root = makeTwoModuleProject({
+      'library/src/main/ets/Util.ets': `
+export class Manager {
+  static getInstance(): number {
+    Manager.load();
+    return 1;
+  }
+
+  static load(): void {
+    helper();
+  }
+}
+
+export function helper(): string {
+  return 'ok';
+}
+`,
+      'entry/src/main/ets/Index.ets': `
+import { Manager } from 'library';
+
+export function main(): number {
+  return Manager.getInstance();
+}
+`,
+    });
+
+    const cg = HomeGraph.initSync(root);
+    try {
+      await cg.indexAll();
+
+      const getInstance = cg
+        .getNodesByKind('method')
+        .find(
+          (n) =>
+            n.name === 'getInstance' &&
+            n.filePath.replace(/\\/g, '/').includes('library/')
+        );
+      expect(getInstance).toBeTruthy();
+
+      const callees = cg.getCallees(getInstance!.id);
+      const names = callees.map((c) => c.node.name);
+      expect(names).toContain('load');
+    } finally {
+      cg.close();
+    }
+  }, 120_000);
+});
