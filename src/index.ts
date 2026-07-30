@@ -44,6 +44,7 @@ import {
 import { bindExtractionContext } from './extraction/context';
 import {
   bindOhosApiDbForProject,
+  attachExistingOhosApiDbForProject,
   restoreOhosApiDbAttach,
   ohosApiDbPackageName,
   resetArkTSBatch,
@@ -209,7 +210,8 @@ export class HomeGraph {
     );
     restoreOhosApiDbAttach(this.queries);
     if (!this.queries.getOhosApiDbPath()) {
-      bindOhosApiDbForProject(this.projectRoot, this.queries);
+      // Open path: attach a prebuilt ~/.homegraph/api db only — never build here.
+      attachExistingOhosApiDbForProject(this.projectRoot, this.queries);
     }
   }
 
@@ -580,7 +582,12 @@ export class HomeGraph {
           const languages = Object.entries(this.getStats().filesByLanguage)
             .filter(([, count]) => count > 0)
             .map(([lang]) => lang);
-          const ohosBinding = bindOhosApiDbForProject(this.projectRoot, this.queries, languages);
+          const ohosBinding = await bindOhosApiDbForProject(
+            this.projectRoot,
+            this.queries,
+            languages,
+            { build: true, onProgress: options.onProgress }
+          );
           if (ohosBinding && 'code' in ohosBinding) {
             result.errors.push({ message: ohosBinding.message, severity: 'warning', code: ohosBinding.code });
           }

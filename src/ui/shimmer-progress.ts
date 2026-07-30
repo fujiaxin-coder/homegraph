@@ -5,6 +5,7 @@ const PHASE_NAMES: Record<string, string> = {
   scanning: 'Scanning files',
   parsing: 'Parsing code',
   'arkts-batch': 'Parsing ArkTS',
+  'ohos-api': 'Building OHOS API db',
   storing: 'Storing data',
   resolving: 'Resolving refs',
 };
@@ -48,7 +49,9 @@ export function createShimmerProgress(): ShimmerProgress {
       const phaseName =
         progress.phase === 'arkts-batch'
           ? formatArkTSBatchMessage(progress)
-          : PHASE_NAMES[progress.phase] || progress.phase;
+          : progress.phase === 'ohos-api' && progress.currentFile
+            ? `${PHASE_NAMES['ohos-api']} (${progress.currentFile})`
+            : PHASE_NAMES[progress.phase] || progress.phase;
 
       if (progress.phase !== lastPhase && lastPhase) {
         worker.postMessage({ type: 'finish-phase' });

@@ -18,10 +18,14 @@ import {
   resetArkTSBatch,
   resolveOhosSdkInput,
   detectOhosCompileSdkVersion,
+  discoverLocalOhosSdkCandidates,
+  ensureOhosApiDb,
+  findLocalOhosSdkForVersion,
   isOhosApiFilePath,
   markOhosApiFilePath,
   normalizeOhosApiVersion,
   parseJson5Minimal,
+  readOhosSdkPlatformVersion,
 } from '../../../src/extraction/languages/arkts';
 
 const tempDirs: string[] = [];
@@ -171,4 +175,113 @@ describe('languages/arkts ohos-sdk-pack', () => {
     expect(queries.getNodesByName('FixtureGreeter').some((n) => n.kind === 'class')).toBe(true);
     db.close();
   }, 120_000);
+
+  it('reads platformVersion from sdk-pkg.json', () => {
+    const { sdkHome } = makeToolsTree('6.1.1.290');
+    fs.writeFileSync(
+      path.join(sdkHome, 'sdk-pkg.json'),
+      JSON.stringify({
+        data: {
+          apiVersion: '24',
+          platformVersion: '6.1.1',
+          version: '6.1.1.125',
+        },
+      })
+    );
+    expect(readOhosSdkPlatformVersion(sdkHome)).toBe('6.1.1');
+  });
+
+  it('discovers local SDK via HOMEGRAPH_OHOS_SDK and builds API db on ensure', async () => {
+    const { root, sdkHome } = makeToolsTree('6.0.1.100', { fixtureName: '@ohos.fixture.d.ets' });
+    fs.writeFileSync(
+      path.join(sdkHome, 'sdk-pkg.json'),
+      JSON.stringify({ data: { platformVersion: '6.0.1', version: '6.0.1.100' } })
+    );
+
+    const apiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ohos-api-home-'));
+    tempDirs.push(apiDir);
+    const prevHome = process.env.HOME;
+    const prevUserProfile = process.env.USERPROFILE;
+    const prevSdk = process.env.HOMEGRAPH_OHOS_SDK;
+    const prevOhos = process.env.OHOS_SDK_HOME;
+    const prevDevEco = process.env.DEVECO_SDK_HOME;
+    const prevHos = process.env.HOS_SDK_HOME;
+    // Point os.homedir() consumers at a temp home so we don't write into the real ~/.homegraph
+    process.env.HOME = apiDir;
+    process.env.USERPROFILE = apiDir;
+    process.env.HOMEGRAPH_OHOS_SDK = root;
+    delete process.env.OHOS_SDK_HOME;
+    delete process.env.DEVECO_SDK_HOME;
+    delete process.env.HOS_SDK_HOME;
+
+    try {
+      const candidates = discoverLocalOhosSdkCandidates();
+      expect(candidates.some((c) => c.version === '6.0.1')).toBe(true);
+      expect(findLocalOhosSdkForVersion('6.0.1')?.sdkHome).toBe(sdkHome);
+
+      const ensured = await ensureOhosApiDb('6.0.1', { build: true });
+      expect('code' in ensured).toBe(false);
+      if ('code' in ensured) return;
+      expect(ensured.installed).toBe(true);
+      expect(fs.existsSync(ensured.dbPath)).toBe(true);
+      expect(path.basename(ensured.dbPath)).toBe('ohos-api-6.0.1.db');
+
+      // Second call reuses the on-disk db
+      const reused = await ensureOhosApiDb('6.0.1', { build: true });
+      expect('code' in reused).toBe(false);
+      if ('code' in reused) return;
+      expect(reused.installed).toBe(false);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevUserProfile;
+      if (prevSdk === undefined) delete process.env.HOMEGRAPH_OHOS_SDK;
+      else process.env.HOMEGRAPH_OHOS_SDK = prevSdk;
+      if (prevOhos === undefined) delete process.env.OHOS_SDK_HOME;
+      else process.env.OHOS_SDK_HOME = prevOhos;
+      if (prevDevEco === undefined) delete process.env.DEVECO_SDK_HOME;
+      else process.env.DEVECO_SDK_HOME = prevDevEco;
+      if (prevHos === undefined) delete process.env.HOS_SDK_HOME;
+      else process.env.HOS_SDK_HOME = prevHos;
+    }
+  }, 120_000);
+
+  it('returns a warning (not throw) when local SDK is missing', async () => {
+    const apiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ohos-api-miss-'));
+    tempDirs.push(apiDir);
+    const prevHome = process.env.HOME;
+    const prevUserProfile = process.env.USERPROFILE;
+    const prevSdk = process.env.HOMEGRAPH_OHOS_SDK;
+    const prevOhos = process.env.OHOS_SDK_HOME;
+    const prevDevEco = process.env.DEVECO_SDK_HOME;
+    const prevHos = process.env.HOS_SDK_HOME;
+    process.env.HOME = apiDir;
+    process.env.USERPROFILE = apiDir;
+    delete process.env.HOMEGRAPH_OHOS_SDK;
+    delete process.env.OHOS_SDK_HOME;
+    delete process.env.DEVECO_SDK_HOME;
+    delete process.env.HOS_SDK_HOME;
+
+    try {
+      const ensured = await ensureOhosApiDb('9.9.9', { build: true });
+      expect('code' in ensured).toBe(true);
+      if (!('code' in ensured)) return;
+      expect(ensured.code).toBe('ohos_api_sdk_missing');
+      expect(ensured.message).toMatch(/not found/i);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevUserProfile;
+      if (prevSdk === undefined) delete process.env.HOMEGRAPH_OHOS_SDK;
+      else process.env.HOMEGRAPH_OHOS_SDK = prevSdk;
+      if (prevOhos === undefined) delete process.env.OHOS_SDK_HOME;
+      else process.env.OHOS_SDK_HOME = prevOhos;
+      if (prevDevEco === undefined) delete process.env.DEVECO_SDK_HOME;
+      else process.env.DEVECO_SDK_HOME = prevDevEco;
+      if (prevHos === undefined) delete process.env.HOS_SDK_HOME;
+      else process.env.HOS_SDK_HOME = prevHos;
+    }
+  });
 });

@@ -85,7 +85,7 @@ const WORKER_RECYCLE_INTERVAL = 250;
  * Progress callback for indexing operations
  */
 export interface IndexProgress {
-  phase: 'scanning' | 'parsing' | 'arkts-batch' | 'storing' | 'resolving' | 'linking';
+  phase: 'scanning' | 'parsing' | 'arkts-batch' | 'ohos-api' | 'storing' | 'resolving' | 'linking';
   current: number;
   total: number;
   currentFile?: string;

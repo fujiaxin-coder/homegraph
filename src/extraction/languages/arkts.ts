@@ -4068,7 +4068,7 @@ export function ohosApiDbFilename(version: string): string {
   return `ohos-api-${version}.db`;
 }
 
-/** npm package name — one package per API version (e.g. homegraph-ohos-api-db-6.0.1). */
+/** Metadata / publish id — one package per API version (e.g. homegraph-ohos-api-db-6.0.1). */
 export function ohosApiDbPackageName(version: string): string {
   return `homegraph-ohos-api-db-${version}`;
 }
@@ -4237,7 +4237,7 @@ export async function indexOhosApiDb(options: OhosApiIndexOptions): Promise<Inde
 }
 
 // =============================================================================
-// OHOS API db consumer: compileSdkVersion detect, npm fetch, ATTACH for queries
+// OHOS API db consumer: compileSdkVersion detect, local SDK build, ATTACH
 // =============================================================================
 
 export const OHOS_API_FILE_PREFIX = 'ohos-sdk:';
@@ -4248,13 +4248,35 @@ export interface OhosApiDbBinding {
   version: string;
   dbPath: string;
   packageName: string;
+  /** True when this call built the db from a local SDK (vs already on disk). */
   installed: boolean;
 }
 
 export interface OhosApiDbBindingWarning {
   message: string;
-  code: 'ohos_api_version_unknown' | 'ohos_api_install_failed' | 'ohos_api_db_missing';
+  code:
+    | 'ohos_api_version_unknown'
+    | 'ohos_api_sdk_missing'
+    | 'ohos_api_build_failed'
+    | 'ohos_api_db_missing'
+    /** @deprecated Prefer ohos_api_sdk_missing — kept for older log readers. */
+    | 'ohos_api_install_failed';
 }
+
+export interface LocalOhosSdkCandidate {
+  sdkHome: string;
+  version: string | null;
+}
+
+export interface EnsureOhosApiDbOptions {
+  /** Prefer this SDK home when it matches the requested version. */
+  sdkHomeHint?: string;
+  onProgress?: (progress: IndexProgress) => void;
+  /** When false, only reuse an existing ~/.homegraph/api db (never build). Default true. */
+  build?: boolean;
+}
+
+export interface BindOhosApiDbOptions extends EnsureOhosApiDbOptions {}
 
 /** Prefix applied to API db node file paths so explore can render without disk reads. */
 export function markOhosApiFilePath(relativePath: string): string {
@@ -4384,85 +4406,320 @@ function hasEtsUnder(dir: string, depth: number): boolean {
   return false;
 }
 
-/** Install npm package if local db is missing; non-throwing on failure. */
-export function ensureOhosApiDb(version: string): OhosApiDbBinding | OhosApiDbBindingWarning {
-  const dbPath = ohosApiDbInstallPath(version);
-  if (fs.existsSync(dbPath)) {
-    return {
-      version,
-      dbPath,
-      packageName: ohosApiDbPackageName(version),
-      installed: false,
-    };
+/** Read platformVersion from sdk-pkg.json / oh-uni-package.json under an SDK home. */
+export function readOhosSdkPlatformVersion(sdkHome: string): string | null {
+  const pkgPaths = [
+    path.join(sdkHome, 'sdk-pkg.json'),
+    path.join(sdkHome, 'openharmony', 'ets', 'oh-uni-package.json'),
+    path.join(sdkHome, 'openharmony', 'oh-uni-package.json'),
+  ];
+  for (const pkgPath of pkgPaths) {
+    if (!fs.existsSync(pkgPath)) continue;
+    try {
+      const raw = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as Record<string, unknown>;
+      const data =
+        raw.data && typeof raw.data === 'object'
+          ? (raw.data as Record<string, unknown>)
+          : raw;
+      const v =
+        normalizeOhosApiVersion(data.platformVersion) ||
+        normalizeOhosApiVersion(data.version) ||
+        normalizeOhosApiVersion(raw.platformVersion) ||
+        normalizeOhosApiVersion(raw.version);
+      if (v) return v;
+    } catch {
+      /* try next */
+    }
+  }
+  return normalizeOhosApiVersion(path.basename(sdkHome));
+}
+
+/** Expand a user/env path into concrete sdk/default-style homes that contain openharmony/ets. */
+function expandLocalOhosSdkHomes(input: string): string[] {
+  const resolved = path.resolve(input);
+  if (!fs.existsSync(resolved)) return [];
+
+  const homes: string[] = [];
+  const push = (p: string) => {
+    if (hasOpenHarmonyEts(p)) homes.push(p);
+  };
+
+  push(resolved);
+  push(path.join(resolved, 'default'));
+  push(path.join(resolved, 'sdk', 'default'));
+
+  const viaFind = findOhosSdkHome(resolved);
+  if (viaFind) homes.push(viaFind);
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(resolved, { withFileTypes: true });
+  } catch {
+    return [...new Set(homes)];
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    const child = path.join(resolved, entry.name);
+    push(child);
+    push(path.join(child, 'default'));
   }
 
-  const packageName = ohosApiDbPackageName(version);
-  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-ohos-npm-'));
+  return [...new Set(homes)];
+}
+
+function localOhosSdkSearchRoots(): string[] {
+  const roots: string[] = [];
+  for (const key of ['HOMEGRAPH_OHOS_SDK', 'OHOS_SDK_HOME', 'DEVECO_SDK_HOME', 'HOS_SDK_HOME']) {
+    const v = process.env[key]?.trim();
+    if (v) roots.push(v);
+  }
+
+  const home = os.homedir();
+  if (process.platform === 'win32') {
+    const lad = process.env.LOCALAPPDATA;
+    if (lad) {
+      roots.push(path.join(lad, 'OpenHarmony', 'Sdk'));
+      roots.push(path.join(lad, 'Huawei', 'Sdk'));
+    }
+    roots.push(path.join('C:\\', 'Program Files', 'Huawei', 'DevEco Studio', 'sdk'));
+    roots.push(path.join(home, 'Huawei', 'Sdk'));
+    roots.push(path.join(home, 'OpenHarmony', 'Sdk'));
+  } else if (process.platform === 'darwin') {
+    roots.push(path.join(home, 'Library', 'Huawei', 'Sdk'));
+    roots.push(path.join(home, 'Library', 'OpenHarmony', 'Sdk'));
+    roots.push('/Applications/DevEco-Studio.app/Contents/sdk');
+  } else {
+    roots.push(path.join(home, 'Huawei', 'Sdk'));
+    roots.push(path.join(home, 'OpenHarmony', 'Sdk'));
+  }
+  return roots;
+}
+
+/** Discover local DevEco / OpenHarmony SDK homes (env vars + common install paths). */
+export function discoverLocalOhosSdkCandidates(): LocalOhosSdkCandidate[] {
+  const out: LocalOhosSdkCandidate[] = [];
+  const seen = new Set<string>();
+  for (const root of localOhosSdkSearchRoots()) {
+    for (const sdkHome of expandLocalOhosSdkHomes(root)) {
+      if (seen.has(sdkHome)) continue;
+      seen.add(sdkHome);
+      out.push({ sdkHome, version: readOhosSdkPlatformVersion(sdkHome) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Pick a local SDK home.
+ * When `preferredVersion` is set, require an exact platformVersion match.
+ * When unset, return the first candidate that has a readable version (else any).
+ */
+export function findLocalOhosSdkForVersion(
+  preferredVersion?: string | null
+): LocalOhosSdkCandidate | null {
+  const candidates = discoverLocalOhosSdkCandidates();
+  if (candidates.length === 0) return null;
+  if (preferredVersion) {
+    return candidates.find((c) => c.version === preferredVersion) ?? null;
+  }
+  return candidates.find((c) => c.version) ?? candidates[0]!;
+}
+
+/**
+ * Resolve the API db version for a project: build-profile / env first, else local SDK.
+ */
+export function resolveOhosApiVersionForProject(projectRoot: string): string | null {
+  const fromProject = detectOhosCompileSdkVersion(projectRoot);
+  if (fromProject) return fromProject;
+  return findLocalOhosSdkForVersion(null)?.version ?? null;
+}
+
+function attachOhosApiDbBinding(
+  queries: QueryBuilder,
+  binding: OhosApiDbBinding
+): OhosApiDbBinding | OhosApiDbBindingWarning {
   try {
-    execFileSync('npm', ['install', '--no-save', packageName], {
-      cwd: installDir,
-      stdio: 'pipe',
-      timeout: 180_000,
-      env: { ...process.env, npm_config_loglevel: 'error' },
-    });
+    queries.attachOhosApiDb(binding.dbPath);
+    queries.setMetadata(OHOS_API_VERSION_META, binding.version);
+    queries.setMetadata(OHOS_API_DB_PATH_META, binding.dbPath);
+    return binding;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
-      code: 'ohos_api_install_failed',
-      message:
-        `Could not fetch ${packageName} (${msg}). ` +
-        'Explore will use project code only until the matching API db is available.',
+      code: 'ohos_api_db_missing',
+      message: `Failed to attach OHOS API db at ${binding.dbPath}: ${msg}`,
     };
-  } finally {
-    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Build (or reuse) ~/.homegraph/api/ohos-api-<version>.db from a local SDK.
+ * Never throws — missing SDK / build failure returns a warning.
+ */
+export async function ensureOhosApiDb(
+  version: string,
+  options: EnsureOhosApiDbOptions = {}
+): Promise<OhosApiDbBinding | OhosApiDbBindingWarning> {
+  const dbPath = ohosApiDbInstallPath(version);
+  const packageName = ohosApiDbPackageName(version);
+
+  if (fs.existsSync(dbPath)) {
+    return { version, dbPath, packageName, installed: false };
   }
 
-  if (!fs.existsSync(dbPath)) {
+  if (options.build === false || process.env.HOMEGRAPH_OHOS_API_SKIP === '1') {
     return {
       code: 'ohos_api_db_missing',
       message:
-        `${packageName} was fetched but ${ohosApiDbFilename(version)} is missing under ~/.homegraph/api/. ` +
+        `${ohosApiDbFilename(version)} is not under ~/.homegraph/api/ yet. ` +
+        'Re-run `homegraph init -i` / `homegraph index` with a local OHOS SDK, or `homegraph index-api <sdk>`. ' +
         'Explore will use project code only.',
     };
   }
 
-  return { version, dbPath, packageName, installed: true };
+  let sdkHome: string | null = null;
+  if (options.sdkHomeHint) {
+    const hintHomes = expandLocalOhosSdkHomes(options.sdkHomeHint);
+    const match = hintHomes.find((h) => readOhosSdkPlatformVersion(h) === version) ?? hintHomes[0];
+    if (match && hasOpenHarmonyEts(match)) sdkHome = match;
+  }
+  if (!sdkHome) {
+    sdkHome = findLocalOhosSdkForVersion(version)?.sdkHome ?? null;
+  }
+
+  if (!sdkHome) {
+    return {
+      code: 'ohos_api_sdk_missing',
+      message:
+        `Local OHOS SDK for API ${version} not found (set OHOS_SDK_HOME / DEVECO_SDK_HOME / HOMEGRAPH_OHOS_SDK, ` +
+        'or install the matching DevEco SDK). SDK API lookup disabled; project indexing continues normally.',
+    };
+  }
+
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+  options.onProgress?.({
+    phase: 'ohos-api',
+    current: 0,
+    total: 1,
+    currentFile: version,
+  });
+
+  try {
+    const result = await indexOhosApiDb({
+      sdkHome,
+      version,
+      outputPath: dbPath,
+      onProgress: options.onProgress
+        ? (progress) => {
+            options.onProgress?.({
+              phase: 'ohos-api',
+              current: progress.current,
+              total: progress.total || 1,
+              currentFile: progress.currentFile
+                ? `${version} ${path.basename(progress.currentFile)}`
+                : version,
+              subphase: progress.subphase,
+            });
+          }
+        : undefined,
+    });
+
+    if (!result.success || !fs.existsSync(dbPath)) {
+      try {
+        fs.unlinkSync(dbPath);
+      } catch {
+        /* ignore */
+      }
+      const detail = result.errors
+        .filter((e) => e.severity === 'error')
+        .map((e) => e.message)
+        .join('; ');
+      return {
+        code: 'ohos_api_build_failed',
+        message:
+          `Failed to build OHOS API db for ${version} from ${sdkHome}` +
+          (detail ? ` (${detail})` : '') +
+          '. SDK API lookup disabled; project indexing continues normally.',
+      };
+    }
+
+    options.onProgress?.({
+      phase: 'ohos-api',
+      current: 1,
+      total: 1,
+      currentFile: version,
+    });
+
+    return { version, dbPath, packageName, installed: true };
+  } catch (err) {
+    try {
+      if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    } catch {
+      /* ignore */
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      code: 'ohos_api_build_failed',
+      message:
+        `Failed to build OHOS API db for ${version} from ${sdkHome} (${msg}). ` +
+        'SDK API lookup disabled; project indexing continues normally.',
+    };
+  }
 }
 
-/** Detect version, ensure db, persist metadata, ATTACH — never throws. */
-export function bindOhosApiDbForProject(
+/**
+ * Attach a prebuilt API db if present — never builds. Used on open / wireLayers.
+ */
+export function attachExistingOhosApiDbForProject(
   projectRoot: string,
   queries: QueryBuilder,
   languages?: string[]
 ): OhosApiDbBinding | OhosApiDbBindingWarning | null {
   if (!isOhosArktsProject(projectRoot, languages)) return null;
 
-  const version = detectOhosCompileSdkVersion(projectRoot);
+  const version = resolveOhosApiVersionForProject(projectRoot);
+  if (!version) return null;
+
+  const dbPath = ohosApiDbInstallPath(version);
+  if (!fs.existsSync(dbPath)) return null;
+
+  return attachOhosApiDbBinding(queries, {
+    version,
+    dbPath,
+    packageName: ohosApiDbPackageName(version),
+    installed: false,
+  });
+}
+
+/**
+ * Detect version, build from local SDK when needed, persist metadata, ATTACH — never throws.
+ * Pass `{ build: true }` (default) after init/index; `{ build: false }` on open.
+ */
+export async function bindOhosApiDbForProject(
+  projectRoot: string,
+  queries: QueryBuilder,
+  languages?: string[],
+  options: BindOhosApiDbOptions = {}
+): Promise<OhosApiDbBinding | OhosApiDbBindingWarning | null> {
+  if (!isOhosArktsProject(projectRoot, languages)) return null;
+
+  const version = resolveOhosApiVersionForProject(projectRoot);
   if (!version) {
     return {
       code: 'ohos_api_version_unknown',
       message:
-        'HarmonyOS project detected but compileSdkVersion not found in build-profile.json5. ' +
+        'HarmonyOS project detected but compileSdkVersion was not found in build-profile.json5 ' +
+        'and no local OHOS SDK was discovered (set OHOS_SDK_HOME / DEVECO_SDK_HOME). ' +
         'SDK API lookup disabled; project indexing continues normally.',
     };
   }
 
-  const ensured = ensureOhosApiDb(version);
+  const ensured = await ensureOhosApiDb(version, options);
   if ('code' in ensured) return ensured;
 
-  try {
-    queries.attachOhosApiDb(ensured.dbPath);
-    queries.setMetadata(OHOS_API_VERSION_META, ensured.version);
-    queries.setMetadata(OHOS_API_DB_PATH_META, ensured.dbPath);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      code: 'ohos_api_db_missing',
-      message: `Failed to attach OHOS API db at ${ensured.dbPath}: ${msg}`,
-    };
-  }
-
-  return ensured;
+  return attachOhosApiDbBinding(queries, ensured);
 }
 
 /** Re-ATTACH from project metadata after reopen / new QueryBuilder. */
