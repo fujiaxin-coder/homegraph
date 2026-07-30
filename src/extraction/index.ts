@@ -39,8 +39,10 @@ import type { ResolutionContext } from '../resolution/types';
 import { setArkTSBatchProgressCallback, isArktsBatchRunning } from './context';
 import {
   isArkTSBatchPersisted,
+  isArkTSBatchCommitted,
   primeArkTSBatch,
   resetArkTSBatch,
+  shrinkArkTSBatchPostParse,
   drainArkTSIndexNotices,
   isArkAnalyzerSourcePath,
 } from './languages/arkts';
@@ -1437,63 +1439,28 @@ export class ExtractionOrchestrator {
       };
     }
 
-    // Phase 2: Parse files in a worker thread (keeps main thread unblocked for UI)
+    // Do NOT emit `parsing` before the ArkTS Scene batch — that makes the
+    // shimmer print "Parsing code - done" when Scene starts, which looks like
+    // a restart. Parsing progress starts after primeArkTSBatch below.
     const total = files.length;
     let processed = 0;
 
-    // Emit parsing phase immediately so the progress bar appears during worker setup.
-    // The yield lets the shimmer worker flush the phase transition to stdout before
-    // the main thread starts synchronous grammar detection work.
-    onProgress?.({
-      phase: 'parsing',
-      current: 0,
-      total,
-    });
-    await new Promise(resolve => setImmediate(resolve));
-
-    // Detect needed languages and load grammars in the parse worker
+    // Detect needed languages. Parse workers start AFTER the ArkTS Scene batch
+    // so peak RSS is not Scene IR + N×WASM grammars at once.
     const neededLanguages = [...new Set(files.map((f) => detectLanguage(f, undefined, overrides)))];
     // .h files default to 'c' but may be C++ — ensure cpp grammar is loaded when c is needed
     if (neededLanguages.includes('c') && !neededLanguages.includes('cpp')) {
       neededLanguages.push('cpp');
     }
 
-    // Parse files on a pool of worker threads (keeps the main thread free for UI
-    // and uses every core). Falls back to in-process parsing when the compiled
-    // worker is unavailable (e.g. running from source in tests).
     const parseWorkerPath = path.join(__dirname, 'parse-worker.js');
     const useWorker = fs.existsSync(parseWorkerPath);
 
+    // Assigned after ArkTS batch (see below).
     let pool: ParseWorkerPool | null = null;
-    if (useWorker) {
-      // CODEGRAPH_PARSE_WORKERS: explicit worker count; 1 = the old single-worker
-      // behaviour (the conservative rollback). Unset → clamp(cores-1, 1, 8).
-      const poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.cpus().length);
-      pool = new ParseWorkerPool({
-        languages: neededLanguages,
-        size: poolSize,
-        workerScriptPath: parseWorkerPath,
-        recycleInterval: WORKER_RECYCLE_INTERVAL,
-        parseTimeoutMs: PARSE_TIMEOUT_MS,
-        log,
-      });
-      log(`Parse worker pool: ${poolSize} worker(s)`);
-    } else {
-      // In-process fallback: load grammars locally and parse on the main thread.
-      await loadGrammarsForLanguages(neededLanguages);
-    }
-
-    const storeWorkerPath = path.join(__dirname, 'store-worker.js');
     let storeWriter: StoreWriter | null = null;
-    if (
-      storeWriterOpts &&
-      process.env.HOMEGRAPH_NO_STORE_WORKER !== '1' &&
-      fs.existsSync(storeWorkerPath)
-    ) {
-      storeWriter = new StoreWriter(storeWorkerPath, storeWriterOpts.dbPath, storeWriterOpts.fastInit);
-      log('Store writer thread active');
-    }
     const STORE_WRITER_WINDOW = 64;
+    let windowSize = 1;
 
     /**
      * Parse one file: on the pool when available (the promise REJECTS on a worker
@@ -1518,8 +1485,7 @@ export class ExtractionOrchestrator {
     // stable commit order keeps the resulting graph deterministic — byte-identical
     // to the single-worker path — instead of drifting with parse timing. The
     // `completed` buffer holds at most ~windowSize out-of-order results, so memory
-    // stays bounded.
-    const windowSize = pool ? Math.max(4, pool.size * 2) : 1;
+    // stays bounded. windowSize is set when the parse pool starts (after ArkTS).
     const inFlight = new Set<Promise<void>>();
     const completed = new Map<number,
       | { ok: true; filePath: string; content: string; stats: fs.Stats; result: ExtractionResult }
@@ -1639,6 +1605,51 @@ export class ExtractionOrchestrator {
       errors.push(...drainArkTSIndexNotices());
     }
 
+    // Start parse pool only after Scene teardown — most .ets are already in DB.
+    const remainingToParse = files.filter(
+      (f) => !(isArkTSBatchPersisted(f) || (isArkTSBatchCommitted() && isArkAnalyzerSourcePath(f)))
+    ).length;
+    if (useWorker) {
+      // CODEGRAPH_PARSE_WORKERS: explicit worker count; 1 = the old single-worker
+      // behaviour (the conservative rollback). Unset → clamp(cores-1, 1, 8).
+      let poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.cpus().length);
+      if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim() && remainingToParse < 500) {
+        poolSize = Math.min(poolSize, 2);
+      } else if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim() && remainingToParse < 2000) {
+        poolSize = Math.min(poolSize, 4);
+      }
+      pool = new ParseWorkerPool({
+        languages: neededLanguages,
+        size: poolSize,
+        workerScriptPath: parseWorkerPath,
+        recycleInterval: WORKER_RECYCLE_INTERVAL,
+        parseTimeoutMs: PARSE_TIMEOUT_MS,
+        log,
+      });
+      windowSize = Math.max(4, pool.size * 2);
+      log(`Parse worker pool: ${poolSize} worker(s) (remaining files≈${remainingToParse})`);
+    } else {
+      await loadGrammarsForLanguages(neededLanguages);
+    }
+
+    const storeWorkerPath = path.join(__dirname, 'store-worker.js');
+    if (
+      storeWriterOpts &&
+      process.env.HOMEGRAPH_NO_STORE_WORKER !== '1' &&
+      fs.existsSync(storeWorkerPath)
+    ) {
+      storeWriter = new StoreWriter(storeWorkerPath, storeWriterOpts.dbPath, storeWriterOpts.fastInit);
+      log('Store writer thread active');
+    }
+
+    // Parsing progress only after ArkTS batch (avoids false "Parsing - done").
+    onProgress?.({
+      phase: 'parsing',
+      current: 0,
+      total,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
     for (let i = 0; i < files.length; i += FILE_IO_BATCH_SIZE) {
       if (signal?.aborted) { aborted = true; break; }
 
@@ -1647,7 +1658,10 @@ export class ExtractionOrchestrator {
       // Read files in parallel (with path validation before any I/O)
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
-          if (isArkTSBatchPersisted(fp)) {
+          if (
+            isArkTSBatchPersisted(fp) ||
+            (isArkTSBatchCommitted() && isArkAnalyzerSourcePath(fp))
+          ) {
             return {
               filePath: fp,
               content: null as string | null,
@@ -1682,7 +1696,11 @@ export class ExtractionOrchestrator {
 
         if (signal?.aborted) { aborted = true; break; }
 
-        if (isArkTSBatchPersisted(filePath) || arktsBatchSkipped) {
+        if (
+          isArkTSBatchPersisted(filePath) ||
+          arktsBatchSkipped ||
+          (isArkTSBatchCommitted() && isArkAnalyzerSourcePath(filePath))
+        ) {
           processed++;
           filesIndexed++;
           onProgress?.({ phase: 'parsing', current: processed, total, currentFile: filePath });
@@ -1892,6 +1910,8 @@ export class ExtractionOrchestrator {
 
     // Shut down the parse worker pool.
     if (pool) await pool.destroy();
+
+    shrinkArkTSBatchPostParse();
 
     return {
       success: filesIndexed > 0 || errors.filter((e) => e.severity === 'error').length === 0,

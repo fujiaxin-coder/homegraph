@@ -1953,7 +1953,8 @@ export class ReferenceResolver {
         this.context,
         onSynthesisProgress,
         pool,
-        parallel?.backpressure
+        parallel?.backpressure,
+        parallel?.dbPath
       );
     } catch {
       // synthesis is additive and optional; ignore failures

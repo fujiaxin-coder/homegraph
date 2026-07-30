@@ -231,6 +231,11 @@ export class ResolverPool {
     await Promise.all(this.workers.map((w) => w.ready));
   }
 
+  /** Number of live workers (for synthesis concurrency caps). */
+  get size(): number {
+    return this.workers.length;
+  }
+
   /**
    * Resolve `refs` across the pool. Chunks preserve input order; the returned
    * arrays are the in-order concatenation of the chunk results.

@@ -28,6 +28,8 @@ import { isGeneratedFile } from '../extraction/generated-detection';
 import { stripCommentsForRegex } from './strip-comments';
 import { cFnPointerDispatchEdges } from './c-fnptr-synthesizer';
 import { goframeRouteEdges } from './goframe-synthesizer';
+import { resolveSynthConcurrency, synthMemoryBudgetBytes } from './memory-budget';
+import * as fs from 'fs';
 import {
   findArktsEntryPageComponent,
   findArktsLifecycleMethod,
@@ -3566,8 +3568,7 @@ function arktsEntryEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] 
     }
   }
 
-  for (const cls of [...queries.getNodesByKind('class'), ...queries.getNodesByKind('struct')]) {
-    if (cls.language !== 'arkts') continue;
+  for (const cls of iterateArktsTypeNodes(queries, ['class', 'struct'])) {
     const methods = queries
       .getOutgoingEdges(cls.id, ['contains'])
       .map((e) => queries.getNodeById(e.target))
@@ -3579,22 +3580,20 @@ function arktsEntryEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] 
     }
   }
 
-  for (const comp of [
-    ...queries.getNodesByKind('component'),
-    ...queries.getNodesByKind('class'),
-    ...queries.getNodesByKind('struct'),
-  ]) {
-    if (comp.language !== 'arkts') continue;
-    const owner =
-      comp.kind === 'component'
-        ? queries.getNodesByKind('struct').find(
-            (c) => c.filePath === comp.filePath && c.name === comp.name
-          ) ??
-          queries.getNodesByKind('class').find(
-            (c) => c.filePath === comp.filePath && c.name === comp.name
-          ) ??
-          comp
-        : comp;
+  for (const comp of iterateArktsTypeNodes(queries, ['component', 'class', 'struct'])) {
+    let owner: Node = comp;
+    if (comp.kind === 'component') {
+      for (const c of queries.getNodesByFile(comp.filePath)) {
+        if (
+          (c.kind === 'struct' || c.kind === 'class') &&
+          c.language === 'arkts' &&
+          c.name === comp.name
+        ) {
+          owner = c;
+          break;
+        }
+      }
+    }
     const methods = queries
       .getOutgoingEdges(owner.id, ['contains'])
       .map((e) => queries.getNodeById(e.target))
@@ -3610,6 +3609,18 @@ function arktsEntryEdges(queries: QueryBuilder, ctx: ResolutionContext): Edge[] 
   }
 
   return edges;
+}
+
+/** Stream ArkTS class/struct/component nodes without materializing full-kind arrays. */
+function* iterateArktsTypeNodes(
+  queries: QueryBuilder,
+  kinds: Array<'class' | 'struct' | 'component'>
+): IterableIterator<Node> {
+  for (const kind of kinds) {
+    for (const n of queries.iterateNodesByKind(kind)) {
+      if (n.language === 'arkts') yield n;
+    }
+  }
 }
 
 const ALWAYS = (): boolean => true;
@@ -3629,7 +3640,7 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'jsxEdges', gate: ALWAYS, run: (_q, c, y) => reactJsxChildEdges(c, y) },
   { name: 'vueEdges', gate: (has) => has('vue'), run: (_q, c, y) => vueTemplateEdges(c, y) },
   { name: 'svelteKitEdges', gate: (has) => has('svelte'), run: (_q, c, y) => svelteKitLoadEdges(c, y) },
-  { name: 'pascalEdges', gate: ALWAYS, run: (_q, c, y) => pascalFormEdges(c, y) },
+  { name: 'pascalEdges', gate: (has) => has('pascal'), run: (_q, c, y) => pascalFormEdges(c, y) },
   { name: 'flutterEdges', gate: (has) => has('dart'), run: (q, c, y) => flutterBuildEdges(q, c, y) },
   { name: 'arkuiStateEdges', gate: (has) => has('arkts'), run: (q, c, y) => arkuiStateBuildEdges(q, c, y) },
   { name: 'arkuiEmitter', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiEmitterEdges(c, y) },
@@ -3644,7 +3655,11 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'kotlinExpectActual', gate: (has) => has('kotlin'), run: (q, _c, y) => kotlinExpectActualEdges(q, y) },
   { name: 'goGrpcEdges', gate: (has) => has('go'), run: (q, _c, y) => goGrpcStubImplEdges(q, y) },
   { name: 'rnEventEdgesList', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => rnEventEdges(c, y) },
-  { name: 'fabricNativeEdges', gate: ALWAYS, run: (_q, c, y) => fabricNativeImplEdges(c, y) },
+  {
+    name: 'fabricNativeEdges',
+    gate: (has) => has(...JS_FAMILY),
+    run: (_q, c, y) => fabricNativeImplEdges(c, y),
+  },
   // Expo module nodes (`expo-module:` ids) are emitted only from .swift/.kt
   // files, and a pair needs BOTH platforms — so without both languages the
   // pass's only collection loop is provably empty (it was streaming every
@@ -3661,7 +3676,7 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   },
   { name: 'ginEdges', gate: (has) => has('go'), run: (q, c, y) => ginMiddlewareChainEdges(q, c, y) },
   { name: 'thunkEdges', gate: (has) => has(...JS_FAMILY), run: (q, c, y) => reduxThunkEdges(q, c, y) },
-  { name: 'registryEdges', gate: ALWAYS, run: (_q, c, y) => objectRegistryEdges(c, y) },
+  { name: 'registryEdges', gate: (has) => has(...JS_FAMILY), run: (_q, c, y) => objectRegistryEdges(c, y) },
   { name: 'rtkEdges', gate: (has) => has(...JS_FAMILY), run: (q, c, y) => rtkQueryEdges(q, c, y) },
   { name: 'piniaEdges', gate: (has) => has('vue', ...JS_FAMILY), run: (_q, c, y) => piniaStoreEdges(c, y) },
   { name: 'vuexEdges', gate: (has) => has('vue', ...JS_FAMILY), run: (_q, c, y) => vuexDispatchEdges(c, y) },
@@ -3694,11 +3709,14 @@ export async function synthesizeCallbackEdges(
   // A live resolver pool to fan the independent passes across (structural type
   // so this file never imports the pool — resolver-worker imports THIS file).
   // Null/omitted → the sequential path, byte-identical to the pool path.
-  pool?: { runSynthPass(name: string): Promise<{ edges: Edge[]; ms: number }> } | null,
+  pool?: { runSynthPass(name: string): Promise<{ edges: Edge[]; ms: number }>; size?: number } | null,
   // WAL-valve writer backstop (WalCheckpointValve.backpressure), called at
   // pool-idle points in the edge-insert loops below — the passes themselves
   // only read; every write in this function happens with the pool idle.
-  backpressure?: () => Promise<void> | null
+  backpressure?: () => Promise<void> | null,
+  // On-disk DB path for the same per-pass cost estimate the resolver pool uses.
+  // Optional — falls back to a node/edge-count heuristic when absent.
+  dbPath?: string
 ): Promise<number> {
   // Each sub-pass below is a whole-graph scan, and there are ~30 of them, all
   // running synchronously on the indexer's main thread. Their AGGREGATE can run
@@ -3795,9 +3813,8 @@ export async function synthesizeCallbackEdges(
   // persist until that merge — so every pass sees the same committed
   // post-resolution DB state whether it runs sequentially here or on a resolver
   // pool worker. With a live pool (already booted on ≥150k-ref repos), passes
-  // fan out across its read-only workers and the per-pass wall-clock comes from
-  // the worker; a pass that fails on a worker falls back to running on the main
-  // thread, so a worker crash isolates to a retry instead of failing synthesis.
+  // fan across workers up to a memory-budget concurrency (not unbounded
+  // Promise.all) — tight soft `--mem` → serial; large budgets still parallelize.
   const passEdges: Edge[][] = new Array<Edge[]>(SYNTH_PASSES.length).fill(NONE);
   const markPass = (label: string, dt: number): void => {
     if (process.env.HOMEGRAPH_SYNTH_TIMINGS && (dt > 250 || process.env.HOMEGRAPH_SYNTH_TIMINGS === 'all')) {
@@ -3827,45 +3844,99 @@ export async function synthesizeCallbackEdges(
   // main-thread retry keeps coverage. Skipping loses only that pass's
   // synthesized edges; the index still completes.
   const MAIN_RETRY_MAX_NODES = 1_500_000;
-  const graphNodes = queries.getNodeAndEdgeCount().nodes;
+  const counts = queries.getNodeAndEdgeCount();
+  const graphNodes = counts.nodes;
 
-  if (pool && gatedIn.length > 1) {
-    await Promise.all(
-      gatedIn.map(async (i) => {
-        const pass = SYNTH_PASSES[i]!;
-        try {
-          const out = await pool.runSynthPass(pass.name);
-          passEdges[i] = out.edges;
-          markPass(pass.name, out.ms);
-        } catch (err) {
-          if (graphNodes > MAIN_RETRY_MAX_NODES) {
-            // Worker died at a scale where the main-thread retry is a process
-            // OOM risk: skip the pass, keep the index alive, and say so.
-            console.error(
-              `[synthesis] pass '${pass.name}' failed on a worker at ${graphNodes} nodes — skipped (edges from this pass are absent): ${err instanceof Error ? err.message : String(err)}`
-            );
-            markPass(`${pass.name} (skipped at scale)`, 0);
-            return;
-          }
-          // Worker-side failure (crash, OOM, unknown pass after a version
-          // mismatch): retry this one pass on the main thread.
-          await runPassOnMain(i);
-        }
-      })
-    );
-  } else {
-    for (const i of gatedIn) {
-      await runPassOnMain(i);
-    }
+  let dbSizeBytes = 0;
+  if (dbPath) {
+    try {
+      dbSizeBytes = fs.statSync(dbPath).size;
+    } catch { /* fresh/missing — heuristic below */ }
+  }
+  if (dbSizeBytes <= 0) {
+    dbSizeBytes = Math.max((counts.nodes + counts.edges) * 200, 64 * 1024 * 1024);
   }
 
-  const merged: Edge[] = [];
-  const seen = new Set<string>();
-  for (const e of passEdges.flat()) {
-    const key = `${e.source}>${e.target}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(e);
+  const poolWorkers = pool?.size ?? 0;
+  const budget = synthMemoryBudgetBytes();
+  const concurrency = resolveSynthConcurrency({
+    explicit: process.env.HOMEGRAPH_SYNTH_CONCURRENCY,
+    memoryBudget: budget,
+    dbSizeBytes,
+    poolWorkers,
+  });
+  if (process.env.HOMEGRAPH_SYNTH_TIMINGS) {
+    console.error(
+      `[synth-timing] concurrency=${concurrency} (pool=${poolWorkers} budget=${Math.round(budget / 1024 / 1024)}MB db=${Math.round(dbSizeBytes / 1024 / 1024)}MB)`
+    );
+  }
+
+  /**
+   * Fold one pass into the ordered first-wins list and drop its array. Used on
+   * the serial path so we never hold every pass's Edge[] at once — but we must
+   * NOT insert into the DB yet: later passes assume the same committed
+   * post-resolution graph (the parallel path's invariant).
+   */
+  const mergedSerial: Edge[] = [];
+  const seenKeys = new Set<string>();
+  const foldPassEdges = (edges: Edge[]): void => {
+    for (const e of edges) {
+      const key = `${e.source}>${e.target}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      mergedSerial.push(e);
+    }
+  };
+
+  const runPassOnPool = async (i: number): Promise<void> => {
+    const pass = SYNTH_PASSES[i]!;
+    try {
+      const out = await pool!.runSynthPass(pass.name);
+      passEdges[i] = out.edges;
+      markPass(pass.name, out.ms);
+    } catch (err) {
+      if (graphNodes > MAIN_RETRY_MAX_NODES) {
+        console.error(
+          `[synthesis] pass '${pass.name}' failed on a worker at ${graphNodes} nodes — skipped (edges from this pass are absent): ${err instanceof Error ? err.message : String(err)}`
+        );
+        markPass(`${pass.name} (skipped at scale)`, 0);
+        return;
+      }
+      await runPassOnMain(i);
+    }
+  };
+
+  // Serial (concurrency 1): registry order + fold-as-you-go (no mid-pass DB
+  // writes). Parallel: limited fan-out across the pool, hold results until
+  // ordered merge.
+  let serialFold = false;
+  if (!pool || concurrency <= 1 || gatedIn.length <= 1) {
+    serialFold = true;
+    for (const i of gatedIn) {
+      await runPassOnMain(i);
+      foldPassEdges(passEdges[i]!);
+      passEdges[i] = NONE;
+    }
+  } else {
+    let next = 0;
+    const runners = Array.from({ length: Math.min(concurrency, gatedIn.length) }, async () => {
+      while (next < gatedIn.length) {
+        const idx = next++;
+        await runPassOnPool(gatedIn[idx]!);
+      }
+    });
+    await Promise.all(runners);
+  }
+
+  const merged: Edge[] = serialFold ? mergedSerial : [];
+  if (!serialFold) {
+    const seen = new Set<string>();
+    for (const e of passEdges.flat()) {
+      const key = `${e.source}>${e.target}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(e);
+    }
   }
   __mark('dedupe-merge');
   // Chunked insert with yields: on the Linux kernel the merged synthesized

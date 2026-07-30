@@ -57,7 +57,8 @@ function parseModuleAbilities(content: string): Array<{ name: string; srcEntry: 
 
 function findArktsComponentByName(context: ResolutionContext, name: string): Node | null {
   for (const kind of ['component', 'struct', 'class'] as const) {
-    for (const n of context.getNodesByKind(kind)) {
+    const iter = context.iterateNodesByKind?.(kind) ?? context.getNodesByKind(kind);
+    for (const n of iter) {
       if (n.language !== 'arkts' || n.name !== name) continue;
       if (n.filePath.endsWith('.ets')) return n;
     }
@@ -72,7 +73,8 @@ function findArktsPageComponent(context: ResolutionContext, pagePath: string): N
 
   const suffix = pagePath.replace(/\\/g, '/');
   for (const kind of ['component', 'struct', 'class'] as const) {
-    for (const n of context.getNodesByKind(kind)) {
+    const iter = context.iterateNodesByKind?.(kind) ?? context.getNodesByKind(kind);
+    for (const n of iter) {
       if (n.language !== 'arkts' || n.name !== stem) continue;
       const fp = n.filePath.replace(/\\/g, '/');
       if (fp.includes(suffix) || fp.endsWith(`${stem}.ets`)) return n;
@@ -86,14 +88,19 @@ function findArktsMethodInComponent(
   component: Node,
   methodName: string
 ): Node | null {
-  const owner =
-    context.getNodesByKind('struct').find(
-      (c) => c.language === 'arkts' && c.filePath === component.filePath && c.name === component.name
-    ) ??
-    context.getNodesByKind('class').find(
-      (c) => c.language === 'arkts' && c.filePath === component.filePath && c.name === component.name
-    ) ??
-    component;
+  let owner: Node = component;
+  if (component.kind === 'component') {
+    for (const c of context.getNodesInFile(component.filePath)) {
+      if (
+        (c.kind === 'struct' || c.kind === 'class') &&
+        c.language === 'arkts' &&
+        c.name === component.name
+      ) {
+        owner = c;
+        break;
+      }
+    }
+  }
 
   for (const n of context.getNodesInFile(owner.filePath)) {
     if (n.kind === 'method' && n.name === methodName && n.startLine >= owner.startLine) {
@@ -207,14 +214,12 @@ export const arktsEntryResolver: FrameworkResolver = {
     if (ref.referenceKind !== 'references') return null;
 
     if (ref.referenceName.startsWith('pages/')) {
-      const routes = context.getNodesByKind('route').filter(
-        (n) => n.name === ref.referenceName && n.filePath.endsWith('module.json5')
-      );
-      const route = routes[0];
-      if (route) {
+      const routesIter = context.iterateNodesByKind?.('route') ?? context.getNodesByKind('route');
+      for (const n of routesIter) {
+        if (n.name !== ref.referenceName || !n.filePath.endsWith('module.json5')) continue;
         return {
           original: ref,
-          targetNodeId: route.id,
+          targetNodeId: n.id,
           confidence: 0.9,
           resolvedBy: 'framework',
         };

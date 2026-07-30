@@ -121,3 +121,66 @@ export function memoryBudgetBytes(): number {
   const darwin = darwinMemoryAvailable();
   return darwin === null ? free : Math.max(free, darwin);
 }
+
+/**
+ * Soft Scene/process ceiling from `HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB`, or null
+ * when unset / disabled (`0`). Used as an *upper bound* on the host budget for
+ * synthesis concurrency — large soft limits still allow parallelism; tight
+ * ones collapse toward serial. Never throws.
+ */
+export function arktsSoftMemoryBudgetBytes(): number | null {
+  const raw = process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB?.trim();
+  if (raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n) * 1024 * 1024;
+}
+
+/**
+ * Effective budget for dynamic-edge synthesis fan-out: host (cgroup) headroom,
+ * optionally capped by the ArkTS soft mem env when the user set one.
+ */
+export function synthMemoryBudgetBytes(): number {
+  const host = memoryBudgetBytes();
+  const soft = arktsSoftMemoryBudgetBytes();
+  return soft === null ? host : Math.min(host, soft);
+}
+
+/**
+ * How many synthesis passes may run concurrently on the resolver pool.
+ * Pure — every input injected — so the matrix is unit-testable.
+ *
+ * Same per-pass cost model as {@link ResolverPool.resolvePoolSize}'s
+ * per-worker estimate, but keeps a larger main-thread reserve (50% vs 30%):
+ * linking overlaps residual Scene / resolver caches, so the observed peak is
+ * main + N workers, not N alone. Soft `--mem` / `HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB`
+ * feeds in via `memoryBudget` (caller uses {@link synthMemoryBudgetBytes});
+ * a large budget still yields concurrency > 1.
+ *
+ * Returns 1 when there is no pool (main-thread-only path). Debug override:
+ * `HOMEGRAPH_SYNTH_CONCURRENCY` (0/1 → serial; capped at 16).
+ */
+export function resolveSynthConcurrency(opts: {
+  explicit?: string;
+  memoryBudget: number;
+  dbSizeBytes: number;
+  poolWorkers: number;
+  maxConcurrency?: number;
+}): number {
+  const maxCap = opts.maxConcurrency ?? 6;
+  if (opts.explicit !== undefined && opts.explicit !== '') {
+    const n = Number.parseInt(opts.explicit, 10);
+    if (Number.isFinite(n)) {
+      if (n <= 1) return 1;
+      const poolCap = opts.poolWorkers > 0 ? opts.poolWorkers : n;
+      return Math.min(n, 16, poolCap, maxCap);
+    }
+  }
+  if (opts.poolWorkers <= 0) return 1;
+  const perPass = Math.min(
+    Math.max(opts.dbSizeBytes * 0.2, 256 * 1024 * 1024),
+    1.5 * 1024 * 1024 * 1024
+  );
+  const memCap = Math.floor((opts.memoryBudget * 0.5) / perPass);
+  return Math.max(1, Math.min(opts.poolWorkers, memCap, maxCap));
+}

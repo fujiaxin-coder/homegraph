@@ -6,13 +6,16 @@
  * 2-CPU container) and memory-blind sizing (six ~1GB workers OOM-killing a
  * 7GB container at true 8-core concurrency).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import * as os from 'os';
 import { ResolverPool } from '../src/resolution/resolver-pool';
 import {
   cgroupMemoryAvailable,
   darwinMemoryAvailable,
   memoryBudgetBytes,
+  resolveSynthConcurrency,
+  synthMemoryBudgetBytes,
+  arktsSoftMemoryBudgetBytes,
 } from '../src/resolution/memory-budget';
 
 const GB = 1024 * 1024 * 1024;
@@ -105,4 +108,76 @@ describe('memory budget helpers', () => {
       expect(darwinMemoryAvailable()).toBeNull();
     }
   );
+});
+
+describe('resolveSynthConcurrency', () => {
+  const GB = 1024 * 1024 * 1024;
+  const MB = 1024 * 1024;
+
+  function synth(opts: Partial<Parameters<typeof resolveSynthConcurrency>[0]>): number {
+    return resolveSynthConcurrency({
+      memoryBudget: 16 * GB,
+      dbSizeBytes: 200 * MB,
+      poolWorkers: 6,
+      ...opts,
+    });
+  }
+
+  it('no pool → always serial', () => {
+    expect(synth({ poolWorkers: 0, memoryBudget: 64 * GB })).toBe(1);
+  });
+
+  it('tight soft budget (~1G Scene cap) collapses toward serial', () => {
+    // 1GB * 0.5 / 256MB floor = 2 → with larger DB estimate drops to 1
+    expect(synth({ memoryBudget: 1024 * MB, dbSizeBytes: 4.6 * GB, poolWorkers: 6 })).toBe(1);
+    expect(synth({ memoryBudget: 512 * MB, dbSizeBytes: 200 * MB, poolWorkers: 6 })).toBe(1);
+  });
+
+  it('large budget still parallelizes up to pool size / max', () => {
+    expect(synth({ memoryBudget: 16 * GB, dbSizeBytes: 200 * MB, poolWorkers: 6 })).toBe(6);
+    expect(synth({ memoryBudget: 16 * GB, dbSizeBytes: 200 * MB, poolWorkers: 4 })).toBe(4);
+  });
+
+  it('mid budget yields mid concurrency (not forced to 1)', () => {
+    // 4GB * 0.5 / 256MB = 8 → capped by pool 6
+    expect(synth({ memoryBudget: 4 * GB, dbSizeBytes: 200 * MB, poolWorkers: 6 })).toBe(6);
+    // 2GB * 0.5 / 256MB = 4
+    expect(synth({ memoryBudget: 2 * GB, dbSizeBytes: 200 * MB, poolWorkers: 6 })).toBe(4);
+  });
+
+  it('HOMEGRAPH_SYNTH_CONCURRENCY override: ≤1 serializes, values clamp', () => {
+    expect(synth({ explicit: '0', memoryBudget: 16 * GB, poolWorkers: 6 })).toBe(1);
+    expect(synth({ explicit: '1', memoryBudget: 16 * GB, poolWorkers: 6 })).toBe(1);
+    expect(synth({ explicit: '3', memoryBudget: 512 * MB, poolWorkers: 6 })).toBe(3);
+    expect(synth({ explicit: '64', memoryBudget: 16 * GB, poolWorkers: 6 })).toBe(6); // pool + maxCap
+  });
+});
+
+describe('synthMemoryBudgetBytes / arkts soft cap', () => {
+  const prev = process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB;
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB;
+    else process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB = prev;
+  });
+
+  it('unset soft mem → host budget only', () => {
+    delete process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB;
+    expect(arktsSoftMemoryBudgetBytes()).toBeNull();
+    // Same path as memoryBudgetBytes(); don't double-call freemem (TOCTOU).
+    const b = synthMemoryBudgetBytes();
+    expect(b).toBeGreaterThan(0);
+    expect(Number.isFinite(b)).toBe(true);
+  });
+
+  it('soft mem=0 disables the soft cap', () => {
+    process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB = '0';
+    expect(arktsSoftMemoryBudgetBytes()).toBeNull();
+  });
+
+  it('soft mem caps the host budget from above', () => {
+    process.env.HOMEGRAPH_ARKTS_MEMORY_LIMIT_MB = '1024';
+    expect(arktsSoftMemoryBudgetBytes()).toBe(1024 * 1024 * 1024);
+    expect(synthMemoryBudgetBytes()).toBeLessThanOrEqual(1024 * 1024 * 1024);
+  });
 });

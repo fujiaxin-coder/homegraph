@@ -41,6 +41,7 @@ import {
   ArkModule,
   ArkNamespace,
   ModuleAnalysisConfig,
+  ModuleBuilder,
   ModuleDepthLevel,
   ModuleLoadState,
   ModuleType,
@@ -473,6 +474,11 @@ interface ArkTSBatchIndex {
   crossFileEdges: Edge[];
   nodeIds: Set<string>;
   errors: ExtractionError[];
+  /**
+   * Paths already written to SQLite during a streaming modular build
+   * (`fileResults` may be empty while this is set).
+   */
+  streamedPersistedPaths?: Set<string>;
 }
 
 interface PersistedBatch extends ArkTSBatchIndex {
@@ -662,7 +668,7 @@ function persistFileResult(
 function persistIncrementalModuleResults(
   rootDir: string,
   queries: QueryBuilder,
-  index: ArkTSBatchIndex
+  index: Pick<ArkTSBatchIndex, 'fileResults'>
 ): void {
   const persistTotal = index.fileResults.size;
   let persistIndex = 0;
@@ -677,6 +683,38 @@ function persistIncrementalModuleResults(
       : fs.statSync(full);
     persistFileResult(queries, filePath, content, stats, fileResult, { force: true });
   }
+}
+
+/**
+ * Persist a module slice then drop it from the in-memory map (streaming modular build).
+ * Returns the number of files written.
+ */
+function persistAndDropModuleSlice(
+  rootDir: string,
+  queries: QueryBuilder,
+  slice: Map<string, ExtractionResult>,
+  streamedPersistedPaths: Set<string>,
+  persistOrdinal: { done: number; totalHint: number }
+): number {
+  if (slice.size === 0) return 0;
+  for (const [filePath, fileResult] of slice) {
+    persistOrdinal.done++;
+    reportBatchProgress(
+      'persist',
+      Math.min(persistOrdinal.done, persistOrdinal.totalHint),
+      persistOrdinal.totalHint,
+      filePath
+    );
+    const isVirtual = filePath.startsWith('@');
+    const full = path.join(rootDir, filePath);
+    const content = isVirtual ? '' : fs.readFileSync(full, 'utf-8');
+    const stats = isVirtual
+      ? ({ size: 0, mtimeMs: Date.now() } as fs.Stats)
+      : fs.statSync(full);
+    persistFileResult(queries, filePath, content, stats, fileResult, { force: true });
+    streamedPersistedPaths.add(normIndexPath(filePath));
+  }
+  return slice.size;
 }
 
 async function persistBatchResultsAsync(
@@ -746,15 +784,71 @@ function commitArkTSBatch(
   index: ArkTSBatchIndex,
   triggerFile: string
 ): PersistedBatch {
-  batchPersistedPaths = new Set(
-    [...index.fileResults.keys()].map(normIndexPath)
-  );
+  const streamed = index.streamedPersistedPaths;
+  batchPersistedPaths =
+    streamed && streamed.size > 0
+      ? new Set([...streamed].map(normIndexPath))
+      : new Set([...index.fileResults.keys()].map(normIndexPath));
   persistedBatch = { ...index, rootDir, batchKey, etsFiles };
   batchTriggerFile = normIndexPath(triggerFile);
-  if (index.fileResults.size > 0) {
+  if (batchPersistedPaths.size > 0 || index.fileResults.size > 0) {
     batchBuildCommitted = true;
   }
   return persistedBatch;
+}
+
+/**
+ * Drop in-memory ExtractionResults / edges after they are in SQLite.
+ * Keep path sets so `isArkTSBatchPersisted` still skips re-parse; matches the
+ * isolated-worker commit shape (empty fileResults).
+ */
+function releaseArkTSBatchHeavyPayload(): void {
+  if (!persistedBatch) return;
+  persistedBatch.fileResults.clear();
+  persistedBatch.crossFileEdges = [];
+  persistedBatch.nodeIds.clear();
+  persistedBatch.errors = [];
+}
+
+/** Best-effort reclaim after Scene / batch teardown (needs `node --expose-gc`). */
+function tryForceGc(): void {
+  const gc = (globalThis as { gc?: () => void }).gc;
+  if (typeof gc === 'function') {
+    try {
+      gc();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
+ * Unload every module's IR then dispose Scene globals. Plain `scene.dispose()`
+ * only clears SDK helpers / moduleCache — project ArkFiles stay reachable and
+ * pin multi-GB RSS into Parsing/Resolving.
+ */
+function releaseArkAnalyzerScene(scene: Scene): void {
+  try {
+    for (const mod of scene.getModules()) {
+      try {
+        scene.disposeModule(mod);
+        mod.setModuleIndex(undefined);
+        mod.setFileDepGraph(undefined);
+        mod.clearFilesMap();
+        mod.setLoadState(ModuleLoadState.NOT_LOADED);
+      } catch {
+        // per-module best-effort
+      }
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    scene.dispose();
+  } catch {
+    // ignore
+  }
+  tryForceGc();
 }
 
 function tryReturnCachedBatch(
@@ -764,9 +858,13 @@ function tryReturnCachedBatch(
 ): PersistedBatch | null {
   const normalizedTrigger = normIndexPath(triggerFile);
 
+  // Only reuse when payload is still in memory. After
+  // releaseArkTSBatchHeavyPayload(), fileResults is empty — fall through to
+  // rebuild (same as isolated-worker commit) rather than return a hollow cache.
   if (
     persistedBatch &&
     persistedBatch.rootDir === rootDir &&
+    persistedBatch.fileResults.size > 0 &&
     batchPersistedPaths.has(normalizedTrigger)
   ) {
     return persistedBatch;
@@ -902,6 +1000,8 @@ function runArkTSBatchFullCore(
       }
     }
 
+    // Keep payload in memory for ArkTSExtractor.extract() same-batch hits.
+    // indexAll uses primeArkTSBatch → releaseArkTSBatchHeavyPayload after persist.
     return commitArkTSBatch(rootDir, batchKey, etsFiles, index, triggerFile);
   } finally {
     setArktsBatchRunning(false);
@@ -964,6 +1064,30 @@ function runArkTSBatch(rootDir: string, queries: QueryBuilder, triggerFile: stri
   const cached = tryReturnCachedBatch(rootDir, normalizedTrigger, etsFiles);
   if (cached) {
     return cached;
+  }
+
+  // indexAll releases the in-memory payload after SQLite persist. A later
+  // ArkTSExtractor hit must NOT rebuild the entire Scene (looks like a restart).
+  if (
+    batchBuildCommitted &&
+    persistedBatch &&
+    persistedBatch.rootDir === rootDir &&
+    batchPersistedPaths.has(normalizedTrigger)
+  ) {
+    return {
+      fileResults: new Map(),
+      crossFileEdges: [],
+      nodeIds: new Set(),
+      errors: [
+        {
+          message: 'ArkTS batch already persisted this run; in-memory payload released',
+          severity: 'warning',
+        },
+      ],
+      rootDir,
+      batchKey: persistedBatch.batchKey,
+      etsFiles: persistedBatch.etsFiles,
+    };
   }
 
   const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
@@ -1035,13 +1159,25 @@ export async function primeArkTSBatch(
   setArktsBatchRunning(true);
   try {
     reportBatchProgress('scene', 0, etsFiles.length);
-    const index = buildArkTSIndex(rootDir, etsFiles);
-    if (index.fileResults.size === 0) {
+    const streamModular = shouldUseModularArkTSBuild(rootDir);
+    if (streamModular) {
+      // Clear stale cross-file RTA edges before streaming module persists.
+      queries.deleteArkTSCrossFileCallEdges();
+    }
+    const index = buildArkTSIndex(rootDir, etsFiles, {
+      streamQueries: streamModular ? queries : undefined,
+    });
+    const streamed = index.streamedPersistedPaths?.size ?? 0;
+    if (index.fileResults.size === 0 && streamed === 0) {
       const fatal = index.errors.find((e) => e.severity === 'error');
       throw new Error(fatal?.message ?? 'ArkTS batch produced no indexed files');
     }
-    queries.deleteArkTSCrossFileCallEdges();
-    await persistBatchResultsAsync(rootDir, queries, index);
+    if (!streamModular) {
+      queries.deleteArkTSCrossFileCallEdges();
+    }
+    if (index.fileResults.size > 0) {
+      await persistBatchResultsAsync(rootDir, queries, index);
+    }
 
     if (index.crossFileEdges.length > 0) {
       const valid = index.crossFileEdges.filter(
@@ -1053,6 +1189,8 @@ export async function primeArkTSBatch(
     }
 
     commitArkTSBatch(rootDir, batchKey, etsFiles, index, normalizedTrigger);
+    releaseArkTSBatchHeavyPayload();
+    tryForceGc();
   } finally {
     setArktsBatchRunning(false);
   }
@@ -1078,8 +1216,13 @@ async function runArkTSBatchIncrementalModules(
   setArktsBatchRunning(true);
   try {
     reportBatchProgress('scene', 0, etsFiles.length);
-    const index = buildArkTSIndexByModule(rootDir, etsFiles, { targetModuleSrcPaths: moduleSrcPaths });
-    if (index.fileResults.size === 0) {
+    queries.deleteArkTSCrossFileCallEdges();
+    const index = buildArkTSIndexByModule(rootDir, etsFiles, {
+      targetModuleSrcPaths: moduleSrcPaths,
+      streamQueries: queries,
+    });
+    const streamed = index.streamedPersistedPaths?.size ?? 0;
+    if (index.fileResults.size === 0 && streamed === 0) {
       const fatal = index.errors.find((e) => e.severity === 'error');
       // Fall back to full project batch when the subset produced nothing.
       const batchKey = etsFiles.length > 0 ? computeBatchKey(rootDir, etsFiles) : '';
@@ -1089,11 +1232,13 @@ async function runArkTSBatchIncrementalModules(
         );
       }
       const full = buildArkTSIndex(rootDir, etsFiles);
-      if (full.fileResults.size === 0) {
+      if (full.fileResults.size === 0 && (full.streamedPersistedPaths?.size ?? 0) === 0) {
         throw new Error(fatal?.message ?? 'ArkTS incremental batch produced no indexed files');
       }
       queries.deleteArkTSCrossFileCallEdges();
-      await persistBatchResultsAsync(rootDir, queries, full);
+      if (full.fileResults.size > 0) {
+        await persistBatchResultsAsync(rootDir, queries, full);
+      }
       if (full.crossFileEdges.length > 0) {
         const valid = full.crossFileEdges.filter(
           (e) => full.nodeIds.has(e.source) && full.nodeIds.has(e.target)
@@ -1101,10 +1246,14 @@ async function runArkTSBatchIncrementalModules(
         if (valid.length > 0) queries.insertEdges(valid);
       }
       commitArkTSBatch(rootDir, batchKey, etsFiles, full, triggerFile);
+      releaseArkTSBatchHeavyPayload();
+      tryForceGc();
       return;
     }
 
-    persistIncrementalModuleResults(rootDir, queries, index);
+    if (index.fileResults.size > 0) {
+      persistIncrementalModuleResults(rootDir, queries, index);
+    }
 
     if (index.crossFileEdges.length > 0) {
       const valid = index.crossFileEdges.filter(
@@ -1118,6 +1267,8 @@ async function runArkTSBatchIncrementalModules(
     // Unique key so a partial index is never mistaken for a full-project cache hit.
     const batchKey = `incremental:${moduleSrcPaths.join(',')}`;
     commitArkTSBatch(rootDir, batchKey, etsFiles, index, triggerFile);
+    releaseArkTSBatchHeavyPayload();
+    tryForceGc();
     process.stderr.write(
       `\n\x1b[33m    ArkTS: incremental module reindex done (${moduleSrcPaths.join(', ')})\x1b[0m\n`
     );
@@ -1131,6 +1282,11 @@ export function isArkTSBatchPersisted(filePath: string): boolean {
   return batchPersistedPaths.has(normIndexPath(filePath));
 }
 
+/** True after a successful ArkTS batch was committed to SQLite this index run. */
+export function isArkTSBatchCommitted(): boolean {
+  return batchBuildCommitted;
+}
+
 /** Clear cached batch state (tests and full re-index). */
 export function resetArkTSBatch(): void {
   persistedBatch = null;
@@ -1138,6 +1294,16 @@ export function resetArkTSBatch(): void {
   batchPersistedPaths = new Set();
   batchBuildCommitted = false;
   arktsIndexNotices = [];
+}
+
+/**
+ * After parse workers no longer need skip-path metadata beyond
+ * `batchPersistedPaths`, drop the heavy path-list / batchKey strings.
+ */
+export function shrinkArkTSBatchPostParse(): void {
+  if (!persistedBatch) return;
+  persistedBatch.etsFiles = [];
+  persistedBatch.batchKey = '';
 }
 
 export class ArkTSExtractor {
@@ -2314,6 +2480,9 @@ class ArkTSAdapter {
     this.stitchModuleCfgCallsAndRefs(files, moduleFiles);
     // Drop live IR object keys so ArkAnalyzer can GC unloaded modules; keep sig→id maps.
     this.releaseLiveIrMaps();
+    // Edges for this module are already in fileResults / crossFileEdges — drop
+    // the string dedupe set so it does not grow across the whole project.
+    this.emittedEdgeKeys.clear();
   }
 
   /**
@@ -2791,6 +2960,32 @@ class ArkTSAdapter {
       nodeIds: this.nodeIds,
       errors: [...errors],
     };
+  }
+
+  /**
+   * Remove and return ExtractionResults for the given paths so callers can
+   * persist+GC mid-Scene (streaming modular build). Keeps sig→id maps / nodeIds.
+   */
+  takeFileResults(paths: Iterable<string>): Map<string, ExtractionResult> {
+    const out = new Map<string, ExtractionResult>();
+    for (const raw of paths) {
+      const p = normIndexPath(raw);
+      const result = this.fileResults.get(p);
+      if (!result) continue;
+      out.set(p, result);
+      this.fileResults.delete(p);
+    }
+    return out;
+  }
+
+  /** Re-insert a previously taken file result (stream persist failure recovery). */
+  putFileResult(filePath: string, result: ExtractionResult): void {
+    this.fileResults.set(normIndexPath(filePath), result);
+  }
+
+  /** All paths currently held in fileResults (for final flush). */
+  fileResultPaths(): string[] {
+    return [...this.fileResults.keys()];
   }
 
   private indexScannedFile(arkFile: ArkFile): void {
@@ -3710,11 +3905,13 @@ function emptyArkTSBatchIndex(errors: ExtractionError[]): ArkTSBatchIndex {
  * Runs with the #850 liveness watchdog suspended: ArkAnalyzer's native BODIES
  * load between module callbacks routinely exceeds the 60s heartbeat window on
  * large Harmony projects, and there is no JS yield point inside that span.
+ * When `streamQueries` is set, each module's ExtractionResults are written to
+ * SQLite immediately and dropped from RAM (cross-file call edges stay until end).
  */
 function buildArkTSIndexByModule(
   rootDir: string,
   scannedFiles: Iterable<string>,
-  options?: { targetModuleSrcPaths?: string[] }
+  options?: { targetModuleSrcPaths?: string[]; streamQueries?: QueryBuilder }
 ): ArkTSBatchIndex {
   return runWithoutLivenessWatchdog(() => buildArkTSIndexByModuleInner(rootDir, scannedFiles, options));
 }
@@ -3722,7 +3919,7 @@ function buildArkTSIndexByModule(
 function buildArkTSIndexByModuleInner(
   rootDir: string,
   scannedFiles: Iterable<string>,
-  options?: { targetModuleSrcPaths?: string[] }
+  options?: { targetModuleSrcPaths?: string[]; streamQueries?: QueryBuilder }
 ): ArkTSBatchIndex {
   const errors: ExtractionError[] = [];
   const memoryLimitMB = resolveArkTSSceneMemoryLimitMB();
@@ -3732,6 +3929,13 @@ function buildArkTSIndexByModuleInner(
   let modulesIndexed = 0;
   const targetSrc = options?.targetModuleSrcPaths?.map(normalizeHarmonyModuleSrcPath);
   const targetSrcSet = targetSrc && targetSrc.length > 0 ? new Set(targetSrc) : null;
+  const streamQueries = options?.streamQueries;
+  const streamedPersistedPaths = new Set<string>();
+  const scannedList = [...scannedFiles].map(normIndexPath);
+  const persistOrdinal = {
+    done: 0,
+    totalHint: Math.max(1, scannedList.filter((f) => isArkAnalyzerSourcePath(f)).length),
+  };
 
   try {
     scene.config(sceneConfig);
@@ -3777,21 +3981,94 @@ function buildArkTSIndexByModuleInner(
       }
       config.setTargetModuleIds(ids);
       process.stderr.write(
-        `\n\x1b[33m    ArkTS: analyseByModule incremental (${ids.length} module(s)→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB})...\x1b[0m\n`
+        `\n\x1b[33m    ArkTS: analyseByModule incremental (${ids.length} module(s)→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB}${streamQueries ? ', streamPersist' : ''})...\x1b[0m\n`
       );
     } else {
       config.setIncludeType(ModuleType.PROJECT, true);
       process.stderr.write(
-        `\n\x1b[33m    ArkTS: analyseByModule (PROJECT→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB}, maxOldSpace=${resolveMaxOldSpaceSizeMb()})...\x1b[0m\n`
+        `\n\x1b[33m    ArkTS: analyseByModule (PROJECT→BODIES, deps→SIGNATURES, memoryLimitMB=${memoryLimitMB}, maxOldSpace=${resolveMaxOldSpaceSizeMb()}${streamQueries ? ', streamPersist' : ''})...\x1b[0m\n`
       );
     }
 
     scene.analyseByModule((module, scn) => {
+      const moduleFileRels = [...module.getFilesMap().values()]
+        .map((f) => normalizeRelPath(rootDir, f.getFilePath()))
+        .filter((p) => p && isArkAnalyzerSourcePath(p))
+        .map(normIndexPath);
+
       adapter.indexModule(module, scn);
+      // HomeGraph already captured this module's symbols/edges. Hollow every
+      // currently-loaded module still above INDEX (target + oh_modules /
+      // SIGNATURES deps left in ModuleCache). Topo order means PROJECT deps of
+      // the current target are often already INDEX from their own callback, so
+      // BFS-from-self alone left depHollowed=0; sweeping the cache catches the
+      // fat non-target SIGNATURES that memoryLimitMB rarely evicts under a large
+      // soft budget. INDEX keeps export-reachable shells; loadModule upgrades
+      // when a later target needs SIGNATURES/BODIES.
+      let depHollowed = 0;
+      try {
+        const builder = new ModuleBuilder(scn);
+        const selfId = scn.getModuleId(module);
+        builder.downgradeModule(selfId, ModuleDepthLevel.INDEX);
+
+        const cache = scn.getModuleCache();
+        if (cache) {
+          for (const modId of cache.getLoadedModules()) {
+            if (modId === selfId) continue;
+            const depMod = builder.getModule(modId);
+            if (!depMod || depMod.getLoadState() <= ModuleLoadState.INDEX) continue;
+            builder.downgradeModule(modId, ModuleDepthLevel.INDEX);
+            depHollowed++;
+          }
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        errors.push({
+          message: `ArkTS post-index INDEX hollow failed for ${module.getModuleName() || module.getModulePath()}: ${message}`,
+          severity: 'warning',
+        });
+      }
+
+      if (streamQueries) {
+        // Persist this module's file bodies now; keep @dummyFile until finalize.
+        const slicePaths = moduleFileRels.filter((p) => p !== ARKANALYZER_DUMMY_FILE);
+        const slice = adapter.takeFileResults(slicePaths);
+        try {
+          persistAndDropModuleSlice(
+            rootDir,
+            streamQueries,
+            slice,
+            streamedPersistedPaths,
+            persistOrdinal
+          );
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          errors.push({
+            message: `ArkTS stream persist failed for ${module.getModuleName() || module.getModulePath()}: ${message}`,
+            severity: 'error',
+          });
+          throw e;
+        }
+      }
+
       modulesIndexed++;
       const name = module.getModuleName() || path.basename(module.getModulePath());
-      process.stderr.write(`\x1b[33m    ArkTS: indexed module ${modulesIndexed}: ${name}\x1b[0m\n`);
+      const st = ModuleLoadState[module.getLoadState()] ?? String(module.getLoadState());
+      const depNote = depHollowed > 0 ? `, hollowed ${depHollowed} deps` : '';
+      process.stderr.write(
+        `\x1b[33m    ArkTS: indexed module ${modulesIndexed}: ${name} → ${st}${depNote}${streamQueries ? ` (streamed ${moduleFileRels.length} files)` : ''}\x1b[0m\n`
+      );
     }, config);
+
+    if (process.env.HOMEGRAPH_ARKTS_DIAG === '1') {
+      const ev = typeof scene.getModuleEvictionStats === 'function' ? scene.getModuleEvictionStats() : null;
+      const mu = process.memoryUsage();
+      const cacheN = scene.getModuleCache()?.size?.() ?? scene.getModuleCache()?.getLoadedModules?.()?.length ?? -1;
+      process.stderr.write(
+        `\x1b[36m    ArkTS DIAG eviction: ${JSON.stringify(ev)} cacheLoaded=${cacheN} ` +
+          `heapUsedMB=${(mu.heapUsed / 1024 / 1024).toFixed(1)} rssMB=${(mu.rss / 1024 / 1024).toFixed(1)}\x1b[0m\n`
+      );
+    }
 
     if (modulesIndexed === 0) {
       errors.push({
@@ -3812,8 +4089,22 @@ function buildArkTSIndexByModuleInner(
       });
     }
 
+    if (streamQueries) {
+      const leftover = adapter.takeFileResults(adapter.fileResultPaths());
+      persistAndDropModuleSlice(
+        rootDir,
+        streamQueries,
+        leftover,
+        streamedPersistedPaths,
+        persistOrdinal
+      );
+    }
+
     const index = adapter.toBatchIndex(errors);
-    if (index.fileResults.size === 0) {
+    if (streamQueries) {
+      index.streamedPersistedPaths = streamedPersistedPaths;
+    }
+    if (index.fileResults.size === 0 && streamedPersistedPaths.size === 0) {
       errors.push({
         message: 'ArkTS analyseByModule indexed modules but no scanned source files matched',
         severity: 'warning',
@@ -3830,7 +4121,7 @@ function buildArkTSIndexByModuleInner(
     return emptyArkTSBatchIndex(errors);
   } finally {
     try {
-      scene.dispose();
+      releaseArkAnalyzerScene(scene);
     } catch {
       // ignore dispose failures
     }
@@ -3859,15 +4150,31 @@ function buildArkTSIndexFull(
       const message = e instanceof Error ? e.message : String(e);
       allErrors.push({ message: `ArkTS adapter failed: ${message}`, severity: 'error' });
       return emptyArkTSBatchIndex(allErrors);
+    } finally {
+      try {
+        releaseArkAnalyzerScene(scene);
+      } catch {
+        // ignore
+      }
     }
   });
 }
 
-function buildArkTSIndex(rootDir: string, scannedFiles: Iterable<string>): ArkTSBatchIndex {
+function buildArkTSIndex(
+  rootDir: string,
+  scannedFiles: Iterable<string>,
+  options?: { streamQueries?: QueryBuilder }
+): ArkTSBatchIndex {
   if (shouldUseModularArkTSBuild(rootDir)) {
-    const modular = buildArkTSIndexByModule(rootDir, scannedFiles);
+    const modular = buildArkTSIndexByModule(rootDir, scannedFiles, {
+      streamQueries: options?.streamQueries,
+    });
     const fatal = modular.errors.find((e) => e.severity === 'error');
-    if (modular.fileResults.size > 0 && !fatal) {
+    const hasOutput =
+      modular.fileResults.size > 0 ||
+      (modular.streamedPersistedPaths?.size ?? 0) > 0 ||
+      modular.nodeIds.size > 0;
+    if (hasOutput && !fatal) {
       return modular;
     }
     // Warnings like "no PROJECT modules" / modular failure → full Scene fallback.
