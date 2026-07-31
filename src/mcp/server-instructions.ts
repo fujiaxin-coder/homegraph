@@ -35,8 +35,10 @@ If the question is **outside the set above**, do **not** open any \`homegraph_*\
 | Tool | Role |
 |------|------|
 | **homegraph_explore** | Primary for the closed set above |
+| homegraph_diff_impact | PR/diff review: unified \`diff\` or \`hunks\` → changed symbols (line∩span) + capped callers/impact/UI edges |
 | homegraph_node | One known symbol body (or indexed file) after explore named it |
 | homegraph_callers / callees | Compact edge lists for a named symbol |
+| homegraph_impact | Blast radius for one named symbol (not a whole PR) |
 | homegraph_search | Rare — unknown spelling only |
 | homegraph_files | Folder tree only |
 

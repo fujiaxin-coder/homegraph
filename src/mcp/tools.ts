@@ -39,6 +39,11 @@ import {
   isCacheableMcpTool,
   isMcpQueryCacheEnabled,
 } from './query-cache';
+import {
+  resolveDiffImpactHunks,
+  buildDiffImpactPack,
+  DIFF_IMPACT_LIMITS,
+} from './diff-impact';
 
 /** ViewTree structural `references` vias — not UI event bindings. */
 const VIEWTREE_STRUCTURE_VIAS = new Set([
@@ -97,6 +102,7 @@ const BAD_ARG_EXAMPLES: Record<string, unknown> = {
   pattern: '*.ets',
   projectPath: '/absolute/path/to/your/project',
   repoPath: '/absolute/path/to/your/project',
+  diff: 'diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -10,3 +10,4 @@\n+export function authenticate() {}\n',
 };
 
 /**
@@ -732,7 +738,8 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_impact',
     description:
       'Blast radius for one NAMED in-repo symbol before a refactor. Required: `symbol` (e.g. "authenticate"). ' +
-      'Not for SDK docs, permission judgments, or hypothetical failure effects — those need Read/Grep.',
+      'Not for SDK docs, permission judgments, or hypothetical failure effects — those need Read/Grep. ' +
+      'For PR/diff review use homegraph_diff_impact instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -752,6 +759,53 @@ export const tools: ToolDefinition[] = [
         projectPath: projectPathProperty,
       },
       required: ['symbol'],
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'homegraph_diff_impact',
+    description:
+      'PR / code-review evidence pack from a unified diff (or explicit hunks). ' +
+      'Required: `diff` (unified diff text) OR `hunks` [{ path, startLine, endLine }]. ' +
+      'Intersects NEW-side changed lines with indexed symbol spans — does NOT dump every symbol in touched files. ' +
+      'Returns changedSymbols + capped callers + impactSummary + UI edges (viewtree/arkui-*); optional relatedSpecs. ' +
+      'Index should match the post-change tree. Does not write review text or judge Specs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        diff: {
+          type: 'string',
+          description:
+            'Unified diff text (preferred). New-side @@ +line ranges are used to find changed symbols. ' +
+            'Example: output of `git diff` / PR patch for the files under review.',
+        },
+        hunks: {
+          type: 'array',
+          description:
+            'Alternative to `diff`: explicit changed ranges. Each item: { path, startLine, endLine } (1-based, inclusive, new-file lines).',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: 'Project-relative file path' },
+              startLine: { type: 'number', description: '1-based start line (new file)' },
+              endLine: { type: 'number', description: '1-based end line (new file)' },
+            },
+          },
+        },
+        depth: {
+          type: 'number',
+          description: 'Impact / caller traversal depth (default: 2, max: 5)',
+          default: 2,
+        },
+        includeSpecs: {
+          type: 'boolean',
+          description:
+            'If true, attach related Commit4Spec hits for changed files/symbols (needs commit4spec.db). Default: false.',
+          default: false,
+        },
+        projectPath: projectPathProperty,
+      },
+      required: [],
     },
     annotations: READ_ONLY_ANNOTATIONS,
   },
@@ -1209,6 +1263,7 @@ export class ToolHandler {
         'homegraph_explore',
         'homegraph_search',
         'homegraph_node',
+        'homegraph_diff_impact',
       ]);
       if (stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
         visible = visible.filter(t => TINY_REPO_CORE_TOOLS.has(t.name));
@@ -1846,6 +1901,7 @@ export class ToolHandler {
       case 'homegraph_callers': return await this.handleCallers(args);
       case 'homegraph_callees': return await this.handleCallees(args);
       case 'homegraph_impact': return await this.handleImpact(args);
+      case 'homegraph_diff_impact': return await this.handleDiffImpact(args);
       case 'homegraph_explore': return await this.handleExplore(args);
       case 'homegraph_node': return await this.handleNode(args);
       case 'homegraph_files': return await this.handleFiles(args);
@@ -2175,6 +2231,170 @@ export class ToolHandler {
       );
     }
     return this.textResult(this.truncateOutput(sections.join('\n') + filterNote));
+  }
+
+  /**
+   * Handle homegraph_diff_impact — diff line ranges ∩ symbol spans → evidence pack.
+   */
+  private async handleDiffImpact(args: Record<string, unknown>): Promise<ToolResult> {
+    const resolved = resolveDiffImpactHunks({
+      diff: args.diff,
+      hunks: args.hunks,
+    });
+    if (resolved.error) {
+      return this.badArgResult(resolved.error, 'diff');
+    }
+    if (resolved.hunks.length === 0) {
+      return this.badArgResult(
+        'No file hunks found. Pass a unified `diff` with `+++` / `@@` headers, or `hunks: [{ path, startLine, endLine }]`.',
+        'diff',
+      );
+    }
+
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    const depthRaw = Number(args.depth);
+    const depth = Number.isFinite(depthRaw) ? depthRaw : 2;
+    const includeSpecs = args.includeSpecs === true;
+
+    const pack = buildDiffImpactPack(cg, resolved.hunks, {
+      depth,
+      notes: resolved.notes,
+    });
+
+    type RelatedSpec = {
+      specId: string;
+      title: string;
+      via: 'file' | 'symbol';
+      symbol?: string;
+      filePath?: string;
+      score?: number;
+    };
+    const relatedSpecs: RelatedSpec[] = [];
+
+    if (includeSpecs) {
+      const { resolveDbPath } = require('../spec/utils') as typeof import('../spec/utils');
+      const { createDatabase } = require('../db/sqlite-adapter') as typeof import('../db/sqlite-adapter');
+      const {
+        findSpecsByFilePath,
+        findSpecsByCodeSymbol,
+      } = require('../spec/graph/queries') as typeof import('../spec/graph/queries');
+
+      const projectRoot = (() => {
+        try {
+          return cg.getProjectRoot();
+        } catch {
+          return (args.projectPath as string | undefined) || process.cwd();
+        }
+      })();
+      const dbPath = resolveDbPath(projectRoot);
+      let db: SqliteDatabase | null = null;
+      try {
+        db = createDatabase(dbPath).db;
+      } catch {
+        pack.notes.push(
+          `includeSpecs was true but Commit4Spec DB is unavailable at ${dbPath} (run \`homegraph spec build\` / \`mine\` first).`,
+        );
+      }
+
+      if (db) {
+        try {
+          const seenFileSpecs = new Set<string>();
+          for (const filePath of pack.changedFiles) {
+            try {
+              const found = findSpecsByFilePath(db, filePath);
+              for (const r of found.results ?? []) {
+                if (!r.id || seenFileSpecs.has(r.id)) continue;
+                seenFileSpecs.add(r.id);
+                relatedSpecs.push({
+                  specId: r.id,
+                  title: r.title,
+                  via: 'file',
+                  filePath,
+                });
+              }
+            } catch {
+              /* ignore per-file */
+            }
+          }
+
+          const forTrace = pack.changedSymbols.slice(0, DIFF_IMPACT_LIMITS.maxSpecSymbols);
+          if (pack.changedSymbols.length > forTrace.length) {
+            pack.notes.push(
+              `Spec symbol-trace limited to ${DIFF_IMPACT_LIMITS.maxSpecSymbols} of ${pack.changedSymbols.length} changed symbols.`,
+            );
+          }
+          const seenSymKeys = new Set<string>();
+          for (const sym of forTrace) {
+            try {
+              const traced = findSpecsByCodeSymbol(
+                db,
+                {
+                  name: sym.name,
+                  qualifiedName: sym.name,
+                  kind: sym.kind,
+                  filePath: sym.filePath,
+                  startLine: sym.startLine,
+                  endLine: sym.endLine,
+                },
+                5,
+              );
+              for (const m of traced.matches ?? []) {
+                const id = m.spec?.id;
+                if (!id) continue;
+                const key = `${id}::${sym.name}`;
+                if (seenSymKeys.has(key)) continue;
+                seenSymKeys.add(key);
+                relatedSpecs.push({
+                  specId: id,
+                  title: m.spec.title,
+                  via: 'symbol',
+                  symbol: sym.name,
+                  score: typeof m.score === 'number' ? m.score : undefined,
+                });
+              }
+            } catch {
+              /* ignore per-symbol */
+            }
+          }
+        } finally {
+          try {
+            db.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+
+    const response = {
+      ...pack,
+      // Drop raw hunk ranges from default agent payload noise — keep changedFiles + symbols.
+      hunks: pack.hunks.map((h) => ({
+        path: h.path,
+        ranges: h.ranges,
+      })),
+      relatedSpecs: includeSpecs ? relatedSpecs : undefined,
+    };
+
+    const json = JSON.stringify(response, null, 2);
+    if (json.length <= MAX_OUTPUT_LENGTH) {
+      return this.textResult(json);
+    }
+    const slim = {
+      ...response,
+      callers: response.callers.slice(0, 20),
+      impactSummary: response.impactSummary.map((s) => ({
+        ...s,
+        sampleNames: s.sampleNames.slice(0, 3),
+      })),
+      uiEdges: response.uiEdges.slice(0, 15),
+      relatedSpecs: response.relatedSpecs?.slice(0, 15),
+      notes: [
+        ...response.notes,
+        'Output trimmed to fit MCP size limit — re-run with a smaller diff if you need full lists.',
+      ],
+    };
+    return this.textResult(this.truncateOutput(JSON.stringify(slim, null, 2)));
   }
 
   /** Whether a graph edge may be traversed by homegraph_explore's main Flow BFS. */

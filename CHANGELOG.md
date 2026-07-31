@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- MCP **`homegraph_diff_impact`**: pass a unified `diff` (or explicit `hunks`) to get a code-review evidence pack — only symbols whose spans intersect changed **new-side** lines, plus capped callers, impact summary, ArkUI/ViewTree UI edges, and optional Commit4Spec links (`includeSpecs`). Does not dump every symbol in touched files.
 - HarmonyOS / ArkTS `init`/`index` now builds the OHOS API db from a **local DevEco/OpenHarmony SDK** (via `OHOS_SDK_HOME` / `DEVECO_SDK_HOME` / `HOMEGRAPH_OHOS_SDK` or common install paths) into `~/.homegraph/api/` instead of downloading an npm package. Missing SDK still only warns — project indexing continues.
 - Indexing and sync are substantially faster on large projects (ported from upstream CodeGraph 1.5.0 performance work, HomeGraph naming kept): adaptive watcher debounce with scoped path sync, WAL checkpoint deferral + valve, parallel reference resolution with memory-aware worker pools, fresh-DB store-writer offload, resolution memos / empty synthesis short-circuits, and batch-loop de-quadratic cleanup. Kill switches: `HOMEGRAPH_NO_WAL_DEFER`, `HOMEGRAPH_NO_FAST_INIT`, `HOMEGRAPH_NO_PARALLEL_RESOLVE`, `HOMEGRAPH_NO_STORE_WORKER`, `HOMEGRAPH_RESOLVE_WORKERS`, `HOMEGRAPH_WAL_VALVE_MB`.
 - Field-name explore/search queries (`profileInfo billingMethod` …) now surface the methods/files that define those fields instead of missing them (#1196).
