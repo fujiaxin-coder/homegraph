@@ -87,6 +87,18 @@ const MAX_OUTPUT_LENGTH = 15000;
  */
 const MAX_INPUT_LENGTH = 10_000;
 
+/** Example values for success-shaped bad-arg guidance (keyed by arg name). */
+const BAD_ARG_EXAMPLES: Record<string, unknown> = {
+  query: 'authenticate login',
+  symbol: 'authenticate',
+  filePath: 'src/auth.ts',
+  file: 'src/auth.ts',
+  path: 'src/components',
+  pattern: '*.ets',
+  projectPath: '/absolute/path/to/your/project',
+  repoPath: '/absolute/path/to/your/project',
+};
+
 /**
  * Maximum length for path-like string inputs (projectPath, path
  * filter, glob pattern). Paths beyond a few thousand chars are
@@ -632,17 +644,20 @@ const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
 export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_search',
-    description: 'LAST RESORT spelling lookup — locations only, no source. Prefer homegraph_explore whenever the question already names a symbol/file/@kit. If you do call search with a bare name, HomeGraph may answer with a compact explore result instead of locations.',
+    description:
+      'LAST RESORT spelling lookup — locations only, no source. Required: `query` (e.g. "signIn"). ' +
+      'Prefer homegraph_explore when the question already names a symbol/file/@kit. ' +
+      'Bare-name search may return a compact explore result instead of locations.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Symbol name or partial name (e.g., "auth", "signIn", "UserService")',
+          description: 'Required. Symbol name or partial name (e.g. "auth", "signIn", "UserService").',
         },
         kind: {
           type: 'string',
-          description: 'Filter by node kind',
+          description: 'Optional filter by node kind',
           enum: ['function', 'method', 'class', 'interface', 'type', 'variable', 'route', 'component'],
         },
         limit: {
@@ -658,17 +673,21 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_callers',
-    description: 'Compact caller list for a NAMED in-repo symbol (no bodies). Use after you know the exact name. For full flows use homegraph_explore. DO NOT call for SDK catalogs, one-function semantics, or "what if X fails" hypothetics — Read that function instead. Prefer one explore over parallel callers+callees+node.',
+    description:
+      'Compact caller list for one NAMED in-repo symbol (no bodies). Required: `symbol` (e.g. "authenticate"). ' +
+      'Use after you know the exact name. For full flows use homegraph_explore. ' +
+      'DO NOT call for SDK catalogs, one-function semantics, or "what if X fails" hypothetics. ' +
+      'Prefer one explore over parallel callers+callees+node.',
     inputSchema: {
       type: 'object',
       properties: {
         symbol: {
           type: 'string',
-          description: 'Name of the function, method, or class to find callers for',
+          description: 'Required. Exact function/method/class name (e.g. "authenticate", "AuthService.login").',
         },
         file: {
           type: 'string',
-          description: 'Narrow to the definition in this file (path or suffix) when several same-named symbols exist (e.g. one UserService per app in a monorepo)',
+          description: 'Optional. Narrow to the definition in this file (path or suffix) when same-named symbols collide.',
         },
         limit: {
           type: 'number',
@@ -683,17 +702,20 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_callees',
-    description: 'Compact callee list for a NAMED in-repo symbol (no bodies). For full flows use homegraph_explore. DO NOT use for out-of-repo SDK internals or counterfactual analysis. Prefer one explore over parallel node+callers+callees.',
+    description:
+      'Compact callee list for one NAMED in-repo symbol (no bodies). Required: `symbol` (e.g. "authenticate"). ' +
+      'For full flows use homegraph_explore. DO NOT use for out-of-repo SDK internals or counterfactual analysis. ' +
+      'Prefer one explore over parallel node+callers+callees.',
     inputSchema: {
       type: 'object',
       properties: {
         symbol: {
           type: 'string',
-          description: 'Name of the function, method, or class to find callees for',
+          description: 'Required. Exact function/method/class name (e.g. "authenticate", "AuthService.login").',
         },
         file: {
           type: 'string',
-          description: 'Narrow to the definition in this file (path or suffix) when several same-named symbols exist',
+          description: 'Optional. Narrow to the definition in this file (path or suffix) when same-named symbols collide.',
         },
         limit: {
           type: 'number',
@@ -708,17 +730,19 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_impact',
-    description: 'Blast radius for a NAMED in-repo symbol before a refactor. Not for SDK docs, permission judgments, or hypothetical failure effects — those need Read/Grep, not impact.',
+    description:
+      'Blast radius for one NAMED in-repo symbol before a refactor. Required: `symbol` (e.g. "authenticate"). ' +
+      'Not for SDK docs, permission judgments, or hypothetical failure effects — those need Read/Grep.',
     inputSchema: {
       type: 'object',
       properties: {
         symbol: {
           type: 'string',
-          description: 'Name of the symbol to analyze impact for',
+          description: 'Required. Exact symbol name to analyze (e.g. "authenticate", "CartRepository").',
         },
         file: {
           type: 'string',
-          description: 'Narrow to the definition in this file (path or suffix) when several same-named symbols exist',
+          description: 'Optional. Narrow to the definition in this file (path or suffix) when same-named symbols collide.',
         },
         depth: {
           type: 'number',
@@ -733,13 +757,20 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_node',
-    description: 'Depth on ONE known in-repo symbol or indexed file — not a survey tool. (1) FILE: pass `file` alone → bounded line-numbered source + dependents. (2) SYMBOL: body (includeCode) + short trail; overloads return every body. USE after explore named the symbol and you still need one body. DO NOT call repeatedly to crawl a feature (prefer one explore). DO NOT call for: @kit/SDK catalogs, broad "how does X work", or after explore already returned that symbol\'s source. Treat returned source as already Read — do not grep/read the same path.',
+    description:
+      'Depth on ONE known in-repo symbol or indexed file — not a survey tool. ' +
+      'Required: pass `symbol` (symbol mode) OR `file` alone (file mode). ' +
+      'FILE: `file` only → line-numbered source + dependents. ' +
+      'SYMBOL: body via includeCode + short trail; overloads return every body. ' +
+      'USE after explore named the symbol and you still need one body. ' +
+      'DO NOT crawl a feature with repeated node calls (prefer one explore). ' +
+      'Treat returned source as already Read.',
     inputSchema: {
       type: 'object',
       properties: {
         symbol: {
           type: 'string',
-          description: 'Name of the symbol to read (symbol mode). Omit it and pass `file` alone to read a whole file like Read.',
+          description: 'Symbol mode (required unless `file` alone). Exact name (e.g. "authenticate").',
         },
         includeCode: {
           type: 'boolean',
@@ -748,7 +779,9 @@ export const tools: ToolDefinition[] = [
         },
         file: {
           type: 'string',
-          description: 'A file path or basename (e.g. "harness.rs", "src/auth/session.ts"). Pass it ALONE (no symbol) to READ the file like the Read tool — its full source with line numbers + which files depend on it. Or pass it WITH a symbol to disambiguate an overloaded name to the definition in this file.',
+          description:
+            'File mode: pass ALONE (no symbol) to read like Read — e.g. "src/auth/session.ts". ' +
+            'Or with `symbol` to disambiguate an overloaded name to that file.',
         },
         offset: {
           type: 'number',
@@ -776,14 +809,17 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_explore',
     description:
-      'PRIMARY tool for THIS REPO\'s symbol graph (call paths + often line-numbered source). CALL when you need in-repo structure: how a named feature/component is wired, A→B path, callers/callees, Type.member → who uses it, click/handler flow, in-repo @kit import usages — put concrete symbol/file/@kit names in query; skip search. If the question does not need that graph, do not call. One explore; answer from returned Source + trail; treat as already Read; do not re-grep/search the same names. Busy/partial → retry same explore once.',
+      'PRIMARY tool for THIS REPO\'s symbol graph (call paths + often line-numbered source). Required: `query` with concrete symbol/file/@kit names. ' +
+      'CALL for in-repo structure: feature wiring, A→B path, callers/callees, Type.member usage, click→handler, in-repo @kit usages. ' +
+      'Skip search when names are already known. One explore; answer from Source + trail; treat as already Read. Busy/partial → retry same explore once.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
           description:
-            'In-repo symbols, file basenames, or @kit names for USAGE questions (import/call sites), not for asking the kit\'s official full API list. For flows, name both endpoints. Prefer concrete names from the question.',
+            'Required. In-repo symbols, file basenames, or @kit names (e.g. "ParentPage onClick build", "CartRepository.addItem"). ' +
+            'For flows, name both endpoints. Not for official SDK API catalogs.',
         },
         maxFiles: {
           type: 'number',
@@ -798,7 +834,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_status',
-    description: 'Index health check (files / nodes / edges). Skip unless debugging.',
+    description: 'Index health check (files / nodes / edges). No required args when a default project is loaded. Skip unless debugging.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -809,17 +845,19 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'homegraph_files',
-    description: 'Indexed directory tree (paths and symbol counts only — NO source code). Do NOT use to answer where/what/how code questions; use homegraph_explore. Only for coarse folder layout when explore cannot help.',
+    description:
+      'Indexed directory tree (paths and symbol counts only — NO source). ' +
+      'Only for coarse folder layout when explore cannot help. For where/what/how code questions use homegraph_explore.',
     inputSchema: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'Filter to files under this directory path (e.g., "src/components"). Returns all files if not specified.',
+          description: 'Optional directory prefix filter (e.g. "src/components"). Omit to list all indexed files.',
         },
         pattern: {
           type: 'string',
-          description: 'Filter files matching this glob pattern (e.g., "*.tsx", "**/*.test.ts")',
+          description: 'Optional glob filter (e.g. "*.tsx", "**/*.ets").',
         },
         format: {
           type: 'string',
@@ -844,19 +882,19 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_spec_match',
     description:
-      'Match a new spec/feature description against the Commit4Spec knowledge graph using FTS5 full-text search. ' +
-      'Returns the most similar historical specs with their associated commits and code fragments. ' +
-      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+      'Match a new feature/spec description against the Commit4Spec knowledge graph (FTS5). ' +
+      'Required: `query` (title + description text). Returns similar historical specs with commits/fragments. ' +
+      'Needs `.homegraph/commit4spec/commit4spec.db` (from `homegraph spec build` / `mine`).',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Spec text (title + description) to match against historical specs.',
+          description: 'Required. Spec text (title + description) to match against historical specs.',
         },
         repoPath: {
           type: 'string',
-          description: 'Path to the repository root. Defaults to the current working directory.',
+          description: 'Optional repository root (default: cwd). Spec DB lives under `.homegraph/commit4spec/`.',
         },
         topK: {
           type: 'number',
@@ -876,20 +914,18 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_spec_find',
     description:
-      'Find which specs are related to the given file path by matching against code-fragment file paths ' +
-      'in the Commit4Spec knowledge graph. Traverses code_fragment_nodes → commit_fragment_relations ' +
-      '→ spec_commit_relations → spec_nodes. Useful for answering "which specs does this file affect?" ' +
-      'The database defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+      'Find which Commit4Spec specs touch a file path. Required: `filePath` (e.g. "src/auth.ts"). ' +
+      'Needs `.homegraph/commit4spec/commit4spec.db`.',
     inputSchema: {
       type: 'object',
       properties: {
         filePath: {
           type: 'string',
-          description: 'File path to look up (substring LIKE match). E.g. "src/auth.ts" or "src/auth".',
+          description: 'Required. File path substring to match (e.g. "src/auth.ts" or "src/auth").',
         },
         repoPath: {
           type: 'string',
-          description: 'Path to the repository root. Defaults to the current working directory.',
+          description: 'Optional repository root (default: cwd). Spec DB lives under `.homegraph/commit4spec/`.',
         },
       },
       required: ['filePath'],
@@ -899,31 +935,26 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_spec_trace',
     description:
-      'Trace a code symbol (function, method, class) back to its associated design Specs in the Commit4Spec ' +
-      'knowledge graph. Resolves the symbol via the HomeGraph code index, then matches against code-fragment ' +
-      'records in the Spec database using five-dimensional scoring: file-path match, code-diff content search ' +
-      '(FTS5), Spec title/subtitle name match, Spec recency, and line-range overlap. ' +
-      'Returns ranked Specs with score breakdowns even when exact line overlap is absent — code drifts over ' +
-      'time, so recency and content matching compensate. ' +
-      'The Spec DB defaults to .homegraph/commit4spec/commit4spec.db under the repo path.',
+      'Trace one code symbol back to related design Specs (Commit4Spec). Required: `symbol` (e.g. "authenticate"). ' +
+      'Optional `file`/`line` to disambiguate. Needs code index + `.homegraph/commit4spec/commit4spec.db`.',
     inputSchema: {
       type: 'object',
       properties: {
         symbol: {
           type: 'string',
-          description: 'Symbol name (bare or qualified). E.g. "authenticate", "AuthService.login", "auth::validate".',
+          description: 'Required. Symbol name (bare or qualified). E.g. "authenticate", "AuthService.login".',
         },
         file: {
           type: 'string',
-          description: 'File path for disambiguation when multiple symbols share the same name (optional).',
+          description: 'Optional file path for disambiguation when multiple symbols share the same name.',
         },
         line: {
           type: 'number',
-          description: 'Line number for disambiguation (optional).',
+          description: 'Optional line number for disambiguation.',
         },
         repoPath: {
           type: 'string',
-          description: 'Path to the repository root. Defaults to the current working directory.',
+          description: 'Optional repository root (default: cwd).',
         },
         topK: {
           type: 'number',
@@ -1323,10 +1354,10 @@ export class ToolHandler {
   /**
    * Validate that a value is a non-empty string within length bounds.
    *
-   * The `maxLength` cap protects against MCP clients that ship huge
-   * payloads (10MB+ query strings either by accident or maliciously).
-   * Without this, a single oversized input can pin the FTS5 index or
-   * exhaust memory before any real work runs.
+   * Bad / oversize args return SUCCESS-shaped guidance (no `isError`) with a
+   * retry example — same policy as {@link NotIndexedError}: early `isError`
+   * teaches agents to abandon the whole toolset. The length cap still blocks
+   * DoS before FTS/work runs.
    */
   private validateString(
     value: unknown,
@@ -1334,11 +1365,22 @@ export class ToolHandler {
     maxLength: number = MAX_INPUT_LENGTH
   ): string | ToolResult {
     if (typeof value !== 'string' || value.length === 0) {
-      return this.errorResult(`${name} must be a non-empty string`);
+      const got =
+        value === undefined || value === null
+          ? 'it was missing'
+          : typeof value !== 'string'
+            ? `got ${typeof value}`
+            : 'got an empty string';
+      return this.badArgResult(
+        `\`${name}\` must be a non-empty string (${got}).`,
+        name,
+      );
     }
     if (value.length > maxLength) {
-      return this.errorResult(
-        `${name} exceeds maximum length of ${maxLength} characters (got ${value.length})`
+      return this.badArgResult(
+        `\`${name}\` exceeds maximum length of ${maxLength} characters (got ${value.length}). ` +
+          'Shorten it — pass a concrete symbol/file name, not a pasted dump.',
+        name,
       );
     }
     return value;
@@ -1346,7 +1388,8 @@ export class ToolHandler {
 
   /**
    * Validate an optional path-like string input. Returns the value if
-   * valid (or undefined), or a ToolResult with the error.
+   * valid (or undefined), or SUCCESS-shaped guidance when the value is present
+   * but invalid (wrong type / oversize).
    */
   private validateOptionalPath(
     value: unknown,
@@ -1354,11 +1397,16 @@ export class ToolHandler {
   ): string | undefined | ToolResult {
     if (value === undefined || value === null) return undefined;
     if (typeof value !== 'string') {
-      return this.errorResult(`${name} must be a string`);
+      return this.badArgResult(
+        `\`${name}\` must be a string when provided (got ${typeof value}).`,
+        name,
+      );
     }
     if (value.length > MAX_PATH_LENGTH) {
-      return this.errorResult(
-        `${name} exceeds maximum length of ${MAX_PATH_LENGTH} characters (got ${value.length})`
+      return this.badArgResult(
+        `\`${name}\` exceeds maximum length of ${MAX_PATH_LENGTH} characters (got ${value.length}). ` +
+          'Pass a normal project-relative or absolute path.',
+        name,
       );
     }
     return value;
@@ -6043,6 +6091,17 @@ export class ToolHandler {
       return this.handleFileView(cg, fileHint, { offset, limit, symbolsOnly });
     }
 
+    if (!symbolRaw && !fileHint) {
+      return this.badArgResult(
+        '`homegraph_node` needs either `symbol` (symbol mode) or `file` alone (file mode). Both were missing.',
+        'symbol',
+        {
+          symbol: 'authenticate',
+          includeCode: true,
+        },
+      );
+    }
+
     const symbol = this.validateString(args.symbol, 'symbol');
     if (typeof symbol !== 'string') return symbol;
 
@@ -7360,6 +7419,29 @@ export class ToolHandler {
     return {
       content: [{ type: 'text', text }],
     };
+  }
+
+  /**
+   * Recoverable bad-argument guidance: SUCCESS-shaped (no `isError`) so agents
+   * retry with fixed args instead of abandoning HomeGraph for the session.
+   * Reserved `isError` cases stay in {@link errorResult} (security / real faults).
+   */
+  private badArgResult(
+    problem: string,
+    argName: string,
+    exampleOverride?: Record<string, unknown>,
+  ): ToolResult {
+    const example =
+      exampleOverride ??
+      ({ [argName]: BAD_ARG_EXAMPLES[argName] ?? '…' } as Record<string, unknown>);
+    return this.textResult(
+      `${problem}\n\n` +
+        'This is not a HomeGraph failure — fix the arguments and retry the same tool.\n' +
+        'Example:\n' +
+        '```json\n' +
+        `${JSON.stringify(example, null, 2)}\n` +
+        '```',
+    );
   }
 
   private errorResult(message: string): ToolResult {

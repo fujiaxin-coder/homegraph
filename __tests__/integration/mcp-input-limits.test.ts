@@ -5,7 +5,9 @@
  * unbounded payloads (`query`, `task`, `symbol`, `projectPath`,
  * `path`, `pattern`). Before the cap, a 100MB string would hit
  * the FTS5 layer and pin the server. These tests assert that the
- * tool layer rejects oversize inputs early.
+ * tool layer rejects oversize inputs early — SUCCESS-shaped guidance
+ * (no isError), so agents retry with shorter args instead of abandoning
+ * the toolset.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -41,6 +43,12 @@ describe('MCP input size limits', () => {
     }
   });
 
+  function expectRejectedGuidance(result: { content: Array<{ text: string }>; isError?: boolean }, needle: RegExp) {
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]!.text).toMatch(needle);
+    expect(result.content[0]!.text).toMatch(/fix the arguments and retry/i);
+  }
+
   it('accepts a normal-sized query', async () => {
     const result = await handler.execute('homegraph_search', { query: 'alpha' });
     expect(result.isError).toBeFalsy();
@@ -49,29 +57,25 @@ describe('MCP input size limits', () => {
   it('rejects an oversize query on homegraph_search', async () => {
     const huge = 'a'.repeat(20_000);
     const result = await handler.execute('homegraph_search', { query: huge });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/maximum length/i);
+    expectRejectedGuidance(result, /maximum length/i);
   });
 
   it('rejects an oversize query on homegraph_explore', async () => {
     const huge = 'b'.repeat(50_000);
     const result = await handler.execute('homegraph_explore', { query: huge });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/maximum length/i);
+    expectRejectedGuidance(result, /maximum length/i);
   });
 
   it('rejects an oversize symbol on homegraph_callers', async () => {
     const huge = 'c'.repeat(15_000);
     const result = await handler.execute('homegraph_callers', { symbol: huge });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/maximum length/i);
+    expectRejectedGuidance(result, /maximum length/i);
   });
 
   it('rejects an oversize symbol on homegraph_impact', async () => {
     const huge = 'd'.repeat(11_000);
     const result = await handler.execute('homegraph_impact', { symbol: huge });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/maximum length/i);
+    expectRejectedGuidance(result, /maximum length/i);
   });
 
   it('rejects an oversize projectPath', async () => {
@@ -80,22 +84,19 @@ describe('MCP input size limits', () => {
       query: 'alpha',
       projectPath: hugePath,
     });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/projectPath/);
+    expectRejectedGuidance(result, /projectPath/);
   });
 
   it('rejects an oversize path filter on homegraph_files', async () => {
     const hugePath = 'src/' + 'y'.repeat(5_000);
     const result = await handler.execute('homegraph_files', { path: hugePath });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/path/);
+    expectRejectedGuidance(result, /path/);
   });
 
   it('rejects an oversize glob pattern on homegraph_files', async () => {
     const hugePattern = '*'.repeat(5_000);
     const result = await handler.execute('homegraph_files', { pattern: hugePattern });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/pattern/);
+    expectRejectedGuidance(result, /pattern/);
   });
 
   it('rejects a non-string projectPath', async () => {
@@ -103,7 +104,6 @@ describe('MCP input size limits', () => {
       query: 'alpha',
       projectPath: 12345 as unknown as string,
     });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toMatch(/projectPath/);
+    expectRejectedGuidance(result, /projectPath/);
   });
 });
