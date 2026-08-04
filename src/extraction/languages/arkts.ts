@@ -832,7 +832,6 @@ function releaseArkAnalyzerScene(scene: Scene): void {
     for (const mod of scene.getModules()) {
       try {
         scene.disposeModule(mod);
-        mod.setModuleIndex(undefined);
         mod.setFileDepGraph(undefined);
         mod.clearFilesMap();
         mod.setLoadState(ModuleLoadState.NOT_LOADED);
@@ -849,6 +848,19 @@ function releaseArkAnalyzerScene(scene: Scene): void {
     // ignore
   }
   tryForceGc();
+}
+
+/**
+ * ArkAnalyzer 1.0.92 keeps INDEX hollow on {@link ModuleBuilder} as a private
+ * method (public eviction paths call it internally). HomeGraph needs the same
+ * post-ingest hollow; call through a narrow cast until a public API exists.
+ */
+function hollowModuleToIndex(builder: ModuleBuilder, moduleId: number): void {
+  (
+    builder as unknown as {
+      downgradeModule(id: number, level: ModuleDepthLevel): void;
+    }
+  ).downgradeModule(moduleId, ModuleDepthLevel.INDEX);
 }
 
 function tryReturnCachedBatch(
@@ -4009,7 +4021,7 @@ function buildArkTSIndexByModuleInner(
       try {
         const builder = new ModuleBuilder(scn);
         const selfId = scn.getModuleId(module);
-        builder.downgradeModule(selfId, ModuleDepthLevel.INDEX);
+        hollowModuleToIndex(builder, selfId);
 
         const cache = scn.getModuleCache();
         if (cache) {
@@ -4017,7 +4029,7 @@ function buildArkTSIndexByModuleInner(
             if (modId === selfId) continue;
             const depMod = builder.getModule(modId);
             if (!depMod || depMod.getLoadState() <= ModuleLoadState.INDEX) continue;
-            builder.downgradeModule(modId, ModuleDepthLevel.INDEX);
+            hollowModuleToIndex(builder, modId);
             depHollowed++;
           }
         }
@@ -4061,7 +4073,11 @@ function buildArkTSIndexByModuleInner(
     }, config);
 
     if (process.env.HOMEGRAPH_ARKTS_DIAG === '1') {
-      const ev = typeof scene.getModuleEvictionStats === 'function' ? scene.getModuleEvictionStats() : null;
+      const sceneDiag = scene as Scene & { getModuleEvictionStats?: () => unknown };
+      const ev =
+        typeof sceneDiag.getModuleEvictionStats === 'function'
+          ? sceneDiag.getModuleEvictionStats()
+          : null;
       const mu = process.memoryUsage();
       const cacheN = scene.getModuleCache()?.size?.() ?? scene.getModuleCache()?.getLoadedModules?.()?.length ?? -1;
       process.stderr.write(
