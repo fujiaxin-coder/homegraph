@@ -6,7 +6,7 @@
  *   - src/spec/llm/agent-client.ts (subprocess lifecycle, retry, timeout)
  *   - src/spec/llm/factory.ts (FallbackLlmClient, createSpecLlmClient)
  *
- * All subprocess tests use fake agent shell scripts on a temp PATH — real
+ * All subprocess tests use fake agent shell scripts on a temp PATH ? real
  * Claude Code / Codex installations are never touched.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -33,18 +33,53 @@ setLogger(silentLogger);
 let tmpDir: string;
 let savedPath: string | undefined;
 let savedHome: string | undefined;
+let savedUserProfile: string | undefined;
 let savedOverride: string | undefined;
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-agent-'));
 }
 
-/** Write an executable shell script into `dir` and return its full path. */
-function writeScript(dir: string, name: string, body: string): string {
+/** Write a PATH-detectable stub binary (exit 0). Uses `.cmd` on Windows. */
+function writeDetectStub(dir: string, name: string): string {
   fs.mkdirSync(dir, { recursive: true });
+  if (process.platform === 'win32') {
+    const cmd = path.join(dir, `${name}.cmd`);
+    const body = '@echo off\r\nexit /b 0\r\n';
+    fs.writeFileSync(cmd, body);
+    // Well-known install paths check the bare name (no .cmd); PATH lookup tries both.
+    fs.writeFileSync(path.join(dir, name), body);
+    return cmd;
+  }
   const p = path.join(dir, name);
-  fs.writeFileSync(p, body, { mode: 0o755 });
+  fs.writeFileSync(p, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   return p;
+}
+
+/**
+ * Write a spawnable fake agent as CommonJS. Always run via `node` through
+ * {@link makeScriptAdapter} so Windows does not need shebang/`.cmd` spawn.
+ */
+function writeAgentScript(dir: string, name: string, nodeBody: string): string {
+  fs.mkdirSync(dir, { recursive: true });
+  const jsPath = path.join(dir, `${name}.cjs`);
+  fs.writeFileSync(jsPath, nodeBody);
+  return jsPath;
+}
+
+/** Drain stdin then run `fn`. Used by fake agents that ignore the prompt body. */
+function agentPreamble(): string {
+  return `
+const fs = require('fs');
+function drainStdin() {
+  return new Promise((resolve) => {
+    const chunks = [];
+    process.stdin.on('data', (c) => chunks.push(c));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.resume();
+  });
+}
+`;
 }
 
 /** Adapter stub that spawns a local script instead of a real agent. */
@@ -52,13 +87,14 @@ function makeScriptAdapter(
   scriptPath: string,
   classify?: (failure: AgentFailure) => 'retryable' | 'terminal',
 ): AgentAdapter {
+  const runViaNode = scriptPath.endsWith('.cjs') || scriptPath.endsWith('.js');
   return {
     id: 'claude-code',
     displayName: 'FakeAgent',
-    binary: scriptPath,
+    binary: runViaNode ? process.execPath : scriptPath,
     detect: () => true,
     buildInvocation: (systemPrompt, userPrompt) => ({
-      args: [],
+      args: runViaNode ? [scriptPath] : [],
       stdin: `${systemPrompt}\n${userPrompt}`,
     }),
     extractOutput: (r) => r.stdout.trim(),
@@ -81,12 +117,15 @@ beforeEach(() => {
   tmpDir = makeTmpDir();
   savedPath = process.env.PATH;
   savedHome = process.env.HOME;
+  savedUserProfile = process.env.USERPROFILE;
   savedOverride = process.env.HOMEGRAPH_SPEC_AGENT;
 });
 
 afterEach(() => {
   process.env.PATH = savedPath;
   process.env.HOME = savedHome;
+  if (savedUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = savedUserProfile;
   if (savedOverride === undefined) {
     delete process.env.HOMEGRAPH_SPEC_AGENT;
   } else {
@@ -96,15 +135,21 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+/** Point os.homedir() at the temp dir on both POSIX (HOME) and Windows (USERPROFILE). */
+function useTempHome(): void {
+  process.env.HOME = tmpDir;
+  process.env.USERPROFILE = tmpDir;
+}
+
 // ---------------------------------------------------------------------------
 // Detection & resolution
 // ---------------------------------------------------------------------------
 
-describe('agents — detection & resolution', () => {
+describe('agents ? detection & resolution', () => {
   it('resolves claude-code when only claude is on PATH', () => {
-    writeScript(tmpDir, 'claude', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(tmpDir, 'claude');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir; // no ~/.claude / ~/.codex here
+    useTempHome(); // no ~/.claude / ~/.codex here
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -112,9 +157,9 @@ describe('agents — detection & resolution', () => {
   });
 
   it('resolves codex when only codex is on PATH', () => {
-    writeScript(tmpDir, 'codex', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(tmpDir, 'codex');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -122,10 +167,10 @@ describe('agents — detection & resolution', () => {
   });
 
   it('prefers claude-code when both are installed', () => {
-    writeScript(tmpDir, 'claude', '#!/bin/sh\nexit 0\n');
-    writeScript(tmpDir, 'codex', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(tmpDir, 'claude');
+    writeDetectStub(tmpDir, 'codex');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -134,7 +179,7 @@ describe('agents — detection & resolution', () => {
 
   it('returns null when nothing is installed', () => {
     process.env.PATH = tmpDir; // empty dir
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -142,12 +187,12 @@ describe('agents — detection & resolution', () => {
   });
 
   it('does NOT detect via a leftover config directory alone (uninstalled agent)', () => {
-    // Uninstalling the CLI leaves ~/.claude / ~/.codex behind — that must
+    // Uninstalling the CLI leaves ~/.claude / ~/.codex behind ? that must
     // not count as "installed" (real-world false positive).
     fs.mkdirSync(path.join(tmpDir, '.claude'));
     fs.mkdirSync(path.join(tmpDir, '.codex'));
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -155,9 +200,9 @@ describe('agents — detection & resolution', () => {
   });
 
   it('detects claude via well-known install path when not on PATH', () => {
-    writeScript(path.join(tmpDir, '.claude', 'local'), 'claude', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(path.join(tmpDir, '.claude', 'local'), 'claude');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -165,9 +210,9 @@ describe('agents — detection & resolution', () => {
   });
 
   it('detects codex via well-known install path when not on PATH', () => {
-    writeScript(path.join(tmpDir, '.local', 'bin'), 'codex', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(path.join(tmpDir, '.local', 'bin'), 'codex');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -175,9 +220,9 @@ describe('agents — detection & resolution', () => {
   });
 
   it("HOMEGRAPH_SPEC_AGENT='none' forces null even with binaries present", () => {
-    writeScript(tmpDir, 'claude', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(tmpDir, 'claude');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     process.env.HOMEGRAPH_SPEC_AGENT = 'none';
     resetAgentResolutionCache();
 
@@ -186,7 +231,7 @@ describe('agents — detection & resolution', () => {
 
   it("HOMEGRAPH_SPEC_AGENT='codex' forces codex without detection", () => {
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     process.env.HOMEGRAPH_SPEC_AGENT = 'codex';
     resetAgentResolutionCache();
 
@@ -194,9 +239,9 @@ describe('agents — detection & resolution', () => {
   });
 
   it('resolves deveco-code when only deveco is on PATH', () => {
-    writeScript(tmpDir, 'deveco', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(tmpDir, 'deveco');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -204,9 +249,9 @@ describe('agents — detection & resolution', () => {
   });
 
   it('detects deveco via well-known install path when not on PATH', () => {
-    writeScript(path.join(tmpDir, '.local', 'bin'), 'deveco', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(path.join(tmpDir, '.local', 'bin'), 'deveco');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -215,7 +260,7 @@ describe('agents — detection & resolution', () => {
 
   it("HOMEGRAPH_SPEC_AGENT='deveco-code' forces deveco-code without detection", () => {
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     process.env.HOMEGRAPH_SPEC_AGENT = 'deveco-code';
     resetAgentResolutionCache();
 
@@ -223,10 +268,10 @@ describe('agents — detection & resolution', () => {
   });
 
   it('claude-code preferred over deveco-code when both are on PATH', () => {
-    writeScript(tmpDir, 'claude', '#!/bin/sh\nexit 0\n');
-    writeScript(tmpDir, 'deveco', '#!/bin/sh\nexit 0\n');
+    writeDetectStub(tmpDir, 'claude');
+    writeDetectStub(tmpDir, 'deveco');
     process.env.PATH = tmpDir;
-    process.env.HOME = tmpDir;
+    useTempHome();
     delete process.env.HOMEGRAPH_SPEC_AGENT;
     resetAgentResolutionCache();
 
@@ -434,31 +479,43 @@ describe('DevecoCodeAdapter', () => {
 });
 
 // ---------------------------------------------------------------------------
-// CodingAgentLlmClient — subprocess lifecycle with fake agent scripts
+// CodingAgentLlmClient ? subprocess lifecycle with fake agent scripts
 // ---------------------------------------------------------------------------
 
 describe('CodingAgentLlmClient', () => {
   it('returns extracted output on success', async () => {
-    const script = writeScript(tmpDir, 'fake-agent', '#!/bin/sh\ncat >/dev/null\necho "agent says hi"\n');
+    const script = writeAgentScript(
+      tmpDir,
+      'fake-agent',
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  process.stdout.write('agent says hi\\n');
+})();
+`,
+    );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script));
     await expect(client.chat('sys', 'user')).resolves.toBe('agent says hi');
   });
 
   it('retries transient failures and eventually succeeds', async () => {
-    const counter = path.join(tmpDir, 'count');
-    const script = writeScript(
+    const script = writeAgentScript(
       tmpDir,
       'flaky-agent',
-      `#!/bin/sh
-cat >/dev/null
-N=$(cat "${counter}" 2>/dev/null || echo 0)
-N=$((N+1))
-echo $N > "${counter}"
-if [ "$N" -lt 2 ]; then
-  echo "boom" >&2
-  exit 1
-fi
-echo "recovered"
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  const counter = ${JSON.stringify(path.join(tmpDir, 'count'))};
+  let n = 0;
+  try { n = parseInt(fs.readFileSync(counter, 'utf8').trim(), 10) || 0; } catch {}
+  n += 1;
+  fs.writeFileSync(counter, String(n));
+  if (n < 2) {
+    process.stderr.write('boom\\n');
+    process.exit(1);
+  }
+  process.stdout.write('recovered\\n');
+})();
 `,
     );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script), {
@@ -467,21 +524,24 @@ echo "recovered"
       retryMaxDelayMs: 5,
     });
     await expect(client.chat('sys', 'user')).resolves.toBe('recovered');
-    expect(fs.readFileSync(counter, 'utf-8').trim()).toBe('2');
+    expect(fs.readFileSync(path.join(tmpDir, 'count'), 'utf-8').trim()).toBe('2');
   });
 
   it('throws immediately on terminal failure without retrying', async () => {
-    const counter = path.join(tmpDir, 'count-terminal');
-    const script = writeScript(
+    const script = writeAgentScript(
       tmpDir,
       'terminal-agent',
-      `#!/bin/sh
-cat >/dev/null
-N=$(cat "${counter}" 2>/dev/null || echo 0)
-N=$((N+1))
-echo $N > "${counter}"
-echo "not logged in" >&2
-exit 1
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  const counter = ${JSON.stringify(path.join(tmpDir, 'count-terminal'))};
+  let n = 0;
+  try { n = parseInt(fs.readFileSync(counter, 'utf8').trim(), 10) || 0; } catch {}
+  n += 1;
+  fs.writeFileSync(counter, String(n));
+  process.stderr.write('not logged in\\n');
+  process.exit(1);
+})();
 `,
     );
     const client = new CodingAgentLlmClient(
@@ -489,11 +549,21 @@ exit 1
       { maxRetries: 3, retryBaseDelayMs: 1, retryMaxDelayMs: 5 },
     );
     await expect(client.chat('sys', 'user')).rejects.toThrow(/exited with code 1/);
-    expect(fs.readFileSync(counter, 'utf-8').trim()).toBe('1');
+    expect(fs.readFileSync(path.join(tmpDir, 'count-terminal'), 'utf-8').trim()).toBe('1');
   });
 
   it('throws after exhausting retries on persistent transient failure', async () => {
-    const script = writeScript(tmpDir, 'always-fail', '#!/bin/sh\ncat >/dev/null\necho "x" >&2\nexit 1\n');
+    const script = writeAgentScript(
+      tmpDir,
+      'always-fail',
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  process.stderr.write('x\\n');
+  process.exit(1);
+})();
+`,
+    );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script), {
       maxRetries: 1,
       retryBaseDelayMs: 1,
@@ -503,7 +573,16 @@ exit 1
   });
 
   it('kills the process on timeout', async () => {
-    const script = writeScript(tmpDir, 'slow-agent', '#!/bin/sh\ncat >/dev/null\nsleep 10\n');
+    const script = writeAgentScript(
+      tmpDir,
+      'slow-agent',
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  await new Promise((r) => setTimeout(r, 10_000));
+})();
+`,
+    );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script), {
       timeoutMs: 300,
       maxRetries: 0,
@@ -512,19 +591,20 @@ exit 1
   });
 
   it('retries after a timeout and succeeds on a later attempt', async () => {
-    const counter = path.join(tmpDir, 'count-timeout');
-    const script = writeScript(
+    const script = writeAgentScript(
       tmpDir,
       'slow-then-fast',
-      `#!/bin/sh
-cat >/dev/null
-N=$(cat "${counter}" 2>/dev/null || echo 0)
-N=$((N+1))
-echo $N > "${counter}"
-if [ "$N" -lt 2 ]; then
-  sleep 10
-fi
-echo "fast response"
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  const counter = ${JSON.stringify(path.join(tmpDir, 'count-timeout'))};
+  let n = 0;
+  try { n = parseInt(fs.readFileSync(counter, 'utf8').trim(), 10) || 0; } catch {}
+  n += 1;
+  fs.writeFileSync(counter, String(n));
+  if (n < 2) await new Promise((r) => setTimeout(r, 10_000));
+  process.stdout.write('fast response\\n');
+})();
 `,
     );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script), {
@@ -536,20 +616,23 @@ echo "fast response"
       retryMaxDelayMs: 5,
     });
     await expect(client.chat('sys', 'user')).resolves.toBe('fast response');
-    expect(fs.readFileSync(counter, 'utf-8').trim()).toBe('2');
+    expect(fs.readFileSync(path.join(tmpDir, 'count-timeout'), 'utf-8').trim()).toBe('2');
   });
 
   it('kills the call when output exceeds the cap', async () => {
-    const counter = path.join(tmpDir, 'count-cap');
-    const script = writeScript(
+    const script = writeAgentScript(
       tmpDir,
       'flooding-agent',
-      `#!/bin/sh
-cat >/dev/null
-N=$(cat "${counter}" 2>/dev/null || echo 0)
-N=$((N+1))
-echo $N > "${counter}"
-head -c 10000 /dev/zero | tr '\\0' 'x'
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  const counter = ${JSON.stringify(path.join(tmpDir, 'count-cap'))};
+  let n = 0;
+  try { n = parseInt(fs.readFileSync(counter, 'utf8').trim(), 10) || 0; } catch {}
+  n += 1;
+  fs.writeFileSync(counter, String(n));
+  process.stdout.write('x'.repeat(10_000));
+})();
 `,
     );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script), {
@@ -559,8 +642,8 @@ head -c 10000 /dev/zero | tr '\\0' 'x'
       retryMaxDelayMs: 5,
     });
     await expect(client.chat('sys', 'user')).rejects.toThrow(/exceeded the 64-char stdout limit/);
-    // exitCode null → terminal per the adapters → no retry
-    expect(fs.readFileSync(counter, 'utf-8').trim()).toBe('1');
+    // exitCode null ? terminal per the adapters ? no retry
+    expect(fs.readFileSync(path.join(tmpDir, 'count-cap'), 'utf-8').trim()).toBe('1');
   });
 
   it('throws terminal when the binary does not exist (ENOENT)', async () => {
@@ -570,17 +653,31 @@ head -c 10000 /dev/zero | tr '\\0' 'x'
   });
 
   it('chatJson parses fenced JSON output', async () => {
-    const script = writeScript(
+    const script = writeAgentScript(
       tmpDir,
       'json-agent',
-      '#!/bin/sh\ncat >/dev/null\nprintf \'Here is the result:\\n```json\\n{"action":"UPDATE"}\\n```\\n\'\n',
+      `${agentPreamble()}
+(async () => {
+  await drainStdin();
+  process.stdout.write('Here is the result:\\n\`\`\`json\\n{"action":"UPDATE"}\\n\`\`\`\\n');
+})();
+`,
     );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script));
     await expect(client.chatJson('sys', 'user')).resolves.toEqual({ action: 'UPDATE' });
   });
 
   it('delivers the prompt via stdin', async () => {
-    const script = writeScript(tmpDir, 'echo-agent', '#!/bin/sh\ncat\n');
+    const script = writeAgentScript(
+      tmpDir,
+      'echo-agent',
+      `${agentPreamble()}
+(async () => {
+  const text = await drainStdin();
+  process.stdout.write(text);
+})();
+`,
+    );
     const client = new CodingAgentLlmClient(makeScriptAdapter(script));
     await expect(client.chat('SYS-PART', 'USER-PART')).resolves.toBe('SYS-PART\nUSER-PART');
   });

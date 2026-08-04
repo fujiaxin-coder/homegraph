@@ -599,6 +599,11 @@ interface PropertySchema {
   description: string;
   enum?: string[];
   default?: unknown;
+  items?: PropertySchema | {
+    type: string;
+    properties?: Record<string, PropertySchema>;
+    description?: string;
+  };
 }
 
 /**
@@ -2590,12 +2595,21 @@ export class ToolHandler {
         const hits = this.findAllSymbols(cg, t).nodes;
         const cands = hits.filter((n) => CALLABLE.has(n.kind));
         tokenFamily.set(t, cands);
+        // Prefer in-repo callables over attached OHOS SDK stubs (`ohos-sdk:…`).
+        // Lifecycle names like `aboutToAppear` / `build` collide with dozens of
+        // API defs; counting those as ambiguity empties co-naming and drops the
+        // project method the agent actually meant (ArkTS explore Flow regression).
+        // Do NOT fall back to the full pool when co-naming empties — that would
+        // pin a polymorphic name like `execute` (9+ impls) onto the Flow spine
+        // and silence the Interface-dispatch announcement.
+        const projectCands = cands.filter((n) => !isOhosApiFilePath(n.filePath));
+        const pool = projectCands.length > 0 ? projectCands : cands;
         // A qualified or otherwise-specific name (<=3 hits) keeps all; an
         // ambiguous simple name keeps only candidates whose container is named.
-        const specific = cands.length <= 3;
+        const specific = pool.length <= 3;
         const pick = specific
-          ? cands
-          : cands.filter((n) => {
+          ? pool
+          : pool.filter((n) => {
               const segs = (n.qualifiedName || '').toLowerCase().split(/::|\./).filter(Boolean);
               const container = segs.length >= 2 ? segs[segs.length - 2] : '';
               return !!container && segPool.has(container);

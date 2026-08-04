@@ -357,13 +357,14 @@ describe('MCP Input Validation', () => {
 
   it('should reject non-string query in homegraph_search', async () => {
     const result = await handler.execute('homegraph_search', { query: null });
-    expect(result.isError).toBe(true);
+    // Invalid args are SUCCESS-shaped (no isError) so agents retry instead of abandoning.
+    expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toContain('non-empty string');
   });
 
   it('should reject empty string query in homegraph_search', async () => {
     const result = await handler.execute('homegraph_search', { query: '' });
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toContain('non-empty string');
   });
 
@@ -380,13 +381,13 @@ describe('MCP Input Validation', () => {
 
   it('should reject non-string symbol in homegraph_callers', async () => {
     const result = await handler.execute('homegraph_callers', { symbol: 123 });
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toContain('non-empty string');
   });
 
   it('should reject non-string query in homegraph_explore', async () => {
     const result = await handler.execute('homegraph_explore', { query: undefined });
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toContain('non-empty string');
   });
 
@@ -418,17 +419,20 @@ describe('MCP Input Validation', () => {
 
   it('should reject non-string symbol in homegraph_impact', async () => {
     const result = await handler.execute('homegraph_impact', { symbol: [] });
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain('non-empty string');
   });
 
   it('should reject non-string symbol in homegraph_node', async () => {
     const result = await handler.execute('homegraph_node', { symbol: false });
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/symbol|non-empty string/i);
   });
 
   it('should reject non-string symbol in homegraph_callees', async () => {
     const result = await handler.execute('homegraph_callees', { symbol: {} });
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain('non-empty string');
   });
 
   it('should handle NaN limit gracefully', async () => {
