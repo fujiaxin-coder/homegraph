@@ -49,7 +49,7 @@ describe('homegraph version affordances', () => {
   });
 
   it('hides the internal `serve` command from --help', () => {
-    // `serve --mcp` is the stdio entry point an AI agent launches for itself,
+    // `serve mcp` is the stdio entry point an AI agent launches for itself,
     // not a human command — it must not appear in the listing. (It stays fully
     // invocable; the mcp-initialize suite covers that the agent path works.)
     expect(run(['--help'])).not.toMatch(/^\s+serve\b/m);

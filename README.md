@@ -156,7 +156,7 @@ homegraph spec stats           # 查看Spec知识图谱状态
 homegraph spec evolve install  # 安装 post-commit 钩子（默认累计 3 次提交后触发演进）
 homegraph spec evolve uninstall# 移除 post-commit 钩子
 homegraph spec evolve process  # 手动触发一次Spec演化
-homegraph serve --mcp           # 启动 MCP 服务（一般由 Agent 自动拉起）
+homegraph serve mcp           # 启动 MCP 服务（一般由 Agent 自动拉起）
 ```
 
 `explore` / `node` 等命令与同名 MCP 工具共享同一套输出，适合没有 MCP 的子 Agent 或脚本直接调用。
@@ -271,7 +271,7 @@ npm run cli
     "homegraph": {
       "type": "stdio",
       "command": "homegraph",
-      "args": ["serve", "--mcp"]
+      "args": ["serve", "mcp"]
     }
   }
 }

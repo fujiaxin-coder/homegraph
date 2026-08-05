@@ -5,7 +5,7 @@
  * top-level `mcp_servers` key, and exposes discovered MCP tools through
  * dynamic toolsets named `mcp-<server>`. We add:
  *
- *   mcp_servers.homegraph -> `homegraph serve --mcp`
+ *   mcp_servers.homegraph -> `homegraph serve mcp`
  *   platform_toolsets.cli -> `mcp-homegraph`
  *
  * The second entry matters because Hermes CLI profiles often enable an

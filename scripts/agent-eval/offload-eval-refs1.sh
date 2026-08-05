@@ -18,19 +18,19 @@ CFG="$RUNS/mcp-$REPO-$STYLE.json"
 # verbatim source, no reasoning model). Any other value is an offload style (plain|refs).
 if [ "$STYLE" = "raw" ]; then
   DAEMON_ENV="HOMEGRAPH_OFFLOAD_DISABLE=1"
-  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_DISABLE=1","node","%s","serve","--mcp","--path","%s"]}}}' \
+  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_DISABLE=1","node","%s","serve","mcp","--path","%s"]}}}' \
     "$BIN" "$TARGET" > "$CFG"
   USAGE="-"
 else
   DAEMON_ENV="HOMEGRAPH_OFFLOAD_STYLE=$STYLE HOMEGRAPH_OFFLOAD_USAGE_LOG=$USAGE"
-  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_STYLE=%s","HOMEGRAPH_OFFLOAD_USAGE_LOG=%s","node","%s","serve","--mcp","--path","%s"]}}}' \
+  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_STYLE=%s","HOMEGRAPH_OFFLOAD_USAGE_LOG=%s","node","%s","serve","mcp","--path","%s"]}}}' \
     "$STYLE" "$USAGE" "$BIN" "$TARGET" > "$CFG"
 fi
 
 # Prewarm a persistent daemon carrying the SAME offload config (it does the reasoning).
-pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
+pkill -9 -f "serve mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
 env $DAEMON_ENV HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 \
-  node "$BIN" serve --mcp --path "$TARGET" </dev/null >/dev/null 2>&1 &
+  node "$BIN" serve mcp --path "$TARGET" </dev/null >/dev/null 2>&1 &
 node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$TARGET" \
   && echo "daemon warm ($STYLE)" || echo "WARN daemon never bound"
 
@@ -46,5 +46,5 @@ echo "== run $tag =="
 node "$EXTRACT" --run "$RUNS/$tag.jsonl" --usage "$USAGE" --arm "offload-$STYLE" --rep "$N" \
     --repo "$REPO" --tier "complex" --q "$Q" >> "$RESULTS"
 node -e 'const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").pop());console.log(`  [${o.arm} #${o.rep}] ${o.durationSec}s | main $${o.costUsdMain} ${o.tokBillable} tok | read=${o.read} grep=${o.grep} explore=${o.explore} offload=${o.offloadFired} | AI ${o.ai.calls}call/${o.ai.totalTokens}tok/$${o.ai.costUsd.toFixed(4)} | ok=${o.ok}`)' "$RESULTS"
-pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null
+pkill -9 -f "serve mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null
 echo "raw transcript: $RUNS/$tag.jsonl"

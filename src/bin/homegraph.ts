@@ -179,7 +179,7 @@ program
 const TELEMETRY_FLUSH_COMMANDS = new Set(['init', 'uninit', 'index', 'sync', 'upgrade']);
 program.hook('preAction', (_thisCommand, actionCommand) => {
   try {
-    // The detached daemon re-invokes `serve --mcp` internally — not a user action.
+    // The detached daemon re-invokes `serve mcp` internally — not a user action.
     if (process.env.HOMEGRAPH_DAEMON_INTERNAL) return;
     const name = actionCommand.name();
     if (name === 'telemetry') return; // managing telemetry is not usage
@@ -1558,16 +1558,16 @@ program
  */
 program
   // Hidden from `--help`: this is the stdio entry point an AI agent launches
-  // for itself (the installer wires `args: ['serve','--mcp']` into every
+  // for itself (the installer wires `args: ['serve','mcp']` into every
   // agent's MCP config), not a command a human runs. It still works when
   // invoked — hiding only removes it from the listing. See the interactive-TTY
   // guard below, which explains this to anyone who runs it by hand.
   .command('serve', { hidden: true })
   .description('Start HomeGraph as an MCP server for AI assistants')
+  .argument('[mode]', 'Run as MCP server (stdio transport)', undefined)
   .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
-  .option('--mcp', 'Run as MCP server (stdio transport)')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean }) => {
+  .action(async (mode: string | undefined, options: { path?: string; watch?: boolean }) => {
     const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
     // Commander sets watch=false when --no-watch is passed. Route it through
@@ -1577,8 +1577,8 @@ program
     }
 
     try {
-      if (options.mcp) {
-        // `serve --mcp` is the stdio MCP server an AI agent launches for itself,
+      if (mode === 'mcp') {
+        // `serve mcp` is the stdio MCP server an AI agent launches for itself,
         // not a command to run by hand. A human in a terminal would otherwise
         // see it hang waiting for JSON-RPC on stdin, which reads as broken. If
         // stdin is an interactive TTY, explain instead of hanging. The agent's
@@ -1603,14 +1603,14 @@ program
         // Default: show info about MCP mode.
         // Use stderr so stdout stays clean for any piped/stdio usage.
         console.error(chalk.bold('\nHomeGraph MCP Server\n'));
-        console.error(chalk.blue(getGlyphs().info) + ' Use --mcp flag to start the MCP server');
+        console.error(chalk.blue(getGlyphs().info) + ' Use `serve mcp` to start the MCP server');
         console.error('\nTo use with Claude Code, add to your MCP configuration:');
         console.error(chalk.dim(`
 {
   "mcpServers": {
     "homegraph": {
       "command": "homegraph",
-      "args": ["serve", "--mcp"]
+      "args": ["serve", "mcp"]
     }
   }
 }

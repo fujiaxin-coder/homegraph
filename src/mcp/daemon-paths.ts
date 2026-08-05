@@ -1,7 +1,7 @@
 /**
  * Daemon socket + lockfile path helpers — issue #411.
  *
- * One shared `homegraph serve --mcp` daemon per project root means we need a
+ * One shared `homegraph serve mcp` daemon per project root means we need a
  * stable, project-keyed rendezvous between cooperating processes. The IPC
  * surface area is just two file paths:
  *

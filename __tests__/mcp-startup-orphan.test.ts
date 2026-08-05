@@ -17,7 +17,7 @@
  * POSIX-only: the blind spot is a POSIX reparenting artifact (Windows never
  * reparents, so its liveness-based check keeps working with a late baseline),
  * and the suite avoids the known Windows EPERM teardown quirk of spawned
- * `serve --mcp` children holding the temp cwd open.
+ * `serve mcp` children holding the temp cwd open.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
@@ -28,7 +28,7 @@ import * as path from 'path';
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
 function spawnServer(cwd: string, handshakeTimeoutMs: number): ChildProcessWithoutNullStreams {
-  return spawn(process.execPath, [BIN, 'serve', '--mcp'], {
+  return spawn(process.execPath, [BIN, 'serve', 'mcp'], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {

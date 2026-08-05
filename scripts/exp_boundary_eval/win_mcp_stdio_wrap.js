@@ -3,7 +3,7 @@
  * Windows MCP launcher: spawn homegraph with windowsHide while keeping stdio
  * connected to DevEco (pythonw + Python subprocess breaks JSON-RPC pipes).
  *
- * Usage: node win_mcp_stdio_wrap.js [--stack-size=N] homegraph.js serve --mcp --path <repo>
+ * Usage: node win_mcp_stdio_wrap.js [--stack-size=N] homegraph.js serve mcp --path <repo>
  */
 'use strict';
 

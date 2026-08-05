@@ -32,7 +32,7 @@ describe('tightenExploreBudgetForQuery', () => {
       base,
       'What does getSummary mean in OpenFolderDragHandler.test.ets',
     );
-    expect(tightened.maxOutputChars).toBeLessThanOrEqual(9000);
+    expect(tightened.maxOutputChars).toBeLessThanOrEqual(7000);
   });
 });
 

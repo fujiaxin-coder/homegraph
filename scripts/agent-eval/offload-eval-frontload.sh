@@ -18,7 +18,7 @@ mkdir -p "$RUNS"
 TARGET=$(cd "$TARGET" && pwd -P)
 
 CFG="$RUNS/mcp-fl-$REPO.json"
-printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_DISABLE=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$TARGET" > "$CFG"
+printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_DISABLE=1","node","%s","serve","mcp","--path","%s"]}}}' "$BIN" "$TARGET" > "$CFG"
 # Generate the hook settings pointing at the persisted hook; enable its debug log so we can
 # count injections (claude passes this env down to the spawned hook process).
 HOOKCFG="$RUNS/frontload-settings.json"
@@ -26,8 +26,8 @@ printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"nod
 export CG_FRONTLOAD_DEBUG="$RUNS/hook-debug.log"
 
 prewarm() {
-  pkill -9 -f "serve --mcp --path $1" 2>/dev/null; rm -f "$1/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
-  env HOMEGRAPH_OFFLOAD_DISABLE=1 HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$1" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $1" 2>/dev/null; rm -f "$1/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
+  env HOMEGRAPH_OFFLOAD_DISABLE=1 HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$1" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$1" \
     && echo "  daemon warm" || echo "  WARN no daemon"
 }
@@ -43,5 +43,5 @@ for r in $(seq 1 "$REPS"); do
   node "$EXTRACT" --run "$RUNS/$tag.jsonl" --usage "-" --arm frontload --rep "$r" --repo "$REPO" --tier "$TIER" --q "$Q" >> "$RESULTS"
   node -e 'const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").pop());console.log(`  [frontload #${o.rep}] ${o.durationSec}s | main $${o.costUsdMain} ${o.tokBillable}tok | read=${o.read} grep=${o.grep} agentExplore=${o.explore} | ok=${o.ok}`)' "$RESULTS"
 done
-pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null
+pkill -9 -f "serve mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null
 echo "###### FRONTLOAD DONE $REPO (cumulative hook injections: $(grep -c INJECTED "$CG_FRONTLOAD_DEBUG" 2>/dev/null))"

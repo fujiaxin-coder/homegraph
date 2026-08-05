@@ -31,7 +31,7 @@ case "$MODE" in headless|tmux|all) ;; *) echo "mode must be headless|tmux|all (g
 
 # MCP config files (path form avoids inline-JSON quoting through tmux).
 cat > "$OUT/mcp-homegraph.json" <<JSON
-{"mcpServers":{"homegraph":{"command":"$CG_BIN","args":["serve","--mcp","--path","$REPO"]}}}
+{"mcpServers":{"homegraph":{"command":"$CG_BIN","args":["serve","mcp","--path","$REPO"]}}}
 JSON
 echo '{"mcpServers":{}}' > "$OUT/mcp-empty.json"
 

@@ -6,7 +6,7 @@ description: The tools HomeGraph exposes to AI agents over MCP.
 HomeGraph runs as a [Model Context Protocol](https://modelcontextprotocol.io/) server. Agents configured by the installer launch it automatically — you don't start it by hand:
 
 ```bash
-homegraph serve --mcp
+homegraph serve mcp
 ```
 
 When a `.homegraph/` index exists, the agent gets the tools below. In a workspace with **no** index, tools stay available — pass `projectPath` to a project that has an index.

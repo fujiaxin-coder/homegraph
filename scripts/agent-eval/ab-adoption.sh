@@ -22,7 +22,7 @@ CHANGED=$(git -C "$ENGINE" diff --name-only "$BASE_REF" HEAD -- src 2>/dev/null)
 [ -n "$CHANGED" ] || { echo "no src/ changes between $BASE_REF and HEAD"; exit 1; }
 
 cleanup() {
-  pkill -9 -f "serve --mcp --path $OUT/" 2>/dev/null
+  pkill -9 -f "serve mcp --path $OUT/" 2>/dev/null
   git -C "$ENGINE" checkout HEAD -- $CHANGED 2>/dev/null
   ( cd "$ENGINE" && npm run build >/dev/null 2>&1 )
 }
@@ -33,8 +33,8 @@ echo "###### changed: $(echo "$CHANGED" | tr '\n' ' ')"
 echo "###### task=$TASK"; echo
 
 prewarm() {
-  pkill -9 -f "serve --mcp --path $1" 2>/dev/null
-  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$1" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $1" 2>/dev/null
+  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$1" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$1" >/dev/null 2>&1
 }
 
@@ -66,7 +66,7 @@ run_arm() { # label, N
     rm -rf "$tgt"
     rsync -a --exclude node_modules --exclude .git --exclude dist --exclude .homegraph "$TARGET/" "$tgt/"
     node "$BIN" init "$tgt" >/dev/null 2>&1
-    printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$c"
+    printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$c"
     prewarm "$tgt"
     echo "----- [$label] run $i -----"
     ( cd "$tgt" && claude -p "$TASK" \
@@ -74,7 +74,7 @@ run_arm() { # label, N
         --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" --max-budget-usd 4 --strict-mcp-config --mcp-config "$c" \
         </dev/null > "$OUT/run-$label-$i.jsonl" 2>"$OUT/run-$label-$i.err" )
     count "$OUT/run-$label-$i.jsonl"
-    pkill -9 -f "serve --mcp --path $tgt" 2>/dev/null
+    pkill -9 -f "serve mcp --path $tgt" 2>/dev/null
   done
   echo
 }

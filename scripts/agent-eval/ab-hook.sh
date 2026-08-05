@@ -34,7 +34,7 @@ command -v jq >/dev/null || { echo "jq not on PATH (the hook needs it)"; exit 1;
 [ -d "$TARGET/.homegraph" ] || { echo "target not indexed: run 'homegraph init $TARGET' first"; exit 1; }
 chmod +x "$HOOK"
 
-cleanup() { pkill -9 -f "serve --mcp --path $OUT/" 2>/dev/null; }
+cleanup() { pkill -9 -f "serve mcp --path $OUT/" 2>/dev/null; }
 trap cleanup EXIT
 
 mkdir -p "$OUT"
@@ -51,8 +51,8 @@ jq -n --arg cmd "bash $HOOK" \
   '{hooks:{PreToolUse:[{matcher:"Read",hooks:[{type:"command",command:$cmd}]}]}}' > "$HOOK_SETTINGS"
 
 prewarm() { # target — spawn a persistent daemon and wait for its socket
-  pkill -9 -f "serve --mcp --path $1" 2>/dev/null
-  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$1" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $1" 2>/dev/null
+  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$1" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$1" \
     && echo "  daemon warm: $1" || echo "  WARN: daemon never bound for $1"
 }
@@ -63,7 +63,7 @@ run_one() { # arm-label, run-index, use-hook(0|1)
   rm -rf "$tgt"
   rsync -a --exclude node_modules --exclude .git --exclude dist --exclude .homegraph "$TARGET/" "$tgt/"
   node "$BIN" init "$tgt" >/dev/null 2>&1
-  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$c"
+  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$c"
   prewarm "$tgt"
   local extra=()
   [ "$hook" = "1" ] && extra=(--settings "$HOOK_SETTINGS")
@@ -75,7 +75,7 @@ run_one() { # arm-label, run-index, use-hook(0|1)
       --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" --max-budget-usd 4 --strict-mcp-config --mcp-config "$c" ${extra[@]+"${extra[@]}"} \
       </dev/null > "$OUT/run-$label-$idx.jsonl" 2>"$OUT/run-$label-$idx.err" )
   node "$PARSE" "$OUT/run-$label-$idx.jsonl" 2>&1 | grep -E "by type|Result" || echo "  (parse failed — see $OUT/run-$label-$idx.jsonl)"
-  pkill -9 -f "serve --mcp --path $tgt" 2>/dev/null
+  pkill -9 -f "serve mcp --path $tgt" 2>/dev/null
   echo
 }
 

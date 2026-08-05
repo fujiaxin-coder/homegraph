@@ -20,7 +20,7 @@ def run_chain(python: str) -> None:
         "--stack-size=32768",
         str(HG),
         "serve",
-        "--mcp",
+        "mcp",
         "--path",
         str(REPO),
     ]

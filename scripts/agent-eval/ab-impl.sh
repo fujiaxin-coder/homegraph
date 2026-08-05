@@ -19,7 +19,7 @@ BIN="$ENGINE/dist/bin/homegraph.js"
 OUT="${AGENT_EVAL_OUT:-/tmp/ab-impl}"
 command -v claude >/dev/null || { echo "claude CLI not on PATH"; exit 1; }
 [ -d "$REPO/.homegraph" ] || { echo "no .homegraph index at $REPO"; exit 1; }
-cleanup(){ pkill -9 -f "serve --mcp --path $OUT/" 2>/dev/null; }
+cleanup(){ pkill -9 -f "serve mcp --path $OUT/" 2>/dev/null; }
 trap cleanup EXIT
 mkdir -p "$OUT"
 ( cd "$ENGINE" && npm run build >/dev/null 2>&1 ) && echo "built engine"
@@ -28,8 +28,8 @@ echo "###### task=$Q"; echo
 echo '{"mcpServers":{}}' > "$OUT/mcp-empty.json"
 
 prewarm(){
-  pkill -9 -f "serve --mcp --path $1" 2>/dev/null
-  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$1" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $1" 2>/dev/null
+  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$1" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$1" >/dev/null 2>&1
 }
 
@@ -60,7 +60,7 @@ run(){ # label, withCodegraph(0/1)
     rsync -a --exclude node_modules --exclude .git --exclude dist --exclude .homegraph "$REPO/" "$tgt/"
     node "$BIN" init "$tgt" >/dev/null 2>&1
     if [ "$wcg" = "1" ]; then
-      printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$cfg"
+      printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$cfg"
       prewarm "$tgt"
     else cp "$OUT/mcp-empty.json" "$cfg"; fi
     ( cd "$tgt" && claude -p "$Q" --output-format stream-json --verbose \
@@ -68,7 +68,7 @@ run(){ # label, withCodegraph(0/1)
         --strict-mcp-config --mcp-config "$cfg" </dev/null > "$OUT/$label-$i.jsonl" 2>"$OUT/$label-$i.err" )
     echo "[$label] run $i:"; analyze "$OUT/$label-$i.jsonl"
     if [ -n "$BUILD_CMD" ]; then ( cd "$tgt" && eval "$BUILD_CMD" >/dev/null 2>&1 && echo "      build: PASS" || echo "      build: FAIL" ); fi
-    pkill -9 -f "serve --mcp --path $tgt" 2>/dev/null
+    pkill -9 -f "serve mcp --path $tgt" 2>/dev/null
   done
   echo
 }

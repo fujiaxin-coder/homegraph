@@ -27,6 +27,7 @@ import {
   shouldBuildCallerInventory,
   queryAsCallerOrMethodSurvey,
   shouldBuildInheritanceSurvey,
+  queryAsInheritanceSurvey,
   shouldLimitToQueryNamedFile,
   shouldBuildMemberSurvey,
   shouldBuildConfigSection,
@@ -57,6 +58,13 @@ import {
   queryAsComponentSurfaceSurvey,
   queryAsFocusedUiCluster,
   queryLooksLikeUiComponentType,
+  queryAsDeclarationSiteSurvey,
+  queryAsConstantUsageSurvey,
+  queryAsFieldUsageSurvey,
+  queryAsModuleExportSurvey,
+  queryAsModuleDependencySurvey,
+  queryAsTypeLifecycleSurvey,
+  extractFieldLikeSymbolsFromQuery,
 } from '../src/search/query-utils';
 
 describe('extractFileBasenamesFromQuery', () => {
@@ -338,6 +346,91 @@ describe('queryShouldDeferToBuiltinTools', () => {
     expect(queryAsLocalSymbolDetail('点击DrawerUninstallButton按钮后会发生什么事情')).toBe(true);
   });
 
+  it('routes cross-cutting usage / declaration / constant / field / module shapes to inventory', () => {
+    expect(
+      shouldBuildApiUsageSurvey('哪些组件使用了 .drawModifier 或 DrawContext 进行自定义绘制？'),
+    ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore('哪些组件使用了 .drawModifier 或 DrawContext 进行自定义绘制？'),
+    ).toBe(true);
+    expect(
+      queryAsDeclarationSiteSurvey(
+        'XComponent 在哪些文件中被声明，id 分别是什么，各自绑定到哪个 C++ 渲染器？',
+      ),
+    ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore(
+        'XComponent 在哪些文件中被声明，id 分别是什么，各自绑定到哪个 C++ 渲染器？',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsConstantUsageSurvey(
+        'FORM_MANAGER_PANEL_SCALE_90 = 0.90 和 FORM_MANAGER_PANEL_SCALE_95 = 0.95 这两个缩放常量分别用于什么场景？',
+      ),
+    ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore(
+        'FORM_MANAGER_PANEL_SCALE_90 = 0.90 和 FORM_MANAGER_PANEL_SCALE_95 = 0.95 这两个缩放常量分别用于什么场景？',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsFieldUsageSurvey(
+        'drawOnSubThread 里用了 m_eglMutex，还有哪些函数也会用到这个锁？',
+      ),
+    ).toBe(true);
+    expect(extractFieldLikeSymbolsFromQuery('… m_eglMutex …')).toContain('m_eglMutex');
+    expect(
+      queryAsModuleExportSurvey('feature/foldeffect 模块通过 NAPI 暴露了哪些 API 接口'),
+    ).toBe(true);
+    expect(
+      queryAsModuleDependencySurvey(
+        'staticcommon/launchercommon、screenlockcommon、systemuicommon、controlcentercommon 这四个模块之间是否存在相互依赖？',
+      ),
+    ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore(
+        'staticcommon/launchercommon、screenlockcommon、systemuicommon、controlcentercommon 这四个模块之间是否存在相互依赖？',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps Type lifecycle / Release-destructor compares on compact bodies', () => {
+    expect(
+      queryAsTypeLifecycleSurvey(
+        'SceneSession 的状态机有哪些状态，foreground、background 转换时会调哪些回调？',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsLocalSymbolDetail(
+        'SceneSession 的状态机有哪些状态，foreground、background 转换时会调哪些回调？',
+      ),
+    ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore(
+        'SceneSession 的状态机有哪些状态，foreground、background 转换时会调哪些回调？',
+      ),
+    ).toBe(false);
+    expect(
+      queryAsLocalSymbolDetail(
+        'OnSurfaceDestroyedCB 里调了 PluginManager::GetRender()->Release()。这个 Release 函数做了哪些事情？跟 PluginRender 的析构函数里做的事有没有重复？',
+      ),
+    ).toBe(true);
+  });
+
+  it('defers literal copy hunts without code anchors', () => {
+    expect(
+      queryShouldDeferToBuiltinTools('全搜一下哪些布局里绑了中文 text 常量，点击会打开编辑页是什么逻辑'),
+    ).toBe('concept-or-existence');
+  });
+
+  it('routes step/download-parse flows to mechanism, not domain file inventory', () => {
+    const q = '用户下载一个完整主题包后，解析和安装的步骤中会走到哪些代码？';
+    expect(queryAsMechanismSurvey(q)).toBe(true);
+    expect(shouldTryLightMechanismExplore(q)).toBe(true);
+    expect(shouldTryFastInventoryExplore(q)).toBe(false);
+    expect(queryAsDomainFileSurvey(q)).toBe(false);
+  });
+
   it('treats Page/Component overview as local surface (not inheritance inventory)', () => {
     expect(queryAsComponentSurfaceSurvey('ThemeHome使用了哪些UI组件，可以跳转到哪些页面')).toBe(true);
     expect(queryAsComponentSurfaceSurvey('ThemeHome')).toBe(true);
@@ -491,7 +584,11 @@ describe('shouldBuildInheritanceSurvey', () => {
     expect(shouldBuildInheritanceSurvey('which classes extend Rectangle')).toBe(true);
     // Bare type — agents search("Rectangle") for hierarchy; inventory must win.
     expect(shouldBuildInheritanceSurvey('Rectangle')).toBe(true);
+    expect(shouldBuildInheritanceSurvey('IntGrid')).toBe(true);
     expect(shouldBuildInheritanceSurvey('how does Rectangle render')).toBe(false);
+    // Explicit subclass wording (empty-graph ANSWER NOW only for these).
+    expect(queryAsInheritanceSurvey('IntGrid')).toBe(false);
+    expect(queryAsInheritanceSurvey('Rectangle subclasses extends inheritance')).toBe(true);
   });
 });
 
@@ -669,6 +766,14 @@ describe('P0 explore shapes', () => {
     expect(shouldBuildApiUsageSurvey(q)).toBe(true);
     expect(shouldBuildCallerInventory(q)).toBe(false);
     expect(shouldTryFastInventoryExplore(q)).toBe(true);
+    // Agent English rewrite must keep the API inventory path (not compact on "usages").
+    const en = 'Telephony API usages and call methods in the project';
+    expect(queryAsApiUsageSurvey(en)).toBe(true);
+    expect(shouldBuildApiUsageSurvey(en)).toBe(true);
+    expect(extractLocalDetailAnchors(en)).toContain('Telephony');
+    expect(extractLocalDetailAnchors(en)).not.toContain('usages');
+    expect(queryAsLocalSymbolDetail(en)).toBe(false);
+    expect(shouldTryFastInventoryExplore(en)).toBe(true);
   });
 
   it('detects test-only interpretation and mechanism entry seeds', () => {

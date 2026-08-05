@@ -61,7 +61,7 @@ import { HOST_PPID_ENV } from '../extraction/wasm-runtime-flags';
 /**
  * Env var that marks a process as the *detached daemon* itself (set by
  * {@link spawnDetachedDaemon} when it re-invokes the CLI). Without it a
- * `serve --mcp` invocation is a launcher that connects-or-spawns; with it, the
+ * `serve mcp` invocation is a launcher that connects-or-spawns; with it, the
  * process IS the daemon and must never try to spawn another (infinite spawn).
  */
 const DAEMON_INTERNAL_ENV = 'HOMEGRAPH_DAEMON_INTERNAL';
@@ -158,7 +158,7 @@ function spawnDetachedDaemon(root: string): void {
     delete env[HOST_PPID_ENV];
     const child = spawn(
       process.execPath,
-      [...process.execArgv, scriptPath, 'serve', '--mcp', '--path', root],
+      [...process.execArgv, scriptPath, 'serve', 'mcp', '--path', root],
       {
         detached: true,
         stdio,

@@ -24,7 +24,7 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, GENERIC_VERB_ANCHOR_NOISE } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE } from '../search/query-utils';
 
 import {
   existsSync,
@@ -136,6 +136,106 @@ const CONTAINER_NODE_KINDS = new Set<NodeKind>([
 function lastQualifierPart(symbol: string): string {
   const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
   return parts[parts.length - 1] ?? symbol;
+}
+
+/**
+ * Page/Dialog surface digests — methods that answer "which UI children / how
+ * does preview load" without dumping the whole struct. Lifecycle alone is not
+ * enough: agents re-Read for PageMap / preview helpers when those are trimmed.
+ */
+function isUiSurfaceDigestMethod(name: string, includePreviewHelpers: boolean): boolean {
+  if (/^(build|aboutToAppear|aboutToDisappear|PageMap)$/i.test(name)) return true;
+  if (!includePreviewHelpers) return false;
+  return /preview|pixelmap|loadimage|getimage|decodeimage/i.test(name);
+}
+
+/** Prefer build/PageMap/preview over aboutToAppear when budget is tight. */
+function surfaceMethodPriority(name: string): number {
+  if (/^(build|PageMap)$/i.test(name)) return 0;
+  if (/preview|pixelmap|loadimage|getimage/i.test(name)) return 1;
+  return 2;
+}
+
+/**
+ * Structured UI/nav bullets extracted from surface method bodies so agents can
+ * ANSWER NOW without re-Reading for child Types / PageMap routes.
+ */
+function extractUiSurfaceInventory(fileLines: string[], methods: Node[]): string {
+  const FRAMEWORK_TAG = new Set([
+    'Column', 'Row', 'Stack', 'Flex', 'Grid', 'List', 'ListItem', 'Scroll', 'Tabs', 'TabContent',
+    'Text', 'Image', 'Button', 'Blank', 'Divider', 'ForEach', 'LazyForEach', 'If', 'Else',
+    'RelativeContainer', 'Swiper', 'WaterFlow', 'GridItem', 'Span', 'SymbolGlyph',
+  ]);
+  const comps = new Set<string>();
+  const nav = new Set<string>();
+  const media: string[] = [];
+  for (const m of methods) {
+    const from = Math.max(1, m.startLine);
+    const to = Math.min(fileLines.length, Math.max(m.endLine, m.startLine));
+    for (let i = from; i <= to; i++) {
+      const line = fileLines[i - 1] ?? '';
+      for (const mm of line.matchAll(/\b([A-Z][A-Za-z0-9_]{2,})\s*\(/g)) {
+        const id = mm[1]!;
+        if (FRAMEWORK_TAG.has(id) || isFrameworkUiDecoratorName(id)) continue;
+        if (/^(Promise|Array|Map|Set|Date|Error|JSON|Object|Math|Number|String|Boolean)$/.test(id)) continue;
+        comps.add(id);
+      }
+      if (/PageMap|pushUrl|replaceUrl|pushPath|replacePath|router\./i.test(line)) {
+        const clipped = line.trim().replace(/\s+/g, ' ').slice(0, 120);
+        if (clipped) nav.add(clipped);
+      }
+      for (const mm of line.matchAll(/\bConstants\.[A-Z][A-Z0-9_]+\b/g)) {
+        nav.add(mm[0]!);
+      }
+      // Preview / Image load origin — $r vs file URI vs network.
+      if (
+        /\$r\s*\(|Image\s*\(|PixelMap|createPixelMap|decode|tempFileUri|http|download|fileUri|getPreview|previewPixelMap|loadImage/i.test(
+          line,
+        )
+      ) {
+        const clipped = line.trim().replace(/\s+/g, ' ').slice(0, 140);
+        if (clipped && media.length < 14) {
+          media.push(`L${i} (\`${m.name}\`): \`${clipped}\``);
+        }
+      }
+    }
+  }
+  if (comps.size === 0 && nav.size === 0 && media.length === 0) return '';
+  const out: string[] = ['**UI surface inventory (from build / PageMap / preview methods)**', ''];
+  if (comps.size > 0) {
+    out.push('UI / child Types:');
+    for (const c of [...comps].sort().slice(0, 24)) out.push(`- \`${c}\``);
+    if (comps.size > 24) out.push(`- … and ${comps.size - 24} more`);
+    out.push('');
+  }
+  if (nav.size > 0) {
+    out.push('Navigation / PageMap / route constants:');
+    for (const n of [...nav].slice(0, 16)) out.push(`- ${n.startsWith('Constants.') ? `\`${n}\`` : n}`);
+    if (nav.size > 16) out.push(`- … and ${nav.size - 16} more`);
+    out.push('');
+  }
+  if (media.length > 0) {
+    out.push('Image / preview load sites ($r / file / network cues):');
+    for (const row of media) out.push(`- ${row}`);
+    out.push('');
+  }
+  out.push(
+    '> **ANSWER NOW** from this inventory + method digests below — do not Read/Grep for the same Page UI children, routes, or preview-load origin.',
+  );
+  out.push('');
+  return out.join('\n');
+}
+
+/** C++ `class Foo : public Bar` vs private `: Bar` — prefer public is-a for subtype lists. */
+function cppExtendsLooksPublic(declLine: string, baseName: string): boolean | null {
+  const esc = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (new RegExp(`:\\s*public\\s+(?:virtual\\s+)?${esc}\\b`).test(declLine)) return true;
+  if (new RegExp(`:\\s*protected\\s+(?:virtual\\s+)?${esc}\\b`).test(declLine)) return false;
+  if (new RegExp(`:\\s*private\\s+(?:virtual\\s+)?${esc}\\b`).test(declLine)) return false;
+  // `class Cluster : Rectangle` (no access) defaults to private for class.
+  if (new RegExp(`:\\s*${esc}\\b`).test(declLine) && /\bclass\b/.test(declLine)) return false;
+  if (new RegExp(`:\\s*${esc}\\b`).test(declLine) && /\bstruct\b/.test(declLine)) return true;
+  return null;
 }
 
 /**
@@ -370,9 +470,9 @@ export function tightenExploreBudgetForQuery(
   if (!local && !compact) return budget;
   return {
     ...budget,
-    maxOutputChars: Math.min(budget.maxOutputChars, local ? 9000 : 12000),
+    maxOutputChars: Math.min(budget.maxOutputChars, local ? 7000 : 9000),
     defaultMaxFiles: Math.min(budget.defaultMaxFiles, local ? 2 : 3),
-    maxCharsPerFile: Math.min(budget.maxCharsPerFile, local ? 4000 : 5000),
+    maxCharsPerFile: Math.min(budget.maxCharsPerFile, local ? 3500 : 4000),
     includeRelationships: false,
     includeAdditionalFiles: false,
     includeCompletenessSignal: false,
@@ -887,9 +987,10 @@ export const tools: ToolDefinition[] = [
       'In-repo multi-file / mechanism tool (call paths + compact line-numbered source). Required: `query`. ' +
       'CALL FIRST for how/wired questions — pass the question or domain keywords; PascalCase names optional. ' +
       'Also CALL FIRST (alone, no parallel Grep) for named Type/Component/Page/Dialog, Type.member, click→handler, inheritance/subtypes, ' +
+      'declaration/attribute sites, ALL_CAPS constant / field-mutex usages, path-module NAPI/exports or inter-deps, ' +
       'and in-repo @kit/@ohos *usages/dependencies* (which files import a named export — not the SDK feature catalog). ' +
       'On the first turn call explore alone (no parallel Grep). Prefer callers/node when one named symbol is already enough. ' +
-      'DO NOT call for topic file-lists, concept/UI-behavior with no named anchors, or SDK/@kit *feature catalogs* — those return Skip guidance. ' +
+      'DO NOT call for topic file-lists, concept/UI-behavior with no named anchors, literal copy hunts, or SDK/@kit *feature catalogs* — those return Skip guidance. ' +
       'Literal string/pattern hunts → Grep. ' +
       'One explore; answer from Source + trail; treat as already Read — do not re-grep/node/read the same symbols. Busy/partial → retry same explore once.',
     inputSchema: {
@@ -1331,7 +1432,7 @@ export class ToolHandler {
           'explicitly:\n' +
           '  • Pass projectPath to the tool call, e.g. projectPath: "/absolute/path/to/your/project" ' +
           '(any project that has a .homegraph/ — including a sub-project of a monorepo)\n' +
-          '  • Or add --path to the server\'s MCP config args: ["serve", "--mcp", "--path", "/absolute/path/to/your/project"]\n' +
+          '  • Or add --path to the server\'s MCP config args: ["serve", "mcp", "--path", "/absolute/path/to/your/project"]\n' +
           'If a project simply has no index, use your built-in tools (Read/Grep/Glob) for THAT ' +
           "project (the user can run 'homegraph init' there to enable it) — you can still query " +
           'other indexed projects by projectPath in the same session.'
@@ -2097,13 +2198,26 @@ export class ToolHandler {
     if (groups.length === 1) {
       const { callers, labels } = collect(groups[0]!);
       if (callers.length === 0) {
+        // Empty callers often means registration/callback wiring (OnSurfaceChangedCB)
+        // — a one-line "no callers" teaches Grep/node thrash. Prefer compact body +
+        // text-usage sites when the symbol is a local anchor.
+        try {
+          const root = cg.getProjectRoot();
+          const compact = this.tryCompactLocalSymbolExplore(cg, symbol, root);
+          if (compact) return compact;
+        } catch { /* fall through */ }
         return this.textResult(`No callers found for "${symbol}"${allMatches.note}${filterNote}`);
       }
       // A successful `file` narrowing makes the multi-symbol aggregation note
       // stale — suppress it.
       const note = fileFilter && !filteredOut ? '' : allMatches.note;
+      const includeBlock = this.formatCallerIncludeVisibility(cg, callers.slice(0, limit));
       const formatted = this.formatNodeList(callers.slice(0, limit), `Callers of ${symbol}`, labels)
-        + '\n\n> Caller listing complete — answer from this list; no read/grep needed.'
+        + includeBlock
+        + '\n\n> Caller listing complete — answer from this list'
+        + (includeBlock ? ' + include/import visibility' : '')
+        + '; no read/grep needed.'
+        + '\n> If another type\'s visibility matters, pass **both** names to `homegraph_explore` (not callers alone).'
         + note + filterNote;
       return this.textResult(this.truncateOutput(formatted));
     }
@@ -3289,10 +3403,14 @@ export class ToolHandler {
       node: Node,
       via: string,
       rank: number,
+      opts?: { importAlways?: boolean },
     ): void => {
       if (isTestFile(node.filePath)) return;
       const sig = `${node.name} ${node.filePath} ${node.signature || ''}`;
-      if (!SERVICE_RE.test(sig)) return;
+      // Same-file @ohos/@kit imports are always data-source candidates (BadgeManager
+      // → notificationManager), even when the import local name fails SERVICE_RE.
+      if (!opts?.importAlways && !SERVICE_RE.test(sig)) return;
+      if (opts?.importAlways && !/@ohos\.|@kit\.|ohos\./i.test(sig)) return;
       const prev = bucket.get(node.id);
       if (!prev || rank < prev.rank) {
         bucket.set(node.id, { name: node.name, file: rel(node.filePath), line: node.startLine, via, rank });
@@ -3321,12 +3439,16 @@ export class ToolHandler {
         try {
           for (const r of cg.searchNodes('@ohos', { kinds: ['import'], limit: 40 })) {
             if (r.node.filePath !== cls.filePath) continue;
-            addEdge(upstream, r.node, 'import', 0);
+            addEdge(upstream, r.node, 'import', 0, { importAlways: true });
+          }
+          for (const r of cg.searchNodes('@kit', { kinds: ['import'], limit: 40 })) {
+            if (r.node.filePath !== cls.filePath) continue;
+            addEdge(upstream, r.node, 'import', 0, { importAlways: true });
           }
           for (const term of ['notification', 'badge', 'NumBadge', 'subscribe', 'bundle', 'ability']) {
             for (const r of cg.searchNodes(term, { kinds: ['import'], limit: 30 })) {
               if (r.node.filePath !== cls.filePath) continue;
-              addEdge(upstream, r.node, 'import', 1);
+              addEdge(upstream, r.node, 'import', 1, { importAlways: true });
             }
           }
         } catch { /* */ }
@@ -3353,7 +3475,10 @@ export class ToolHandler {
       }
     }
     if (edgeCount === 0) return { section: '', edgeCount: 0 };
-    lines.push('> Data-source survey — answer from upstream symbols above; source bodies omitted.');
+    lines.push(
+      '> Data-source survey — **ANSWER NOW** from upstream symbols above (system `@ohos`/`@kit` imports first). ' +
+      'Do not Grep/search/callers the same Manager for the service name.',
+    );
     lines.push('');
     return { section: lines.join('\n'), edgeCount };
   }
@@ -3430,10 +3555,31 @@ export class ToolHandler {
         if (callerSection) parts.push(callerSection);
         return this.textResult(parts.join('\n'));
       }
-      // Nothing graph-visible — fall through; import/domain may still help.
+      // Empty inheritance graph: stop only for *explicit* subclass intent
+      // (子类/extends/subclass). Bare `search("IntGrid")` must fall through to
+      // compact definition — an empty subtype ANSWER NOW blocked visibility/use
+      // questions that reuse a type name after callers().
+      if (queryAsInheritanceSurvey(query)) {
+        return this.textResult(
+          [
+            `**Exploration: ${query}**`,
+            '',
+            'No direct subtypes / inheritance edges indexed for the named type(s). **ANSWER NOW** — do not Grep `extends` unless you need a second opinion.',
+            '',
+          ].join('\n'),
+        );
+      }
+      // Bare type-name focus with no subtypes — fall through to compact / other
+      // inventory (definition + usage), not a fat full explore.
     }
 
-    const importResult = (inheritanceOnly || queryIsTypeNameFocus(query) || queryAsInheritanceSurvey(query))
+    const importResult = (
+      inheritanceOnly
+      || queryIsTypeNameFocus(query)
+      || queryAsInheritanceSurvey(query)
+      || queryAsDataSourceSurvey(query)
+      || shouldBuildApiUsageSurvey(query)
+    )
       ? { section: '', siteCount: 0, compactListing: false }
       : this.buildImportSitesSection(cg, query, projectRoot);
     if (importResult.section) lines.push(importResult.section);
@@ -3446,7 +3592,7 @@ export class ToolHandler {
         : { section: '', symbolCount: 0 };
     if (kitUsageResult.section) lines.push(kitUsageResult.section);
 
-    const domainFileResult = shouldBuildDomainFileSurvey(query)
+    const domainFileResult = shouldBuildDomainFileSurvey(query) && !queryAsDataSourceSurvey(query)
       ? this.buildDomainFileSurveySection(cg, query)
       : { section: '', fileCount: 0 };
     if (domainFileResult.section) lines.push(domainFileResult.section);
@@ -3509,6 +3655,19 @@ export class ToolHandler {
       || apiUsageResult.section || dataSourceResult.section || hoverResult.section || inheritanceSection
       || callerSection || memberSection || configSection;
     if (!hasAnySection) return null;
+
+    // Data-source / API usage inventories are complete without source dumps —
+    // stop here so agents do not also get a fat import list + follow-up Read.
+    if (dataSourceResult.edgeCount > 0 && !apiUsageResult.section) {
+      return finishCompact(
+        `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s). **ANSWER NOW** from system \`@ohos\`/\`@kit\` imports first.`,
+      );
+    }
+    if (apiUsageResult.fileCount > 0 && !dataSourceResult.section) {
+      return finishCompact(
+        `API usage survey — **${apiUsageResult.fileCount}** file(s). **ANSWER NOW** from the list above.`,
+      );
+    }
 
     const omitSource = shouldOmitSourceBodies({
       importSiteCount: importResult.siteCount,
@@ -3929,6 +4088,19 @@ export class ToolHandler {
 
     const typeNames = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
     const typeNameSet = new Set(typeNames.map((t) => t.toLowerCase()));
+    const bridge = queryNeedsCoNamedUseBridge(query);
+    const memberFocus = queryHasNamedMemberFocus(query);
+    const uiCluster = queryAsFocusedUiCluster(query);
+    const typeLifecycle = queryAsTypeLifecycleSurvey(query);
+    const componentSurface = queryAsComponentSurfaceSurvey(query)
+      || uiCluster
+      || typeLifecycle
+      || names.some(queryLooksLikeUiComponentType);
+    // Page/Dialog surface & UI clusters: trail only — pulling callee files ballooned
+    // ThemeHome-style answers by 5–10k without adding the UI-child / nav answer.
+    const surfaceTrailOnly = (componentSurface || uiCluster || typeLifecycle) && !memberFocus
+      && !queryAsNamedComponentAction(query);
+    const bareMemberOnly = bareId && isMemberLikeIdentifier(query.trim());
 
     const ownedByNamedType = (n: Node): boolean => {
       if (typeNameSet.size === 0) return true;
@@ -3955,7 +4127,7 @@ export class ToolHandler {
     for (const seed of names) {
       const candidates = cg.getNodesByName(seed);
       const preferOwned =
-        queryHasNamedMemberFocus(query)
+        memberFocus
         && isMemberLikeIdentifier(seed)
         && typeNameSet.size > 0;
       const filtered = preferOwned
@@ -3966,6 +4138,25 @@ export class ToolHandler {
         : candidates;
       for (const n of filtered) {
         addNode(n);
+        // Page/Component surface digests need build/aboutToAppear as their own
+        // nodes — otherwise we only have the outer struct and dump the whole body.
+        if (componentSurface || uiCluster || typeLifecycle) {
+          if (n.kind === 'component' || n.kind === 'class' || n.kind === 'struct') {
+            try {
+              for (const e of cg.getOutgoingEdges(n.id)) {
+                if (e.kind !== 'contains') continue;
+                const child = cg.getNode(e.target);
+                if (
+                  child
+                  && (child.kind === 'method' || child.kind === 'function')
+                  && isUiSurfaceDigestMethod(child.name, uiCluster)
+                ) {
+                  addNode(child);
+                }
+              }
+            } catch { /* */ }
+          }
+        }
         if (seedIds.size >= 12) break;
       }
       if (seedIds.size >= 12) break;
@@ -3991,14 +4182,10 @@ export class ToolHandler {
     // - Type.member / UI action / pinpoint local-detail: callers + callees
     // - Type.member: expand on the *member* (isExpired), not only the Type, and
     //   do not path-filter callers — UI marking often lives in another package.
-    const bridge = queryNeedsCoNamedUseBridge(query);
-    const memberFocus = queryHasNamedMemberFocus(query);
-    const uiCluster = queryAsFocusedUiCluster(query);
-    const componentSurface = queryAsComponentSurfaceSurvey(query)
-      || uiCluster
-      || names.some(queryLooksLikeUiComponentType);
     const callersOnly =
-      (bareId && !componentSurface)
+      surfaceTrailOnly
+      || bareMemberOnly
+      || (bareId && !componentSurface)
       || bridge
       || (shouldBuildCallerInventory(query) && !queryAsNamedComponentAction(query) && !memberFocus && !componentSurface);
     const primaryName = names[0]!;
@@ -4083,7 +4270,7 @@ export class ToolHandler {
     const lines: string[] = [
       `**Exploration: ${query}**`,
       '',
-      '> **ANSWER NOW from this response.** Do **not** Grep/Read/callers for the same symbols — trail + Source below are authoritative.',
+      '> **ANSWER NOW from this response.** Do **not** Grep/Read/search/explore/node/callers for the same symbols — trail + Source below are authoritative.',
       '',
       `Local-symbol focus: **${seedIds.size}** seed(s)` +
         (neighborIds.size > 0 ? `, **${neighborIds.size}** caller/callee neighbor(s)` : '') +
@@ -4206,7 +4393,7 @@ export class ToolHandler {
             .sort((a, b) => b.score - a.score || a.fp.localeCompare(b.fp))
             .map((x) => x.fp);
 
-          const hitCap = memberFocus ? 16 : 12;
+          const hitCap = bareMemberOnly ? 6 : memberFocus ? 10 : 8;
           const scanFileList = (list: string[], requireTypeMention: boolean): void => {
             for (const fp of list) {
               if (textUsageHits.length >= hitCap) break;
@@ -4349,10 +4536,20 @@ export class ToolHandler {
     const nameSet = new Set(names);
     const usageFiles = new Set(textUsageHits.map((h) => h.filePath));
     const maxFiles =
-      (queryAsNamedComponentAction(query) || queryHasNamedMemberFocus(query) || componentSurface || usageFiles.size > 0 || bridge)
-        ? (memberFocus && usageFiles.size > 0 ? 5 : (uiCluster || componentSurface ? 3 : 4))
-        : 2;
+      bareMemberOnly
+        ? 2
+        : memberFocus
+          // Call/filter sites already listed above — dumping caller file bodies
+          // (FormStack…) burns tokens and invites a follow-up Read of isExpired.
+          ? 1
+        : (queryAsNamedComponentAction(query) || componentSurface || usageFiles.size > 0 || bridge)
+          ? (uiCluster ? 2 : (componentSurface ? 2 : 3))
+          : 2;
     const ranked = [...fileNodes.entries()]
+      .filter(([, nodes]) => {
+        if (!memberFocus || memberNames.size === 0) return true;
+        return nodes.some((n) => memberNames.has(n.name) || typeNameSet.has(n.name.toLowerCase()));
+      })
       .map(([fp, nodes]) => {
         const exact = nodes.filter((n) => nameSet.has(n.name)).length;
         const typeHits = typeNames.filter((t) => nodes.some((n) => n.name === t)).length;
@@ -4378,13 +4575,27 @@ export class ToolHandler {
 
     lines.push('**Source Code**', '');
     lines.push(
-      '> Line-numbered source — treat as already Read. Answer from it; do not re-explore/search/grep the same symbols.',
+      '> Line-numbered source — treat as already Read. **ANSWER NOW** — do not Read/Grep/search/explore/node the same symbols again.',
     );
     lines.push('');
 
     let totalChars = lines.join('\n').length;
-    const maxTotal = componentSurface ? 14_000 : memberFocus && usageFiles.size > 0 ? 12_000 : 9000;
-    const maxPerFile = componentSurface ? 10_000 : memberFocus ? 3500 : 4000;
+    // Lean ceilings: without-HG Grep/Read stacks were ~15k session tokens; a 10–14k
+    // compact body + follow-up Read is what loses the token A/B.
+    const maxTotal = bareMemberOnly
+      ? 4500
+      : componentSurface || uiCluster
+        ? 7000
+        : memberFocus && usageFiles.size > 0
+          ? 6500
+          : 5500;
+    const maxPerFile = bareMemberOnly
+      ? 2800
+      : componentSurface || uiCluster
+        ? 4500
+        : memberFocus
+          ? 2800
+          : 3200;
     let rendered = 0;
 
     for (const { fp, nodes } of ranked) {
@@ -4407,11 +4618,25 @@ export class ToolHandler {
       let start = 1;
       let end = Math.min(fileLines.length, 120);
       const usageLine = textUsageHits.find((h) => h.filePath === fp)?.line;
+      const surfaceMethodsRaw = (componentSurface || uiCluster)
+        ? focusNodes
+          .filter((n) => (n.kind === 'method' || n.kind === 'function') && isUiSurfaceDigestMethod(n.name, uiCluster))
+          .sort((a, b) => surfaceMethodPriority(a.name) - surfaceMethodPriority(b.name) || a.startLine - b.startLine)
+        : [];
+      // When build/PageMap answer the surface question, skip lifecycle — it ate
+      // the budget and agents re-Read PageMap anyway.
+      const hasBuildOrPageMap = surfaceMethodsRaw.some((n) => /^(build|PageMap)$/i.test(n.name));
+      const surfaceMethods = hasBuildOrPageMap
+        ? surfaceMethodsRaw.filter((n) => !/^(aboutToAppear|aboutToDisappear)$/i.test(n.name))
+        : surfaceMethodsRaw;
+      // Type.member: keep the member body, not the whole owning class dump.
+      const memberOnlyNodes = memberFocus && memberNames.size > 0
+        ? focusNodes.filter((n) => memberNames.has(n.name) && (n.kind === 'method' || n.kind === 'function' || n.kind === 'property' || n.kind === 'field'))
+        : [];
+
       if (focusNodes.length > 0) {
         const named = focusNodes.filter((n) => nameSet.has(n.name));
         const use = named.length > 0 ? named : focusNodes.slice(0, 3);
-        // Component/Page surface / UI cluster: render full type spans (build +
-        // Dialog body). When Page+Dialog co-locate, union every named UI Type.
         const surfaceNodes: Node[] = componentSurface
           ? use.filter((n) =>
               (n.kind === 'component' || n.kind === 'class' || n.kind === 'struct'
@@ -4426,25 +4651,81 @@ export class ToolHandler {
           ) ?? use[0];
           if (one) surfaceNodes.push(one);
         }
-        if (surfaceNodes.length > 0 && surfaceNodes.some((n) => n.endLine > n.startLine)) {
+        if (memberOnlyNodes.length > 0) {
+          start = Math.max(1, Math.min(...memberOnlyNodes.map((n) => n.startLine)) - 2);
+          end = Math.min(fileLines.length, Math.max(...memberOnlyNodes.map((n) => n.endLine)) + 2);
+        } else if (surfaceMethods.length > 0) {
+          // Per-method chunks below — placeholder window unused.
+          start = 1;
+          end = 1;
+        } else if (surfaceNodes.length > 0 && surfaceNodes.some((n) => n.endLine > n.startLine)) {
           start = Math.max(1, Math.min(...surfaceNodes.map((n) => n.startLine)) - 2);
           end = Math.min(fileLines.length, Math.max(...surfaceNodes.map((n) => n.endLine)) + 2);
         } else {
           start = Math.max(1, Math.min(...use.map((n) => n.startLine)) - 2);
           end = Math.min(fileLines.length, Math.max(...use.map((n) => n.endLine)) + 2);
         }
-        // Keep window bounded
-        if ((end - start + 1) * 40 > maxPerFile) {
+        // Keep window bounded (non-surface paths)
+        if (surfaceMethods.length === 0 && (end - start + 1) * 40 > maxPerFile) {
           end = Math.min(fileLines.length, start + Math.floor(maxPerFile / 40) - 1);
         }
       } else if (usageLine) {
-        start = Math.max(1, usageLine - 15);
-        end = Math.min(fileLines.length, usageLine + 25);
+        start = Math.max(1, usageLine - 10);
+        end = Math.min(fileLines.length, usageLine + 18);
       }
 
       const header = fileSectionHeader(fp, focusNodes.map((n) => `${n.name}(${n.kind})`).slice(0, 6).join(', '));
       const withLineNumbers = exploreLineNumbersEnabled();
       const bodyLines: string[] = [header, '```' + (nodes[0]?.language || ''), ''];
+
+      if (surfaceMethods.length > 0) {
+        // Do NOT span aboutToAppear→build as one window — ThemeHome-sized pages
+        // always trim before PageMap/build. Emit imports + each method separately,
+        // prioritizing build/PageMap/preview.
+        let lastImportLine = 0;
+        for (let i = 0; i < Math.min(fileLines.length, 60); i++) {
+          if (/^\s*import\s+/.test(fileLines[i] ?? '')) lastImportLine = i + 1;
+        }
+        const inventory = extractUiSurfaceInventory(fileLines, surfaceMethods);
+        // Inventory is prepended outside the code fence below via chunk assembly.
+        const methodBudget = Math.max(900, Math.floor((maxPerFile - Math.min(lastImportLine, 40) * 40) / Math.max(1, Math.min(surfaceMethods.length, 4))));
+        if (lastImportLine > 0) {
+          const importCap = Math.min(lastImportLine, 45);
+          for (let i = 1; i <= importCap; i++) {
+            const code = fileLines[i - 1] ?? '';
+            bodyLines.push(withLineNumbers ? `${i}\t${code}` : code);
+          }
+          bodyLines.push(withLineNumbers ? `…\t// …` : '// …');
+        }
+        let methodsEmitted = 0;
+        for (const m of surfaceMethods) {
+          if (methodsEmitted >= 5) break;
+          const mStart = Math.max(1, m.startLine - 1);
+          let mEnd = Math.min(fileLines.length, m.endLine + 1);
+          // Cap each method so later build/PageMap still fit.
+          const maxLines = Math.max(25, Math.floor(methodBudget / 40));
+          if (mEnd - mStart + 1 > maxLines) {
+            mEnd = mStart + maxLines - 1;
+          }
+          bodyLines.push(withLineNumbers ? `…\t// --- ${m.name} ---` : `// --- ${m.name} ---`);
+          for (let i = mStart; i <= mEnd; i++) {
+            const code = fileLines[i - 1] ?? '';
+            bodyLines.push(withLineNumbers ? `${i}\t${code}` : code);
+          }
+          methodsEmitted++;
+        }
+        bodyLines.push('```', '');
+        let chunk = (inventory ? inventory + '\n' : '') + bodyLines.join('\n');
+        if (chunk.length > maxPerFile + (inventory ? 1200 : 0)) {
+          chunk = `${chunk.slice(0, maxPerFile + (inventory ? 1200 : 0))}\n... (trimmed — answer from inventory + visible methods; do not Read the rest)\n\`\`\`\n`;
+        }
+        if (totalChars + chunk.length > maxTotal && rendered > 0) break;
+        lines.push(chunk);
+        totalChars += chunk.length;
+        rendered++;
+        continue;
+      }
+
       for (let i = start; i <= end; i++) {
         const code = fileLines[i - 1] ?? '';
         bodyLines.push(withLineNumbers ? `${i}\t${code}` : code);
@@ -4452,7 +4733,7 @@ export class ToolHandler {
       bodyLines.push('```', '');
       let chunk = bodyLines.join('\n');
       if (chunk.length > maxPerFile) {
-        chunk = `${chunk.slice(0, maxPerFile)}\n... (trimmed)\n\`\`\`\n`;
+        chunk = `${chunk.slice(0, maxPerFile)}\n... (trimmed — answer from visible lines; do not Read the rest)\n\`\`\`\n`;
       }
       if (totalChars + chunk.length > maxTotal && rendered > 0) break;
       lines.push(chunk);
@@ -4464,8 +4745,8 @@ export class ToolHandler {
 
     lines.push('---');
     lines.push(
-      '> **Compact local explore complete** — answer from the definition(s) above. ' +
-      'Do not call `homegraph_search` or another full explore for the same symbol.',
+      '> **Compact local explore complete — ANSWER NOW.** ' +
+      'Do **not** Read/Grep/`homegraph_search`/`homegraph_explore`/`homegraph_node` for the same symbols.',
     );
     lines.push('');
     return this.textResult(lines.join('\n'));
@@ -4736,20 +5017,45 @@ export class ToolHandler {
     const rel = (p: string) => p.replace(/\\/g, '/');
     const lines: string[] = ['**Inheritance survey**', ''];
     let listed = 0;
+    const projectRoot = (() => {
+      try { return cg.getProjectRoot(); } catch { return ''; }
+    })();
 
     for (const typeName of extractTypeNamesFromQuery(query).slice(0, 2)) {
       const bases = cg.getNodesByName(typeName).filter(
         (n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'interface') && !isTestFile(n.filePath),
       );
       for (const base of bases.slice(0, 2)) {
-        const subs: Node[] = [];
+        const publicSubs: Node[] = [];
+        const otherSubs: Node[] = [];
         for (const e of cg.getIncomingEdges(base.id)) {
           if (e.kind !== 'extends' && e.kind !== 'implements') continue;
           try {
             const child = cg.getNode(e.source);
-            if (child && !isTestFile(child.filePath)) subs.push(child);
+            if (!child || isTestFile(child.filePath)) continue;
+            const isCpp = /\.(hpp|h|hh|hxx|cpp|cc|cxx)$/i.test(child.filePath);
+            if (isCpp && projectRoot) {
+              const abs = validatePathWithinRoot(projectRoot, child.filePath);
+              if (abs && existsSync(abs) && child.startLine > 0) {
+                try {
+                  const fileLines = readFileSync(abs, 'utf-8').split('\n');
+                  // Class decl may span a few lines (`class Foo\n: public Bar`).
+                  const from = Math.max(0, child.startLine - 1);
+                  const decl = fileLines.slice(from, Math.min(fileLines.length, from + 4)).join(' ');
+                  const pub = cppExtendsLooksPublic(decl, base.name);
+                  if (pub === false) {
+                    otherSubs.push(child);
+                    continue;
+                  }
+                } catch { /* keep as public-ish */ }
+              }
+            }
+            publicSubs.push(child);
           } catch { /* skip */ }
         }
+        // Prefer public / language-default is-a; only fall back to private if
+        // nothing else is indexed (avoids empty answers).
+        const subs = publicSubs.length > 0 ? publicSubs : otherSubs;
         if (subs.length === 0) continue;
         lines.push(`### Subtypes of \`${base.name}\` (\`${rel(base.filePath)}\`)`);
         for (const s of subs.slice(0, 30)) {
@@ -4757,6 +5063,12 @@ export class ToolHandler {
           listed++;
         }
         if (subs.length > 30) lines.push(`- … and ${subs.length - 30} more`);
+        if (publicSubs.length > 0 && otherSubs.length > 0) {
+          lines.push(
+            `- _(also private/protected C++ inherits, omitted: ${otherSubs.map((s) => s.name).slice(0, 8).join(', ')})` +
+            `${otherSubs.length > 8 ? ', …' : ''})_`,
+          );
+        }
         lines.push('');
       }
     }
@@ -4779,6 +5091,10 @@ export class ToolHandler {
     // Literal chains in quotes: .width('100%')
     for (const m of query.matchAll(/(\.[a-zA-Z_][\w]*\s*\([^)]*\))/g)) {
       patterns.push(m[1]!.replace(/\s+/g, ''));
+    }
+    // Bare field / mutex names (m_eglMutex) — text-scan without a leading dot.
+    for (const f of extractFieldLikeSymbolsFromQuery(query)) {
+      patterns.push(f);
     }
     if (patterns.length === 0) return '';
 
@@ -4805,7 +5121,9 @@ export class ToolHandler {
 
     // Scan top FTS files for literal pattern in source
     for (const pat of patterns.slice(0, 3)) {
-      const literal = pat.startsWith('.') ? pat : `.${pat}`;
+      const literal = pat.startsWith('.') || pat.startsWith('m_') || /(?:Mutex|Lock)$/.test(pat)
+        ? pat
+        : `.${pat}`;
       const re = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
       let files: SearchResult[] = [];
       try {
@@ -4852,37 +5170,56 @@ export class ToolHandler {
     projectRoot: string,
   ): { section: string; fileCount: number } {
     // Include PascalCase SDK modules (Telephony) — deps-only missed them.
-    const symbols = extractApiUsageTokens(query).slice(0, 6);
-    if (symbols.length === 0) return { section: '', fileCount: 0 };
+    const rawSymbols = extractApiUsageTokens(query).slice(0, 6);
+    if (rawSymbols.length === 0) return { section: '', fileCount: 0 };
+    // Expand Telephony → telephony / @ohos.telephony so import call sites hit.
+    const symbols: string[] = [];
+    for (const sym of rawSymbols) {
+      symbols.push(sym);
+      if (/^[A-Z][A-Za-z0-9]+$/.test(sym) && sym.length >= 4) {
+        const lc = sym.toLowerCase();
+        if (!symbols.includes(lc)) symbols.push(lc);
+        const ohos = `@ohos.${lc}`;
+        if (!symbols.includes(ohos)) symbols.push(ohos);
+      }
+    }
 
     const rel = (p: string) => p.replace(/\\/g, '/');
-    const hits = new Map<string, number[]>();
+    const hits = new Map<string, { lines: number[]; stub: boolean }>();
 
     const addHit = (file: string, line: number): void => {
       if (isTestFile(file)) return;
       const fp = rel(file);
-      const arr = hits.get(fp) ?? [];
-      if (!arr.includes(line)) arr.push(line);
-      hits.set(fp, arr);
+      const stub = /\.d\.ts$/i.test(fp) || /windowsceneinterfaces|@ohos\.|\/api\//i.test(fp);
+      const prev = hits.get(fp) ?? { lines: [], stub };
+      if (!prev.lines.includes(line)) prev.lines.push(line);
+      prev.stub = prev.stub && stub;
+      hits.set(fp, prev);
     };
 
-    for (const sym of symbols.slice(0, 4)) {
+    for (const sym of symbols.slice(0, 6)) {
       const symLc = sym.toLowerCase();
       let nodes: SearchResult[] = [];
       try {
-        nodes = cg.searchNodes(sym, { limit: 40 });
+        nodes = cg.searchNodes(sym.replace(/^@/, ''), { limit: 40 });
       } catch { /* skip */ }
       for (const r of nodes) {
         const n = r.node;
-        if (n.name.toLowerCase() === symLc || (n.signature || '').toLowerCase().includes(symLc)) {
+        const hay = `${n.name} ${n.signature || ''} ${n.filePath}`.toLowerCase();
+        if (hay.includes(symLc) || n.name.toLowerCase() === symLc) {
           addHit(n.filePath, n.startLine);
         }
       }
 
-      const wordRe = new RegExp(`\\b${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      const wordRe = new RegExp(
+        sym.startsWith('@')
+          ? sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          : `\\b${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+        'i',
+      );
       let scanHits: SearchResult[] = [];
       try {
-        scanHits = cg.searchNodes(sym, { limit: 30 });
+        scanHits = cg.searchNodes(sym.replace(/^@/, ''), { limit: 35 });
       } catch { continue; }
       const seenFiles = new Set<string>();
       for (const r of scanHits) {
@@ -4903,26 +5240,49 @@ export class ToolHandler {
 
     if (hits.size === 0) return { section: '', fileCount: 0 };
 
+    // Prefer project call/import sites over SDK .d.ts stubs.
+    const rankedFiles = [...hits.entries()].sort((a, b) => {
+      if (a[1].stub !== b[1].stub) return a[1].stub ? 1 : -1;
+      return a[0].localeCompare(b[0]);
+    });
+    const projectHits = rankedFiles.filter(([, v]) => !v.stub);
+    const display = projectHits.length > 0 ? projectHits : rankedFiles;
+
     const lines = [
       '**API usage sites**',
       '',
-      `> Files referencing \`${symbols.join('`, `')}\` in this repo (${hits.size} file(s)). Answer from this list; source bodies omitted.`,
+      `> In-repo references to \`${rawSymbols.join('`, `')}\` (${display.length} file(s)` +
+      `${projectHits.length > 0 && projectHits.length < rankedFiles.length ? `; SDK stubs omitted` : ''}). ` +
+      '**ANSWER NOW** from this list (+ snippets); do not Grep the same API again.',
       '',
     ];
     let shown = 0;
-    for (const [fp, lineNos] of [...hits.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      if (shown >= 45) break;
-      const sortedLines = [...lineNos].sort((a, b) => a - b).slice(0, 6);
+    for (const [fp, info] of display) {
+      if (shown >= 28) break;
+      const sortedLines = [...info.lines].sort((a, b) => a - b).slice(0, 4);
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      let snippet = '';
+      if (abs && existsSync(abs)) {
+        try {
+          const fileLines = readFileSync(abs, 'utf-8').split('\n');
+          const ln = sortedLines[0]!;
+          snippet = (fileLines[ln - 1] ?? '').trim().slice(0, 100);
+        } catch { /* */ }
+      }
       const lineStr = sortedLines.map((l) => `L${l}`).join(', ');
-      const more = lineNos.length > sortedLines.length ? ` +${lineNos.length - sortedLines.length} more` : '';
-      lines.push(`- \`${fp}\` (${lineStr}${more})`);
+      const more = info.lines.length > sortedLines.length ? ` +${info.lines.length - sortedLines.length} more` : '';
+      lines.push(
+        snippet
+          ? `- \`${fp}\` (${lineStr}${more})  \`${snippet}\``
+          : `- \`${fp}\` (${lineStr}${more})`,
+      );
       shown++;
     }
-    if (hits.size > shown) lines.push(`- … and ${hits.size - shown} more file(s)`);
+    if (display.length > shown) lines.push(`- … and ${display.length - shown} more file(s)`);
     lines.push('');
-    lines.push(`> API usage survey complete — **${hits.size}** file(s) listed.`);
+    lines.push(`> API usage survey complete — **${display.length}** file(s). **ANSWER NOW.**`);
     lines.push('');
-    return { section: lines.join('\n'), fileCount: hits.size };
+    return { section: lines.join('\n'), fileCount: display.length };
   }
 
   /**
@@ -8044,6 +8404,46 @@ export class ToolHandler {
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * At caller sites, list nearby `#include` / `import` lines — answers
+   * "which call makes Type X's definition visible" without a second Grep/Read
+   * when the agent only called `homegraph_callers`.
+   */
+  private formatCallerIncludeVisibility(cg: HomeGraph, callers: Node[]): string {
+    if (callers.length === 0) return '';
+    let projectRoot = '';
+    try { projectRoot = cg.getProjectRoot(); } catch { return ''; }
+    const rows: string[] = [];
+    const seen = new Set<string>();
+    for (const caller of callers.slice(0, 8)) {
+      const abs = validatePathWithinRoot(projectRoot, caller.filePath);
+      if (!abs || !existsSync(abs)) continue;
+      let content: string;
+      try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+      const fileLines = content.split('\n');
+      const scanTo = Math.min(fileLines.length, Math.max(120, (caller.startLine || 1) + 5));
+      for (let i = 0; i < scanTo; i++) {
+        const lineText = fileLines[i] ?? '';
+        if (!/^\s*(?:#\s*include|import\s)/.test(lineText)) continue;
+        const key = `${caller.filePath}:${i + 1}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push(`- \`${caller.filePath}:${i + 1}\`  \`${lineText.trim().slice(0, 140)}\``);
+        if (rows.length >= 12) break;
+      }
+      if (rows.length >= 12) break;
+    }
+    if (rows.length === 0) return '';
+    return [
+      '',
+      '**Include / import at caller files** (definition visibility cues)',
+      '',
+      ...rows,
+      '',
+      '> Use these includes with the caller list when asking which call makes another type visible.',
+    ].join('\n');
   }
 
   /**

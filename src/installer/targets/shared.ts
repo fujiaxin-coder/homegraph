@@ -25,7 +25,7 @@ export function getMcpServerConfig(): { type: string; command: string; args: str
   return {
     type: 'stdio',
     command: 'homegraph',
-    args: ['serve', '--mcp'],
+    args: ['serve', 'mcp'],
   };
 }
 

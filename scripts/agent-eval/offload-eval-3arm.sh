@@ -27,8 +27,8 @@ command -v claude >/dev/null || { echo "no claude on PATH"; exit 1; }
 TARGET=$(cd "$TARGET" && pwd -P)
 
 prewarm() { # path  extra-env (e.g. "FOO=bar")
-  pkill -9 -f "serve --mcp --path $1" 2>/dev/null; rm -f "$1/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
-  env ${2:-} HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$1" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $1" 2>/dev/null; rm -f "$1/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
+  env ${2:-} HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$1" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$1" \
     && echo "  daemon warm" || echo "  WARN daemon never bound"
 }
@@ -52,8 +52,8 @@ run() { # arm rep mcp-config usage-log-or-dash
 
 CFG_OFF="$RUNS/mcp-offload-$REPO.json"; CFG_RAW="$RUNS/mcp-raw-$REPO.json"; CFG_NOCG="$RUNS/mcp-nocg.json"
 USAGE="$RUNS/$REPO-usage.jsonl"
-printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_USAGE_LOG=%s","node","%s","serve","--mcp","--path","%s"]}}}' "$USAGE" "$BIN" "$TARGET" > "$CFG_OFF"
-printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_DISABLE=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$TARGET" > "$CFG_RAW"
+printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_USAGE_LOG=%s","node","%s","serve","mcp","--path","%s"]}}}' "$USAGE" "$BIN" "$TARGET" > "$CFG_OFF"
+printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","HOMEGRAPH_OFFLOAD_DISABLE=1","node","%s","serve","mcp","--path","%s"]}}}' "$BIN" "$TARGET" > "$CFG_RAW"
 printf '{"mcpServers":{}}' > "$CFG_NOCG"
 
 # REP_START lets a later batch ADD reps without clobbering earlier jsonls
@@ -63,10 +63,10 @@ echo "###### repo=$REPO tier=$TIER reps=$START..$END model=${MODEL:-sonnet}/${EF
 echo "###### Q=$Q"
 echo "== ARM offload =="; prewarm "$TARGET" "HOMEGRAPH_OFFLOAD_USAGE_LOG=$USAGE"
 for r in $(seq "$START" "$END"); do run offload "$r" "$CFG_OFF" "$USAGE"; done
-pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 1
+pkill -9 -f "serve mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 1
 echo "== ARM raw =="; prewarm "$TARGET" "HOMEGRAPH_OFFLOAD_DISABLE=1"
 for r in $(seq "$START" "$END"); do run raw "$r" "$CFG_RAW" "-"; done
-pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 1
+pkill -9 -f "serve mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 1
 echo "== ARM nocg =="
 for r in $(seq "$START" "$END"); do run nocg "$r" "$CFG_NOCG" "-"; done
 echo "###### DONE $REPO"

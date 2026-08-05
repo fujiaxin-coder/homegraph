@@ -88,16 +88,16 @@ artifact (`scripts/agent-eval/redirect-read-hook.sh` + `ab-hook.sh`).
 
 ## P2 — Agent runs without homegraph because the server is `pending` at startup
 
-**Symptom:** `serve --mcp` isn't ready when the agent's first turn fires (the host marks the MCP server `status:"pending"` / 0 tools), so the agent starts Read/grep and never uses homegraph. We saw this hard in nested evals (~2-3s startup vs the agent's turn-1); **real users hit a milder version** — the first query of a session may not have homegraph.
+**Symptom:** `serve mcp` isn't ready when the agent's first turn fires (the host marks the MCP server `status:"pending"` / 0 tools), so the agent starts Read/grep and never uses homegraph. We saw this hard in nested evals (~2-3s startup vs the agent's turn-1); **real users hit a milder version** — the first query of a session may not have homegraph.
 
 ### Root cause
-`serve --mcp` does a `--liftoff-only` **re-exec** (for a node memory flag) **and** spawns/binds a detached **daemon** before tools are usable. Under load that exceeds the host's MCP-startup window. (`HOMEGRAPH_WASM_RELAUNCHED=1` skips the re-exec; pre-warming a daemon removes the bind latency — both proven in `ab-new-vs-baseline.sh`. But a real user can't pre-warm.)
+`serve mcp` does a `--liftoff-only` **re-exec** (for a node memory flag) **and** spawns/binds a detached **daemon** before tools are usable. Under load that exceeds the host's MCP-startup window. (`HOMEGRAPH_WASM_RELAUNCHED=1` skips the re-exec; pre-warming a daemon removes the bind latency — both proven in `ab-new-vs-baseline.sh`. But a real user can't pre-warm.)
 
 ### Ideas, ranked
 
 1. **HOMEGRAPH-SIDE — expose the static tool list INSTANTLY, decoupled from the daemon. *Biggest shippable win; helps every user.***
-   - Hypothesis: the host marks homegraph `pending` because `tools/list` (tool exposure) waits on the daemon connect. The local handshake already answers `initialize` fast (~107ms; `runLocalHandshakeProxy` in `src/mcp/proxy.ts`, `getStaticTools` is imported there). **Investigate: does `serve --mcp` answer `tools/list` *locally and instantly* from `getStaticTools`, or does it forward it to the still-connecting daemon?** If the latter, decouple it: advertise the static tools the moment the client asks, mark connected, and resolve the daemon in the background for actual tool *calls*.
-   - Verify with: `printf '<initialize>\n<initialized>\n<tools/list>\n' | node dist/bin/homegraph.js serve --mcp --path <repo>` and time the `tools/list` response, daemon-mode vs in-process. In-process answered in ~165ms; daemon-mode is the suspect.
+   - Hypothesis: the host marks homegraph `pending` because `tools/list` (tool exposure) waits on the daemon connect. The local handshake already answers `initialize` fast (~107ms; `runLocalHandshakeProxy` in `src/mcp/proxy.ts`, `getStaticTools` is imported there). **Investigate: does `serve mcp` answer `tools/list` *locally and instantly* from `getStaticTools`, or does it forward it to the still-connecting daemon?** If the latter, decouple it: advertise the static tools the moment the client asks, mark connected, and resolve the daemon in the background for actual tool *calls*.
+   - Verify with: `printf '<initialize>\n<initialized>\n<tools/list>\n' | node dist/bin/homegraph.js serve mcp --path <repo>` and time the `tools/list` response, daemon-mode vs in-process. In-process answered in ~165ms; daemon-mode is the suspect.
    - If this lands, `pending`-at-startup largely disappears without any host change.
 
 2. **HOMEGRAPH-SIDE — speed/skip the re-exec on the MCP serve path.** The re-exec exists for a V8 memory flag (`src/extraction/wasm-runtime-flags.ts`, `RELAUNCH_GUARD_ENV = HOMEGRAPH_WASM_RELAUNCHED`). For MCP serving on a normal repo the flag may be unnecessary, or settable without a full process re-exec. Removing one process spawn from the cold path shaves the startup window.
@@ -122,7 +122,7 @@ artifact (`scripts/agent-eval/redirect-read-hook.sh` + `ab-hook.sh`).
 
 ## How to validate anything here
 - **P1 (Read displacement):** `bash scripts/agent-eval/ab-new-vs-baseline.sh <indexed-repo> "<implementation task>" [baseline-ref]` — compare `Read` vs `mcp__homegraph__*` counts. ≥2 runs/arm (n=1 is noisy). Run non-nested for cleanest results. Use a *genuinely new* feature task (verify it doesn't already exist — the first A/B attempt wasted a run on an already-implemented `--quiet`).
-- **P2 (startup):** time `tools/list` from `serve --mcp` (above); and count cold-start runs where `init` shows `connected` + tools > 0. Don't trust a single `pending` init snapshot — confirm by whether the agent actually called homegraph.
+- **P2 (startup):** time `tools/list` from `serve mcp` (above); and count cold-start runs where `init` shows `connected` + tools > 0. Don't trust a single `pending` init snapshot — confirm by whether the agent actually called homegraph.
 
 ## Constraints / gotchas to remember
 - Descriptions/instructions are low-salience — **A/B every behavioral claim**, don't ship wording on faith.
@@ -131,6 +131,6 @@ artifact (`scripts/agent-eval/redirect-read-hook.sh` + `ab-hook.sh`).
 - Don't run evals nested for "clean" numbers unless pre-warmed; even then, a real terminal is better.
 
 ## Suggested start order for the fresh session
-1. **P2 idea 1** — verify whether `serve --mcp` answers `tools/list` locally/instantly; if not, decouple it from the daemon. (Highest-value, shippable, helps all users, no behavioral guesswork.)
+1. **P2 idea 1** — verify whether `serve mcp` answers `tools/list` locally/instantly; if not, decouple it from the daemon. (Highest-value, shippable, helps all users, no behavioral guesswork.)
 2. **P1 idea 1** — prototype the PreToolUse(Read) redirect hook; A/B it. (Highest-value behavioral lever.)
 3. Ship the P2 SessionStart pre-warm hook as a mitigation; file the host-side wait/retry request.
