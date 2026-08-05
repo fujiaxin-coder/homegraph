@@ -24,7 +24,7 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE, queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps } from '../search/query-utils';
 
 import {
   existsSync,
@@ -468,11 +468,15 @@ export function tightenExploreBudgetForQuery(
     };
   }
   if (!local && !compact) return budget;
+  const lean =
+    queryAsAssignedFlagImpactSurvey(query)
+    || queryAsFocusedUiCluster(query)
+    || queryAsTypeLifecycleSurvey(query);
   return {
     ...budget,
-    maxOutputChars: Math.min(budget.maxOutputChars, local ? 7000 : 9000),
-    defaultMaxFiles: Math.min(budget.defaultMaxFiles, local ? 2 : 3),
-    maxCharsPerFile: Math.min(budget.maxCharsPerFile, local ? 3500 : 4000),
+    maxOutputChars: Math.min(budget.maxOutputChars, lean ? 4800 : local ? 7000 : 9000),
+    defaultMaxFiles: Math.min(budget.defaultMaxFiles, lean ? 2 : local ? 2 : 3),
+    maxCharsPerFile: Math.min(budget.maxCharsPerFile, lean ? 2200 : local ? 3500 : 4000),
     includeRelationships: false,
     includeAdditionalFiles: false,
     includeCompletenessSignal: false,
@@ -3297,7 +3301,7 @@ export class ToolHandler {
   /**
    * External-caller inventory for a named class — methods → who calls them (paths only).
    */
-  private buildCallerListingSection(cg: HomeGraph, query: string): string {
+  private buildCallerListingSection(cg: HomeGraph, query: string, projectRoot?: string): string {
     const typeNames = extractCallerSurveySymbols(query);
     if (typeNames.length === 0) return '';
 
@@ -3306,14 +3310,36 @@ export class ToolHandler {
     // Applying this to every caller-survey query wiped same-file call sites
     // (common in C++/ARK .cpp units) and fell through to a fat full explore.
     const externalOnly = /\bexternal\b/i.test(query) || /外部/.test(query);
+    const listedMethods = new Set(extractListedTypeMethodsFromQuery(query));
+    const typeNameSet = new Set(extractTypeNamesFromQuery(query));
     const lines: string[] = ['**Caller inventory**', ''];
     let substantive = 0;
 
     // Function / method symbols named directly (e.g. SortWidgets).
-    for (const sym of typeNames.slice(0, 4)) {
-      const funcs = cg.getNodesByName(sym).filter(
+    // When Type + listed methods (BinaryGrid Set/Test/Fill), keep defs near the
+    // owning Type's files (template methods often lack reliable contains edges).
+    const ownerDirs = new Set<string>();
+    if (listedMethods.size > 0 && typeNameSet.size > 0) {
+      for (const t of typeNameSet) {
+        for (const n of cg.getNodesByName(t)) {
+          if (n.kind === 'class' || n.kind === 'struct' || n.kind === 'component') {
+            const fp = rel(n.filePath);
+            ownerDirs.add(fp.split('/').slice(0, -1).join('/'));
+          }
+        }
+      }
+    }
+    for (const sym of typeNames.slice(0, 6)) {
+      let funcs = cg.getNodesByName(sym).filter(
         (n) => (n.kind === 'function' || n.kind === 'method') && !isTestFile(n.filePath),
       );
+      if (listedMethods.has(sym) && ownerDirs.size > 0) {
+        const near = funcs.filter((n) => {
+          const dir = rel(n.filePath).split('/').slice(0, -1).join('/');
+          return ownerDirs.has(dir);
+        });
+        if (near.length > 0) funcs = near;
+      }
       for (const fn of funcs.slice(0, 3)) {
         let callers: Array<{ node: Node }> = [];
         try { callers = cg.getCallers(fn.id) as Array<{ node: Node }>; } catch { continue; }
@@ -3335,6 +3361,7 @@ export class ToolHandler {
     }
 
     for (const typeName of typeNames.slice(0, 3)) {
+      if (!typeNameSet.has(typeName) && listedMethods.size > 0) continue;
       const classes = cg.getNodesByName(typeName)
         .filter((n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'component') && !isTestFile(n.filePath));
       for (const cls of classes.slice(0, 2)) {
@@ -3351,8 +3378,11 @@ export class ToolHandler {
             }
           }
         }
+        const focusMethods = listedMethods.size > 0
+          ? methods.filter((m) => listedMethods.has(m.name))
+          : methods;
         const methodLines: string[] = [];
-        for (const method of methods.slice(0, 25)) {
+        for (const method of (focusMethods.length > 0 ? focusMethods : methods).slice(0, 25)) {
           let callers: Array<{ node: Node }> = [];
           try { callers = cg.getCallers(method.id) as Array<{ node: Node }>; } catch { continue; }
           const uniq = new Map<string, Node>();
@@ -3376,15 +3406,408 @@ export class ToolHandler {
         lines.push('');
       }
     }
-    if (substantive === 0) return '';
+
+    // Text call-site fallback for return-value / member consumers when the graph
+    // has no edges onto SDK/.d.ts methods (common for getConnectionState).
+    if (substantive === 0 && queryAsReturnValueConsumerSurvey(query)) {
+      const root = projectRoot || '';
+      for (const sym of typeNames.slice(0, 3)) {
+        if (!/^(?:get|is|has|create|on)[A-Z]/.test(sym) && !isMemberLikeIdentifier(sym)) continue;
+        let scanHits: SearchResult[] = [];
+        try { scanHits = cg.searchNodes(sym, { limit: 40 }); } catch { continue; }
+        const esc = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const callRe = new RegExp(`\\.${esc}\\s*\\(`);
+        const bareRe = new RegExp(`\\b${esc}\\s*\\(`);
+        const seen = new Set<string>();
+        const bullets: string[] = [];
+        for (const r of scanHits) {
+          if (isTestFile(r.node.filePath)) continue;
+          if (/\.d\.ts$/i.test(r.node.filePath) || isOhosApiFilePath(r.node.filePath)) continue;
+          const abs = root
+            ? validatePathWithinRoot(root, r.node.filePath)
+            : (existsSync(r.node.filePath) ? r.node.filePath : null);
+          if (!abs) continue;
+          let fileLines: string[] = [];
+          try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { continue; }
+          for (let i = 0; i < fileLines.length; i++) {
+            const lineText = fileLines[i] ?? '';
+            if (!callRe.test(lineText) && !bareRe.test(lineText)) continue;
+            const key = `${rel(r.node.filePath)}:${i + 1}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            bullets.push(`- \`${sym}\` ← \`${key}\`  \`${lineText.trim().slice(0, 120)}\``);
+            if (bullets.length >= 12) break;
+          }
+          if (bullets.length >= 12) break;
+        }
+        if (bullets.length > 0) {
+          lines.push(`### \`${sym}\` (text call sites)`);
+          lines.push(...bullets);
+          lines.push('');
+          substantive += bullets.length;
+        }
+      }
+    }
+
+    if (substantive === 0) {
+      if (queryAsReturnValueConsumerSurvey(query)) {
+        return [
+          '**Caller inventory**',
+          '',
+          '> No in-repo callers of the return-value member in the graph/index. **ANSWER NOW** — do not open SDK `.d.ts` stubs; Grep once for `.member(` only if needed.',
+          '',
+        ].join('\n');
+      }
+      return '';
+    }
+    // Unique caller files — answers "哪些文件调用了 Type::methods" without Grep.
+    if (listedMethods.size > 0 && substantive > 0) {
+      const callerFiles = new Set<string>();
+      for (const line of lines) {
+        const idx = line.indexOf('←');
+        if (idx < 0) continue;
+        for (const m of line.slice(idx).matchAll(/`([^`]+?):(\d+)`/g)) {
+          callerFiles.add(m[1]!);
+        }
+      }
+      if (callerFiles.size > 0) {
+        lines.push('');
+        lines.push('**Unique caller files**');
+        for (const fp of [...callerFiles].sort()) {
+          lines.push(`- \`${fp}\``);
+        }
+      }
+    }
     lines.push('> Caller inventory complete — answer from this section.');
     lines.push('');
     return lines.join('\n');
   }
 
   /**
-   * Upstream data-source survey — which services/symbols feed a Manager (e.g. BadgeManager → notification).
+   * Multi-module / circular dependency survey — lean cycle list, not an import flood.
    */
+  private buildModuleDependencySurveySection(
+    cg: HomeGraph,
+    query: string,
+  ): { section: string; hitCount: number } {
+    // Prefer leaf module tokens (`launchercommon`) over shared parents (`staticcommon`)
+    // — parent matches flood unrelated windowscene cycles.
+    const leafModules = new Set<string>();
+    for (const p of (query.match(
+      /\b[A-Za-z][\w]*(?:common|service|component|constants)\b/gi,
+    ) ?? [])) {
+      const low = p.toLowerCase();
+      if (!/^(?:static|feature|product|base|common)$/i.test(low)) leafModules.add(low);
+    }
+    for (const seg of query.match(/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)+/g) ?? []) {
+      const leaf = seg.split(/[/\\]/).pop()?.toLowerCase();
+      if (leaf && leaf.length >= 4 && /common|service|component|constants/i.test(leaf)) {
+        leafModules.add(leaf);
+      }
+    }
+    if (leafModules.size === 0) return { section: '', hitCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const hitLeaf = (fp: string): string | null => {
+      const low = fp.toLowerCase().replace(/\\/g, '/');
+      for (const n of leafModules) {
+        if (low.includes(`/${n}/`) || low.includes(`/${n}.`) || low.endsWith(`/${n}`)) return n;
+      }
+      return null;
+    };
+
+    let cycles: string[][] = [];
+    try { cycles = cg.findCircularDependencies(); } catch { cycles = []; }
+    const matchedCycles = cycles
+      .map((c) => {
+        const touched = new Set<string>();
+        const kept: string[] = [];
+        for (const p of c) {
+          const leaf = hitLeaf(p);
+          if (leaf) {
+            touched.add(leaf);
+            kept.push(p);
+          }
+        }
+        return touched.size >= 2 ? kept : [];
+      })
+      .filter((c) => c.length >= 2)
+      .slice(0, 8);
+
+    const lines = [
+      '**Module dependency / cycle survey**',
+      '',
+      `> Focused on leaf modules \`${[...leafModules].slice(0, 8).join('`, `')}\`. **ANSWER NOW** — do not glob every \`oh-package.json5\`.`,
+      '',
+    ];
+    if (matchedCycles.length === 0) {
+      lines.push(
+        `- No **circular** import cycle spanning **two or more** of the named leaf modules.`,
+      );
+      lines.push(
+        '- (Cycles only inside an unrelated sibling under the same parent path are omitted.)',
+      );
+      lines.push('');
+      return { section: lines.join('\n'), hitCount: 1 };
+    }
+    lines.push(`Found **${matchedCycles.length}** cycle(s) spanning named leaf modules:`);
+    for (const c of matchedCycles) {
+      lines.push(`- ${c.map((p) => `\`${rel(p)}\``).join(' → ')}`);
+    }
+    lines.push('');
+    return { section: lines.join('\n'), hitCount: matchedCycles.length };
+  }
+
+  /**
+   * Path-module / named-Type NAPI export surface — not a 50-file domain dump.
+   */
+  private buildModuleExportSurveySection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const paths = extractPathSegmentsFromQuery(query);
+    const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+    const needles = [
+      ...paths.map((p) => p.replace(/\\/g, '/').toLowerCase()),
+      ...types.map((t) => t.toLowerCase()),
+    ].filter((n) => n.length >= 4);
+    if (needles.length === 0) return { section: '', hitCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const inScope = (fp: string): boolean => {
+      const low = rel(fp).toLowerCase();
+      return needles.some((n) => low.includes(n));
+    };
+
+    const exports: Array<{ name: string; file: string; line: number; snippet: string }> = [];
+    const seen = new Set<string>();
+    const seedNames = [
+      'Export', 'NapiInit', 'napi_init', 'Init', 'napi_module_register',
+      ...types.slice(0, 3),
+    ];
+    for (const seed of seedNames) {
+      let hits: SearchResult[] = [];
+      try { hits = cg.searchNodes(seed, { limit: 30 }); } catch { continue; }
+      for (const r of hits) {
+        if (!inScope(r.node.filePath) || isTestFile(r.node.filePath)) continue;
+        if (!/\.(cpp|cc|cxx|h|hpp)$/i.test(r.node.filePath) && !/napi/i.test(r.node.filePath)) {
+          continue;
+        }
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs) continue;
+        let content = '';
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          // napi_define_function / exports / Descriptor { "foo", … }
+          const m =
+            line.match(/napi_define_(?:function|property)\s*\([^,]+,\s*["']([\w]+)["']/i)
+            || line.match(/\{\s*["']([\w]+)["']\s*,\s*(?:nullptr|NULL)?\s*,\s*\w+/i)
+            || line.match(/\.?(?:exports|export)\s*[:=].*["']([\w]+)["']/i);
+          if (!m?.[1] || m[1].length < 2) continue;
+          const key = `${m[1]}:${rel(r.node.filePath)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          exports.push({
+            name: m[1],
+            file: rel(r.node.filePath),
+            line: i + 1,
+            snippet: line.trim().slice(0, 100),
+          });
+        }
+        // Also list Export / Init method nodes in-scope.
+        if (/^(?:Export|Init|NapiInit)$/i.test(r.node.name)) {
+          const key = `fn:${r.node.name}:${rel(r.node.filePath)}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            exports.push({
+              name: r.node.name,
+              file: rel(r.node.filePath),
+              line: r.node.startLine,
+              snippet: (r.node.signature || r.node.name).slice(0, 100),
+            });
+          }
+        }
+      }
+    }
+
+    const lines = [
+      '**NAPI / native export survey**',
+      '',
+      `> In-repo NAPI surface for \`${needles.slice(0, 4).join('`, `')}\`. **ANSWER NOW** — do not Grep \`napi_define\` again.`,
+      '',
+    ];
+    if (exports.length === 0) {
+      lines.push('- No `napi_define_*` / Export descriptors found under the named path/Type.');
+      lines.push('');
+      return { section: lines.join('\n'), hitCount: 0 };
+    }
+    for (const e of exports.slice(0, 30)) {
+      lines.push(`- \`${e.name}\` — \`${e.file}:${e.line}\`  \`${e.snippet}\``);
+    }
+    if (exports.length > 30) lines.push(`- … and ${exports.length - 30} more`);
+    lines.push('');
+    return { section: lines.join('\n'), hitCount: Math.min(exports.length, 30) };
+  }
+
+  /**
+   * Named `.d.ts` wrap — where the basename is imported / called in-repo.
+   */
+  private buildDtsWrapSurveySection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const bases = extractFileBasenamesFromQuery(query)
+      .map((b) => b.replace(/\.d\.ts$/i, ''))
+      .filter((b) => b.length >= 3);
+    if (bases.length === 0 && /\.d\.ts\b/i.test(query)) {
+      for (const m of query.matchAll(/\b([A-Za-z][\w]*)\.d\.ts\b/g)) {
+        if (m[1]) bases.push(m[1]);
+      }
+    }
+    if (bases.length === 0) return { section: '', hitCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const hits = new Map<string, { lines: number[]; snippet: string }>();
+    for (const base of bases.slice(0, 3)) {
+      let nodes: SearchResult[] = [];
+      try { nodes = cg.searchNodes(base, { limit: 40 }); } catch { continue; }
+      const re = new RegExp(
+        `(?:from\\s+['"].*${base}['"]|import\\s+.*\\b${base}\\b|\\b${base}\\.\\w+)`,
+        'i',
+      );
+      const seen = new Set<string>();
+      for (const r of nodes) {
+        if (isTestFile(r.node.filePath)) continue;
+        const fp = rel(r.node.filePath);
+        if (/\.d\.ts$/i.test(fp)) continue;
+        if (seen.has(fp)) continue;
+        seen.add(fp);
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs) continue;
+        let content = '';
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          if (!re.test(line) && !line.includes(base)) continue;
+          if (!new RegExp(`\\b${base}\\b`, 'i').test(line)) continue;
+          const prev = hits.get(fp) ?? { lines: [], snippet: '' };
+          if (!prev.lines.includes(i + 1)) prev.lines.push(i + 1);
+          if (!prev.snippet) prev.snippet = line.trim().slice(0, 100);
+          hits.set(fp, prev);
+        }
+      }
+    }
+
+    const lines = [
+      '**`.d.ts` wrap / call sites**',
+      '',
+      `> In-repo imports/uses of \`${bases.join('`, `')}\` (stub file itself omitted). **ANSWER NOW.**`,
+      '',
+    ];
+    if (hits.size === 0) {
+      lines.push('- No in-repo import/call sites indexed for this wrap.');
+      lines.push('');
+      return { section: lines.join('\n'), hitCount: 0 };
+    }
+    for (const [fp, info] of [...hits.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(0, 28)) {
+      const ls = info.lines.slice(0, 4).map((l) => `L${l}`).join(', ');
+      lines.push(
+        info.snippet
+          ? `- \`${fp}\` (${ls})  \`${info.snippet}\``
+          : `- \`${fp}\` (${ls})`,
+      );
+    }
+    lines.push('');
+    return { section: lines.join('\n'), hitCount: hits.size };
+  }
+
+  /**
+   * Named Toggle/control state-sync — which files/modules mention the control
+   * (Type may be missing from FTS; seed stems + text scan).
+   */
+  private buildNamedControlStateSyncSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+    if (types.length === 0) return { section: '', hitCount: 0 };
+    const stems = new Set<string>();
+    for (const t of types) {
+      stems.add(t);
+      for (const m of t.matchAll(/[A-Z][a-z]+/g)) {
+        if (m[0] && m[0].length >= 4) stems.add(m[0]);
+      }
+    }
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const hits = new Map<string, { lines: number[]; snippet: string; score: number }>();
+    for (const stem of [...stems].slice(0, 6)) {
+      let nodes: SearchResult[] = [];
+      try { nodes = cg.searchNodes(stem, { limit: 35 }); } catch { continue; }
+      const re = new RegExp(`\\b${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      const seen = new Set<string>();
+      for (const r of nodes) {
+        if (isTestFile(r.node.filePath)) continue;
+        const fp = rel(r.node.filePath);
+        if (seen.has(fp)) continue;
+        seen.add(fp);
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs) continue;
+        let content = '';
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        let matched = false;
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          if (!re.test(line) && !line.includes(stem)) continue;
+          const prev = hits.get(fp) ?? { lines: [], snippet: '', score: 0 };
+          if (!prev.lines.includes(i + 1)) prev.lines.push(i + 1);
+          if (!prev.snippet) prev.snippet = line.trim().slice(0, 100);
+          if (/Manager|Service|Store|Controller|Provider/i.test(fp) || /Manager|Service|Store/.test(line)) {
+            prev.score += 5;
+          }
+          prev.score += 1;
+          hits.set(fp, prev);
+          matched = true;
+        }
+        if (!matched && /Toggle|Switch|Hotspot|Manager/i.test(r.node.name)) {
+          hits.set(fp, {
+            lines: [r.node.startLine],
+            snippet: (r.node.signature || r.node.name).slice(0, 100),
+            score: 2,
+          });
+        }
+      }
+    }
+    const ranked = [...hits.entries()].sort((a, b) => b[1].score - a[1].score || a[0].localeCompare(b[0]));
+    const lines = [
+      '**Control / Toggle state-sync sites**',
+      '',
+      `> In-repo references to \`${types.join('`, `')}\` (and stems). Prefer Manager/Service files for \"which module guarantees consistency\". **ANSWER NOW.**`,
+      '',
+    ];
+    if (ranked.length === 0) {
+      lines.push('- No indexed sites for the named control; answer from domain knowledge only if sure.');
+      lines.push('');
+      return { section: lines.join('\n'), hitCount: 0 };
+    }
+    for (const [fp, info] of ranked.slice(0, 24)) {
+      const ls = info.lines.slice(0, 3).map((l) => `L${l}`).join(', ');
+      lines.push(
+        info.snippet
+          ? `- \`${fp}\` (${ls})  \`${info.snippet}\``
+          : `- \`${fp}\` (${ls})`,
+      );
+    }
+    lines.push('');
+    return { section: lines.join('\n'), hitCount: Math.min(ranked.length, 24) };
+  }
+
   private buildDataSourceSection(cg: HomeGraph, query: string): { section: string; edgeCount: number } {
     const anchors = extractTypeNamesFromQuery(query).filter((n) =>
       /Manager|Service|Handler|Store|Provider|Controller/i.test(n));
@@ -3533,7 +3956,7 @@ export class ToolHandler {
     if (typeSurface && !queryNeedsCoNamedUseBridge(query)) {
       const inheritanceSection = this.buildInheritanceSurveySection(cg, query);
       const callerSection = shouldBuildCallerInventory(query)
-        ? this.buildCallerListingSection(cg, query)
+        ? this.buildCallerListingSection(cg, query, projectRoot)
         : '';
       const inheritanceListed = inheritanceSection
         ? inheritanceSection.split('\n').filter((l) => l.startsWith('- `')).length > 0
@@ -3583,6 +4006,9 @@ export class ToolHandler {
       || queryAsReturnValueConsumerSurvey(query)
       || queryAsDeclarationSiteSurvey(query)
       || queryAsModuleExportSurvey(query)
+      || queryAsModuleDependencySurvey(query)
+      // Kit install-deps needs oh-package lines — skip bare import inventory.
+      || queryAsksKitInstallDeps(query)
     )
       ? { section: '', siteCount: 0, compactListing: false }
       : this.buildImportSitesSection(cg, query, projectRoot);
@@ -3590,14 +4016,23 @@ export class ToolHandler {
 
     // Kit usage section is redundant when a focused import inventory already listed
     // every matching `@kit`/`export` site (avoids a second dump + Grep temptation).
+    // Install-deps questions always take the kit survey (oh-package + imports).
     const kitUsageResult =
-      shouldBuildKitModuleUsageSurvey(query) && !(importResult.compactListing && importResult.siteCount > 0)
+      shouldBuildKitModuleUsageSurvey(query)
+      && (
+        queryAsksKitInstallDeps(query)
+        || !(importResult.compactListing && importResult.siteCount > 0)
+      )
         ? this.buildKitModuleUsageSection(cg, query, projectRoot)
         : { section: '', symbolCount: 0 };
     if (kitUsageResult.section) lines.push(kitUsageResult.section);
 
     const domainFileResult = shouldBuildDomainFileSurvey(query) && !queryAsDataSourceSurvey(query)
       && !queryAsInRepoSystemCapabilityHowto(query)
+      && !queryAsModuleDependencySurvey(query)
+      && !queryAsModuleExportSurvey(query)
+      && !queryAsDtsWrapSurvey(query)
+      && !queryAsDeclarationSiteSurvey(query)
       ? this.buildDomainFileSurveySection(cg, query)
       : { section: '', fileCount: 0 };
     if (domainFileResult.section) lines.push(domainFileResult.section);
@@ -3609,13 +4044,33 @@ export class ToolHandler {
 
     const declarationResult = queryAsDeclarationSiteSurvey(query)
       ? this.buildDeclarationSiteSurveySection(cg, query, projectRoot)
-      : { section: '', hitCount: 0 };
+      : { section: '', hitCount: 0, attempted: false };
     if (declarationResult.section) lines.push(declarationResult.section);
 
     const apiUsageResult = shouldBuildApiUsageSurvey(query) && !queryAsDeclarationSiteSurvey(query)
       ? this.buildApiUsageSection(cg, query, projectRoot)
       : { section: '', fileCount: 0 };
     if (apiUsageResult.section) lines.push(apiUsageResult.section);
+
+    const moduleDepResult = queryAsModuleDependencySurvey(query)
+      ? this.buildModuleDependencySurveySection(cg, query)
+      : { section: '', hitCount: 0 };
+    if (moduleDepResult.section) lines.push(moduleDepResult.section);
+
+    const moduleExportResult = queryAsModuleExportSurvey(query)
+      ? this.buildModuleExportSurveySection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (moduleExportResult.section) lines.push(moduleExportResult.section);
+
+    const dtsWrapResult = queryAsDtsWrapSurvey(query)
+      ? this.buildDtsWrapSurveySection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (dtsWrapResult.section) lines.push(dtsWrapResult.section);
+
+    const controlSyncResult = queryAsNamedControlStateSyncSurvey(query)
+      ? this.buildNamedControlStateSyncSection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (controlSyncResult.section) lines.push(controlSyncResult.section);
 
     const dataSourceResult = queryAsDataSourceSurvey(query)
       ? this.buildDataSourceSection(cg, query)
@@ -3642,9 +4097,14 @@ export class ToolHandler {
 
     const inheritanceSection = !hasFlowPath && !multiAnchor
       ? this.buildInheritanceSurveySection(cg, query) : '';
-    const callerSection = !hasFlowPath && !multiAnchor && shouldBuildCallerInventory(query)
-      ? this.buildCallerListingSection(cg, query) : '';
+    const listedTypeMethods = extractListedTypeMethodsFromQuery(query).length > 0;
+    // Type + listed methods (BinaryGrid Set/Test/Fill) must keep caller inventory even
+    // when multi-anchor would otherwise skip it into a fat source dump.
+    const callerSection = !hasFlowPath && (!multiAnchor || listedTypeMethods) && shouldBuildCallerInventory(query)
+      ? this.buildCallerListingSection(cg, query, projectRoot) : '';
+    // Field new/delete inventories already list text sites — skip redundant member scan.
     const memberSection = !hasFlowPath && !multiAnchor && shouldBuildMemberSurvey(query)
+      && !(queryAsFieldUsageSurvey(query) && apiUsageResult.fileCount > 0)
       ? this.buildMemberSurveySection(cg, query, projectRoot) : '';
     const configSection = shouldBuildConfigSection(query)
       ? this.buildConfigFileSection(cg, query, projectRoot) : '';
@@ -3672,7 +4132,8 @@ export class ToolHandler {
     const hasAnySection = importResult.section || kitUsageResult.section || domainFileResult.section
       || apiUsageResult.section || dataSourceResult.section || hoverResult.section || inheritanceSection
       || callerSection || memberSection || configSection
-      || systemCapResult.section || declarationResult.section;
+      || systemCapResult.section || declarationResult.section || moduleDepResult.section
+      || moduleExportResult.section || dtsWrapResult.section || controlSyncResult.section;
     if (!hasAnySection) return null;
 
     // Data-source / API usage inventories are complete without source dumps —
@@ -3682,9 +4143,37 @@ export class ToolHandler {
         `System-capability howto — **${systemCapResult.hitCount}** in-repo site(s). **ANSWER NOW** from \`@ohos\`/\`System\` call sites above.`,
       );
     }
-    if (declarationResult.hitCount > 0) {
+    // Declaration intent must NOT fall through to a fat explore / include dump when empty.
+    if (declarationResult.attempted) {
       return finishCompact(
-        `Declaration-site survey — **${declarationResult.hitCount}** site(s). **ANSWER NOW** from ids + bindings above; do not Grep the same Type.`,
+        declarationResult.hitCount > 0
+          ? `Declaration-site survey — **${declarationResult.hitCount}** site(s). **ANSWER NOW** from ids + bindings above; do not Grep the same Type.`
+          : 'Declaration-site survey complete (0 sites). **ANSWER NOW** from the note above.',
+      );
+    }
+    if (controlSyncResult.section) {
+      return finishCompact(
+        `Control/Toggle state-sync survey — **${controlSyncResult.hitCount}** file(s). **ANSWER NOW** from Manager/Service sites above.`,
+      );
+    }
+    if (kitUsageResult.section && queryAsksKitInstallDeps(query)) {
+      return finishCompact(
+        `Kit install/deps survey — **ANSWER NOW** from imports + oh-package lines above; do not Grep oh-package again.`,
+      );
+    }
+    if (moduleExportResult.section) {
+      return finishCompact(
+        `NAPI / native export survey — **${moduleExportResult.hitCount}** export(s). **ANSWER NOW**; do not Grep napi_define again.`,
+      );
+    }
+    if (dtsWrapResult.section) {
+      return finishCompact(
+        `\`.d.ts\` wrap call sites — **${dtsWrapResult.hitCount}** file(s). **ANSWER NOW**; do not Grep the wrap basename again.`,
+      );
+    }
+    if (moduleDepResult.hitCount > 0 || (queryAsModuleDependencySurvey(query) && moduleDepResult.section)) {
+      return finishCompact(
+        `Module dependency / cycle survey — **ANSWER NOW** from the edges above; do not glob every oh-package.`,
       );
     }
     if (dataSourceResult.edgeCount > 0 && !apiUsageResult.section) {
@@ -3700,6 +4189,18 @@ export class ToolHandler {
     if (queryAsReturnValueConsumerSurvey(query) && callerBulletCount > 0) {
       return finishCompact(
         `Return-value consumers — **${callerBulletCount}** caller site(s). **ANSWER NOW** from the caller inventory; do not Grep the same member.`,
+      );
+    }
+    // Return-value intent with empty graph callers — stop before SDK .d.ts dumps.
+    if (queryAsReturnValueConsumerSurvey(query) && callerSection) {
+      return finishCompact(
+        'Return-value consumer survey complete. **ANSWER NOW** from the inventory above; do not open SDK `.d.ts` stubs.',
+      );
+    }
+    // Type + listed methods (Set/Test/Fill) — multi-anchor would block omit-source; stop here.
+    if (listedTypeMethods && callerBulletCount > 0) {
+      return finishCompact(
+        `Caller inventory — **${callerBulletCount}** site(s) for listed methods. **ANSWER NOW**; do not fan out callers per method.`,
       );
     }
 
@@ -3984,6 +4485,41 @@ export class ToolHandler {
     if (importResult.section) lines.push(importResult.section);
     if (flow.text) lines.push(flow.text);
 
+    // Shared-lib + GLES/EGL thread: surface CMake link lines before bodies.
+    if (queryAsNativeRenderThreadSurvey(query)) {
+      const cmakeHits: string[] = [];
+      try {
+        for (const f of cg.getFiles()) {
+          const fp = f.path.replace(/\\/g, '/');
+          if (!/CMakeLists\.txt$/i.test(fp)) continue;
+          if (!/foldeffect|effectrender|render|egl/i.test(fp) && extractPathSegmentsFromQuery(query).length > 0) {
+            const segs = extractPathSegmentsFromQuery(query);
+            if (!segs.some((s) => fp.toLowerCase().includes(s.toLowerCase().split('/').pop() || s))) {
+              // still allow any CMake with GLESv3/EGL
+            }
+          }
+          const abs = validatePathWithinRoot(projectRoot, f.path);
+          if (!abs) continue;
+          let content = '';
+          try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+          if (!/GLES|EGL|OpenGL/i.test(content)) continue;
+          const fileLines = content.split('\n');
+          for (let i = 0; i < fileLines.length; i++) {
+            const line = fileLines[i] ?? '';
+            if (/GLES|EGL|OpenGL|target_link|pthread|thread/i.test(line)) {
+              cmakeHits.push(`- \`${fp}:${i + 1}\`  \`${line.trim().slice(0, 100)}\``);
+            }
+          }
+          if (cmakeHits.length >= 12) break;
+        }
+      } catch { /* optional */ }
+      if (cmakeHits.length > 0) {
+        lines.push('**CMake / link + GL libs**', '');
+        lines.push(...cmakeHits.slice(0, 12));
+        lines.push('');
+      }
+    }
+
     const distinctiveForScore = extractDomainSearchTerms(query).filter(
       (t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()),
     );
@@ -4244,7 +4780,9 @@ export class ToolHandler {
       || bareMemberOnly
       || (bareId && !componentSurface)
       || bridge
-      || (shouldBuildCallerInventory(query) && !queryAsNamedComponentAction(query) && !memberFocus && !componentSurface);
+      || (shouldBuildCallerInventory(query) && !queryAsNamedComponentAction(query) && !memberFocus && !componentSurface)
+      // Conditional wiring ("失败时还会…") — method body + callers, not logInfo fan-out.
+      || /失败时|还会被注册|还会被|still\s+(?:be\s+)?(?:register|call)|if\s+.+\s+fails?/i.test(query);
     const primaryName = names[0]!;
     const memberNames = new Set<string>([
       ...extractMemberAccessFromQuery(query).map((m) => m.member),
@@ -4305,6 +4843,10 @@ export class ToolHandler {
         }
         if (!callersOnly) {
           for (const { node: c } of cg.getCallees(id).slice(0, 10)) {
+            // Skip log*/hilog helpers — Export→logInfo homonyms ballooned seeds.
+            if (/^log(?:Info|Error|Warn|Debug|Fatal)?$/i.test(c.name) || /^hilog$/i.test(c.name)) {
+              continue;
+            }
             if (
               !memberFocus
               && !nearSeed(c.filePath)
@@ -4582,7 +5124,7 @@ export class ToolHandler {
     }
 
     const callerSection = shouldBuildCallerInventory(query)
-      ? this.buildCallerListingSection(cg, query)
+      ? this.buildCallerListingSection(cg, query, projectRoot)
       : '';
     if (callerSection) lines.push(callerSection);
 
@@ -5038,10 +5580,43 @@ export class ToolHandler {
       }
     }
 
+    // "需要额外安装哪些依赖" — surface oh-package.json5 lines naming the kit.
+    if (/额外安装|还需.*依赖|需要.*依赖|install(?:ing)?\s+(?:extra\s+)?deps?|which\s+deps?/i.test(query)) {
+      const depLines: string[] = [];
+      try {
+        for (const f of cg.getFiles()) {
+          const fp = f.path.replace(/\\/g, '/');
+          if (!/oh-package\.json5?$/i.test(fp)) continue;
+          const abs = validatePathWithinRoot(projectRoot, f.path);
+          if (!abs) continue;
+          let content = '';
+          try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+          if (!kitTerms.some((k) => content.toLowerCase().includes(k.toLowerCase()))) continue;
+          const fileLines = content.split('\n');
+          for (let i = 0; i < fileLines.length; i++) {
+            const line = fileLines[i] ?? '';
+            if (!kitTerms.some((k) => line.toLowerCase().includes(k.toLowerCase()))) continue;
+            depLines.push(`- \`${fp}:${i + 1}\`  \`${line.trim().slice(0, 100)}\``);
+          }
+          if (depLines.length >= 16) break;
+        }
+      } catch { /* optional */ }
+      lines.push('');
+      lines.push('**oh-package dependencies naming this Kit**');
+      if (depLines.length === 0) {
+        lines.push(
+          '- No `oh-package.json5` dependency line naming this Kit was indexed. ' +
+          '**ANSWER NOW**: calling `@kit.*` typically needs **no extra npm install** beyond the HarmonyOS SDK / DevEco kit — only what `oh-package.json5` already lists.',
+        );
+      } else {
+        lines.push(...depLines.slice(0, 16));
+      }
+    }
+
     lines.push('');
-    lines.push('> Kit usage survey complete — answer from this section; do not search external SDK docs or grep the repo again.');
+    lines.push('> Kit usage survey complete — **ANSWER NOW** from this section; do not Grep `oh-package` / SDK docs again.');
     lines.push('');
-    return { section: lines.join('\n'), symbolCount: symbolFiles.size };
+    return { section: lines.join('\n'), symbolCount: Math.max(symbolFiles.size, imports.length, 1) };
   }
 
   /** Disambiguate homonymous types (Configuration, Rectangle) when several defs exist. */
@@ -5199,6 +5774,37 @@ export class ToolHandler {
       }
     }
 
+    // Field patterns with zero FTS: seed from co-named methods/types in the query.
+    const fieldPats = patterns.filter((p) => p.startsWith('m_') || /(?:Mutex|Lock)$/.test(p));
+    if (fieldPats.length > 0 && hits.size < 2) {
+      const seeds = [
+        ...extractLocalDetailAnchors(query),
+        ...extractTypeNamesFromQuery(query),
+      ].filter((n) => !fieldPats.some((p) => p === n || p.endsWith(n)));
+      const seen = new Set(hits.keys());
+      for (const seed of seeds.slice(0, 5)) {
+        let seedHits: SearchResult[] = [];
+        try { seedHits = cg.searchNodes(seed, { limit: 20 }); } catch { continue; }
+        for (const r of seedHits) {
+          if (isTestFile(r.node.filePath)) continue;
+          const fp = rel(r.node.filePath);
+          if (seen.has(fp)) continue;
+          seen.add(fp);
+          const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+          if (!abs) continue;
+          let content: string;
+          try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+          const fileLines = content.split('\n');
+          for (const pat of fieldPats) {
+            const re = new RegExp(pat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+            for (let i = 0; i < fileLines.length; i++) {
+              if (re.test(fileLines[i] ?? '')) addHit(fp, i + 1);
+            }
+          }
+        }
+      }
+    }
+
     if (hits.size === 0) return '';
 
     const lines = ['**Member / pattern usage**', ''];
@@ -5314,11 +5920,11 @@ export class ToolHandler {
     cg: HomeGraph,
     query: string,
     projectRoot: string,
-  ): { section: string; hitCount: number } {
+  ): { section: string; hitCount: number; attempted: boolean } {
     const types = extractTypeNamesFromQuery(query)
       .filter((t) => !isFrameworkUiDecoratorName(t))
       .slice(0, 3);
-    if (types.length === 0) return { section: '', hitCount: 0 };
+    if (types.length === 0) return { section: '', hitCount: 0, attempted: false };
 
     const rel = (p: string) => p.replace(/\\/g, '/');
     const rows: string[] = [];
@@ -5327,29 +5933,72 @@ export class ToolHandler {
     for (const typeName of types) {
       let hits: SearchResult[] = [];
       try {
-        hits = cg.searchNodes(typeName, { limit: 40 });
+        hits = cg.searchNodes(typeName, { limit: 80 });
       } catch { continue; }
+      // Also pull same-name defs (component/class) even when FTS ranks them low.
+      try {
+        for (const n of cg.getNodesByName(typeName).slice(0, 40)) {
+          hits.push({ node: n, score: 1 });
+        }
+      } catch { /* optional */ }
+
+      const files = new Map<string, string>(); // abs → rel
       for (const r of hits) {
         if (isTestFile(r.node.filePath)) continue;
         if (isOhosApiFilePath(r.node.filePath) && /\.d\.ts$/i.test(r.node.filePath)) continue;
         const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
         if (!abs || !existsSync(abs)) continue;
+        files.set(abs, rel(r.node.filePath));
+      }
+
+      // Framework UI tags (XComponent…) often have no indexed symbol at the JSX
+      // site — expand to sibling .ets under the same feature/staticcommon roots
+      // already touched by native/header hits.
+      const featureRoots = new Set<string>();
+      for (const fp of files.values()) {
+        const m = fp.match(/^(feature\/[^/]+|staticcommon\/[^/]+)/);
+        if (m?.[1]) featureRoots.add(m[1]);
+      }
+      if (featureRoots.size > 0 && featureRoots.size <= 6) {
+        try {
+          for (const f of cg.getFiles()) {
+            const fp = rel(f.path);
+            if (!/\.ets$/i.test(fp) || isTestFile(fp)) continue;
+            if (![...featureRoots].some((root) => fp.startsWith(`${root}/`))) continue;
+            const abs = validatePathWithinRoot(projectRoot, f.path);
+            if (!abs || !existsSync(abs)) continue;
+            files.set(abs, fp);
+          }
+        } catch { /* optional */ }
+      }
+
+      const typeRe = new RegExp(`\\b${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      const jsxRe = new RegExp(`<${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      const callRe = new RegExp(`${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`);
+      for (const [abs, fp] of files) {
         let content: string;
         try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
         const fileLines = content.split('\n');
-        const typeRe = new RegExp(`\\b${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        const isUi = /\.(ets|ts|tsx|jsx)$/i.test(fp);
+        const isNative = /\.(cpp|cc|cxx|h|hpp)$/i.test(fp);
         for (let i = 0; i < fileLines.length; i++) {
           const lineText = fileLines[i] ?? '';
           if (!typeRe.test(lineText)) continue;
-          // Prefer construction / JSX / register / id= / native bind sites.
-          if (
-            !new RegExp(`${typeName}\\s*\\(|<${typeName}\\b|id\\s*[:=]|OH_Native|RegisterCallback|Export\\s*\\(|napi_`, 'i')
-              .test(lineText)
-            && !/id\s*[:=]/.test(fileLines[i + 1] ?? '')
-          ) {
-            continue;
-          }
-          const key = `${r.node.filePath}:${i + 1}`;
+          const window = [lineText, fileLines[i + 1] ?? '', fileLines[i + 2] ?? ''].join('\n');
+          const uiHit =
+            isUi
+            && (
+              jsxRe.test(lineText)
+              || callRe.test(lineText)
+              || (/id\s*[:=]/.test(window) && !/Log(?:Error|Info|Warn|Debug|Message)/i.test(lineText))
+            );
+          const nativeHit =
+            isNative
+            && /OH_Native|RegisterCallback|Export\s*\(|napi_/i.test(window)
+            && !/Log(?:Error|Info|Warn|Debug|Message)/i.test(lineText);
+          // Prefer construction / JSX / id / native bind; skip log-only mentions.
+          if (!uiHit && !nativeHit) continue;
+          const key = `${fp}:${i + 1}`;
           if (seen.has(key)) continue;
           seen.add(key);
           const clip = [lineText, fileLines[i + 1] ?? '', fileLines[i + 2] ?? '']
@@ -5357,24 +6006,43 @@ export class ToolHandler {
             .filter(Boolean)
             .join(' / ')
             .slice(0, 160);
-          rows.push(`- \`${typeName}\` — \`${rel(r.node.filePath)}:${i + 1}\`  \`${clip}\``);
-          if (rows.length >= 20) break;
+          rows.push(`- \`${typeName}\` — \`${fp}:${i + 1}\`  \`${clip}\``);
+          if (rows.length >= 24) break;
         }
-        if (rows.length >= 20) break;
+        if (rows.length >= 24) break;
       }
+      if (rows.length >= 24) break;
     }
 
-    if (rows.length === 0) return { section: '', hitCount: 0 };
+    // Prefer UI (.ets) rows first so C++ includes don't dominate.
+    rows.sort((a, b) => {
+      const score = (s: string) => (/\.ets`/.test(s) ? 0 : /\.cpp`|\.h`/.test(s) ? 2 : 1);
+      return score(a) - score(b);
+    });
+
+    if (rows.length === 0) {
+      return {
+        section: [
+          '**Declaration / id / native-binding survey**',
+          '',
+          `> No UI/native construction sites for \`${types.join('`, `')}\` in the index. **ANSWER NOW** — do not Grep the same Type for "declaration"; at most one Grep for \`<${types[0]}\` if you must.`,
+          '',
+        ].join('\n'),
+        hitCount: 0,
+        attempted: true,
+      };
+    }
     return {
       section: [
         '**Declaration / id / native-binding survey**',
         '',
-        '> Construction sites with nearby `id` / native register cues. **ANSWER NOW** — do not Grep the same Type again.',
+        '> Construction / JSX / `id` / native register sites. **ANSWER NOW** — do not Grep the same Type again.',
         '',
-        ...rows,
+        ...rows.slice(0, 20),
         '',
       ].join('\n'),
-      hitCount: rows.length,
+      hitCount: Math.min(rows.length, 20),
+      attempted: true,
     };
   }
 
@@ -5452,6 +6120,38 @@ export class ToolHandler {
       }
     }
 
+    // Field/mutex tokens often have zero FTS hits (not extracted as nodes). Seed
+    // scan files from co-named methods/types in the query (drawOnSubThread…).
+    const fieldSyms = extractFieldLikeSymbolsFromQuery(query);
+    if (fieldSyms.length > 0) {
+      const seedNames = [
+        ...extractLocalDetailAnchors(query),
+        ...extractTypeNamesFromQuery(query),
+      ].filter((n) => !fieldSyms.includes(n) && n.length >= 4);
+      const seenSeedFiles = new Set<string>([...hits.keys()]);
+      for (const seed of seedNames.slice(0, 5)) {
+        let seedHits: SearchResult[] = [];
+        try { seedHits = cg.searchNodes(seed, { limit: 20 }); } catch { continue; }
+        for (const r of seedHits) {
+          if (isTestFile(r.node.filePath)) continue;
+          const fp = rel(r.node.filePath);
+          if (seenSeedFiles.has(fp)) continue;
+          seenSeedFiles.add(fp);
+          const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+          if (!abs) continue;
+          let content: string;
+          try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+          const fileLines = content.split('\n');
+          for (const field of fieldSyms) {
+            const re = new RegExp(`\\b${field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+            for (let i = 0; i < fileLines.length; i++) {
+              if (re.test(fileLines[i] ?? '')) addHit(fp, i + 1);
+            }
+          }
+        }
+      }
+    }
+
     if (hits.size === 0) return { section: '', fileCount: 0 };
 
     // Prefer project call/import sites over SDK .d.ts stubs.
@@ -5462,15 +6162,55 @@ export class ToolHandler {
     const projectHits = rankedFiles.filter(([, v]) => !v.stub);
     const display = projectHits.length > 0 ? projectHits : rankedFiles;
 
-    // Extract concrete API method names from snippets (telephony.call.xxx / radio.getY).
-    const methodNames = new Set<string>();
-    for (const [fp, info] of display.slice(0, 40)) {
+    // In files that import the API, also record alias.method( call sites so
+    // "which call methods" answers don't stop at import lines.
+    const aliasCallRe =
+      /\b((?:call|radio|data|sim|observer|telephony|i18n|sensor|wifi)(?:\.\w+)*)\.([A-Za-z_][\w]*)\s*\(/gi;
+    const wantLifetime =
+      queryAsFieldUsageSurvey(query)
+      && /new|delete|allocat|释放|free/i.test(query);
+    for (const [fp] of display.slice(0, 40)) {
       const abs = validatePathWithinRoot(projectRoot, fp);
       if (!abs || !existsSync(abs)) continue;
       let fileLines: string[] = [];
       try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { continue; }
-      for (const ln of info.lines.slice(0, 8)) {
+      for (let i = 0; i < fileLines.length; i++) {
+        const lineText = fileLines[i] ?? '';
+        if (aliasCallRe.test(lineText)) addHit(fp, i + 1);
+        aliasCallRe.lastIndex = 0;
+        if (wantLifetime) {
+          for (const sym of rawSymbols) {
+            if (!lineText.includes(sym)) continue;
+            if (/\b(?:new|delete|free|reset)\b/i.test(lineText) || /=\s*new\b/.test(lineText)) {
+              addHit(fp, i + 1);
+            }
+          }
+        }
+      }
+    }
+
+    // Recompute display after call-site enrichment.
+    const rankedFiles2 = [...hits.entries()].sort((a, b) => {
+      if (a[1].stub !== b[1].stub) return a[1].stub ? 1 : -1;
+      return a[0].localeCompare(b[0]);
+    });
+    const projectHits2 = rankedFiles2.filter(([, v]) => !v.stub);
+    const display2 = projectHits2.length > 0 ? projectHits2 : rankedFiles2;
+
+    // Extract concrete API method names from snippets (telephony.call.xxx / radio.getY).
+    const methodNames = new Set<string>();
+    for (const [fp, info] of display2.slice(0, 40)) {
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      if (!abs || !existsSync(abs)) continue;
+      let fileLines: string[] = [];
+      try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { continue; }
+      for (const ln of info.lines.slice(0, 12)) {
         const lineText = fileLines[ln - 1] ?? '';
+        for (const m of lineText.matchAll(
+          /\b((?:call|radio|data|sim|observer|telephony)(?:\.\w+)*)\.([A-Za-z_][\w]*)\s*\(/gi,
+        )) {
+          if (m[2] && m[2].length >= 2) methodNames.add(`${m[1]}.${m[2]}`);
+        }
         for (const sym of rawSymbols) {
           const esc = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           const re = new RegExp(
@@ -5490,8 +6230,8 @@ export class ToolHandler {
     const lines = [
       '**API usage sites**',
       '',
-      `> In-repo references to \`${rawSymbols.join('`, `')}\` (${display.length} file(s)` +
-      `${projectHits.length > 0 && projectHits.length < rankedFiles.length ? `; SDK stubs omitted` : ''}). ` +
+      `> In-repo references to \`${rawSymbols.join('`, `')}\` (${display2.length} file(s)` +
+      `${projectHits2.length > 0 && projectHits2.length < rankedFiles2.length ? `; SDK stubs omitted` : ''}). ` +
       '**ANSWER NOW** from this list (+ snippets); do not Grep the same API again.',
       '',
     ];
@@ -5502,17 +6242,44 @@ export class ToolHandler {
       lines.push('');
     }
     let shown = 0;
-    for (const [fp, info] of display) {
+    const isImportish = (s: string) => /^\s*import\b/.test(s) || /\bfrom\s+['"]@/.test(s);
+    const isLifetimeish = (s: string) =>
+      /\b(?:new|delete|free|reset)\b/i.test(s) || /=\s*new\b/.test(s);
+    for (const [fp, info] of display2) {
       if (shown >= 28) break;
-      const sortedLines = [...info.lines].sort((a, b) => a - b).slice(0, 4);
       const abs = validatePathWithinRoot(projectRoot, fp);
-      let snippet = '';
+      let fileLines: string[] = [];
       if (abs && existsSync(abs)) {
-        try {
-          const fileLines = readFileSync(abs, 'utf-8').split('\n');
-          const ln = sortedLines[0]!;
-          snippet = (fileLines[ln - 1] ?? '').trim().slice(0, 100);
-        } catch { /* */ }
+        try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { /* */ }
+      }
+      // Prefer call / new-delete lines over bare imports for the displayed snippet.
+      const rankedLines = [...info.lines].sort((a, b) => {
+        const ta = fileLines[a - 1] ?? '';
+        const tb = fileLines[b - 1] ?? '';
+        const score = (t: string) => {
+          let s = 0;
+          if (wantLifetime && isLifetimeish(t)) s += 4;
+          if (/\.\w+\s*\(/.test(t) && !isImportish(t)) s += 3;
+          if (isImportish(t)) s -= 2;
+          return s;
+        };
+        return score(tb) - score(ta) || a - b;
+      });
+      // For field new/delete, surface both sides when present (not only `new`).
+      let sortedLines = rankedLines.slice(0, 4);
+      if (wantLifetime && fileLines.length > 0) {
+        const news = rankedLines.filter((l) => /\bnew\b/i.test(fileLines[l - 1] ?? ''));
+        const dels = rankedLines.filter((l) => /\bdelete\b|\bfree\b|=\s*nullptr/i.test(fileLines[l - 1] ?? ''));
+        sortedLines = [...new Set([...news.slice(0, 2), ...dels.slice(0, 2), ...rankedLines])].slice(0, 4);
+      }
+      let snippet = '';
+      if (fileLines.length > 0) {
+        const ln = sortedLines[0]!;
+        snippet = (fileLines[ln - 1] ?? '').trim().slice(0, 100);
+        if (wantLifetime && sortedLines.length > 1) {
+          const sn2 = (fileLines[sortedLines[1]! - 1] ?? '').trim().slice(0, 80);
+          if (sn2 && sn2 !== snippet) snippet = `${snippet}` + ` | ${sn2}`;
+        }
       }
       const lineStr = sortedLines.map((l) => `L${l}`).join(', ');
       const more = info.lines.length > sortedLines.length ? ` +${info.lines.length - sortedLines.length} more` : '';
@@ -5523,11 +6290,11 @@ export class ToolHandler {
       );
       shown++;
     }
-    if (display.length > shown) lines.push(`- … and ${display.length - shown} more file(s)`);
+    if (display2.length > shown) lines.push(`- … and ${display2.length - shown} more file(s)`);
     lines.push('');
-    lines.push(`> API usage survey complete — **${display.length}** file(s). **ANSWER NOW.**`);
+    lines.push(`> API usage survey complete — **${display2.length}** file(s). **ANSWER NOW.**`);
     lines.push('');
-    return { section: lines.join('\n'), fileCount: display.length };
+    return { section: lines.join('\n'), fileCount: display2.length };
   }
 
   /**
@@ -6449,14 +7216,20 @@ export class ToolHandler {
       lines.push('');
     }
 
-    const importResult = this.buildImportSitesSection(cg, query, projectRoot);
+    const importResult = queryAsksKitInstallDeps(query)
+      ? { section: '', siteCount: 0, compactListing: false }
+      : this.buildImportSitesSection(cg, query, projectRoot);
     if (importResult.section) lines.push(importResult.section);
 
     const homonymSection = this.buildHomonymDefinitionsSection(cg, query);
     if (homonymSection) lines.push(homonymSection);
 
     const kitUsageResult =
-      shouldBuildKitModuleUsageSurvey(query) && !(importResult.compactListing && importResult.siteCount > 0)
+      shouldBuildKitModuleUsageSurvey(query)
+      && (
+        queryAsksKitInstallDeps(query)
+        || !(importResult.compactListing && importResult.siteCount > 0)
+      )
         ? this.buildKitModuleUsageSection(cg, query, projectRoot)
         : { section: '', symbolCount: 0 };
     if (kitUsageResult.section) lines.push(kitUsageResult.section);
@@ -6511,9 +7284,14 @@ export class ToolHandler {
 
     const inheritanceSection = !hasFlowPath && !multiAnchor
       ? this.buildInheritanceSurveySection(cg, query) : '';
-    const callerSection = !hasFlowPath && !multiAnchor && shouldBuildCallerInventory(query)
-      ? this.buildCallerListingSection(cg, query) : '';
+    const listedTypeMethods = extractListedTypeMethodsFromQuery(query).length > 0;
+    // Type + listed methods (BinaryGrid Set/Test/Fill) must keep caller inventory even
+    // when multi-anchor would otherwise skip it into a fat source dump.
+    const callerSection = !hasFlowPath && (!multiAnchor || listedTypeMethods) && shouldBuildCallerInventory(query)
+      ? this.buildCallerListingSection(cg, query, projectRoot) : '';
+    // Field new/delete inventories already list text sites — skip redundant member scan.
     const memberSection = !hasFlowPath && !multiAnchor && shouldBuildMemberSurvey(query)
+      && !(queryAsFieldUsageSurvey(query) && apiUsageResult.fileCount > 0)
       ? this.buildMemberSurveySection(cg, query, projectRoot) : '';
     const configSection = shouldBuildConfigSection(query)
       ? this.buildConfigFileSection(cg, query, projectRoot) : '';
@@ -6568,6 +7346,11 @@ export class ToolHandler {
       if (apiUsageResult.section && apiUsageResult.fileCount > 0) {
         return finishCompact(
           `API usage survey — **${apiUsageResult.fileCount}** file(s). **ANSWER NOW** from the list above.`,
+        );
+      }
+      if (listedTypeMethods && callerBulletCount > 0) {
+        return finishCompact(
+          `Caller inventory — **${callerBulletCount}** site(s) for listed methods. **ANSWER NOW**; do not fan out callers per method.`,
         );
       }
       if (dataSourceResult.section && dataSourceResult.edgeCount > 0) {

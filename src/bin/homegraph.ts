@@ -1621,33 +1621,26 @@ function printServeUsage(): void {
   console.error(chalk.cyan('  homegraph_status') + '    - Get index status');
 }
 
-const serveCommand = program
+// IMPORTANT: keep `mcp` as an argument (not a nested Commander subcommand).
+// Nested `serve.command('mcp')` + a parent `-p/--path` made Commander 14 drop
+ // `--path` on `serve mcp --path <repo>` — the daemon then keyed off cwd, so
+// prewarm/eval looked "timed out" while a useless daemon bound the wrong root.
+// `spawnDetachedDaemon` also invokes `serve mcp --path <root>`; that path must
+// stick. Legacy `serve --mcp` stays supported.
+program
   .command('serve', { hidden: true })
   .description('Start HomeGraph protocol servers for AI assistants')
+  .argument('[mode]', 'Run as MCP server (stdio transport)', undefined)
   .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
   .option('--mcp', 'Legacy alias for `serve mcp` (stdio MCP server)')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean }) => {
+  .action(async (mode: string | undefined, options: { path?: string; mcp?: boolean; watch?: boolean }) => {
     try {
-      if (options.mcp) {
+      if (mode === 'mcp' || options.mcp) {
         await runServeMcp(options);
       } else {
         printServeUsage();
       }
-    } catch (err) {
-      error(`Failed to start server: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-serveCommand
-  .command('mcp')
-  .description('Start as MCP server (stdio transport)')
-  .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
-  .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; watch?: boolean }) => {
-    try {
-      await runServeMcp(options);
     } catch (err) {
       error(`Failed to start server: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

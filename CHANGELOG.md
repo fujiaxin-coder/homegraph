@@ -9,6 +9,14 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- `homegraph serve mcp --path <repo>` again honors `--path`. A nested Commander subcommand had been dropping it, so the shared daemon keyed off the process cwd instead of the project — MCP prewarm looked timed out and agents attached to the wrong index.
+- Explore inventories stop **wrong-tool fallthrough** that raised tokens and hurt accuracy: declaration-site surveys no longer become include-path "API usage" dumps; return-value consumers prefer the `通过/via` member (with text call-site fallback) instead of SDK `.d.ts` bodies; circular/`*common` module-dep questions get a lean cycle survey; `Type::method` and enum `Type.MEMBER` route as named anchors. Startup instructions match these shapes.
+- Field **new/delete** lifetime questions (`m_eglCore` …) route to a field usage inventory instead of seeding unrelated `new`/`delete` methods; `lib*.so` is not treated as a member access; GLES/EGL **thread** questions take light-mechanism (EGLCore/PluginRender); Type + listed methods (Set/Test/Fill) stay on that type's caller inventory; conditional `Export` fail wiring skips `logInfo` fan-out; API usage lists prefer call-site snippets over imports.
+- Field/mutex co-use inventories **seed scan files from co-named methods** when the field has no FTS hit (avoids a 20k dump); path-module **NAPI export** surveys replace domain file floods; module **cycle** surveys require two named leaf `*common` modules (not a shared parent path); named `.d.ts` wraps get import/call inventories; assigned-flag impact and Toggle state-sync stay on compact explore.
+- Wrong-route fixes that cut token↑ / accuracy↓: kit **extra-deps** and caller+**visibility** no longer lose to light-mechanism; Type + co-named PascalCase methods (`CanPlace`/`Place` ↔ owner Type) stay compact instead of a 13k mechanism dump; constants/fields prefer explore over Grep-first; kit surveys surface `oh-package` dep lines; listed-method caller inventories include a unique-file summary; flag/UI-cluster compact budgets are leaner.
+
 
 ## [1.5.1] - 2026-08-05
 

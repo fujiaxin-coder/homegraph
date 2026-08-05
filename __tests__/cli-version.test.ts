@@ -58,8 +58,12 @@ describe('homegraph version affordances', () => {
   it('`serve mcp` and legacy `serve --mcp` are both accepted', () => {
     // TTY path prints guidance and exits 0 without hanging. Non-TTY agent
     // path is covered by mcp-initialize; here we only assert both CLIs parse.
+    // `mcp` is an argument (not a nested subcommand) so --path on
+    // `serve mcp --path <repo>` is not dropped (Commander 14 nest bug).
     const mcpHelp = run(['serve', 'mcp', '--help']);
-    expect(mcpHelp).toContain('Usage: homegraph serve mcp');
+    expect(mcpHelp).toMatch(/Usage: homegraph serve/);
+    expect(mcpHelp).toMatch(/\bmode\b|\bmcp\b/);
+    expect(mcpHelp).toContain('--path');
     const serveHelp = run(['serve', '--help']);
     expect(serveHelp).toContain('--mcp');
     expect(serveHelp).toMatch(/\bmcp\b/);

@@ -67,6 +67,11 @@ import {
   extractFieldLikeSymbolsFromQuery,
   queryAsInRepoSystemCapabilityHowto,
   queryAsReturnValueConsumerSurvey,
+  extractListedTypeMethodsFromQuery,
+  queryAsNativeRenderThreadSurvey,
+  queryAsDtsWrapSurvey,
+  queryAsAssignedFlagImpactSurvey,
+  queryAsNamedControlStateSyncSurvey,
 } from '../src/search/query-utils';
 
 describe('extractFileBasenamesFromQuery', () => {
@@ -131,6 +136,38 @@ describe('extractMemberAccessFromQuery', () => {
     expect(dotted).toContain('pointer.setPointerStyle');
     expect(dotted).toContain('.drawModifier');
     expect(dotted).toContain('locationManager.on');
+  });
+
+  it('does not treat shared-lib extensions as members', () => {
+    const accesses = extractMemberAccessFromQuery(
+      'libeffectrender.so 链接了 GLESv3 和 EGL，OpenGL上下文在哪个线程创建',
+    );
+    expect(accesses.map((a) => a.dotted)).not.toContain('libeffectrender.so');
+    expect(accesses.map((a) => a.member)).not.toContain('so');
+  });
+});
+
+describe('Type-listed method callers / native GL thread', () => {
+  it('keeps BinaryGrid Set/Test/Fill in caller symbols', () => {
+    const q = '哪些文件调用了BinaryGrid 模板类的 Set、Test 或 Fill 方法？';
+    expect(extractListedTypeMethodsFromQuery(q)).toEqual(
+      expect.arrayContaining(['Set', 'Test', 'Fill']),
+    );
+    expect(extractCallerSurveySymbols(q)).toEqual(
+      expect.arrayContaining(['BinaryGrid', 'Set', 'Test', 'Fill']),
+    );
+    expect(shouldBuildCallerInventory(q)).toBe(true);
+  });
+
+  it('routes lib*.so + GLES thread to light mechanism', () => {
+    const q = 'libeffectrender.so 链接了 GLESv3 和 EGL，OpenGL上下文在哪个线程创建？与XComponent的UI线程是否相同？';
+    expect(queryAsNativeRenderThreadSurvey(q)).toBe(true);
+    expect(shouldTryLightMechanismExplore(q)).toBe(true);
+    expect(queryAsLocalSymbolDetail(q)).toBe(false);
+    expect(shouldBuildMemberSurvey(q)).toBe(false);
+    expect(extractMechanismEntrySeeds(q)).toEqual(
+      expect.arrayContaining(['EGLCore', 'PluginRender']),
+    );
   });
 });
 
@@ -382,8 +419,51 @@ describe('queryShouldDeferToBuiltinTools', () => {
     ).toBe(true);
     expect(extractFieldLikeSymbolsFromQuery('… m_eglMutex …')).toContain('m_eglMutex');
     expect(
-      queryAsModuleExportSurvey('feature/foldeffect 模块通过 NAPI 暴露了哪些 API 接口'),
+      queryAsFieldUsageSurvey(
+        'PluginRender 里的 m_eglCore 指针，在哪些地方被 new 出来？又在哪些地方被 delete 掉？',
+      ),
     ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore(
+        'PluginRender 里的 m_eglCore 指针，在哪些地方被 new 出来？又在哪些地方被 delete 掉？',
+      ),
+    ).toBe(true);
+    expect(
+      extractLocalDetailAnchors(
+        'PluginRender 里的 m_eglCore 指针，在哪些地方被 new 出来？又在哪些地方被 delete 掉？',
+      ),
+    ).not.toContain('new');
+    expect(
+      queryAsDtsWrapSurvey(
+        'harmonyShare.d.ts 这个文件看起来对 systemShare 做了封装。在项目中什么功能、在什么地方调用了它？',
+      ),
+    ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore(
+        'harmonyShare.d.ts 这个文件看起来对 systemShare 做了封装。在项目中什么功能、在什么地方调用了它？',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsAssignedFlagImpactSurvey(
+        'OnSurfaceChangedCB sets isChangeSurface = true. How does this flag affect later render timing?',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsLocalSymbolDetail(
+        'OnSurfaceChangedCB sets isChangeSurface = true. How does this flag affect later render timing?',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsNamedControlStateSyncSurvey(
+        'HotspotToggle state is consistent across control center, settings, and status bar — which module guarantees it?',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsModuleExportSurvey('feature/foldeffect module NAPI expose which APIs'),
+    ).toBe(true);
+    expect(
+      shouldBuildDomainFileSurvey('feature/foldeffect module NAPI expose which APIs'),
+    ).toBe(false);
     expect(
       queryAsModuleDependencySurvey(
         'staticcommon/launchercommon、screenlockcommon、systemuicommon、controlcentercommon 这四个模块之间是否存在相互依赖？',
@@ -747,10 +827,38 @@ describe('P0 explore shapes', () => {
     expect(queryNeedsCoNamedUseBridge(q)).toBe(true);
     expect(queryAsLocalSymbolDetail(q)).toBe(true);
     expect(shouldTryFastInventoryExplore(q)).toBe(false);
+    expect(shouldTryLightMechanismExplore(q)).toBe(false);
     expect(queryHasFocusedNamedAnchors(q)).toBe(true);
     // Plain caller survey without co-named visibility still uses inventory.
     expect(queryNeedsCoNamedUseBridge('项目中哪里调用了SortWidgets')).toBe(false);
     expect(shouldTryFastInventoryExplore('项目中哪里调用了SortWidgets')).toBe(true);
+  });
+
+  it('routes kit extra-deps / Type×method interaction / constants away from light dumps', () => {
+    const kit =
+      '调用 ServiceCollaborationKit 需要额外安装哪些依赖？项目里怎么引用的？';
+    expect(shouldBuildKitModuleUsageSurvey(kit)).toBe(true);
+    expect(shouldTryLightMechanismExplore(kit)).toBe(false);
+    expect(shouldTryFastInventoryExplore(kit)).toBe(true);
+
+    const place = 'CanPlace、Place 是怎么和 BinaryGrid 交互的？';
+    expect(queryHasNamedMemberFocus(place)).toBe(true);
+    expect(queryAsLocalSymbolDetail(place)).toBe(true);
+    expect(shouldTryLightMechanismExplore(place)).toBe(false);
+
+    const enPlace = 'How do CanPlace and Place interact with BinaryGrid?';
+    expect(queryHasNamedMemberFocus(enPlace)).toBe(true);
+    expect(shouldTryLightMechanismExplore(enPlace)).toBe(false);
+
+    const constant =
+      'audio.AudioVolumeType.RINGTONE 在项目中哪些函数或方法中被依赖或调用？';
+    expect(queryShouldPreferExploreOverSearch(constant)).toBe(true);
+
+    const grid = 'BinaryGrid 的 Set、Test 或 Fill 在哪些文件里被调用？';
+    expect(queryAsCallerOrMethodSurvey(grid)).toBe(true);
+    expect(queryHasNamedMemberFocus(grid)).toBe(false);
+    expect(shouldTryFastInventoryExplore(grid)).toBe(true);
+    expect(shouldTryLightMechanismExplore(grid)).toBe(false);
   });
 
   it('upstream/downstream local-detail uses compact', () => {
@@ -810,6 +918,23 @@ describe('P0 explore shapes', () => {
     expect(
       queryAsModuleExportSurvey('LayoutRotatePacking C++ class NAPI expose to ArkTS'),
     ).toBe(true);
+
+    expect(
+      queryAsModuleDependencySurvey(
+        'commonconstants 被多层引用，是否存在循环依赖？构建系统如何检测？',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsConstantUsageSurvey(
+        'audio.AudioVolumeType.RINGTONE 在项目中哪些函数或方法中被依赖或调用？',
+      ),
+    ).toBe(true);
+    expect(shouldBuildApiUsageSurvey('XComponent declaration id binding')).toBe(false);
+    expect(extractMemberAccessFromQuery('PluginManager::Export 失败时还会注册吗')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ receiver: 'PluginManager', member: 'Export' }),
+      ]),
+    );
   });
 
   it('detects test-only interpretation and mechanism entry seeds', () => {
