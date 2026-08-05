@@ -158,7 +158,7 @@ function spawnDetachedDaemon(root: string): void {
     delete env[HOST_PPID_ENV];
     const child = spawn(
       process.execPath,
-      [...process.execArgv, scriptPath, 'serve', '--mcp', '--path', root],
+      [...process.execArgv, scriptPath, 'serve', 'mcp', '--path', root],
       {
         detached: true,
         stdio,

@@ -28,7 +28,7 @@ homegraph version                 # Print the installed version (also -v, --vers
 homegraph help [command]          # Show help, optionally for one command
 ```
 
-The MCP server (`homegraph serve --mcp`) is launched automatically by your agent — you don't run it by hand. See [MCP Server](/homegraph/reference/mcp-server/).
+The MCP server (`homegraph serve mcp`) is launched automatically by your agent — you don't run it by hand. See [MCP Server](/homegraph/reference/mcp-server/). Legacy `homegraph serve --mcp` is still accepted.
 
 ## init, index, and sync
 

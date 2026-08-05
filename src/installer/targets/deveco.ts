@@ -102,7 +102,7 @@ function getDevecoServerEntry(loc: Location): { type: string; command: string[];
   const pathArg = loc === 'local' ? process.cwd() : '${workspaceFolder}';
   return {
     type: 'local',
-    command: ['homegraph', 'serve', '--mcp', '--path', pathArg],
+    command: ['homegraph', 'serve', 'mcp', '--path', pathArg],
     enabled: true,
   };
 }

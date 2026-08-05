@@ -49,10 +49,20 @@ describe('homegraph version affordances', () => {
   });
 
   it('hides the internal `serve` command from --help', () => {
-    // `serve --mcp` is the stdio entry point an AI agent launches for itself,
+    // `serve mcp` is the stdio entry point an AI agent launches for itself,
     // not a human command — it must not appear in the listing. (It stays fully
     // invocable; the mcp-initialize suite covers that the agent path works.)
     expect(run(['--help'])).not.toMatch(/^\s+serve\b/m);
+  });
+
+  it('`serve mcp` and legacy `serve --mcp` are both accepted', () => {
+    // TTY path prints guidance and exits 0 without hanging. Non-TTY agent
+    // path is covered by mcp-initialize; here we only assert both CLIs parse.
+    const mcpHelp = run(['serve', 'mcp', '--help']);
+    expect(mcpHelp).toContain('Usage: homegraph serve mcp');
+    const serveHelp = run(['serve', '--help']);
+    expect(serveHelp).toContain('--mcp');
+    expect(serveHelp).toMatch(/\bmcp\b/);
   });
 
   it('a trailing `-v` is still the subcommand\'s --verbose, not the version intercept', () => {

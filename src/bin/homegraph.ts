@@ -179,7 +179,7 @@ program
 const TELEMETRY_FLUSH_COMMANDS = new Set(['init', 'uninit', 'index', 'sync', 'upgrade']);
 program.hook('preAction', (_thisCommand, actionCommand) => {
   try {
-    // The detached daemon re-invokes `serve --mcp` internally — not a user action.
+    // The detached daemon re-invokes `serve mcp` internally — not a user action.
     if (process.env.HOMEGRAPH_DAEMON_INTERNAL) return;
     const name = actionCommand.name();
     if (name === 'telemetry') return; // managing telemetry is not usage
@@ -1554,77 +1554,100 @@ program
   });
 
 /**
- * homegraph serve
+ * homegraph serve / homegraph serve mcp
+ *
+ * Preferred: `homegraph serve mcp`
+ * Legacy (still supported): `homegraph serve --mcp`
+ *
+ * Hidden from `--help`: this is the stdio entry point an AI agent launches
+ * for itself (the installer wires it into every agent's MCP config), not a
+ * command a human runs. It still works when invoked — hiding only removes it
+ * from the listing. See the interactive-TTY guard in `runServeMcp`, which
+ * explains this to anyone who runs it by hand.
  */
-program
-  // Hidden from `--help`: this is the stdio entry point an AI agent launches
-  // for itself (the installer wires `args: ['serve','--mcp']` into every
-  // agent's MCP config), not a command a human runs. It still works when
-  // invoked — hiding only removes it from the listing. See the interactive-TTY
-  // guard below, which explains this to anyone who runs it by hand.
-  .command('serve', { hidden: true })
-  .description('Start HomeGraph as an MCP server for AI assistants')
-  .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
-  .option('--mcp', 'Run as MCP server (stdio transport)')
-  .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean }) => {
-    const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
+async function runServeMcp(options: { path?: string; watch?: boolean }): Promise<void> {
+  const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
-    // Commander sets watch=false when --no-watch is passed. Route it through
-    // the same env-var chokepoint the watcher and MCP server already honor.
-    if (options.watch === false) {
-      process.env.HOMEGRAPH_NO_WATCH = '1';
-    }
+  // Commander sets watch=false when --no-watch is passed. Route it through
+  // the same env-var chokepoint the watcher and MCP server already honor.
+  if (options.watch === false) {
+    process.env.HOMEGRAPH_NO_WATCH = '1';
+  }
 
-    try {
-      if (options.mcp) {
-        // `serve --mcp` is the stdio MCP server an AI agent launches for itself,
-        // not a command to run by hand. A human in a terminal would otherwise
-        // see it hang waiting for JSON-RPC on stdin, which reads as broken. If
-        // stdin is an interactive TTY, explain instead of hanging. The agent's
-        // pipe and the detached daemon both have a non-TTY stdin, so this only
-        // ever fires for a person who typed it.
-        if (process.stdin.isTTY && !process.env.HOMEGRAPH_DAEMON_INTERNAL) {
-          console.error(chalk.bold('\nHomeGraph MCP server\n'));
-          console.error("This is the MCP server your AI agent (Claude Code, Cursor, Codex, opencode, …)");
-          console.error("starts automatically — you don't run it yourself.");
-          console.error(`\nIt's already wired up by ${chalk.cyan('homegraph install')}. To check on things:`);
-          console.error(`  ${chalk.cyan('homegraph status')}   ${chalk.dim('— is this project indexed and healthy?')}`);
-          console.error(`  ${chalk.cyan('homegraph daemon')}   ${chalk.dim('— list or stop background MCP servers')}`);
-          console.error(chalk.dim('\n(Running it directly only does something when an MCP client drives it over stdin.)'));
-          return;
-        }
-        // Start MCP server - it handles initialization lazily based on rootUri from client
-        const { MCPServer } = await import('../mcp/index');
-        const server = new MCPServer(projectPath);
-        await server.start();
-        // Server will run until terminated
-      } else {
-        // Default: show info about MCP mode.
-        // Use stderr so stdout stays clean for any piped/stdio usage.
-        console.error(chalk.bold('\nHomeGraph MCP Server\n'));
-        console.error(chalk.blue(getGlyphs().info) + ' Use --mcp flag to start the MCP server');
-        console.error('\nTo use with Claude Code, add to your MCP configuration:');
-        console.error(chalk.dim(`
+  // The stdio MCP server an AI agent launches for itself — not a command to
+  // run by hand. A human in a terminal would otherwise see it hang waiting
+  // for JSON-RPC on stdin. The agent's pipe and the detached daemon both
+  // have a non-TTY stdin, so this only ever fires for a person who typed it.
+  if (process.stdin.isTTY && !process.env.HOMEGRAPH_DAEMON_INTERNAL) {
+    console.error(chalk.bold('\nHomeGraph MCP server\n'));
+    console.error("This is the MCP server your AI agent (Claude Code, Cursor, Codex, opencode, …)");
+    console.error("starts automatically — you don't run it yourself.");
+    console.error(`\nIt's already wired up by ${chalk.cyan('homegraph install')}. To check on things:`);
+    console.error(`  ${chalk.cyan('homegraph status')}   ${chalk.dim('— is this project indexed and healthy?')}`);
+    console.error(`  ${chalk.cyan('homegraph daemon')}   ${chalk.dim('— list or stop background MCP servers')}`);
+    console.error(chalk.dim('\n(Running it directly only does something when an MCP client drives it over stdin.)'));
+    return;
+  }
+
+  const { MCPServer } = await import('../mcp/index');
+  const server = new MCPServer(projectPath);
+  await server.start();
+}
+
+function printServeUsage(): void {
+  // Use stderr so stdout stays clean for any piped/stdio usage.
+  console.error(chalk.bold('\nHomeGraph MCP Server\n'));
+  console.error(chalk.blue(getGlyphs().info) + ' Start with: ' + chalk.cyan('homegraph serve mcp'));
+  console.error(chalk.dim('  (legacy alias also works: homegraph serve --mcp)'));
+  console.error('\nTo use with Claude Code, add to your MCP configuration:');
+  console.error(chalk.dim(`
 {
   "mcpServers": {
     "homegraph": {
       "command": "homegraph",
-      "args": ["serve", "--mcp"]
+      "args": ["serve", "mcp"]
     }
   }
 }
 `));
-        console.error('Available tools:');
-        console.error(chalk.cyan('  homegraph_explore') + '   - Primary: source of the relevant symbols for any question');
-        console.error(chalk.cyan('  homegraph_search') + '    - Search for code symbols');
-        console.error(chalk.cyan('  homegraph_callers') + '   - Find callers of a symbol');
-        console.error(chalk.cyan('  homegraph_callees') + '   - Find what a symbol calls');
-        console.error(chalk.cyan('  homegraph_impact') + '    - Analyze impact of changes');
-        console.error(chalk.cyan('  homegraph_node') + '      - Get symbol details');
-        console.error(chalk.cyan('  homegraph_files') + '     - Get project file structure');
-        console.error(chalk.cyan('  homegraph_status') + '    - Get index status');
+  console.error('Available tools:');
+  console.error(chalk.cyan('  homegraph_explore') + '   - Primary: source of the relevant symbols for any question');
+  console.error(chalk.cyan('  homegraph_search') + '    - Search for code symbols');
+  console.error(chalk.cyan('  homegraph_callers') + '   - Find callers of a symbol');
+  console.error(chalk.cyan('  homegraph_callees') + '   - Find what a symbol calls');
+  console.error(chalk.cyan('  homegraph_impact') + '    - Analyze impact of changes');
+  console.error(chalk.cyan('  homegraph_node') + '      - Get symbol details');
+  console.error(chalk.cyan('  homegraph_files') + '     - Get project file structure');
+  console.error(chalk.cyan('  homegraph_status') + '    - Get index status');
+}
+
+const serveCommand = program
+  .command('serve', { hidden: true })
+  .description('Start HomeGraph protocol servers for AI assistants')
+  .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
+  .option('--mcp', 'Legacy alias for `serve mcp` (stdio MCP server)')
+  .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
+  .action(async (options: { path?: string; mcp?: boolean; watch?: boolean }) => {
+    try {
+      if (options.mcp) {
+        await runServeMcp(options);
+      } else {
+        printServeUsage();
       }
+    } catch (err) {
+      error(`Failed to start server: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+serveCommand
+  .command('mcp')
+  .description('Start as MCP server (stdio transport)')
+  .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
+  .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
+  .action(async (options: { path?: string; watch?: boolean }) => {
+    try {
+      await runServeMcp(options);
     } catch (err) {
       error(`Failed to start server: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

@@ -353,7 +353,7 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(result.files.some((f) => f.path === file)).toBe(true);
     const cfg = parseJsonc(fs.readFileSync(file, 'utf-8'));
     expect(cfg.mcp.homegraph.command).toEqual([
-      'homegraph', 'serve', '--mcp', '--path', '${workspaceFolder}',
+      'homegraph', 'serve', 'mcp', '--path', '${workspaceFolder}',
     ]);
   });
 
@@ -377,7 +377,7 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(result.files.some((f) => f.path === file)).toBe(true);
     const cfg = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(cfg.mcpServers.homegraph.args).toEqual([
-      'serve', '--mcp', '--path', '${workspaceFolder}',
+      'serve', 'mcp', '--path', '${workspaceFolder}',
     ]);
   });
 
@@ -407,7 +407,7 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(fs.readFileSync(geminiMd, 'utf-8')).toContain('homegraph explore');
 
     const cfg = JSON.parse(fs.readFileSync(settings, 'utf-8'));
-    expect(cfg.mcpServers.homegraph).toEqual({ type: 'stdio', command: 'homegraph', args: ['serve', '--mcp'] });
+    expect(cfg.mcpServers.homegraph).toEqual({ type: 'stdio', command: 'homegraph', args: ['serve', 'mcp'] });
   });
 
   it('gemini: install preserves pre-existing settings (security.auth survives)', () => {
@@ -474,7 +474,7 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(fs.existsSync(steering)).toBe(false);
 
     const cfg = JSON.parse(fs.readFileSync(mcp, 'utf-8'));
-    expect(cfg.mcpServers.homegraph).toEqual({ type: 'stdio', command: 'homegraph', args: ['serve', '--mcp'] });
+    expect(cfg.mcpServers.homegraph).toEqual({ type: 'stdio', command: 'homegraph', args: ['serve', 'mcp'] });
   });
 
   it('kiro: install deletes a leftover steering homegraph.md (self-heal) (#529)', () => {
@@ -610,7 +610,7 @@ describe('Installer targets — partial-state idempotency', () => {
     ));
     expect(cfg.mcpServers.homegraph.type).toBeUndefined();
     expect(cfg.mcpServers.homegraph.command).toBeDefined();
-    expect(cfg.mcpServers.homegraph.args).toEqual(['serve', '--mcp']);
+    expect(cfg.mcpServers.homegraph.args).toEqual(['serve', 'mcp']);
   });
 
   it('antigravity: install migrates a legacy homegraph entry to the unified path when marker appears', () => {
@@ -622,7 +622,7 @@ describe('Installer targets — partial-state idempotency', () => {
     const legacyFile = path.join(tmpHome, '.gemini', 'antigravity', 'mcp_config.json');
     fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
     fs.writeFileSync(legacyFile, JSON.stringify({
-      mcpServers: { homegraph: { command: 'homegraph', args: ['serve', '--mcp'] } },
+      mcpServers: { homegraph: { command: 'homegraph', args: ['serve', 'mcp'] } },
     }, null, 2) + '\n');
     fs.mkdirSync(path.join(tmpHome, '.gemini', 'config'), { recursive: true });
     fs.writeFileSync(path.join(tmpHome, '.gemini', 'config', '.migrated'), '');
@@ -701,10 +701,10 @@ describe('Installer targets — partial-state idempotency', () => {
     fs.mkdirSync(path.dirname(legacy), { recursive: true });
     fs.mkdirSync(path.dirname(unified), { recursive: true });
     fs.writeFileSync(legacy, JSON.stringify({
-      mcpServers: { homegraph: { command: 'homegraph', args: ['serve', '--mcp'] } },
+      mcpServers: { homegraph: { command: 'homegraph', args: ['serve', 'mcp'] } },
     }, null, 2) + '\n');
     fs.writeFileSync(unified, JSON.stringify({
-      mcpServers: { homegraph: { command: 'homegraph', args: ['serve', '--mcp'] } },
+      mcpServers: { homegraph: { command: 'homegraph', args: ['serve', 'mcp'] } },
     }, null, 2) + '\n');
     fs.writeFileSync(path.join(path.dirname(unified), '.migrated'), '');
 
@@ -912,8 +912,8 @@ describe('Installer targets — partial-state idempotency', () => {
     const original = fs.readFileSync(tomlPath, 'utf-8');
     // User edits the block to add a custom key.
     const edited = original.replace(
-      'args = ["serve", "--mcp"]',
-      'args = ["serve", "--mcp"]\nenabled = true',
+      'args = ["serve", "mcp"]',
+      'args = ["serve", "mcp"]\nenabled = true',
     );
     fs.writeFileSync(tomlPath, edited);
     // Re-install: our serializer doesn't know `enabled = true`, so
@@ -977,7 +977,7 @@ describe('Installer targets — partial-state idempotency', () => {
     const legacy = path.join(tmpCwd, '.claude.json');
     fs.writeFileSync(
       legacy,
-      JSON.stringify({ mcpServers: { homegraph: { type: 'stdio', command: 'homegraph', args: ['serve', '--mcp'] } } }, null, 2),
+      JSON.stringify({ mcpServers: { homegraph: { type: 'stdio', command: 'homegraph', args: ['serve', 'mcp'] } } }, null, 2),
     );
 
     claude.install('local', { autoAllow: false });
@@ -996,7 +996,7 @@ describe('Installer targets — partial-state idempotency', () => {
       legacy,
       JSON.stringify({
         mcpServers: {
-          homegraph: { type: 'stdio', command: 'homegraph', args: ['serve', '--mcp'] },
+          homegraph: { type: 'stdio', command: 'homegraph', args: ['serve', 'mcp'] },
           other: { command: 'x' },
         },
         somethingElse: true,
@@ -1259,11 +1259,11 @@ describe('Installer targets — TOML serializer (Codex backbone)', () => {
   it('builds a [mcp_servers.homegraph] block with command + args', () => {
     const block = buildTomlTable('mcp_servers.homegraph', {
       command: 'homegraph',
-      args: ['serve', '--mcp'],
+      args: ['serve', 'mcp'],
     });
     expect(block).toContain('[mcp_servers.homegraph]');
     expect(block).toContain('command = "homegraph"');
-    expect(block).toContain('args = ["serve", "--mcp"]');
+    expect(block).toContain('args = ["serve", "mcp"]');
   });
 
   it('upsert inserts into empty content', () => {
@@ -1296,7 +1296,7 @@ describe('Installer targets — TOML serializer (Codex backbone)', () => {
     ].join('\n');
     const newBlock = buildTomlTable('mcp_servers.homegraph', {
       command: 'homegraph',
-      args: ['serve', '--mcp'],
+      args: ['serve', 'mcp'],
     });
     const { content, action } = upsertTomlTable(existing, 'mcp_servers.homegraph', newBlock);
     expect(action).toBe('replaced');
@@ -1699,7 +1699,7 @@ describe('Installer targets — opencode XDG config path (#535)', () => {
       '  // my servers',
       '  "$schema": "https://opencode.ai/config.json",',
       '  "mcp": {',
-      '    "homegraph": { "type": "local", "command": ["homegraph", "serve", "--mcp"], "enabled": true },',
+      '    "homegraph": { "type": "local", "command": ["homegraph", "serve", "mcp"], "enabled": true },',
       '    "other": { "type": "local", "command": ["other"], "enabled": true }',
       '  }',
       '}',
@@ -1731,7 +1731,7 @@ describe('Installer targets — opencode XDG config path (#535)', () => {
     // the only entry that exists is the stale %APPDATA% one.
     fs.mkdirSync(legacyDir(), { recursive: true });
     fs.writeFileSync(path.join(legacyDir(), 'opencode.json'),
-      '{\n  "mcp": {\n    "homegraph": { "type": "local", "command": ["homegraph", "serve", "--mcp"], "enabled": true }\n  }\n}\n');
+      '{\n  "mcp": {\n    "homegraph": { "type": "local", "command": ["homegraph", "serve", "mcp"], "enabled": true }\n  }\n}\n');
 
     const opencode = getTarget('opencode')!;
     const result = opencode.uninstall('global');
@@ -1743,7 +1743,7 @@ describe('Installer targets — opencode XDG config path (#535)', () => {
   it('install after install sweeps only once — second run reports no legacy changes', () => {
     fs.mkdirSync(legacyDir(), { recursive: true });
     fs.writeFileSync(path.join(legacyDir(), 'opencode.json'),
-      '{\n  "mcp": {\n    "homegraph": { "type": "local", "command": ["homegraph", "serve", "--mcp"], "enabled": true }\n  }\n}\n');
+      '{\n  "mcp": {\n    "homegraph": { "type": "local", "command": ["homegraph", "serve", "mcp"], "enabled": true }\n  }\n}\n');
 
     const opencode = getTarget('opencode')!;
     const first = opencode.install('global', { autoAllow: true });
@@ -1831,7 +1831,7 @@ describe('Installer targets — deveco XDG config path', () => {
       '  // my servers',
       '  "$schema": "https://opencode.ai/config.json",',
       '  "mcp": {',
-      '    "homegraph": { "type": "local", "command": ["homegraph", "serve", "--mcp", "--path", "${workspaceFolder}"], "enabled": true },',
+      '    "homegraph": { "type": "local", "command": ["homegraph", "serve", "mcp", "--path", "${workspaceFolder}"], "enabled": true },',
       '    "other": { "type": "local", "command": ["other"], "enabled": true }',
       '  }',
       '}',
@@ -1856,7 +1856,7 @@ describe('Installer targets — deveco XDG config path', () => {
   it('uninstall sweeps the legacy %APPDATA% entry too', () => {
     fs.mkdirSync(legacyDir(), { recursive: true });
     fs.writeFileSync(path.join(legacyDir(), 'deveco.json'),
-      '{\n  "mcp": {\n    "homegraph": { "type": "local", "command": ["homegraph", "serve", "--mcp", "--path", "${workspaceFolder}"], "enabled": true }\n  }\n}\n');
+      '{\n  "mcp": {\n    "homegraph": { "type": "local", "command": ["homegraph", "serve", "mcp", "--path", "${workspaceFolder}"], "enabled": true }\n  }\n}\n');
 
     const deveco = getTarget('deveco')!;
     const result = deveco.uninstall('global');

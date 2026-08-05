@@ -1310,7 +1310,7 @@ export class ToolHandler {
           'explicitly:\n' +
           '  • Pass projectPath to the tool call, e.g. projectPath: "/absolute/path/to/your/project" ' +
           '(any project that has a .homegraph/ — including a sub-project of a monorepo)\n' +
-          '  • Or add --path to the server\'s MCP config args: ["serve", "--mcp", "--path", "/absolute/path/to/your/project"]\n' +
+          '  • Or add --path to the server\'s MCP config args: ["serve", "mcp", "--path", "/absolute/path/to/your/project"]\n' +
           'If a project simply has no index, use your built-in tools (Read/Grep/Glob) for THAT ' +
           "project (the user can run 'homegraph init' there to enable it) — you can still query " +
           'other indexed projects by projectPath in the same session.'

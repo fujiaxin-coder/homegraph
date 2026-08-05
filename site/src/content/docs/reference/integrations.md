@@ -34,7 +34,7 @@ Add the MCP server to `~/.claude.json`:
     "homegraph": {
       "type": "stdio",
       "command": "homegraph",
-      "args": ["serve", "--mcp"]
+      "args": ["serve", "mcp"]
     }
   }
 }

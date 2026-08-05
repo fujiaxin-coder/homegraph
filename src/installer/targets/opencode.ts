@@ -118,7 +118,7 @@ function parseConfig(text: string): Record<string, any> {
 function getOpencodeServerEntry(): { type: string; command: string[]; enabled: boolean } {
   return {
     type: 'local',
-    command: ['homegraph', 'serve', '--mcp'],
+    command: ['homegraph', 'serve', 'mcp'],
     enabled: true,
   };
 }
