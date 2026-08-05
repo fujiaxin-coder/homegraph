@@ -24,7 +24,7 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE, queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey } from '../search/query-utils';
 
 import {
   existsSync,
@@ -3579,6 +3579,10 @@ export class ToolHandler {
       || queryAsInheritanceSurvey(query)
       || queryAsDataSourceSurvey(query)
       || shouldBuildApiUsageSurvey(query)
+      || queryAsInRepoSystemCapabilityHowto(query)
+      || queryAsReturnValueConsumerSurvey(query)
+      || queryAsDeclarationSiteSurvey(query)
+      || queryAsModuleExportSurvey(query)
     )
       ? { section: '', siteCount: 0, compactListing: false }
       : this.buildImportSitesSection(cg, query, projectRoot);
@@ -3593,11 +3597,22 @@ export class ToolHandler {
     if (kitUsageResult.section) lines.push(kitUsageResult.section);
 
     const domainFileResult = shouldBuildDomainFileSurvey(query) && !queryAsDataSourceSurvey(query)
+      && !queryAsInRepoSystemCapabilityHowto(query)
       ? this.buildDomainFileSurveySection(cg, query)
       : { section: '', fileCount: 0 };
     if (domainFileResult.section) lines.push(domainFileResult.section);
 
-    const apiUsageResult = shouldBuildApiUsageSurvey(query)
+    const systemCapResult = queryAsInRepoSystemCapabilityHowto(query)
+      ? this.buildSystemCapabilityHowtoSection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (systemCapResult.section) lines.push(systemCapResult.section);
+
+    const declarationResult = queryAsDeclarationSiteSurvey(query)
+      ? this.buildDeclarationSiteSurveySection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (declarationResult.section) lines.push(declarationResult.section);
+
+    const apiUsageResult = shouldBuildApiUsageSurvey(query) && !queryAsDeclarationSiteSurvey(query)
       ? this.buildApiUsageSection(cg, query, projectRoot)
       : { section: '', fileCount: 0 };
     if (apiUsageResult.section) lines.push(apiUsageResult.section);
@@ -3616,7 +3631,10 @@ export class ToolHandler {
     const multiAnchor = queryNamesMultipleExploreAnchors(query);
     // Type / caller surveys: skip expensive named-symbol flow synthesize —
     // it wanders unrelated dynamic edges and burns tokens.
-    const skipFlow = typeSurface || queryAsCallerOrMethodSurvey(query);
+    const skipFlow = typeSurface || queryAsCallerOrMethodSurvey(query)
+      || queryAsDeclarationSiteSurvey(query)
+      || queryAsInRepoSystemCapabilityHowto(query)
+      || queryAsReturnValueConsumerSurvey(query);
     const flow = skipFlow
       ? { pathNodeIds: new Set<string>(), text: '' }
       : this.buildFlowFromNamedSymbols(cg, query);
@@ -3653,11 +3671,22 @@ export class ToolHandler {
 
     const hasAnySection = importResult.section || kitUsageResult.section || domainFileResult.section
       || apiUsageResult.section || dataSourceResult.section || hoverResult.section || inheritanceSection
-      || callerSection || memberSection || configSection;
+      || callerSection || memberSection || configSection
+      || systemCapResult.section || declarationResult.section;
     if (!hasAnySection) return null;
 
     // Data-source / API usage inventories are complete without source dumps —
     // stop here so agents do not also get a fat import list + follow-up Read.
+    if (systemCapResult.hitCount > 0) {
+      return finishCompact(
+        `System-capability howto — **${systemCapResult.hitCount}** in-repo site(s). **ANSWER NOW** from \`@ohos\`/\`System\` call sites above.`,
+      );
+    }
+    if (declarationResult.hitCount > 0) {
+      return finishCompact(
+        `Declaration-site survey — **${declarationResult.hitCount}** site(s). **ANSWER NOW** from ids + bindings above; do not Grep the same Type.`,
+      );
+    }
     if (dataSourceResult.edgeCount > 0 && !apiUsageResult.section) {
       return finishCompact(
         `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s). **ANSWER NOW** from system \`@ohos\`/\`@kit\` imports first.`,
@@ -3666,6 +3695,11 @@ export class ToolHandler {
     if (apiUsageResult.fileCount > 0 && !dataSourceResult.section) {
       return finishCompact(
         `API usage survey — **${apiUsageResult.fileCount}** file(s). **ANSWER NOW** from the list above.`,
+      );
+    }
+    if (queryAsReturnValueConsumerSurvey(query) && callerBulletCount > 0) {
+      return finishCompact(
+        `Return-value consumers — **${callerBulletCount}** caller site(s). **ANSWER NOW** from the caller inventory; do not Grep the same member.`,
       );
     }
 
@@ -4130,13 +4164,36 @@ export class ToolHandler {
         memberFocus
         && isMemberLikeIdentifier(seed)
         && typeNameSet.size > 0;
+      // Prefer in-repo implementations over SDK `.d.ts` / @ohos API stubs when both exist.
+      const projectFirst = [...candidates].sort((a, b) => {
+        const score = (n: Node) => {
+          let s = 0;
+          if (isOhosApiFilePath(n.filePath) || /\.d\.ts$/i.test(n.filePath)) s -= 50;
+          if (isTestFile(n.filePath)) s -= 20;
+          if (n.kind === 'class' || n.kind === 'struct' || n.kind === 'component') s += 5;
+          return s;
+        };
+        return score(b) - score(a);
+      });
       const filtered = preferOwned
         ? (() => {
-            const owned = candidates.filter(ownedByNamedType);
-            return owned.length > 0 ? owned : candidates;
+            const owned = projectFirst.filter(ownedByNamedType);
+            return owned.length > 0 ? owned : projectFirst;
           })()
-        : candidates;
+        : projectFirst;
       for (const n of filtered) {
+        // Skip SDK stubs when a project definition of the same name exists.
+        if (
+          (isOhosApiFilePath(n.filePath) || /\.d\.ts$/i.test(n.filePath))
+          && filtered.some(
+            (o) =>
+              o.name === n.name
+              && !isOhosApiFilePath(o.filePath)
+              && !/\.d\.ts$/i.test(o.filePath),
+          )
+        ) {
+          continue;
+        }
         addNode(n);
         // Page/Component surface digests need build/aboutToAppear as their own
         // nodes — otherwise we only have the outer struct and dump the whole body.
@@ -5164,6 +5221,163 @@ export class ToolHandler {
   /**
    * API call-site survey — where a named API/symbol (statfs, napi_*) appears in repo source.
    */
+  /**
+   * In-repo how-to for system settings/capabilities (language/locale/…).
+   * Lists concrete `@ohos.i18n` / `getSystemLanguage` call sites — not every
+   * file that mentions the word "language".
+   */
+  private buildSystemCapabilityHowtoSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const searchTerms = [
+      'getSystemLanguage',
+      'getSystemRegion',
+      'System.getSystemLanguage',
+      '@ohos.i18n',
+      'i18n.System',
+    ];
+    // Topic tokens from the question (language/locale) only as secondary filters.
+    if (/\blanguage\b|语言/i.test(query)) searchTerms.push('getSystemLanguage');
+    if (/\blocale\b|地区/i.test(query)) searchTerms.push('getSystemRegion');
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const rows: string[] = [];
+    const seen = new Set<string>();
+
+    for (const term of searchTerms) {
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(term.replace(/^@/, ''), { limit: 35 });
+      } catch { continue; }
+      for (const r of hits) {
+        if (isTestFile(r.node.filePath) || isOhosApiFilePath(r.node.filePath)) continue;
+        if (/\.d\.ts$/i.test(r.node.filePath)) continue;
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs || !existsSync(abs)) continue;
+        let content: string;
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        const re = new RegExp(
+          term.startsWith('@')
+            ? term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            : `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+        );
+        for (let i = 0; i < fileLines.length; i++) {
+          const lineText = fileLines[i] ?? '';
+          if (!re.test(lineText)) continue;
+          // Prefer real get/import sites over comments.
+          if (/getSystemLanguage|getSystemRegion|@ohos\.i18n|i18n\.System/i.test(lineText)
+            || /import\s+.*i18n/i.test(lineText)) {
+            const key = `${r.node.filePath}:${i + 1}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            rows.push(`- \`${rel(r.node.filePath)}:${i + 1}\`  \`${lineText.trim().slice(0, 120)}\``);
+            if (rows.length >= 16) break;
+          }
+        }
+        if (rows.length >= 16) break;
+      }
+      if (rows.length >= 16) break;
+    }
+
+    if (rows.length === 0) {
+      return {
+        section: [
+          '**System capability howto (in-repo)**',
+          '',
+          'No `getSystemLanguage` / `@ohos.i18n` call sites indexed. **ANSWER NOW** from SDK docs if the project does not wrap this API.',
+          '',
+        ].join('\n'),
+        hitCount: 0,
+      };
+    }
+
+    return {
+      section: [
+        '**System capability howto (in-repo)**',
+        '',
+        '> Concrete call/import sites for system language/locale. **ANSWER NOW** — do not Grep `language` broadly.',
+        '',
+        ...rows,
+        '',
+      ].join('\n'),
+      hitCount: rows.length,
+    };
+  }
+
+  /**
+   * Declaration / id / native-binding sites for a named UI/native Type (XComponent…).
+   */
+  private buildDeclarationSiteSurveySection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const types = extractTypeNamesFromQuery(query)
+      .filter((t) => !isFrameworkUiDecoratorName(t))
+      .slice(0, 3);
+    if (types.length === 0) return { section: '', hitCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const rows: string[] = [];
+    const seen = new Set<string>();
+
+    for (const typeName of types) {
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(typeName, { limit: 40 });
+      } catch { continue; }
+      for (const r of hits) {
+        if (isTestFile(r.node.filePath)) continue;
+        if (isOhosApiFilePath(r.node.filePath) && /\.d\.ts$/i.test(r.node.filePath)) continue;
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs || !existsSync(abs)) continue;
+        let content: string;
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        const typeRe = new RegExp(`\\b${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        for (let i = 0; i < fileLines.length; i++) {
+          const lineText = fileLines[i] ?? '';
+          if (!typeRe.test(lineText)) continue;
+          // Prefer construction / JSX / register / id= / native bind sites.
+          if (
+            !new RegExp(`${typeName}\\s*\\(|<${typeName}\\b|id\\s*[:=]|OH_Native|RegisterCallback|Export\\s*\\(|napi_`, 'i')
+              .test(lineText)
+            && !/id\s*[:=]/.test(fileLines[i + 1] ?? '')
+          ) {
+            continue;
+          }
+          const key = `${r.node.filePath}:${i + 1}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const clip = [lineText, fileLines[i + 1] ?? '', fileLines[i + 2] ?? '']
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .join(' / ')
+            .slice(0, 160);
+          rows.push(`- \`${typeName}\` — \`${rel(r.node.filePath)}:${i + 1}\`  \`${clip}\``);
+          if (rows.length >= 20) break;
+        }
+        if (rows.length >= 20) break;
+      }
+    }
+
+    if (rows.length === 0) return { section: '', hitCount: 0 };
+    return {
+      section: [
+        '**Declaration / id / native-binding survey**',
+        '',
+        '> Construction sites with nearby `id` / native register cues. **ANSWER NOW** — do not Grep the same Type again.',
+        '',
+        ...rows,
+        '',
+      ].join('\n'),
+      hitCount: rows.length,
+    };
+  }
+
   private buildApiUsageSection(
     cg: HomeGraph,
     query: string,
@@ -5248,6 +5462,31 @@ export class ToolHandler {
     const projectHits = rankedFiles.filter(([, v]) => !v.stub);
     const display = projectHits.length > 0 ? projectHits : rankedFiles;
 
+    // Extract concrete API method names from snippets (telephony.call.xxx / radio.getY).
+    const methodNames = new Set<string>();
+    for (const [fp, info] of display.slice(0, 40)) {
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      if (!abs || !existsSync(abs)) continue;
+      let fileLines: string[] = [];
+      try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { continue; }
+      for (const ln of info.lines.slice(0, 8)) {
+        const lineText = fileLines[ln - 1] ?? '';
+        for (const sym of rawSymbols) {
+          const esc = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const re = new RegExp(
+            `(?:@ohos\\.)?${esc}(?:\\.[A-Za-z_][\\w]*)*\\.([A-Za-z_][\\w]*)\\s*\\(`,
+            'g',
+          );
+          for (const m of lineText.matchAll(re)) {
+            if (m[1] && m[1].length >= 2) methodNames.add(`${sym}.${m[1]}`);
+          }
+          // import X from '@ohos.telephony.call' → module surface
+          const imp = lineText.match(new RegExp(`from\\s+['"]@ohos\\.${esc}(?:\\.(\\w+))?['"]`, 'i'));
+          if (imp) methodNames.add(imp[1] ? `@ohos.${sym.toLowerCase()}.${imp[1]}` : `@ohos.${sym.toLowerCase()}`);
+        }
+      }
+    }
+
     const lines = [
       '**API usage sites**',
       '',
@@ -5256,6 +5495,12 @@ export class ToolHandler {
       '**ANSWER NOW** from this list (+ snippets); do not Grep the same API again.',
       '',
     ];
+    if (methodNames.size > 0) {
+      lines.push('**Called / imported API surfaces**');
+      for (const m of [...methodNames].sort().slice(0, 24)) lines.push(`- \`${m}\``);
+      if (methodNames.size > 24) lines.push(`- … and ${methodNames.size - 24} more`);
+      lines.push('');
+    }
     let shown = 0;
     for (const [fp, info] of display) {
       if (shown >= 28) break;

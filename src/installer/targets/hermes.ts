@@ -255,7 +255,7 @@ function renderHomeGraphMcpChild(): string[] {
     '    command: homegraph',
     '    args:',
     '      - serve',
-    '      - --mcp',
+    '      - mcp',
     '    timeout: 120',
     '    connect_timeout: 60',
     '    enabled: true',

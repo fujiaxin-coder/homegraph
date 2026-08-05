@@ -65,6 +65,8 @@ import {
   queryAsModuleDependencySurvey,
   queryAsTypeLifecycleSurvey,
   extractFieldLikeSymbolsFromQuery,
+  queryAsInRepoSystemCapabilityHowto,
+  queryAsReturnValueConsumerSurvey,
 } from '../src/search/query-utils';
 
 describe('extractFileBasenamesFromQuery', () => {
@@ -774,6 +776,40 @@ describe('P0 explore shapes', () => {
     expect(extractLocalDetailAnchors(en)).not.toContain('usages');
     expect(queryAsLocalSymbolDetail(en)).toBe(false);
     expect(shouldTryFastInventoryExplore(en)).toBe(true);
+    // Bag noise must not dilute Telephony into call/radio false positives.
+    expect(extractApiUsageTokens('Telephony 调用方法 usage calls radio call sim')).toEqual([
+      'Telephony',
+    ]);
+  });
+
+  it('routes system-capability howto and declaration / return-consumer shapes', () => {
+    expect(queryAsInRepoSystemCapabilityHowto('如何获取系统当前设置的语言')).toBe(true);
+    expect(shouldTryLightMechanismExplore('如何获取系统当前设置的语言')).toBe(false);
+    expect(shouldTryFastInventoryExplore('获取系统当前设置语言 language locale i18n')).toBe(true);
+
+    expect(
+      queryAsDeclarationSiteSurvey(
+        'XComponent 在哪些文件中被声明，id 分别是什么，各自绑定到哪个 C++ 渲染器？',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsDeclarationSiteSurvey('XComponent declaration id native render C++ renderer binding'),
+    ).toBe(true);
+    expect(shouldTryFastInventoryExplore('XComponent declaration id native render binding')).toBe(
+      true,
+    );
+
+    const ret =
+      'remoteDevice.createRemoteDevice getConnectionState 返回结果被项目中哪些其他函数使用';
+    expect(queryAsReturnValueConsumerSurvey(ret)).toBe(true);
+    expect(shouldBuildCallerInventory(ret)).toBe(true);
+    expect(extractCallerSurveySymbols(ret)).toEqual(
+      expect.arrayContaining(['getConnectionState']),
+    );
+
+    expect(
+      queryAsModuleExportSurvey('LayoutRotatePacking C++ class NAPI expose to ArkTS'),
+    ).toBe(true);
   });
 
   it('detects test-only interpretation and mechanism entry seeds', () => {

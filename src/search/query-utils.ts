@@ -667,8 +667,49 @@ export function extractFieldLikeSymbolsFromQuery(query: string): string[] {
 export function queryAsDeclarationSiteSurvey(query: string): boolean {
   const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
   if (types.length < 1 || types.length > 3) return false;
-  return /在哪些文件|哪些文件.*(?:声明|定义|出现)|被声明|声明了|id\s*分别|各自绑定|绑定到|which\s+files?.{0,80}(?:declar|defin|appear)|where\s+(?:is|are).{0,40}declar/i.test(
-    query,
+  return (
+    /在哪些文件|哪些文件.*(?:声明|定义|出现)|被声明|声明了|id\s*分别|各自绑定|绑定到|which\s+files?.{0,80}(?:declar|defin|appear)|where\s+(?:is|are).{0,40}declar/i.test(
+      query,
+    )
+    // Agent English rewrites: "XComponent declaration id native render binding"
+    || /\bdeclarations?\b/i.test(query)
+    || /\bdeclared\b/i.test(query)
+    || (/\bids?\b/i.test(query) && /\b(?:bind|binding|native|renderer|xcomponent)\b/i.test(query))
+  );
+}
+
+/**
+ * How-to get a system setting/capability *as used in this repo* (language/locale/…).
+ * Must NOT become a light-mechanism dump of every `language` import.
+ */
+export function queryAsInRepoSystemCapabilityHowto(query: string): boolean {
+  if (extractTypeNamesFromQuery(query).some((t) => /Manager|Service|Controller/i.test(t))) {
+    // Named Manager data-source / lifecycle owns those questions.
+    if (queryAsDataSourceSurvey(query) || queryAsTypeLifecycleSurvey(query)) return false;
+  }
+  return (
+    /如何获取系统|怎样获取系统|怎么获取系统|获取系统当前|系统当前设置|系统.*语言|当前设置的语言/i.test(query)
+    || /how\s+to\s+get\s+(?:the\s+)?system\s+(?:language|locale|setting)/i.test(query)
+    || (
+      /\b(?:language|locale|i18n)\b/i.test(query)
+      && /(?:获取|当前设置|get\s+system|system\s+(?:language|locale))/i.test(query)
+    )
+  );
+}
+
+/**
+ * "Who uses the return value of Type.member / fn" — callers of the member, not a
+ * create→get flow dump or an import flood on leftover words like `state`.
+ */
+export function queryAsReturnValueConsumerSurvey(query: string): boolean {
+  const hasMember =
+    extractMemberAccessFromQuery(query).length > 0
+    || extractLocalDetailAnchors(query).some((n) => isMemberLikeIdentifier(n));
+  if (!hasMember && extractTypeNamesFromQuery(query).length === 0) return false;
+  return (
+    /返回结果被|返回值.*(?:被|由).*(?:使用|调用)|其返回.*使用|返回结果.*哪些/i.test(query)
+    || /who\s+uses\s+the\s+(?:return|result)|return(?:ed)?\s+(?:value|result).{0,80}(?:used|consum)/i.test(query)
+    || /哪些其他函数使用|被项目中哪些.{0,20}函数使用|which\s+(?:other\s+)?functions?\s+use/i.test(query)
   );
 }
 
@@ -689,12 +730,17 @@ export function queryAsFieldUsageSurvey(query: string): boolean {
   );
 }
 
-/** Path module + NAPI / exported API surface. */
+/** Path module + NAPI / exported API surface (or named Type + NAPI/expose). */
 export function queryAsModuleExportSurvey(query: string): boolean {
-  if (extractPathSegmentsFromQuery(query).length === 0) return false;
-  return /NAPI|napi|暴露了哪些|暴露哪些|哪些\s*API|API\s*接口|exports?\s+(?:which|what)|which\s+(?:APIs?|exports?)/i.test(
-    query,
-  );
+  const napi =
+    /NAPI|napi|暴露了哪些|暴露哪些|暴露给|expose(?:d|s)?\s+to|napi_module_register|哪些\s*API|API\s*接口|exports?\s+(?:which|what)|which\s+(?:APIs?|exports?)/i.test(
+      query,
+    );
+  if (!napi) return false;
+  if (extractPathSegmentsFromQuery(query).length > 0) return true;
+  // "LayoutRotatePacking … NAPI expose to ArkTS" — no path segment required.
+  if (extractTypeNamesFromQuery(query).length > 0) return true;
+  return false;
 }
 
 /** Multi-module path interdependence (A/B/C… mutual deps). */
@@ -715,7 +761,7 @@ export function queryAsTypeLifecycleSurvey(query: string): boolean {
   if (queryAsCrossModuleFlowSurvey(query)) return false;
   const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
   if (types.length !== 1) return false;
-  return /状态机|状态变化|状态来源|状态转换|状态.*回调|回调.*状态|foreground|background|lifecycle|state\s*machine|哪些状态/i.test(
+  return /状态机|状态变化|状态来源|状态转换|状态.*回调|回调.*状态|foreground|background|lifecycle|state\s*machine|哪些状态|status\s+source|state\s+source|state\s+change|how\s+(?:are|is)\s+.+states?\s+(?:unified|distinguished)/i.test(
     query,
   );
 }
@@ -736,7 +782,19 @@ export function extractApiUsageTokens(query: string): string[] {
   for (const m of query.matchAll(/\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g)) {
     if (m[1] && m[1].length >= 6) tokens.add(m[1]);
   }
-  return [...tokens];
+  // When a PascalCase SDK/module token is present (Telephony, DrawContext), drop
+  // short lowercase bag noise agents add (`call`/`radio`/`usage`) — those flood
+  // false-positive files and tank precision.
+  const primary = [...tokens].filter(
+    (t) =>
+      (/^[A-Z]/.test(t) && t.length >= 4)
+      || t.startsWith('@')
+      || /^(?:statfs|napi_\w+)$/i.test(t)
+      || extractFieldLikeSymbolsFromQuery(query).includes(t)
+      || extractMemberAccessFromQuery(query).some((m) => m.member === t || m.dotted === t),
+  );
+  if (primary.length > 0) return primary.slice(0, 8);
+  return [...tokens].filter((t) => t.length >= 4 && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase())).slice(0, 8);
 }
 
 export function shouldBuildApiUsageSurvey(query: string): boolean {
@@ -806,6 +864,8 @@ export function shouldBuildCallerInventory(query: string): boolean {
   ) {
     return false;
   }
+  // Return-value consumers: list callers of the named member/fn.
+  if (queryAsReturnValueConsumerSurvey(query)) return true;
   // Require real caller/method intent — bare PascalCase alone is NOT enough
   // (that emptied inventory → blocked compact → 15K full explore on callbacks).
   return queryAsCallerOrMethodSurvey(query);
@@ -814,9 +874,20 @@ export function shouldBuildCallerInventory(query: string): boolean {
 /** Symbols to list callers for — types, free functions (SortWidgets), snake_case APIs. */
 export function extractCallerSurveySymbols(query: string): string[] {
   const names = new Set<string>(extractTypeNamesFromQuery(query));
-  if (!queryAsCallerOrMethodSurvey(query)) return [...names];
+  const wantMembers =
+    queryAsCallerOrMethodSurvey(query) || queryAsReturnValueConsumerSurvey(query);
+  if (!wantMembers) return [...names].filter((n) => n.length >= 3);
   for (const d of extractDependencySymbolsFromQuery(query)) {
     if (d.length >= 4) names.add(d);
+  }
+  for (const ma of extractMemberAccessFromQuery(query)) {
+    names.add(ma.member);
+    if (ma.receiver) names.add(ma.receiver);
+  }
+  for (const a of extractLocalDetailAnchors(query)) {
+    if (isMemberLikeIdentifier(a) || /^(?:get|set|is|has|create|on)[A-Z]/.test(a)) {
+      names.add(a);
+    }
   }
   return [...names].filter((n) => n.length >= 3);
 }
@@ -863,6 +934,8 @@ export function extractLocalDetailAnchors(query: string): string[] {
     'render', 'frame', 'sync', 'thread', 'subthread', 'layout', 'method', 'methods',
     'function', 'functions', 'file', 'files', 'src', 'main', 'define', 'visible',
     'usage', 'usages', 'api', 'apis', 'project', 'codebase', 'repo',
+    'language', 'locale', 'i18n', 'radio', 'state', 'communication', 'binding',
+    'renderer', 'native', 'declaration', 'declarations', 'declared',
     // Generic UI nouns agents leave in NL (not the PascalCase Type).
     'dialog', 'page', 'view', 'button', 'component', 'card', 'icon', 'background',
     'animation', 'hover', 'preview', 'image', 'resource', 'network', 'application',
@@ -907,6 +980,9 @@ export function queryAsLocalSymbolDetail(query: string): boolean {
   // Cross-file API / declaration / constant / field inventories — not definition-only.
   if (shouldBuildApiUsageSurvey(query) && !queryAsTypeLifecycleSurvey(query)) return false;
   if (queryAsModuleExportSurvey(query) || queryAsModuleDependencySurvey(query)) return false;
+  if (queryAsInRepoSystemCapabilityHowto(query)) return false;
+  if (queryAsReturnValueConsumerSurvey(query)) return false;
+  if (queryAsDeclarationSiteSurvey(query)) return false;
   // Caller + co-named visibility → compact (body + callers), not inventory-only.
   if (queryNeedsCoNamedUseBridge(query)) return true;
   if (shouldBuildCallerInventory(query)) return false;
@@ -1085,6 +1161,10 @@ export function queryAsDomainMechanismBag(query: string): boolean {
 export function shouldTryLightMechanismExplore(query: string): boolean {
   if (queryAsCrossModuleFlowSurvey(query)) return false;
   if (queryAsInterpretationSurvey(query)) return false;
+  // System-setting howto → lean capability inventory, not every `language` import.
+  if (queryAsInRepoSystemCapabilityHowto(query)) return false;
+  // Return-value consumers → callers of the member, not a seed+flow dump.
+  if (queryAsReturnValueConsumerSurvey(query)) return false;
   // Named UI control + event → compact (body + callees + usage sites), not light-mechanism.
   if (queryAsNamedComponentAction(query)) return false;
   // Declaration / constant / field / module-export inventories own these shapes.
@@ -1140,6 +1220,9 @@ export function shouldTryFastInventoryExplore(query: string): boolean {
     || queryAsModuleExportSurvey(query)
     || queryAsModuleDependencySurvey(query)
     || shouldBuildMemberSurvey(query)
+    || queryAsInRepoSystemCapabilityHowto(query)
+    || queryAsReturnValueConsumerSurvey(query)
+    || queryAsDeclarationSiteSurvey(query)
   ) {
     return true;
   }
