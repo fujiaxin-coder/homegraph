@@ -42,7 +42,7 @@ CHANGED=$(git -C "$ENGINE" diff --name-only "$BASE_REF" HEAD -- src 2>/dev/null)
 
 # On exit: kill any eval daemons + restore the engine to HEAD.
 cleanup() {
-  pkill -9 -f "serve --mcp --path $OUT/" 2>/dev/null
+  pkill -9 -f "serve mcp --path $OUT/" 2>/dev/null
   git -C "$ENGINE" checkout HEAD -- $CHANGED 2>/dev/null
   ( cd "$ENGINE" && npm run build >/dev/null 2>&1 )
 }
@@ -61,8 +61,8 @@ rsync -a --exclude node_modules --exclude .git --exclude dist --exclude .homegra
 cp -R "$OUT/t-new" "$OUT/t-base"
 
 prewarm() { # target — spawn a persistent daemon (current $BIN) and wait for its socket
-  pkill -9 -f "serve --mcp --path $1" 2>/dev/null
-  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$1" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $1" 2>/dev/null
+  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$1" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$1" \
     && echo "  daemon warm: $1" || echo "  WARN: daemon never bound for $1 (arm may run without homegraph)"
 }
@@ -70,7 +70,7 @@ prewarm() { # target — spawn a persistent daemon (current $BIN) and wait for i
 run_arm() { # label, target-copy
   local label="$1" tgt="$2" c="$OUT/mcp-$1.json"
   # Connect to the pre-warmed daemon; skip the startup re-exec for a fast attach.
-  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$c"
+  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","mcp","--path","%s"]}}}' "$BIN" "$tgt" > "$c"
   prewarm "$tgt"
   echo "############## ARM [$label] ##############"
   ( cd "$tgt" && claude -p "$TASK" \
@@ -78,7 +78,7 @@ run_arm() { # label, target-copy
       --model "${MODEL:-sonnet}" --effort "${EFFORT:-high}" --max-budget-usd 4 --strict-mcp-config --mcp-config "$c" \
       </dev/null > "$OUT/run-$label.jsonl" 2>"$OUT/run-$label.err" )
   node "$PARSE" "$OUT/run-$label.jsonl" 2>&1 | grep -E "by type|Result" || echo "  (parse failed — see $OUT/run-$label.jsonl)"
-  pkill -9 -f "serve --mcp --path $tgt" 2>/dev/null
+  pkill -9 -f "serve mcp --path $tgt" 2>/dev/null
   echo
 }
 

@@ -7,53 +7,55 @@
 
 export const SERVER_INSTRUCTIONS = `# HomeGraph — when to call
 
-HomeGraph is a **local structural index of THIS repo**: symbols + call/import/extends edges + files. Use it only when the answer needs that graph.
+HomeGraph is a **local structural index of THIS repo**: symbols + call/import/extends edges + files. Use it when the answer needs that graph.
 
-## Call HomeGraph (closed set)
+## Call HomeGraph first (do this before Grep/Read)
 
-Use \`homegraph_explore\` (primary) when **all** of these hold:
+For these shapes, open \`homegraph_explore\` **immediately** — do **not** Grep/Glob/Read first (and do **not** parallel-Grep on the same turn):
 
-1. The evidence lives **in this repository's source** (not an external SDK manual).
-2. You need **structure**: definition location, who calls whom, how A reaches B, multi-file wiring, or in-repo import/usage of a named API/\`@kit\` module.
-3. You can put **concrete names** in \`query\` — symbol, \`Type.member\`, file basename, or \`@kit…\` (skip \`homegraph_search\` when names are already known).
+- How / mechanism / wiring in this repo. Domain keywords in \`query\` are enough — no PascalCase names required first.
+- **How to get** a system setting / capability **as used in this repo** — explore with the question (domain keywords OK); do not Grep-first
+- **Named** Type / Component / Page / Dialog / \`Type.member\` already in the question
+- Callers / callees / blast radius / subtypes of a **named** symbol
+- **In-repo usages / dependencies** of a named API, \`.member\` (incl. \`.drawModifier\` / DrawContext), ALL_CAPS constant, field/mutex, or \`@kit\`/\`@ohos\` import — including "does calling Kit X need other deps?"
+- **Declaration / attribute sites** of a named Type (which files declare it, ids, native bindings) — English rewrites OK (\`declaration\` / \`id\` / \`binding\`)
+- **Who uses the return value** of a named member/fn — explore (not Grep)
+- **Path-module / named-Type NAPI** export surfaces or multi-module interdependence
+- Named \`.d.ts\` / file basename wrap + where it is called
+- **Step / download→parse→install call-chains** ("会走到哪些代码") — explore as mechanism, not a topic file-list
+- Co-named **call + visibility** questions (who calls X / how Y becomes visible) — \`homegraph_explore\`, not \`homegraph_callers\` alone
 
-Typical fits:
+After one explore → **answer**. Do not re-verify with Grep/Read/node for the same symbols.
+Do **not** follow a successful explore with \`homegraph_files\` / another explore of the same bag.
 
-- How a **feature in this repo** is wired (mechanism / cross-file / click→handler flow)
-- Callers / callees / blast radius of a **named** symbol
-- What a **named component/method** does (include the name; one explore is enough)
-- In-repo usages of an imported API (not the official feature catalog)
+Prefer the **smallest** tool when the name is already known: \`homegraph_callers\` / \`homegraph_callees\` / \`homegraph_node\` for one symbol; \`homegraph_explore\` for multi-file / how-wired / usage inventories (prefer explore over \`homegraph_files\` for structural questions); \`homegraph_search\` only for unknown spelling.
 
-**One explore with names** beats search→explore→node→grep→read. Treat returned line-numbered source as already Read. After a full explore — **answer**; do not re-verify with grep/read/node for the same symbols. Busy/partial → retry that **same** explore once.
+## Do not call HomeGraph (skip → Grep / Glob / Read / SDK docs)
 
-## Do not call HomeGraph otherwise
+Open **zero** \`homegraph_*\` tools when:
 
-If the question is **outside the set above**, do **not** open any \`homegraph_*\` tool — use Read / Grep / Glob / SDK docs. HomeGraph is not a general Q&A layer; forcing it on the wrong shape costs time and tokens and often lowers quality.
+- **Topic → file list** with no concrete Type / file basename / constant / path
+- **Existence / concept / pure UI behavior** with no named in-repo Type, file, or \`@kit\`/\`@ohos\` target
+- **Literal / layout copy hunts** (全搜文案、字面量) with no code anchors
+- **Official SDK / \`@kit\` feature catalogs** (what APIs a kit *provides*) — opposite of in-repo *usages*
+- Evidence lives only in **external manuals**
 
-## Tool roles
+\`@kit\` **usages in this repo** ≠ SDK catalog. Usages → explore. Catalogs → SDK docs.
 
-| Tool | Role |
-|------|------|
-| **homegraph_explore** | Primary for the closed set above |
-| homegraph_diff_impact | PR/diff review: unified \`diff\` or \`hunks\` → changed symbols (line∩span) + capped callers/impact/UI edges |
-| homegraph_node | One known symbol body (or indexed file) after explore named it |
-| homegraph_callers / callees | Compact edge lists for a named symbol |
-| homegraph_impact | Blast radius for one named symbol (not a whole PR) |
-| homegraph_search | Rare — unknown spelling only |
-| homegraph_files | Folder tree only |
+If explore/search returns **Skip HomeGraph**, treat as final — do not retry homegraph_*.
 
 ## Tips
 
-- **Deadline / partial** — success-shaped; retry ONE explore with the same names. Do not abandon to grep for those symbols.
+- Busy/partial → retry that **same** explore once; then answer.
 - **Staleness banner** — Read only the listed edited files.
 - **Not indexed** — built-in tools; user runs \`homegraph init\` — you do not.
 `;
 
 export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — per-project (pass projectPath)
 
-HomeGraph indexes a codebase into a symbol graph. Call it **only** for in-repo structural / flow / usage questions on a project that has \`.homegraph/\`. Pass that project as \`projectPath\`.
+HomeGraph indexes a codebase into a symbol graph. Pass \`projectPath\` to a project with \`.homegraph/\`.
 
-- Fits the closed set (structure, callers, wiring, named symbol/file) → \`homegraph_explore\`
-- Anything else → Read/Grep/Glob — **do not call homegraph_***
+- How/mechanism/wiring, named Type/Component/\`Type.member\`, declaration/usage inventories, constants/fields, path NAPI/deps, in-repo \`@kit\` usages → \`homegraph_explore\` first (no Grep-first)
+- Topic file-lists, concept compares, literal copy hunts, SDK *catalogs* → Read/Grep/Glob — **do not call homegraph_***
 - No index → Read/Grep/Glob; user runs \`homegraph init\` if they want indexing
 `;

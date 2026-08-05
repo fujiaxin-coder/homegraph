@@ -128,7 +128,7 @@ def _mcp_launcher_python() -> str:
 
 def homegraph_mcp_command(repo: Path) -> List[str]:
     """MCP argv: pythonw (no flash) → hidden node, stdio preserved."""
-    inner = _homegraph_node_inner("serve", "--mcp", "--path", str(repo.resolve()))
+    inner = _homegraph_node_inner("serve", "mcp", "--path", str(repo.resolve()))
     if os.name == "nt":
         launcher = EVAL_ROOT / "win_mcp_launcher.py"
         return [_mcp_launcher_python(), str(launcher), *inner]

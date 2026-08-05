@@ -3,7 +3,7 @@
  *
  * On Linux, when an MCP host (Claude Code, opencode, …) is SIGKILL'd by the
  * OOM killer / a force-quit / a container teardown, the kernel does NOT
- * propagate the death to its `homegraph serve --mcp` child. The child gets
+ * propagate the death to its `homegraph serve mcp` child. The child gets
  * reparented to init/systemd, its stdin stays half-open in some
  * configurations, and the existing `stdin.on('end' | 'close')` handlers
  * never fire — the server lingers indefinitely, holding inotify watches,
@@ -101,7 +101,7 @@ describe.skipIf(process.platform === 'win32')('MCP PPID watchdog (#277)', () => 
         detached: true,
       });
       stdinHolder.unref();
-      const child = spawn(process.execPath, [${JSON.stringify(BIN)}, 'serve', '--mcp'], {
+      const child = spawn(process.execPath, [${JSON.stringify(BIN)}, 'serve', 'mcp'], {
         stdio: [stdinHolder.stdout, 'ignore', stderrFd],
         // Pin to direct (in-process) mode: this test targets the in-process
         // server's PPID watchdog (#277). The detached-daemon/proxy watchdog is

@@ -21,7 +21,7 @@ import { killMcpChild, removeTempDir } from './helpers/fs';
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
 function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
-  return spawn(process.execPath, [BIN, 'serve', '--mcp'], {
+  return spawn(process.execPath, [BIN, 'serve', 'mcp'], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     // Pin to direct (in-process) mode. #172 is a contract about the in-process

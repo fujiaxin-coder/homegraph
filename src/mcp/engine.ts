@@ -21,7 +21,7 @@ import { getDatabasePath } from '../db';
 
 // Lazy-load the heavy HomeGraph chain (sqlite + query/graph/context layers) OFF
 // the MCP startup path. It's only needed once a tool actually opens a project —
-// not to answer initialize/tools-list — so deferring it lets `serve --mcp` (and
+// not to answer initialize/tools-list — so deferring it lets `serve mcp` (and
 // the daemon it spawns) bind + register tools in ~Node-startup time instead of
 // ~800ms, closing the "No such tool available" cold-start race that made headless
 // agents flounder. require() is sync + cached on the CommonJS build.

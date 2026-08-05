@@ -38,11 +38,11 @@ esac
 CFG="$OUT/mcp-$ARM.json"
 if [ -n "$TOOLS" ]; then
   cat > "$CFG" <<JSON
-{"mcpServers":{"homegraph":{"command":"$CG_BIN","args":["serve","--mcp","--path","$REPO"],"env":{"HOMEGRAPH_MCP_TOOLS":"$TOOLS"}}}}
+{"mcpServers":{"homegraph":{"command":"$CG_BIN","args":["serve","mcp","--path","$REPO"],"env":{"HOMEGRAPH_MCP_TOOLS":"$TOOLS"}}}}
 JSON
 else
   cat > "$CFG" <<JSON
-{"mcpServers":{"homegraph":{"command":"$CG_BIN","args":["serve","--mcp","--path","$REPO"]}}}
+{"mcpServers":{"homegraph":{"command":"$CG_BIN","args":["serve","mcp","--path","$REPO"]}}}
 JSON
 fi
 

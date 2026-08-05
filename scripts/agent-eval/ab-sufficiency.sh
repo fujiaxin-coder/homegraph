@@ -21,7 +21,7 @@ OUT="${AGENT_EVAL_OUT:-/tmp/ab-sufficiency}"
 TGT="$OUT/target"
 command -v claude >/dev/null || { echo "claude CLI not on PATH"; exit 1; }
 [ -d "$REPO/.homegraph" ] || { echo "no .homegraph index at $REPO"; exit 1; }
-cleanup(){ pkill -9 -f "serve --mcp --path $TGT" 2>/dev/null; }
+cleanup(){ pkill -9 -f "serve mcp --path $TGT" 2>/dev/null; }
 trap cleanup EXIT
 mkdir -p "$OUT"
 ( cd "$ENGINE" && npm run build >/dev/null 2>&1 ) && echo "built"
@@ -35,11 +35,11 @@ node "$BIN" init "$TGT" >/dev/null 2>&1 && echo "indexed copy ($(node "$BIN" sta
 echo "###### repo=$REPO  runs/arm=$RUNS"
 echo "###### Q=$Q"; echo
 echo '{"mcpServers":{}}' > "$OUT/mcp-empty.json"
-printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","--mcp","--path","%s"]}}}' "$BIN" "$TGT" > "$OUT/mcp-cg.json"
+printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1","node","%s","serve","mcp","--path","%s"]}}}' "$BIN" "$TGT" > "$OUT/mcp-cg.json"
 
 prewarm(){
-  pkill -9 -f "serve --mcp --path $TGT" 2>/dev/null
-  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$TGT" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $TGT" 2>/dev/null
+  HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$TGT" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$TGT" >/dev/null 2>&1
 }
 

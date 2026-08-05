@@ -1,5 +1,5 @@
 /**
- * Never-initialized backstop for `serve --mcp` (#1185).
+ * Never-initialized backstop for `serve mcp` (#1185).
  *
  * Every real MCP host sends `initialize` immediately after spawning a server.
  * A server that has received NO bytes at all for many minutes is not serving

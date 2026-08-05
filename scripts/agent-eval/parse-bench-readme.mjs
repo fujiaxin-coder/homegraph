@@ -30,7 +30,7 @@ function parse(file) {
         else if (/homegraph/.test(n)) cg++;
       }
     }
-    // MCP cold-start race: the headless agent fired before `homegraph serve --mcp`
+    // MCP cold-start race: the headless agent fired before `homegraph serve mcp`
     // finished registering its tools, so early calls returned "No such tool
     // available" and the agent floundered into grep/Read. That measures HomeGraph's
     // startup latency, NOT its steady-state value — flag the run so the aggregate

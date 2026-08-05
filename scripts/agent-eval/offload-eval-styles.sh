@@ -28,12 +28,12 @@ command -v claude >/dev/null || { echo "no claude on PATH"; exit 1; }
 TARGET=$(cd "$TARGET" && pwd -P)
 
 prewarm() { # path  extra-env
-  pkill -9 -f "serve --mcp --path $1" 2>/dev/null; rm -f "$1/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
-  env ${2:-} HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve --mcp --path "$1" </dev/null >/dev/null 2>&1 &
+  pkill -9 -f "serve mcp --path $1" 2>/dev/null; rm -f "$1/.homegraph/daemon.sock" 2>/dev/null; sleep 0.6
+  env ${2:-} HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS=1800000 node "$BIN" serve mcp --path "$1" </dev/null >/dev/null 2>&1 &
   node -e 'const fs=require("fs");let n=0;const t=setInterval(()=>{if(fs.existsSync(process.argv[1]+"/.homegraph/daemon.sock")){clearInterval(t);process.exit(0)}if(n++>150){clearInterval(t);process.exit(1)}},100)' "$1" \
     && echo "  daemon warm" || echo "  WARN daemon never bound"
 }
-kill_daemon() { pkill -9 -f "serve --mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 1; }
+kill_daemon() { pkill -9 -f "serve mcp --path $TARGET" 2>/dev/null; rm -f "$TARGET/.homegraph/daemon.sock" 2>/dev/null; sleep 1; }
 
 run() { # arm rep mcp-config usage-log-or-dash
   local arm="$1" rep="$2" cfg="$3" usage="$4" tag="$REPO-$1-$2"
@@ -52,7 +52,7 @@ run() { # arm rep mcp-config usage-log-or-dash
 # MCP configs: env baked into the daemon-spawn command claude uses.
 USAGE="$RUNS/$REPO-usage.jsonl"
 mkcfg() { # file extra-env-pairs(JSON array entries, comma-led or empty)
-  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1"%s,"node","%s","serve","--mcp","--path","%s"]}}}' "$1" "$BIN" "$TARGET"
+  printf '{"mcpServers":{"homegraph":{"command":"env","args":["HOMEGRAPH_WASM_RELAUNCHED=1"%s,"node","%s","serve","mcp","--path","%s"]}}}' "$1" "$BIN" "$TARGET"
 }
 CFG_RAW="$RUNS/mcp-sty-raw-$REPO.json";   mkcfg ',"HOMEGRAPH_OFFLOAD_DISABLE=1"' > "$CFG_RAW"
 CFG_REFS="$RUNS/mcp-sty-refs-$REPO.json"; mkcfg ",\"HOMEGRAPH_OFFLOAD_USAGE_LOG=$USAGE\"" > "$CFG_REFS"

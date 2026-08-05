@@ -15,7 +15,7 @@ OUT_DIR="${AGENT_EVAL_OUT:-/tmp/agent-eval}"; mkdir -p "$OUT_DIR"
 OUT="$OUT_DIR/run-${LABEL}.jsonl"
 
 MCP_CONFIG=$(cat <<JSON
-{"mcpServers":{"homegraph":{"command":"${CG_BIN}","args":["serve","--mcp","--path","${REPO}"]}}}
+{"mcpServers":{"homegraph":{"command":"${CG_BIN}","args":["serve","mcp","--path","${REPO}"]}}}
 JSON
 )
 

@@ -24,7 +24,8 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE, queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey } from '../search/query-utils';
+
 import {
   existsSync,
   readFileSync,
@@ -135,6 +136,106 @@ const CONTAINER_NODE_KINDS = new Set<NodeKind>([
 function lastQualifierPart(symbol: string): string {
   const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
   return parts[parts.length - 1] ?? symbol;
+}
+
+/**
+ * Page/Dialog surface digests — methods that answer "which UI children / how
+ * does preview load" without dumping the whole struct. Lifecycle alone is not
+ * enough: agents re-Read for PageMap / preview helpers when those are trimmed.
+ */
+function isUiSurfaceDigestMethod(name: string, includePreviewHelpers: boolean): boolean {
+  if (/^(build|aboutToAppear|aboutToDisappear|PageMap)$/i.test(name)) return true;
+  if (!includePreviewHelpers) return false;
+  return /preview|pixelmap|loadimage|getimage|decodeimage/i.test(name);
+}
+
+/** Prefer build/PageMap/preview over aboutToAppear when budget is tight. */
+function surfaceMethodPriority(name: string): number {
+  if (/^(build|PageMap)$/i.test(name)) return 0;
+  if (/preview|pixelmap|loadimage|getimage/i.test(name)) return 1;
+  return 2;
+}
+
+/**
+ * Structured UI/nav bullets extracted from surface method bodies so agents can
+ * ANSWER NOW without re-Reading for child Types / PageMap routes.
+ */
+function extractUiSurfaceInventory(fileLines: string[], methods: Node[]): string {
+  const FRAMEWORK_TAG = new Set([
+    'Column', 'Row', 'Stack', 'Flex', 'Grid', 'List', 'ListItem', 'Scroll', 'Tabs', 'TabContent',
+    'Text', 'Image', 'Button', 'Blank', 'Divider', 'ForEach', 'LazyForEach', 'If', 'Else',
+    'RelativeContainer', 'Swiper', 'WaterFlow', 'GridItem', 'Span', 'SymbolGlyph',
+  ]);
+  const comps = new Set<string>();
+  const nav = new Set<string>();
+  const media: string[] = [];
+  for (const m of methods) {
+    const from = Math.max(1, m.startLine);
+    const to = Math.min(fileLines.length, Math.max(m.endLine, m.startLine));
+    for (let i = from; i <= to; i++) {
+      const line = fileLines[i - 1] ?? '';
+      for (const mm of line.matchAll(/\b([A-Z][A-Za-z0-9_]{2,})\s*\(/g)) {
+        const id = mm[1]!;
+        if (FRAMEWORK_TAG.has(id) || isFrameworkUiDecoratorName(id)) continue;
+        if (/^(Promise|Array|Map|Set|Date|Error|JSON|Object|Math|Number|String|Boolean)$/.test(id)) continue;
+        comps.add(id);
+      }
+      if (/PageMap|pushUrl|replaceUrl|pushPath|replacePath|router\./i.test(line)) {
+        const clipped = line.trim().replace(/\s+/g, ' ').slice(0, 120);
+        if (clipped) nav.add(clipped);
+      }
+      for (const mm of line.matchAll(/\bConstants\.[A-Z][A-Z0-9_]+\b/g)) {
+        nav.add(mm[0]!);
+      }
+      // Preview / Image load origin — $r vs file URI vs network.
+      if (
+        /\$r\s*\(|Image\s*\(|PixelMap|createPixelMap|decode|tempFileUri|http|download|fileUri|getPreview|previewPixelMap|loadImage/i.test(
+          line,
+        )
+      ) {
+        const clipped = line.trim().replace(/\s+/g, ' ').slice(0, 140);
+        if (clipped && media.length < 14) {
+          media.push(`L${i} (\`${m.name}\`): \`${clipped}\``);
+        }
+      }
+    }
+  }
+  if (comps.size === 0 && nav.size === 0 && media.length === 0) return '';
+  const out: string[] = ['**UI surface inventory (from build / PageMap / preview methods)**', ''];
+  if (comps.size > 0) {
+    out.push('UI / child Types:');
+    for (const c of [...comps].sort().slice(0, 24)) out.push(`- \`${c}\``);
+    if (comps.size > 24) out.push(`- … and ${comps.size - 24} more`);
+    out.push('');
+  }
+  if (nav.size > 0) {
+    out.push('Navigation / PageMap / route constants:');
+    for (const n of [...nav].slice(0, 16)) out.push(`- ${n.startsWith('Constants.') ? `\`${n}\`` : n}`);
+    if (nav.size > 16) out.push(`- … and ${nav.size - 16} more`);
+    out.push('');
+  }
+  if (media.length > 0) {
+    out.push('Image / preview load sites ($r / file / network cues):');
+    for (const row of media) out.push(`- ${row}`);
+    out.push('');
+  }
+  out.push(
+    '> **ANSWER NOW** from this inventory + method digests below — do not Read/Grep for the same Page UI children, routes, or preview-load origin.',
+  );
+  out.push('');
+  return out.join('\n');
+}
+
+/** C++ `class Foo : public Bar` vs private `: Bar` — prefer public is-a for subtype lists. */
+function cppExtendsLooksPublic(declLine: string, baseName: string): boolean | null {
+  const esc = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (new RegExp(`:\\s*public\\s+(?:virtual\\s+)?${esc}\\b`).test(declLine)) return true;
+  if (new RegExp(`:\\s*protected\\s+(?:virtual\\s+)?${esc}\\b`).test(declLine)) return false;
+  if (new RegExp(`:\\s*private\\s+(?:virtual\\s+)?${esc}\\b`).test(declLine)) return false;
+  // `class Cluster : Rectangle` (no access) defaults to private for class.
+  if (new RegExp(`:\\s*${esc}\\b`).test(declLine) && /\bclass\b/.test(declLine)) return false;
+  if (new RegExp(`:\\s*${esc}\\b`).test(declLine) && /\bstruct\b/.test(declLine)) return true;
+  return null;
 }
 
 /**
@@ -327,6 +428,10 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
  * Shrink explore ceilings for local-detail / no-flow named-symbol questions.
  * Large repos otherwise dump ~24K related source that the agent then still
  * greps/reads — the main token regression vs without-homegraph.
+ *
+ * Mechanism / cross-module flows also get a tighter ceiling: full 24K + a
+ * second explore/node/Read stack is what blows session tokens on "how is X
+ * implemented" questions even when the first answer was already enough.
  */
 export function tightenExploreBudgetForQuery(
   budget: ExploreOutputBudget,
@@ -335,7 +440,16 @@ export function tightenExploreBudgetForQuery(
 ): ExploreOutputBudget {
   const hasFlow = opts?.hasFlowPath === true;
   if (hasFlow && (queryAsMechanismSurvey(query) || queryAsCrossModuleFlowSurvey(query))) {
-    return budget;
+    return {
+      ...budget,
+      maxOutputChars: Math.min(budget.maxOutputChars, 12000),
+      defaultMaxFiles: Math.min(budget.defaultMaxFiles, 4),
+      maxCharsPerFile: Math.min(budget.maxCharsPerFile, 4500),
+      includeRelationships: false,
+      includeAdditionalFiles: false,
+      includeCompletenessSignal: false,
+      includeBudgetNote: false,
+    };
   }
   const local = queryAsLocalSymbolDetail(query);
   const compact = shouldUseCompactExploreBudget(query);
@@ -356,9 +470,9 @@ export function tightenExploreBudgetForQuery(
   if (!local && !compact) return budget;
   return {
     ...budget,
-    maxOutputChars: Math.min(budget.maxOutputChars, local ? 9000 : 12000),
+    maxOutputChars: Math.min(budget.maxOutputChars, local ? 7000 : 9000),
     defaultMaxFiles: Math.min(budget.defaultMaxFiles, local ? 2 : 3),
-    maxCharsPerFile: Math.min(budget.maxCharsPerFile, local ? 4000 : 5000),
+    maxCharsPerFile: Math.min(budget.maxCharsPerFile, local ? 3500 : 4000),
     includeRelationships: false,
     includeAdditionalFiles: false,
     includeCompletenessSignal: false,
@@ -646,9 +760,9 @@ const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
 /**
  * All HomeGraph MCP tools
  *
- * Designed for minimal context usage - use homegraph_explore as the primary tool
- * (one call usually answers the whole question), and only use other tools for
- * targeted follow-up queries.
+ * Prefer the smallest tool that answers: callers/node for one named symbol,
+ * explore for multi-file flows. Skip HomeGraph entirely for topic file-lists,
+ * concept compares, SDK catalogs, and literal greps.
  *
  * All tools support cross-project queries via the optional `projectPath` parameter.
  */
@@ -657,7 +771,9 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_search',
     description:
       'LAST RESORT spelling lookup — locations only, no source. Required: `query` (e.g. "signIn"). ' +
-      'Prefer homegraph_explore when the question already names a symbol/file/@kit. ' +
+      'Prefer explore/callers/node when names are known. ' +
+      'DO NOT call for topic file-lists, concept compares, or SDK/@kit feature catalogs (those return Skip guidance). ' +
+      'Also skip literal string/pattern greps — use Grep instead. ' +
       'Bare-name search may return a compact explore result instead of locations.',
     inputSchema: {
       type: 'object',
@@ -686,9 +802,8 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_callers',
     description:
       'Compact caller list for one NAMED in-repo symbol (no bodies). Required: `symbol` (e.g. "authenticate"). ' +
-      'Use after you know the exact name. For full flows use homegraph_explore. ' +
-      'DO NOT call for SDK catalogs, one-function semantics, or "what if X fails" hypothetics. ' +
-      'Prefer one explore over parallel callers+callees+node.',
+      'Cheaper than explore when you only need who-calls-X. For multi-file flows use homegraph_explore. ' +
+      'DO NOT call for SDK catalogs, topic file-lists, concept compares, or hypothetics.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -715,8 +830,8 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_callees',
     description:
       'Compact callee list for one NAMED in-repo symbol (no bodies). Required: `symbol` (e.g. "authenticate"). ' +
-      'For full flows use homegraph_explore. DO NOT use for out-of-repo SDK internals or counterfactual analysis. ' +
-      'Prefer one explore over parallel node+callers+callees.',
+      'Cheaper than explore when you only need what-X-calls. For multi-file flows use homegraph_explore. ' +
+      'DO NOT use for out-of-repo SDK catalogs or counterfactual analysis.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -819,10 +934,11 @@ export const tools: ToolDefinition[] = [
     description:
       'Depth on ONE known in-repo symbol or indexed file — not a survey tool. ' +
       'Required: pass `symbol` (symbol mode) OR `file` alone (file mode). ' +
+      'Cheaper than explore when you already know the name and only need one body. ' +
       'FILE: `file` only → line-numbered source + dependents. ' +
       'SYMBOL: body via includeCode + short trail; overloads return every body. ' +
-      'USE after explore named the symbol and you still need one body. ' +
-      'DO NOT crawl a feature with repeated node calls (prefer one explore). ' +
+      'DO NOT call after explore already returned that symbol/file (multiplies tokens). ' +
+      'DO NOT crawl a feature with repeated node calls (prefer one explore for flows). ' +
       'Treat returned source as already Read.',
     inputSchema: {
       type: 'object',
@@ -868,17 +984,23 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_explore',
     description:
-      'PRIMARY tool for THIS REPO\'s symbol graph (call paths + often line-numbered source). Required: `query` with concrete symbol/file/@kit names. ' +
-      'CALL for in-repo structure: feature wiring, A→B path, callers/callees, Type.member usage, click→handler, in-repo @kit usages. ' +
-      'Skip search when names are already known. One explore; answer from Source + trail; treat as already Read. Busy/partial → retry same explore once.',
+      'In-repo multi-file / mechanism tool (call paths + compact line-numbered source). Required: `query`. ' +
+      'CALL FIRST for how/wired questions — pass the question or domain keywords; PascalCase names optional. ' +
+      'Also CALL FIRST (alone, no parallel Grep) for named Type/Component/Page/Dialog, Type.member, click→handler, inheritance/subtypes, ' +
+      'declaration/attribute sites, ALL_CAPS constant / field-mutex usages, path-module NAPI/exports or inter-deps, ' +
+      'and in-repo @kit/@ohos *usages/dependencies* (which files import a named export — not the SDK feature catalog). ' +
+      'On the first turn call explore alone (no parallel Grep). Prefer callers/node when one named symbol is already enough. ' +
+      'DO NOT call for topic file-lists, concept/UI-behavior with no named anchors, literal copy hunts, or SDK/@kit *feature catalogs* — those return Skip guidance. ' +
+      'Literal string/pattern hunts → Grep. ' +
+      'One explore; answer from Source + trail; treat as already Read — do not re-grep/node/read the same symbols. Busy/partial → retry same explore once.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
           description:
-            'Required. In-repo symbols, file basenames, or @kit names (e.g. "ParentPage onClick build", "CartRepository.addItem"). ' +
-            'For flows, name both endpoints. Not for official SDK API catalogs.',
+            'Required. Prefer the user question or domain keywords for how/mechanism. ' +
+            'For named flows, include Type / Type.member / component names. For @kit, ask usages (depend/import sites), not SDK catalogs.',
         },
         maxFiles: {
           type: 'number',
@@ -1694,6 +1816,18 @@ export class ToolHandler {
       }
 
       const projectPath = args.projectPath as string | undefined;
+
+      // Wrong question shapes → short Skip (before cache / graph work).
+      if (toolName === 'homegraph_explore' || toolName === 'homegraph_search') {
+        const qEarly = typeof args.query === 'string' ? args.query : '';
+        if (qEarly) {
+          const deferKind = queryShouldDeferToBuiltinTools(qEarly);
+          if (deferKind) {
+            return this.textResult(homegraphDeferGuidance(deferKind, qEarly));
+          }
+        }
+      }
+
       const cacheEnabled = isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
       let cacheKey: string | undefined;
       let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
@@ -1746,10 +1880,10 @@ export class ToolHandler {
               (toolName === 'homegraph_explore' || toolName === 'homegraph_search'
                 ? this.tryFastInventoryExplore(cgFast, q, rootFast)
                 : null)
-              ?? this.tryCompactLocalSymbolExplore(cgFast, q, rootFast)
-              ?? (toolName === 'homegraph_explore'
+              ?? (toolName === 'homegraph_explore' || toolName === 'homegraph_search'
                 ? this.tryLightMechanismExplore(cgFast, q, rootFast)
-                : null);
+                : null)
+              ?? this.tryCompactLocalSymbolExplore(cgFast, q, rootFast);
             if (fast) {
               if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !fast.isError) {
                 cacheIndex.setEntry(cacheQueries, cacheKey, toolName, fast);
@@ -1921,6 +2055,11 @@ export class ToolHandler {
     const query = this.validateString(args.query, 'query');
     if (typeof query !== 'string') return query;
 
+    const deferKind = queryShouldDeferToBuiltinTools(query);
+    if (deferKind) {
+      return this.textResult(homegraphDeferGuidance(deferKind, query));
+    }
+
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
     // Explore redirect is best-effort — incomplete/faked graphs (or missing
     // getProjectRoot) must fall through to FTS search rather than error.
@@ -1928,14 +2067,14 @@ export class ToolHandler {
       const projectRoot = cg.getProjectRoot();
       if (queryShouldPreferExploreOverSearch(query)) {
         const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
-          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
-          ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+          ?? this.tryLightMechanismExplore(cg, query, projectRoot)
+          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
         if (exploreRedirect) return exploreRedirect;
       }
 
       const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
-        ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
-        ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+        ?? this.tryLightMechanismExplore(cg, query, projectRoot)
+        ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
       if (exploreRedirect) return exploreRedirect;
     } catch {
       // Fall through to FTS search.
@@ -2059,13 +2198,26 @@ export class ToolHandler {
     if (groups.length === 1) {
       const { callers, labels } = collect(groups[0]!);
       if (callers.length === 0) {
+        // Empty callers often means registration/callback wiring (OnSurfaceChangedCB)
+        // — a one-line "no callers" teaches Grep/node thrash. Prefer compact body +
+        // text-usage sites when the symbol is a local anchor.
+        try {
+          const root = cg.getProjectRoot();
+          const compact = this.tryCompactLocalSymbolExplore(cg, symbol, root);
+          if (compact) return compact;
+        } catch { /* fall through */ }
         return this.textResult(`No callers found for "${symbol}"${allMatches.note}${filterNote}`);
       }
       // A successful `file` narrowing makes the multi-symbol aggregation note
       // stale — suppress it.
       const note = fileFilter && !filteredOut ? '' : allMatches.note;
+      const includeBlock = this.formatCallerIncludeVisibility(cg, callers.slice(0, limit));
       const formatted = this.formatNodeList(callers.slice(0, limit), `Callers of ${symbol}`, labels)
-        + '\n\n> Caller listing complete — answer from this list; no read/grep needed.'
+        + includeBlock
+        + '\n\n> Caller listing complete — answer from this list'
+        + (includeBlock ? ' + include/import visibility' : '')
+        + '; no read/grep needed.'
+        + '\n> If another type\'s visibility matters, pass **both** names to `homegraph_explore` (not callers alone).'
         + note + filterNote;
       return this.textResult(this.truncateOutput(formatted));
     }
@@ -3024,7 +3176,7 @@ export class ToolHandler {
 
   /**
    * Import sites for @kit.* / *Kit module names — surfaces full `import { … } from '@kit.X'`
-   * lines. When the query also names a symbol (taskpool), only matching imports are listed.
+   * lines. When the query also names an export/API token, only matching imports are listed.
    */
   private buildImportSitesSection(
     cg: HomeGraph,
@@ -3032,26 +3184,34 @@ export class ToolHandler {
     projectRoot: string,
   ): { section: string; siteCount: number; compactListing: boolean } {
     const kitTerms = extractKitModuleNamesFromQuery(query);
-    const depSymbols = extractDependencySymbolsFromQuery(query);
+    const depSymbols = extractDependencySymbolsFromQuery(query).filter(
+      (s) => !isMemberLikeIdentifier(s) && !GENERIC_VERB_ANCHOR_NOISE.has(s.toLowerCase()),
+    );
+    const focusExports = [
+      ...new Set([
+        ...extractKitSubmoduleNamesFromQuery(query),
+        ...depSymbols.filter((s) => s.length >= 4),
+      ]),
+    ];
     const kitSearchTerms = extractImportSearchTerms(query);
+    // Named export/API + kit (or usage-survey intent) → return the full matching list.
+    const completeInventory =
+      focusExports.length > 0
+      && (kitTerms.length > 0 || shouldBuildKitModuleUsageSurvey(query) || shouldBuildApiUsageSurvey(query));
 
     const seen = new Set<string>();
     const sites: Array<{ file: string; line: number; lineText: string }> = [];
 
     const tryAdd = (node: Node, lineText: string): void => {
+      if (isOhosApiFilePath(node.filePath)) return;
       const lineLc = lineText.toLowerCase();
+      const focus = focusExports.length > 0 ? focusExports : depSymbols;
+      if (focus.length > 0 && !focus.some((s) => lineLc.includes(s.toLowerCase()))) return;
+      // When a @kit module is named, require that kit — or @ohos.<focus> module path.
       if (kitTerms.length > 0) {
-        const matchesKit = kitTerms.some(
-          (k) => lineLc.includes(`@kit.${k.toLowerCase()}`),
-        );
-        if (!matchesKit) return;
-      }
-      if (depSymbols.length > 0) {
-        const matchesSym = depSymbols.some((s) => lineLc.includes(s.toLowerCase()));
-        if (!matchesSym) return;
-      }
-      if (depSymbols.includes('taskpool')) {
-        if (!lineLc.includes('taskpool') || !lineLc.includes('@kit.arkts')) return;
+        const matchesKit = kitTerms.some((k) => lineLc.includes(`@kit.${k.toLowerCase()}`));
+        const matchesOhosModule = focusExports.some((s) => lineLc.includes(`@ohos.${s.toLowerCase()}`));
+        if (!matchesKit && !matchesOhosModule) return;
       }
       const key = `${node.filePath}:${node.startLine}`;
       if (seen.has(key)) return;
@@ -3061,11 +3221,11 @@ export class ToolHandler {
 
     const resolveImportLine = (node: Node): string => resolveImportLineFromNode(node, projectRoot);
 
-    const importLimit = depSymbols.includes('taskpool') ? 200
-      : depSymbols.length > 0 ? 60 : 20;
+    const importLimit = completeInventory ? 200 : focusExports.length > 0 || depSymbols.length > 0 ? 60 : 20;
+    const searchSyms = focusExports.length > 0 ? focusExports : depSymbols;
 
-    // Symbol-first search: "taskpool" hits `import { taskpool } from '@kit.ArkTS'`.
-    for (const sym of depSymbols) {
+    // Symbol-first search: named export hits `import { foo } from '@kit.X'`.
+    for (const sym of searchSyms) {
       let hits: SearchResult[] = [];
       try {
         hits = cg.searchNodes(sym, { kinds: ['import'], limit: importLimit });
@@ -3078,7 +3238,7 @@ export class ToolHandler {
     }
 
     // Kit-module search (when no symbol filter, or to catch re-exports).
-    if (sites.length === 0 || depSymbols.length === 0) {
+    if (sites.length === 0 || searchSyms.length === 0) {
       for (const term of kitSearchTerms) {
         const termLc = term.toLowerCase().replace(/^@kit\./, '');
         let hits: SearchResult[] = [];
@@ -3090,8 +3250,8 @@ export class ToolHandler {
         for (const r of hits) {
           const lineText = resolveImportLine(r.node);
           if (!lineText.toLowerCase().includes(termLc)) continue;
-          if (depSymbols.length > 0) {
-            const matchesSym = depSymbols.some((s) => lineText.toLowerCase().includes(s.toLowerCase()));
+          if (searchSyms.length > 0) {
+            const matchesSym = searchSyms.some((s) => lineText.toLowerCase().includes(s.toLowerCase()));
             if (!matchesSym) continue;
           }
           tryAdd(r.node, lineText);
@@ -3106,11 +3266,11 @@ export class ToolHandler {
     sites.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 
     const importInventoryFilter = hasImportInventoryFilter(query);
-    const taskpoolInventory = depSymbols.includes('taskpool');
-    const compactListing = taskpoolInventory || shouldCompactImportListing(sites.length, importInventoryFilter);
-    const cap = compactListing ? (taskpoolInventory ? sites.length : 40) : 15;
+    const compactListing = completeInventory || shouldCompactImportListing(sites.length, importInventoryFilter);
+    const cap = completeInventory ? sites.length : compactListing ? 40 : 15;
+    const focusLabel = focusExports.length > 0 ? focusExports.map((s) => `\`${s}\``).join(', ') : 'queried symbol(s)';
     const lines = compactListing
-      ? ['**Dependency list**', '', `Files importing the queried symbol(s) (${sites.length} total):`, '']
+      ? ['**Dependency list**', '', `Files importing ${focusLabel} (${sites.length} total):`, '']
       : ['**Import sites**', ''];
 
     for (const s of sites.slice(0, cap)) {
@@ -3125,13 +3285,10 @@ export class ToolHandler {
     }
     if (compactListing) {
       lines.push('');
-      if (taskpoolInventory) {
-        lines.push(
-          `> Complete list of **${sites.length}** \`import { taskpool } from '@kit.ArkTS'\` site(s) — answer from this section; no grep/read needed.`,
-        );
-      } else {
-        lines.push('> Listing complete — answer from this section; no grep/read needed for the dependency set.');
-      }
+      lines.push(
+        `> **ANSWER NOW.** Complete list of **${sites.length}** matching import site(s) for ${focusLabel}. ` +
+        'Do **not** Grep/Read the same `@kit`/`@ohos` import pattern.',
+      );
     }
     lines.push('');
     return { section: lines.join('\n'), siteCount: sites.length, compactListing };
@@ -3246,10 +3403,14 @@ export class ToolHandler {
       node: Node,
       via: string,
       rank: number,
+      opts?: { importAlways?: boolean },
     ): void => {
       if (isTestFile(node.filePath)) return;
       const sig = `${node.name} ${node.filePath} ${node.signature || ''}`;
-      if (!SERVICE_RE.test(sig)) return;
+      // Same-file @ohos/@kit imports are always data-source candidates (BadgeManager
+      // → notificationManager), even when the import local name fails SERVICE_RE.
+      if (!opts?.importAlways && !SERVICE_RE.test(sig)) return;
+      if (opts?.importAlways && !/@ohos\.|@kit\.|ohos\./i.test(sig)) return;
       const prev = bucket.get(node.id);
       if (!prev || rank < prev.rank) {
         bucket.set(node.id, { name: node.name, file: rel(node.filePath), line: node.startLine, via, rank });
@@ -3278,12 +3439,16 @@ export class ToolHandler {
         try {
           for (const r of cg.searchNodes('@ohos', { kinds: ['import'], limit: 40 })) {
             if (r.node.filePath !== cls.filePath) continue;
-            addEdge(upstream, r.node, 'import', 0);
+            addEdge(upstream, r.node, 'import', 0, { importAlways: true });
+          }
+          for (const r of cg.searchNodes('@kit', { kinds: ['import'], limit: 40 })) {
+            if (r.node.filePath !== cls.filePath) continue;
+            addEdge(upstream, r.node, 'import', 0, { importAlways: true });
           }
           for (const term of ['notification', 'badge', 'NumBadge', 'subscribe', 'bundle', 'ability']) {
             for (const r of cg.searchNodes(term, { kinds: ['import'], limit: 30 })) {
               if (r.node.filePath !== cls.filePath) continue;
-              addEdge(upstream, r.node, 'import', 1);
+              addEdge(upstream, r.node, 'import', 1, { importAlways: true });
             }
           }
         } catch { /* */ }
@@ -3310,7 +3475,10 @@ export class ToolHandler {
       }
     }
     if (edgeCount === 0) return { section: '', edgeCount: 0 };
-    lines.push('> Data-source survey — answer from upstream symbols above; source bodies omitted.');
+    lines.push(
+      '> Data-source survey — **ANSWER NOW** from upstream symbols above (system `@ohos`/`@kit` imports first). ' +
+      'Do not Grep/search/callers the same Manager for the service name.',
+    );
     lines.push('');
     return { section: lines.join('\n'), edgeCount };
   }
@@ -3321,18 +3489,22 @@ export class ToolHandler {
   private tryFastPathResult(toolName: string, args: Record<string, unknown>): ToolResult | null {
     const query = args.query;
     if (typeof query !== 'string') return null;
+    const deferKind = queryShouldDeferToBuiltinTools(query);
+    if (deferKind) {
+      return this.textResult(homegraphDeferGuidance(deferKind, query));
+    }
     try {
       const cg = this.getHomeGraph(args.projectPath as string | undefined);
       const projectRoot = cg.getProjectRoot();
       if (toolName === 'homegraph_explore') {
         return this.tryFastInventoryExplore(cg, query, projectRoot)
-          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
-          ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+          ?? this.tryLightMechanismExplore(cg, query, projectRoot)
+          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
       }
       if (toolName === 'homegraph_search') {
         return this.tryFastInventoryExplore(cg, query, projectRoot)
-          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot)
-          ?? this.tryLightMechanismExplore(cg, query, projectRoot);
+          ?? this.tryLightMechanismExplore(cg, query, projectRoot)
+          ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
       }
     } catch {
       return null;
@@ -3374,34 +3546,73 @@ export class ToolHandler {
           `**Exploration: ${query}**`,
           '',
           inheritanceListed && callerBulletCount > 0
-            ? 'Type surface: inheritance + method caller inventory below — answer from it; do not grep `extends` and do not `homegraph_callers` each method.'
+            ? 'Type surface: inheritance + method caller inventory below — **ANSWER NOW**; do not grep `extends` and do not `homegraph_callers` each method.'
             : inheritanceListed
-              ? 'Inheritance survey above lists all direct subtypes found.'
-              : 'Caller inventory lists method→caller sites — answer from it; do not fan out `homegraph_callers` per method.',
+              ? 'Inheritance survey above lists all direct subtypes found. **ANSWER NOW** — do not Grep `extends`.'
+              : 'Caller inventory lists method→caller sites — **ANSWER NOW**; do not fan out `homegraph_callers` per method.',
         ];
         if (inheritanceSection) parts.push(inheritanceSection);
         if (callerSection) parts.push(callerSection);
         return this.textResult(parts.join('\n'));
       }
-      // Nothing graph-visible — fall through; import/domain may still help.
+      // Empty inheritance graph: stop only for *explicit* subclass intent
+      // (子类/extends/subclass). Bare `search("IntGrid")` must fall through to
+      // compact definition — an empty subtype ANSWER NOW blocked visibility/use
+      // questions that reuse a type name after callers().
+      if (queryAsInheritanceSurvey(query)) {
+        return this.textResult(
+          [
+            `**Exploration: ${query}**`,
+            '',
+            'No direct subtypes / inheritance edges indexed for the named type(s). **ANSWER NOW** — do not Grep `extends` unless you need a second opinion.',
+            '',
+          ].join('\n'),
+        );
+      }
+      // Bare type-name focus with no subtypes — fall through to compact / other
+      // inventory (definition + usage), not a fat full explore.
     }
 
-    const importResult = (inheritanceOnly || queryIsTypeNameFocus(query) || queryAsInheritanceSurvey(query))
+    const importResult = (
+      inheritanceOnly
+      || queryIsTypeNameFocus(query)
+      || queryAsInheritanceSurvey(query)
+      || queryAsDataSourceSurvey(query)
+      || shouldBuildApiUsageSurvey(query)
+      || queryAsInRepoSystemCapabilityHowto(query)
+      || queryAsReturnValueConsumerSurvey(query)
+      || queryAsDeclarationSiteSurvey(query)
+      || queryAsModuleExportSurvey(query)
+    )
       ? { section: '', siteCount: 0, compactListing: false }
       : this.buildImportSitesSection(cg, query, projectRoot);
     if (importResult.section) lines.push(importResult.section);
 
-    const kitUsageResult = shouldBuildKitModuleUsageSurvey(query)
-      ? this.buildKitModuleUsageSection(cg, query, projectRoot)
-      : { section: '', symbolCount: 0 };
+    // Kit usage section is redundant when a focused import inventory already listed
+    // every matching `@kit`/`export` site (avoids a second dump + Grep temptation).
+    const kitUsageResult =
+      shouldBuildKitModuleUsageSurvey(query) && !(importResult.compactListing && importResult.siteCount > 0)
+        ? this.buildKitModuleUsageSection(cg, query, projectRoot)
+        : { section: '', symbolCount: 0 };
     if (kitUsageResult.section) lines.push(kitUsageResult.section);
 
-    const domainFileResult = shouldBuildDomainFileSurvey(query)
+    const domainFileResult = shouldBuildDomainFileSurvey(query) && !queryAsDataSourceSurvey(query)
+      && !queryAsInRepoSystemCapabilityHowto(query)
       ? this.buildDomainFileSurveySection(cg, query)
       : { section: '', fileCount: 0 };
     if (domainFileResult.section) lines.push(domainFileResult.section);
 
-    const apiUsageResult = shouldBuildApiUsageSurvey(query)
+    const systemCapResult = queryAsInRepoSystemCapabilityHowto(query)
+      ? this.buildSystemCapabilityHowtoSection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (systemCapResult.section) lines.push(systemCapResult.section);
+
+    const declarationResult = queryAsDeclarationSiteSurvey(query)
+      ? this.buildDeclarationSiteSurveySection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (declarationResult.section) lines.push(declarationResult.section);
+
+    const apiUsageResult = shouldBuildApiUsageSurvey(query) && !queryAsDeclarationSiteSurvey(query)
       ? this.buildApiUsageSection(cg, query, projectRoot)
       : { section: '', fileCount: 0 };
     if (apiUsageResult.section) lines.push(apiUsageResult.section);
@@ -3411,11 +3622,19 @@ export class ToolHandler {
       : { section: '', edgeCount: 0 };
     if (dataSourceResult.section) lines.push(dataSourceResult.section);
 
+    const hoverResult = shouldBuildHoverHandlerSurvey(query)
+      ? this.buildHoverHandlerSurveySection(cg, query, projectRoot)
+      : { section: '', hitCount: 0 };
+    if (hoverResult.section) lines.push(hoverResult.section);
+
     const importInventoryFilter = hasImportInventoryFilter(query);
     const multiAnchor = queryNamesMultipleExploreAnchors(query);
     // Type / caller surveys: skip expensive named-symbol flow synthesize —
     // it wanders unrelated dynamic edges and burns tokens.
-    const skipFlow = typeSurface || queryAsCallerOrMethodSurvey(query);
+    const skipFlow = typeSurface || queryAsCallerOrMethodSurvey(query)
+      || queryAsDeclarationSiteSurvey(query)
+      || queryAsInRepoSystemCapabilityHowto(query)
+      || queryAsReturnValueConsumerSurvey(query);
     const flow = skipFlow
       ? { pathNodeIds: new Set<string>(), text: '' }
       : this.buildFlowFromNamedSymbols(cg, query);
@@ -3451,9 +3670,38 @@ export class ToolHandler {
       : false;
 
     const hasAnySection = importResult.section || kitUsageResult.section || domainFileResult.section
-      || apiUsageResult.section || dataSourceResult.section || inheritanceSection
-      || callerSection || memberSection || configSection;
+      || apiUsageResult.section || dataSourceResult.section || hoverResult.section || inheritanceSection
+      || callerSection || memberSection || configSection
+      || systemCapResult.section || declarationResult.section;
     if (!hasAnySection) return null;
+
+    // Data-source / API usage inventories are complete without source dumps —
+    // stop here so agents do not also get a fat import list + follow-up Read.
+    if (systemCapResult.hitCount > 0) {
+      return finishCompact(
+        `System-capability howto — **${systemCapResult.hitCount}** in-repo site(s). **ANSWER NOW** from \`@ohos\`/\`System\` call sites above.`,
+      );
+    }
+    if (declarationResult.hitCount > 0) {
+      return finishCompact(
+        `Declaration-site survey — **${declarationResult.hitCount}** site(s). **ANSWER NOW** from ids + bindings above; do not Grep the same Type.`,
+      );
+    }
+    if (dataSourceResult.edgeCount > 0 && !apiUsageResult.section) {
+      return finishCompact(
+        `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s). **ANSWER NOW** from system \`@ohos\`/\`@kit\` imports first.`,
+      );
+    }
+    if (apiUsageResult.fileCount > 0 && !dataSourceResult.section) {
+      return finishCompact(
+        `API usage survey — **${apiUsageResult.fileCount}** file(s). **ANSWER NOW** from the list above.`,
+      );
+    }
+    if (queryAsReturnValueConsumerSurvey(query) && callerBulletCount > 0) {
+      return finishCompact(
+        `Return-value consumers — **${callerBulletCount}** caller site(s). **ANSWER NOW** from the caller inventory; do not Grep the same member.`,
+      );
+    }
 
     const omitSource = shouldOmitSourceBodies({
       importSiteCount: importResult.siteCount,
@@ -3466,39 +3714,59 @@ export class ToolHandler {
       inheritanceListed,
       domainFileCount: domainFileResult.fileCount,
       dataSourceEdgeCount: dataSourceResult.edgeCount,
-    }, hasFlowPath, multiAnchor);
+    }, hasFlowPath, multiAnchor) || hoverResult.hitCount > 0;
 
     if (!omitSource) return null;
 
-    if (configSection) return finishCompact('Config/manifest content above — answer from it directly.');
+    if (configSection) return finishCompact('Config/manifest content above — answer from it directly. **ANSWER NOW.**');
+    if (hoverResult.section) {
+      return finishCompact(
+        `Hover/pointer handler survey — **${hoverResult.hitCount}** site(s). **ANSWER NOW** from the list + snippets; do not Grep \`onHover\` again.`,
+      );
+    }
     if (kitUsageResult.section) {
       return finishCompact(
-        `Kit module usage survey — **${kitUsageResult.symbolCount}** imported symbol(s) across the repo.`,
+        `Kit module **in-repo usage** survey — **${kitUsageResult.symbolCount}** imported symbol(s). ` +
+        'This is not an SDK catalog. **ANSWER NOW** from the usage list; do not Grep the same `@kit` path.',
       );
     }
     if (domainFileResult.fileCount > 0) {
       return finishCompact(
         `Domain file survey — **${domainFileResult.fileCount}** related file(s) listed above. ` +
-        'This is the exhaustive related-file inventory; no glob/search needed.',
+        'This is the exhaustive related-file inventory; **ANSWER NOW** — no glob/search needed.',
       );
     }
     if (apiUsageResult.fileCount > 0) {
-      return finishCompact(`API usage survey — **${apiUsageResult.fileCount}** file(s) referencing the queried symbol(s).`);
+      return finishCompact(
+        `API usage survey — **${apiUsageResult.fileCount}** file(s). **ANSWER NOW** from the list above.`,
+      );
     }
     if (dataSourceResult.edgeCount > 0) {
-      return finishCompact(`Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s) listed above.`);
+      return finishCompact(
+        `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s). **ANSWER NOW.**`,
+      );
     }
-    if (inheritanceListed) return finishCompact('Inheritance survey above lists all direct subtypes found.');
+    if (inheritanceListed) {
+      return finishCompact(
+        'Inheritance survey above lists all direct subtypes found. **ANSWER NOW** — do not grep `extends`.',
+      );
+    }
     if (importResult.compactListing) {
-      return finishCompact(`Listed **${importResult.siteCount}** import site(s) for the queried symbol(s).`);
+      return finishCompact(
+        `Listed **${importResult.siteCount}** import site(s). **ANSWER NOW** from the dependency list.`,
+      );
     }
     if (callerBulletCount >= 1) {
-      return finishCompact(`Caller inventory lists **${callerBulletCount}** call site(s) — answer from the section above.`);
+      return finishCompact(
+        `Caller inventory lists **${callerBulletCount}** call site(s). **ANSWER NOW** from the section above.`,
+      );
     }
     if (memberFileCount >= 2) {
-      return finishCompact(`Member/pattern usage in **${memberFileCount}** file(s) — answer from the inventory above.`);
+      return finishCompact(
+        `Member/pattern usage in **${memberFileCount}** file(s). **ANSWER NOW** from the inventory above.`,
+      );
     }
-    return finishCompact('Inventory sections above are complete for this query.');
+    return finishCompact('Inventory sections above are complete for this query. **ANSWER NOW.**');
   }
 
   /**
@@ -3554,6 +3822,7 @@ export class ToolHandler {
     const seedIds = new Set<string>();
 
     const addNode = (n: Node): void => {
+      if (isOhosApiFilePath(n.filePath)) return;
       if (isTestPath(n.filePath)) return;
       if (n.kind !== 'import' && !STRUCTURE_KINDS.has(n.kind)) return;
       seedIds.add(n.id);
@@ -3561,6 +3830,37 @@ export class ToolHandler {
       if (!list.some((x) => x.id === n.id)) list.push(n);
       fileNodes.set(n.filePath, list);
     };
+
+    const domainTermsEarly = extractDomainSearchTerms(query);
+    const distinctiveEarly = domainTermsEarly.filter(
+      (t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()),
+    );
+
+    // Distinctive-token IMPORT seeds first — `@ohos.convertxml` / `XmlParse*` before
+    // structure FTS fills the budget with unrelated Parser* hits.
+    for (const term of distinctiveEarly.slice(0, 4)) {
+      const termLc = term.toLowerCase();
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(term, { kinds: ['import'], limit: 40 });
+      } catch {
+        continue;
+      }
+      for (const r of hits) {
+        if (isOhosApiFilePath(r.node.filePath)) continue;
+        const line = resolveImportLineFromNode(r.node, projectRoot).toLowerCase();
+        const nameLc = r.node.name.toLowerCase();
+        const sigLc = (r.node.signature || '').toLowerCase();
+        if (!nameLc.includes(termLc) && !line.includes(termLc) && !sigLc.includes(termLc)) continue;
+        addNode(r.node);
+        try {
+          for (const n of cg.getNodesInFile(r.node.filePath)) {
+            if (STRUCTURE_KINDS.has(n.kind) && n.name.toLowerCase().includes(termLc)) addNode(n);
+          }
+        } catch { /* optional */ }
+        if (seedIds.size >= 16) break;
+      }
+    }
 
     for (const seed of extractMechanismEntrySeeds(query)) {
       if (seed.startsWith('@')) {
@@ -3578,34 +3878,81 @@ export class ToolHandler {
       }
     }
 
-    if (seedIds.size < 2) {
-      const domainTerms = extractDomainSearchTerms(query);
-      const asciiTerms = domainTerms.filter((t) => /^[\x00-\x7F]+$/.test(t));
-      for (const term of asciiTerms.slice(0, 8)) {
+    if (seedIds.size < 2 || distinctiveEarly.length > 0) {
+      const domainTerms = domainTermsEarly;
+      // Prefer distinctive ASCII (xml) then Chinese nouns — never seed on bare verbs
+      // when a distinctive token exists (xml parse → convertxml, not ParseNotification*).
+      const distinctive = distinctiveEarly;
+      const ranked = distinctive.length > 0
+        ? [
+            ...distinctive,
+            ...domainTerms.filter((t) => !/^[\x00-\x7F]+$/.test(t) && t.length >= 2 && t.length <= 8),
+          ]
+        : [
+            ...domainTerms.filter((t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase())),
+            ...domainTerms.filter((t) => !/^[\x00-\x7F]+$/.test(t) && t.length >= 2 && t.length <= 8),
+            ...domainTerms.filter((t) => /^[\x00-\x7F]+$/.test(t) && GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase())),
+          ];
+      for (const term of ranked.slice(0, 10)) {
         let hits: SearchResult[] = [];
         try {
           hits = cg.searchNodes(term, {
             kinds: ['class', 'struct', 'interface', 'function', 'method', 'import'],
-            limit: 16,
+            limit: 20,
           });
         } catch {
           continue;
         }
+        const termIsVerb = GENERIC_VERB_ANCHOR_NOISE.has(term.toLowerCase());
+        const termLc = term.toLowerCase();
         for (const r of hits) {
-          // English FTS expansions from Chinese concepts need not be *Manager.
-          const nameHit = new RegExp(
-            term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-            'i',
-          ).test(r.node.name);
+          if (isOhosApiFilePath(r.node.filePath)) continue;
+          const nameLc = r.node.name.toLowerCase();
+          const pathLc = r.node.filePath.toLowerCase();
+          const sigLc = (r.node.signature || '').toLowerCase();
+          const nameHit = nameLc.includes(termLc);
+          const pathHit = pathLc.includes(termLc);
+          const sigHit = sigLc.includes(termLc);
+          // Verb-only hits need path affinity; imports for verbs are dropped when
+          // distinctive tokens exist (handled by ranked list above).
+          if (termIsVerb && !pathHit) continue;
+          // Distinctive token: require name/path/signature to actually mention it
+          // (drops FTS neighbors that only share an unrelated Parser suffix).
+          if (!termIsVerb && distinctive.length > 0 && !nameHit && !pathHit && !sigHit) continue;
           const entryOk =
-            isImplementationEntrySymbol(r.node.name, domainTerms)
-            || r.node.kind === 'import'
-            || ((r.node.kind === 'function' || r.node.kind === 'method') && nameHit);
+            r.node.kind === 'import'
+            || ((r.node.kind === 'function' || r.node.kind === 'method' || r.node.kind === 'class'
+              || r.node.kind === 'interface' || r.node.kind === 'struct')
+              && (nameHit || pathHit));
           if (!entryOk) continue;
           addNode(r.node);
-          if (seedIds.size >= 10) break;
+          if (seedIds.size >= 16) break;
         }
-        if (seedIds.size >= 10) break;
+        if (seedIds.size >= 12) break;
+      }
+
+      // Prefer seeds that mention a distinctive token when we have any.
+      if (distinctive.length > 0 && seedIds.size > 0) {
+        const keep = new Set<string>();
+        for (const id of seedIds) {
+          const n = cg.getNode(id);
+          if (!n) continue;
+          const line = n.kind === 'import' ? resolveImportLineFromNode(n, projectRoot) : '';
+          const blob = `${n.name}\n${n.filePath}\n${n.signature || ''}\n${line}`.toLowerCase();
+          if (distinctive.some((t) => blob.includes(t.toLowerCase()))) keep.add(id);
+        }
+        if (keep.size > 0) {
+          for (const id of [...seedIds]) {
+            if (!keep.has(id)) {
+              seedIds.delete(id);
+            }
+          }
+          for (const [fp, nodes] of [...fileNodes.entries()]) {
+            const filtered = nodes.filter((n) => keep.has(n.id));
+            if (filtered.length === 0) fileNodes.delete(fp);
+            else fileNodes.set(fp, filtered);
+          }
+        }
       }
     }
 
@@ -3617,18 +3964,49 @@ export class ToolHandler {
     const lines: string[] = [
       `**Exploration: ${query}**`,
       '',
+      '> **ANSWER NOW from this response.** Do **not** Grep or Read listed files in parallel — Source below is authoritative.',
+      '',
       `Mechanism anchors: **${seedIds.size}** symbol(s) — lightweight explore (seed + flow spine).`,
       '',
     ];
 
-    const importResult = this.buildImportSitesSection(cg, query, projectRoot);
+    // Import inventory: only distinctive deps (xml), never bare parse/parsing.
+    const distinctiveDeps = extractDependencySymbolsFromQuery(query)
+      .filter((s) => !GENERIC_VERB_ANCHOR_NOISE.has(s.toLowerCase()));
+    const importQuery = distinctiveDeps.length > 0
+      ? distinctiveDeps.join(' ')
+      : extractDomainSearchTerms(query)
+          .filter((t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()))
+          .join(' ');
+    const importResult = importQuery
+      ? this.buildImportSitesSection(cg, importQuery, projectRoot)
+      : { section: '', siteCount: 0, compactListing: false };
     if (importResult.section) lines.push(importResult.section);
     if (flow.text) lines.push(flow.text);
 
+    const distinctiveForScore = extractDomainSearchTerms(query).filter(
+      (t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()),
+    );
     const fileScores = new Map<string, number>();
     for (const [fp, nodes] of fileNodes) {
+      if (isOhosApiFilePath(fp)) continue;
       let score = 0;
+      const fpLc = fp.toLowerCase();
+      if (distinctiveForScore.some((t) => fpLc.includes(t.toLowerCase()))) score += 30;
       for (const n of nodes) {
+        const line = n.kind === 'import' ? resolveImportLineFromNode(n, projectRoot) : '';
+        const blob = `${n.name}\n${n.signature || ''}\n${line}`.toLowerCase();
+        if (distinctiveForScore.some((t) => blob.includes(t.toLowerCase()))) score += 20;
+        // Prefer files whose imports/modules compound the domain token (convertxml ⊃ xml).
+        if (
+          n.kind === 'import'
+          && distinctiveForScore.some((t) => {
+            const tLc = t.toLowerCase();
+            return (line.includes(tLc) || blob.includes(tLc)) && (line.includes('@ohos.') || line.includes('@kit.'));
+          })
+        ) {
+          score += 20;
+        }
         if (flow.pathNodeIds.has(n.id)) score += 20;
         else if (flow.uniqueNamedNodeIds.has(n.id)) score += 10;
         else score += 5;
@@ -3639,20 +4017,19 @@ export class ToolHandler {
     const sortedFiles = [...fileScores.entries()]
       .filter(([, s]) => s > 0)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 4);
+      .slice(0, 5);
 
     lines.push('**Source Code**', '');
     lines.push(
-      '> Line-numbered source below — treat as already Read. Do not grep/read these files again; ' +
-      'another `homegraph_explore` with more symbol names is cheaper if you need more.',
+      '> Line-numbered source below — treat as already Read. Do **not** grep/read/`homegraph_node` these files again.',
     );
     lines.push('');
 
     let totalChars = lines.join('\n').length;
     let filesRendered = 0;
     for (const [fp] of sortedFiles) {
-      if (filesRendered >= 4 || totalChars > 14_000) break;
-      const chunk = this.renderLightMechanismSource(projectRoot, fp, fileNodes.get(fp) ?? [], 4000);
+      if (filesRendered >= 4 || totalChars > 12_000) break;
+      const chunk = this.renderLightMechanismSource(projectRoot, fp, fileNodes.get(fp) ?? [], 3800);
       if (!chunk) continue;
       lines.push(chunk);
       totalChars += chunk.length;
@@ -3663,8 +4040,9 @@ export class ToolHandler {
 
     lines.push('---');
     lines.push(
-      '> **Mechanism explore complete** for anchored symbols — answer from sections above. ' +
-      'Retry explore with more names before grep/read (grep duplicates token cost).',
+      '> **Mechanism explore complete — ANSWER NOW.** Sections above cover the wired mechanism. ' +
+      'Do **not** call `homegraph_node`, Read, or Grep for symbols/files already shown (that multiplies tokens). ' +
+      'Only one tighter `homegraph_explore` if a **named** symbol essential to the answer is still missing.',
     );
     lines.push('');
 
@@ -3683,8 +4061,20 @@ export class ToolHandler {
     // Multi-anchor flow bags (routeSave/onSave, aboutToAppear/build, thunk→thunk)
     // must fall through to full explore so Flow / Dynamic-dispatch / adaptive
     // sizing still surface — compact trail is not a substitute.
+    // Mechanism / domain-mechanism bags belong to light-mechanism (or full explore),
+    // never compact — agents rewrite "如何实现 xml 解析" to "xml parse" and would
+    // otherwise seed every method named `parse`.
+    if (shouldTryLightMechanismExplore(query) || queryAsMechanismSurvey(query)) {
+      return null;
+    }
     const bareId = /^[A-Za-z_][\w]*$/.test(query.trim());
-    if (!queryAsLocalSymbolDetail(query) && !bareId && !queryHasFocusedNamedAnchors(query)) {
+    if (
+      !queryAsLocalSymbolDetail(query)
+      && !queryAsFocusedUiCluster(query)
+      && !queryAsComponentSurfaceSurvey(query)
+      && !bareId
+      && !queryHasFocusedNamedAnchors(query)
+    ) {
       return null;
     }
 
@@ -3697,15 +4087,19 @@ export class ToolHandler {
 
     if (names.length === 0) return null;
 
-    // Multi-anchor bags that form a Flow / Dynamic-dispatch section must use
-    // full explore (synth notes, adaptive sizing, boundary announcements).
-    // Compact trail alone loses those sections. Probe using the raw query —
-    // extractLocalDetailAnchors can drop snake_case tokens (handle_save) that
-    // buildFlowFromNamedSymbols still resolves.
+    // Multi-anchor bags that form a Flow / Dynamic-dispatch section normally fall
+    // through to full explore. EXCEPT focused UI Type clusters / local-detail /
+    // Type.member — full explore is a 15–30k dump for a local composition question.
+    const stayOnCompact =
+      queryAsFocusedUiCluster(query)
+      || queryAsComponentSurfaceSurvey(query)
+      || queryAsNamedComponentAction(query)
+      || queryHasNamedMemberFocus(query)
+      || queryAsLocalSymbolDetail(query);
     const rawTokens = query.split(/[\s,()[\]]+/).filter(
       (t) => t.length >= 3 && /^[A-Za-z_][\w]*$/.test(t),
     );
-    if (names.length >= 2 || rawTokens.length >= 2) {
+    if (!stayOnCompact && (names.length >= 2 || rawTokens.length >= 2)) {
       try {
         const flow = this.buildFlowFromNamedSymbols(cg, query);
         if (flow.text.length > 0) return null;
@@ -3726,9 +4120,100 @@ export class ToolHandler {
       fileNodes.set(n.filePath, list);
     };
 
+    const typeNames = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+    const typeNameSet = new Set(typeNames.map((t) => t.toLowerCase()));
+    const bridge = queryNeedsCoNamedUseBridge(query);
+    const memberFocus = queryHasNamedMemberFocus(query);
+    const uiCluster = queryAsFocusedUiCluster(query);
+    const typeLifecycle = queryAsTypeLifecycleSurvey(query);
+    const componentSurface = queryAsComponentSurfaceSurvey(query)
+      || uiCluster
+      || typeLifecycle
+      || names.some(queryLooksLikeUiComponentType);
+    // Page/Dialog surface & UI clusters: trail only — pulling callee files ballooned
+    // ThemeHome-style answers by 5–10k without adding the UI-child / nav answer.
+    const surfaceTrailOnly = (componentSurface || uiCluster || typeLifecycle) && !memberFocus
+      && !queryAsNamedComponentAction(query);
+    const bareMemberOnly = bareId && isMemberLikeIdentifier(query.trim());
+
+    const ownedByNamedType = (n: Node): boolean => {
+      if (typeNameSet.size === 0) return true;
+      const qn = (n.qualifiedName || '').toLowerCase();
+      if ([...typeNameSet].some((t) => qn === t || qn.startsWith(`${t}.`) || qn.startsWith(`${t}::`) || qn.includes(`::${t}.`) || qn.endsWith(`::${t}`))) {
+        return true;
+      }
+      // Same file as a named type definition.
+      try {
+        for (const t of typeNames) {
+          for (const owner of cg.getNodesByName(t)) {
+            if (
+              (owner.kind === 'class' || owner.kind === 'struct' || owner.kind === 'interface' || owner.kind === 'component')
+              && owner.filePath === n.filePath
+            ) {
+              return true;
+            }
+          }
+        }
+      } catch { /* */ }
+      return false;
+    };
+
     for (const seed of names) {
-      for (const n of cg.getNodesByName(seed)) {
+      const candidates = cg.getNodesByName(seed);
+      const preferOwned =
+        memberFocus
+        && isMemberLikeIdentifier(seed)
+        && typeNameSet.size > 0;
+      // Prefer in-repo implementations over SDK `.d.ts` / @ohos API stubs when both exist.
+      const projectFirst = [...candidates].sort((a, b) => {
+        const score = (n: Node) => {
+          let s = 0;
+          if (isOhosApiFilePath(n.filePath) || /\.d\.ts$/i.test(n.filePath)) s -= 50;
+          if (isTestFile(n.filePath)) s -= 20;
+          if (n.kind === 'class' || n.kind === 'struct' || n.kind === 'component') s += 5;
+          return s;
+        };
+        return score(b) - score(a);
+      });
+      const filtered = preferOwned
+        ? (() => {
+            const owned = projectFirst.filter(ownedByNamedType);
+            return owned.length > 0 ? owned : projectFirst;
+          })()
+        : projectFirst;
+      for (const n of filtered) {
+        // Skip SDK stubs when a project definition of the same name exists.
+        if (
+          (isOhosApiFilePath(n.filePath) || /\.d\.ts$/i.test(n.filePath))
+          && filtered.some(
+            (o) =>
+              o.name === n.name
+              && !isOhosApiFilePath(o.filePath)
+              && !/\.d\.ts$/i.test(o.filePath),
+          )
+        ) {
+          continue;
+        }
         addNode(n);
+        // Page/Component surface digests need build/aboutToAppear as their own
+        // nodes — otherwise we only have the outer struct and dump the whole body.
+        if (componentSurface || uiCluster || typeLifecycle) {
+          if (n.kind === 'component' || n.kind === 'class' || n.kind === 'struct') {
+            try {
+              for (const e of cg.getOutgoingEdges(n.id)) {
+                if (e.kind !== 'contains') continue;
+                const child = cg.getNode(e.target);
+                if (
+                  child
+                  && (child.kind === 'method' || child.kind === 'function')
+                  && isUiSurfaceDigestMethod(child.name, uiCluster)
+                ) {
+                  addNode(child);
+                }
+              }
+            } catch { /* */ }
+          }
+        }
         if (seedIds.size >= 12) break;
       }
       if (seedIds.size >= 12) break;
@@ -3751,30 +4236,66 @@ export class ToolHandler {
 
     // Neighbor policy (agents often search("Foo") alone — do not dump 11 callees):
     // - bareId / caller-bridge: callers of PRIMARY name only, no callee fan-out
-    // - UI action / pinpoint local-detail: callers + callees
-    const bridge = queryNeedsCoNamedUseBridge(query);
+    // - Type.member / UI action / pinpoint local-detail: callers + callees
+    // - Type.member: expand on the *member* (isExpired), not only the Type, and
+    //   do not path-filter callers — UI marking often lives in another package.
     const callersOnly =
-      bareId
+      surfaceTrailOnly
+      || bareMemberOnly
+      || (bareId && !componentSurface)
       || bridge
-      || (shouldBuildCallerInventory(query) && !queryAsNamedComponentAction(query));
+      || (shouldBuildCallerInventory(query) && !queryAsNamedComponentAction(query) && !memberFocus && !componentSurface);
     const primaryName = names[0]!;
+    const memberNames = new Set<string>([
+      ...extractMemberAccessFromQuery(query).map((m) => m.member),
+      ...names.filter((n) => isMemberLikeIdentifier(n)),
+    ]);
+    // UI Type clusters: expand every named *Page/*Dialog seed — not only the first
+    // token — so Page↔Dialog composition stays in one compact answer.
+    const expandNameSet = new Set<string>(
+      uiCluster || componentSurface
+        ? [...typeNames, primaryName]
+        : [primaryName],
+    );
     const expandIds = [...seedIds].filter((id) => {
       try {
-        return cg.getNode(id)?.name === primaryName;
+        const n = cg.getNode(id);
+        if (!n) return false;
+        if (memberFocus && memberNames.size > 0) return memberNames.has(n.name);
+        return expandNameSet.has(n.name);
       } catch {
         return false;
       }
     });
+    // Fall back to primary type seeds if member name wasn't indexed as its own node.
+    const expandIdsFinal = expandIds.length > 0
+      ? expandIds
+      : [...seedIds].filter((id) => {
+          try {
+            return cg.getNode(id)?.name === primaryName;
+          } catch {
+            return false;
+          }
+        });
 
     // Pull one-hop neighbors into the focus set so the answer is graph-complete
     // without dumping an import inventory for isExpired/onClick.
     const neighborIds = new Set<string>();
-    for (const id of expandIds) {
+    for (const id of expandIdsFinal) {
       let seedPath = '';
       try { seedPath = cg.getNode(id)?.filePath ?? ''; } catch { /* */ }
       try {
-        for (const { node: c } of cg.getCallers(id).slice(0, callersOnly ? 8 : 10)) {
-          if (!nearSeed(c.filePath) && seedPath && !pathAffinity(seedPath, c.filePath)) continue;
+        for (const { node: c } of cg.getCallers(id).slice(0, callersOnly ? 8 : 12)) {
+          // Type.member / UI-marking: keep cross-package callers (path filter drops them).
+          if (
+            !memberFocus
+            && !queryAsNamedComponentAction(query)
+            && !nearSeed(c.filePath)
+            && seedPath
+            && !pathAffinity(seedPath, c.filePath)
+          ) {
+            continue;
+          }
           if (!isTestPath(c.filePath) || queryAsTestOnlyInterpretation(query)) {
             neighborIds.add(c.id);
             // List callers in the trail, but don't pull their whole files into Source
@@ -3784,7 +4305,14 @@ export class ToolHandler {
         }
         if (!callersOnly) {
           for (const { node: c } of cg.getCallees(id).slice(0, 10)) {
-            if (!nearSeed(c.filePath) && seedPath && !pathAffinity(seedPath, c.filePath)) continue;
+            if (
+              !memberFocus
+              && !nearSeed(c.filePath)
+              && seedPath
+              && !pathAffinity(seedPath, c.filePath)
+            ) {
+              continue;
+            }
             if (!isTestPath(c.filePath) || queryAsTestOnlyInterpretation(query)) {
               neighborIds.add(c.id);
               addNode(c);
@@ -3798,6 +4326,8 @@ export class ToolHandler {
 
     const lines: string[] = [
       `**Exploration: ${query}**`,
+      '',
+      '> **ANSWER NOW from this response.** Do **not** Grep/Read/search/explore/node/callers for the same symbols — trail + Source below are authoritative.',
       '',
       `Local-symbol focus: **${seedIds.size}** seed(s)` +
         (neighborIds.size > 0 ? `, **${neighborIds.size}** caller/callee neighbor(s)` : '') +
@@ -3828,7 +4358,7 @@ export class ToolHandler {
     {
       const trail: string[] = ['**Call / use trail**', ''];
       let trailBullets = 0;
-      const trailIds = (callersOnly ? expandIds : [...seedIds]).slice(0, 6);
+      const trailIds = (callersOnly ? expandIdsFinal : [...seedIds]).slice(0, 6);
       for (const id of trailIds) {
         let seedNode: Node | null | undefined;
         try {
@@ -3839,12 +4369,14 @@ export class ToolHandler {
         if (!seedNode) continue;
         let callers: Array<{ node: Node }> = [];
         let callees: Array<{ node: Node }> = [];
-        try { callers = cg.getCallers(id).slice(0, 8) as Array<{ node: Node }>; } catch { /* */ }
+        try { callers = cg.getCallers(id).slice(0, memberFocus ? 12 : 8) as Array<{ node: Node }>; } catch { /* */ }
         if (!callersOnly) {
           try { callees = cg.getCallees(id).slice(0, 8) as Array<{ node: Node }>; } catch { /* */ }
         }
-        callers = callers.filter((c) => nearSeed(c.node.filePath) || pathAffinity(seedNode.filePath, c.node.filePath));
-        callees = callees.filter((c) => nearSeed(c.node.filePath) || pathAffinity(seedNode.filePath, c.node.filePath));
+        if (!memberFocus) {
+          callers = callers.filter((c) => nearSeed(c.node.filePath) || pathAffinity(seedNode.filePath, c.node.filePath));
+          callees = callees.filter((c) => nearSeed(c.node.filePath) || pathAffinity(seedNode.filePath, c.node.filePath));
+        }
         if (callers.length === 0 && callees.length === 0) continue;
         trail.push(`- \`${seedNode.name}\` (${seedNode.kind}) — ${seedNode.filePath}:${seedNode.startLine}`);
         for (const c of callers) {
@@ -3861,7 +4393,7 @@ export class ToolHandler {
       if (trailBullets > 0) {
         trail.push('');
         trail.push(
-          '> Prefer answering from this trail + Source below. Do not grep/search the same symbols again.',
+          '> **ANSWER NOW** from this trail + Source below. Do not grep/search/read the same symbols again.',
         );
         trail.push('');
         lines.push(...trail);
@@ -3875,15 +4407,20 @@ export class ToolHandler {
     // Also scan when the agent asks upstream/registration — callee neighbors
     // alone do not show Export / OH_NativeXComponent wiring sites.
     const needUsageScan =
-      neighborIds.size === 0
-      || /上下游|上游|下游|注册|挂到|callback|upstream|downstream/i.test(query)
-      || names.every((n) => /(?:CB|Callback)$/i.test(n));
+      !componentSurface
+      && (neighborIds.size === 0
+        || memberFocus
+        || /上下游|上游|下游|注册|挂到|callback|upstream|downstream/i.test(query)
+        || names.every((n) => /(?:CB|Callback)$/i.test(n)));
     if (needUsageScan) {
       // Scan ALL focused anchors (incl. PascalCase callables) — previously only
       // lowercase names were scanned, so OnSurfaceChangedCB registration sites
       // never surfaced and agents fell through to callers/grep/read.
       const typeSeeds = extractTypeNamesFromQuery(query);
-      const scanNames = names.slice(0, 3);
+      // Prefer member-like names for Type.member UI questions (isExpired over Type).
+      const scanNames = memberFocus && memberNames.size > 0
+        ? [...memberNames].slice(0, 3)
+        : names.slice(0, 3);
       if (scanNames.length > 0) {
         try {
           const defLineKeys = new Set<string>();
@@ -3892,51 +4429,89 @@ export class ToolHandler {
               if (scanNames.includes(n.name)) defLineKeys.add(`${n.filePath}:${n.startLine}`);
             }
           }
+          const norm = (fp: string) => fp.replace(/\\/g, '/');
           const defDirs = new Set(
-            [...fileNodes.keys()].map((fp) => fp.split('/').slice(0, 4).join('/')),
+            [...fileNodes.keys()].map((fp) => norm(fp).split('/').slice(0, 4).join('/')),
           );
+          // Large monorepos: never rely on getFiles() order + hard slice — Type.member
+          // call sites (LauncherCardInfo.isExpired filters) live near the defining
+          // package and must be scanned first or Grep wins.
+          const rankScanFile = (fp: string): number => {
+            const n = norm(fp);
+            let score = 0;
+            if ([...defDirs].some((d) => n === d || n.startsWith(`${d}/`))) score += 100;
+            if (typeSeeds.some((t) => n.toLowerCase().includes(t.toLowerCase()))) score += 40;
+            return score;
+          };
           const files = cg.getFiles()
             .map((f) => f.path)
-            .filter((fp) => {
-              if (isTestPath(fp)) return false;
-              if (defDirs.size === 0) return true;
-              return [...defDirs].some((d) => fp === d || fp.startsWith(`${d}/`));
-            })
-            .slice(0, 120);
-          for (const fp of files) {
-            if (textUsageHits.length >= 12) break;
-            const absPath = validatePathWithinRoot(projectRoot, fp);
-            if (!absPath || !existsSync(absPath)) continue;
-            let content: string;
-            try {
-              content = readFileSync(absPath, 'utf-8');
-            } catch {
-              continue;
-            }
-            // Prefer files that also mention a co-named type when both present
-            // (skip for single-anchor upstream/registration scans).
-            if (
-              typeSeeds.length > 1
-              && names.length > 1
-              && !typeSeeds.some((t) => content.includes(t))
-            ) {
-              continue;
-            }
-            const fileLines = content.split('\n');
-            for (const sym of scanNames) {
-              const escaped = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              // Match call OR bare identifier use (callback registration tables).
-              const re = new RegExp(`\\b${escaped}\\b`);
-              for (let i = 0; i < fileLines.length; i++) {
-                const lineText = fileLines[i] ?? '';
-                if (!re.test(lineText)) continue;
-                if (defLineKeys.has(`${fp}:${i + 1}`)) continue;
-                textUsageHits.push({ filePath: fp, line: i + 1, text: lineText.trim(), symbol: sym });
-                if (!fileNodes.has(fp)) fileNodes.set(fp, []);
-                if (textUsageHits.length >= 12) break;
+            .filter((fp) => !isTestPath(fp))
+            .map((fp) => ({ fp, score: rankScanFile(fp) }))
+            .sort((a, b) => b.score - a.score || a.fp.localeCompare(b.fp))
+            .map((x) => x.fp);
+
+          const hitCap = bareMemberOnly ? 6 : memberFocus ? 10 : 8;
+          const scanFileList = (list: string[], requireTypeMention: boolean): void => {
+            for (const fp of list) {
+              if (textUsageHits.length >= hitCap) break;
+              const absPath = validatePathWithinRoot(projectRoot, fp);
+              if (!absPath || !existsSync(absPath)) continue;
+              let content: string;
+              try {
+                content = readFileSync(absPath, 'utf-8');
+              } catch {
+                continue;
               }
-              if (textUsageHits.length >= 12) break;
+              if (
+                requireTypeMention
+                && typeSeeds.length > 0
+                && !typeSeeds.some((t) => content.includes(t))
+              ) {
+                continue;
+              }
+              // Prefer files that also mention a co-named type when both present
+              // (skip for single-anchor upstream/registration scans and Type.member).
+              if (
+                !memberFocus
+                && typeSeeds.length > 1
+                && names.length > 1
+                && !typeSeeds.some((t) => content.includes(t))
+              ) {
+                continue;
+              }
+              const fileLines = content.split('\n');
+              for (const sym of scanNames) {
+                const escaped = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                // Match call OR bare identifier use; prefer Type.member when typed.
+                const typeAlt = typeSeeds.length > 0
+                  ? `(?:\\b(?:${typeSeeds.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\.)?`
+                  : '';
+                const re = new RegExp(`${typeAlt}\\b${escaped}\\b`);
+                const defRe = new RegExp(
+                  `^\\s*(?:export\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|async\\s+)*${escaped}\\s*\\(`,
+                );
+                for (let i = 0; i < fileLines.length; i++) {
+                  const lineText = fileLines[i] ?? '';
+                  if (!re.test(lineText)) continue;
+                  if (defLineKeys.has(`${fp}:${i + 1}`)) continue;
+                  // Skip the method's own definition line (no Type. prefix / no call punctuation).
+                  if (defRe.test(lineText) && !lineText.includes(`.${sym}`)) continue;
+                  textUsageHits.push({ filePath: fp, line: i + 1, text: lineText.trim(), symbol: sym });
+                  if (!fileNodes.has(fp)) fileNodes.set(fp, []);
+                  if (textUsageHits.length >= hitCap) break;
+                }
+                if (textUsageHits.length >= hitCap) break;
+              }
             }
+          };
+
+          // Pass 1: same package / type-path affinity (score > 0), require Type mention when known.
+          const nearFiles = files.filter((fp) => rankScanFile(fp) > 0).slice(0, memberFocus ? 80 : 40);
+          scanFileList(nearFiles, memberFocus && typeSeeds.length > 0);
+          // Pass 2: broader if still empty / thin (still bounded).
+          if (textUsageHits.length < 3) {
+            const rest = files.filter((fp) => rankScanFile(fp) === 0).slice(0, memberFocus ? 160 : 80);
+            scanFileList(rest, false);
           }
         } catch {
           // text scan is best-effort
@@ -3949,9 +4524,16 @@ export class ToolHandler {
         }
         lines.push('');
         lines.push(
-          '> These lines are the in-repo use sites. Answer from them + Source; do not grep the same names again.',
+          memberFocus
+            ? '> These lines are the in-repo **call/filter sites** for the named member. **ANSWER NOW** from them + Source — do not Grep/`homegraph_callers` the same member.'
+            : '> These lines are the in-repo use sites. Answer from them + Source; do not grep the same names again.',
         );
         lines.push('');
+      } else if (memberFocus) {
+        lines.push(
+          '> No in-repo text call sites found for this member beyond its definition. Answer from Source; avoid a broad Grep unless needed.',
+          '',
+        );
       }
     }
 
@@ -4007,23 +4589,42 @@ export class ToolHandler {
     // Prefer files whose nodes exactly match query names; then neighbor / usage files.
     // Primary named symbol (first anchor) always ranks first — secondary types like
     // IntGrid used to drown SortWidgets' defining .cpp via higher exact-count on the header.
+    // UI clusters: co-occurrence of 2+ named Types beats a lonely homonym elsewhere.
     const nameSet = new Set(names);
     const usageFiles = new Set(textUsageHits.map((h) => h.filePath));
     const maxFiles =
-      (queryAsNamedComponentAction(query) || queryHasNamedMemberFocus(query) || usageFiles.size > 0 || bridge)
-        ? 4
-        : 2;
+      bareMemberOnly
+        ? 2
+        : memberFocus
+          // Call/filter sites already listed above — dumping caller file bodies
+          // (FormStack…) burns tokens and invites a follow-up Read of isExpired.
+          ? 1
+        : (queryAsNamedComponentAction(query) || componentSurface || usageFiles.size > 0 || bridge)
+          ? (uiCluster ? 2 : (componentSurface ? 2 : 3))
+          : 2;
     const ranked = [...fileNodes.entries()]
+      .filter(([, nodes]) => {
+        if (!memberFocus || memberNames.size === 0) return true;
+        return nodes.some((n) => memberNames.has(n.name) || typeNameSet.has(n.name.toLowerCase()));
+      })
       .map(([fp, nodes]) => {
         const exact = nodes.filter((n) => nameSet.has(n.name)).length;
+        const typeHits = typeNames.filter((t) => nodes.some((n) => n.name === t)).length;
+        const clusterCoOccur = typeHits >= 2 ? 250 : typeHits === 1 ? 80 : 0;
         const primaryHit = nodes.some((n) => n.name === primaryName) ? 100 : 0;
         const neighborHit = nodes.filter((n) => neighborIds.has(n.id)).length;
-        const usageHit = usageFiles.has(fp) ? 15 : 0;
+        const usageHit = usageFiles.has(fp) ? (memberFocus ? 60 : 15) : 0;
         return {
           fp,
           nodes,
           exact,
-          score: primaryHit + exact * 20 + neighborHit * 5 + usageHit + nodes.length,
+          score:
+            (uiCluster || componentSurface ? clusterCoOccur : 0)
+            + primaryHit
+            + exact * 20
+            + neighborHit * 5
+            + usageHit
+            + nodes.length,
         };
       })
       .sort((a, b) => b.score - a.score || a.fp.localeCompare(b.fp))
@@ -4031,13 +4632,27 @@ export class ToolHandler {
 
     lines.push('**Source Code**', '');
     lines.push(
-      '> Line-numbered source — treat as already Read. Answer from it; do not re-explore/search/grep the same symbols.',
+      '> Line-numbered source — treat as already Read. **ANSWER NOW** — do not Read/Grep/search/explore/node the same symbols again.',
     );
     lines.push('');
 
     let totalChars = lines.join('\n').length;
-    const maxTotal = 9000;
-    const maxPerFile = 4000;
+    // Lean ceilings: without-HG Grep/Read stacks were ~15k session tokens; a 10–14k
+    // compact body + follow-up Read is what loses the token A/B.
+    const maxTotal = bareMemberOnly
+      ? 4500
+      : componentSurface || uiCluster
+        ? 7000
+        : memberFocus && usageFiles.size > 0
+          ? 6500
+          : 5500;
+    const maxPerFile = bareMemberOnly
+      ? 2800
+      : componentSurface || uiCluster
+        ? 4500
+        : memberFocus
+          ? 2800
+          : 3200;
     let rendered = 0;
 
     for (const { fp, nodes } of ranked) {
@@ -4060,23 +4675,114 @@ export class ToolHandler {
       let start = 1;
       let end = Math.min(fileLines.length, 120);
       const usageLine = textUsageHits.find((h) => h.filePath === fp)?.line;
+      const surfaceMethodsRaw = (componentSurface || uiCluster)
+        ? focusNodes
+          .filter((n) => (n.kind === 'method' || n.kind === 'function') && isUiSurfaceDigestMethod(n.name, uiCluster))
+          .sort((a, b) => surfaceMethodPriority(a.name) - surfaceMethodPriority(b.name) || a.startLine - b.startLine)
+        : [];
+      // When build/PageMap answer the surface question, skip lifecycle — it ate
+      // the budget and agents re-Read PageMap anyway.
+      const hasBuildOrPageMap = surfaceMethodsRaw.some((n) => /^(build|PageMap)$/i.test(n.name));
+      const surfaceMethods = hasBuildOrPageMap
+        ? surfaceMethodsRaw.filter((n) => !/^(aboutToAppear|aboutToDisappear)$/i.test(n.name))
+        : surfaceMethodsRaw;
+      // Type.member: keep the member body, not the whole owning class dump.
+      const memberOnlyNodes = memberFocus && memberNames.size > 0
+        ? focusNodes.filter((n) => memberNames.has(n.name) && (n.kind === 'method' || n.kind === 'function' || n.kind === 'property' || n.kind === 'field'))
+        : [];
+
       if (focusNodes.length > 0) {
         const named = focusNodes.filter((n) => nameSet.has(n.name));
         const use = named.length > 0 ? named : focusNodes.slice(0, 3);
-        start = Math.max(1, Math.min(...use.map((n) => n.startLine)) - 2);
-        end = Math.min(fileLines.length, Math.max(...use.map((n) => n.endLine)) + 2);
-        // Keep window bounded
-        if ((end - start + 1) * 40 > maxPerFile) {
+        const surfaceNodes: Node[] = componentSurface
+          ? use.filter((n) =>
+              (n.kind === 'component' || n.kind === 'class' || n.kind === 'struct'
+                || queryLooksLikeUiComponentType(n.name))
+              && (typeNameSet.size === 0 || typeNameSet.has(n.name.toLowerCase()) || nameSet.has(n.name)),
+            )
+          : [];
+        if (surfaceNodes.length === 0 && componentSurface) {
+          const one = use.find((n) =>
+            n.kind === 'component' || n.kind === 'class' || n.kind === 'struct'
+            || queryLooksLikeUiComponentType(n.name),
+          ) ?? use[0];
+          if (one) surfaceNodes.push(one);
+        }
+        if (memberOnlyNodes.length > 0) {
+          start = Math.max(1, Math.min(...memberOnlyNodes.map((n) => n.startLine)) - 2);
+          end = Math.min(fileLines.length, Math.max(...memberOnlyNodes.map((n) => n.endLine)) + 2);
+        } else if (surfaceMethods.length > 0) {
+          // Per-method chunks below — placeholder window unused.
+          start = 1;
+          end = 1;
+        } else if (surfaceNodes.length > 0 && surfaceNodes.some((n) => n.endLine > n.startLine)) {
+          start = Math.max(1, Math.min(...surfaceNodes.map((n) => n.startLine)) - 2);
+          end = Math.min(fileLines.length, Math.max(...surfaceNodes.map((n) => n.endLine)) + 2);
+        } else {
+          start = Math.max(1, Math.min(...use.map((n) => n.startLine)) - 2);
+          end = Math.min(fileLines.length, Math.max(...use.map((n) => n.endLine)) + 2);
+        }
+        // Keep window bounded (non-surface paths)
+        if (surfaceMethods.length === 0 && (end - start + 1) * 40 > maxPerFile) {
           end = Math.min(fileLines.length, start + Math.floor(maxPerFile / 40) - 1);
         }
       } else if (usageLine) {
-        start = Math.max(1, usageLine - 15);
-        end = Math.min(fileLines.length, usageLine + 25);
+        start = Math.max(1, usageLine - 10);
+        end = Math.min(fileLines.length, usageLine + 18);
       }
 
       const header = fileSectionHeader(fp, focusNodes.map((n) => `${n.name}(${n.kind})`).slice(0, 6).join(', '));
       const withLineNumbers = exploreLineNumbersEnabled();
       const bodyLines: string[] = [header, '```' + (nodes[0]?.language || ''), ''];
+
+      if (surfaceMethods.length > 0) {
+        // Do NOT span aboutToAppear→build as one window — ThemeHome-sized pages
+        // always trim before PageMap/build. Emit imports + each method separately,
+        // prioritizing build/PageMap/preview.
+        let lastImportLine = 0;
+        for (let i = 0; i < Math.min(fileLines.length, 60); i++) {
+          if (/^\s*import\s+/.test(fileLines[i] ?? '')) lastImportLine = i + 1;
+        }
+        const inventory = extractUiSurfaceInventory(fileLines, surfaceMethods);
+        // Inventory is prepended outside the code fence below via chunk assembly.
+        const methodBudget = Math.max(900, Math.floor((maxPerFile - Math.min(lastImportLine, 40) * 40) / Math.max(1, Math.min(surfaceMethods.length, 4))));
+        if (lastImportLine > 0) {
+          const importCap = Math.min(lastImportLine, 45);
+          for (let i = 1; i <= importCap; i++) {
+            const code = fileLines[i - 1] ?? '';
+            bodyLines.push(withLineNumbers ? `${i}\t${code}` : code);
+          }
+          bodyLines.push(withLineNumbers ? `…\t// …` : '// …');
+        }
+        let methodsEmitted = 0;
+        for (const m of surfaceMethods) {
+          if (methodsEmitted >= 5) break;
+          const mStart = Math.max(1, m.startLine - 1);
+          let mEnd = Math.min(fileLines.length, m.endLine + 1);
+          // Cap each method so later build/PageMap still fit.
+          const maxLines = Math.max(25, Math.floor(methodBudget / 40));
+          if (mEnd - mStart + 1 > maxLines) {
+            mEnd = mStart + maxLines - 1;
+          }
+          bodyLines.push(withLineNumbers ? `…\t// --- ${m.name} ---` : `// --- ${m.name} ---`);
+          for (let i = mStart; i <= mEnd; i++) {
+            const code = fileLines[i - 1] ?? '';
+            bodyLines.push(withLineNumbers ? `${i}\t${code}` : code);
+          }
+          methodsEmitted++;
+        }
+        bodyLines.push('```', '');
+        let chunk = (inventory ? inventory + '\n' : '') + bodyLines.join('\n');
+        if (chunk.length > maxPerFile + (inventory ? 1200 : 0)) {
+          chunk = `${chunk.slice(0, maxPerFile + (inventory ? 1200 : 0))}\n... (trimmed — answer from inventory + visible methods; do not Read the rest)\n\`\`\`\n`;
+        }
+        if (totalChars + chunk.length > maxTotal && rendered > 0) break;
+        lines.push(chunk);
+        totalChars += chunk.length;
+        rendered++;
+        continue;
+      }
+
       for (let i = start; i <= end; i++) {
         const code = fileLines[i - 1] ?? '';
         bodyLines.push(withLineNumbers ? `${i}\t${code}` : code);
@@ -4084,7 +4790,7 @@ export class ToolHandler {
       bodyLines.push('```', '');
       let chunk = bodyLines.join('\n');
       if (chunk.length > maxPerFile) {
-        chunk = `${chunk.slice(0, maxPerFile)}\n... (trimmed)\n\`\`\`\n`;
+        chunk = `${chunk.slice(0, maxPerFile)}\n... (trimmed — answer from visible lines; do not Read the rest)\n\`\`\`\n`;
       }
       if (totalChars + chunk.length > maxTotal && rendered > 0) break;
       lines.push(chunk);
@@ -4096,11 +4802,98 @@ export class ToolHandler {
 
     lines.push('---');
     lines.push(
-      '> **Compact local explore complete** — answer from the definition(s) above. ' +
-      'Do not call `homegraph_search` or another full explore for the same symbol.',
+      '> **Compact local explore complete — ANSWER NOW.** ' +
+      'Do **not** Read/Grep/`homegraph_search`/`homegraph_explore`/`homegraph_node` for the same symbols.',
     );
     lines.push('');
     return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * Hover / pointer-handler inventory — onHover / Hover* symbols + short snippets.
+   * Used when the agent asks about hover effects without naming a Type yet.
+   */
+  private buildHoverHandlerSurveySection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const topicBoost = /图标|icon|appicon|dock|launcher/i.test(query);
+    const searchTerms = ['onHover', 'HoverAnimation', 'HoverEffect', 'HoverConstants', 'hover'];
+    const seen = new Set<string>();
+    const hits: Array<{ file: string; line: number; name: string; kind: string; score: number; snippet: string }> = [];
+
+    for (const term of searchTerms) {
+      let results: SearchResult[] = [];
+      try {
+        results = cg.searchNodes(term, {
+          kinds: ['method', 'function', 'property', 'field', 'variable', 'constant', 'class', 'component'],
+          limit: 30,
+        });
+      } catch {
+        continue;
+      }
+      for (const r of results) {
+        if (isOhosApiFilePath(r.node.filePath) || isTestFile(r.node.filePath)) continue;
+        const nameLc = r.node.name.toLowerCase();
+        const pathLc = r.node.filePath.toLowerCase();
+        const termLc = term.toLowerCase();
+        if (!nameLc.includes(termLc) && !pathLc.includes(termLc)) continue;
+        const key = `${r.node.filePath}:${r.node.startLine}:${r.node.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        let score = nameLc === 'onhover' || nameLc.startsWith('onhover') ? 40 : 10;
+        if (/hover/.test(nameLc)) score += 15;
+        if (topicBoost && /icon|appicon|dock|launcher|smartdock|appcenter/i.test(pathLc)) score += 25;
+        let snippet = (r.node.signature || r.node.name).slice(0, 120);
+        try {
+          const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+          if (abs && existsSync(abs) && r.node.startLine > 0) {
+            const lines = readFileSync(abs, 'utf-8').split('\n');
+            const from = Math.max(0, r.node.startLine - 1);
+            const to = Math.min(lines.length, from + 4);
+            snippet = lines.slice(from, to).map((l) => l.trim()).filter(Boolean).join(' / ').slice(0, 160);
+          }
+        } catch { /* keep signature */ }
+        hits.push({
+          file: r.node.filePath,
+          line: r.node.startLine,
+          name: r.node.name,
+          kind: r.node.kind,
+          score,
+          snippet,
+        });
+      }
+    }
+
+    if (hits.length === 0) {
+      return {
+        section: [
+          '**Hover / pointer handler survey**',
+          '',
+          'No `onHover` / Hover* handlers found in the indexed project graph.',
+          '',
+          '> Next: Grep `onHover` / `Hover` in `*.ets` if the index is incomplete.',
+          '',
+        ].join('\n'),
+        hitCount: 0,
+      };
+    }
+
+    hits.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+    const lines = [
+      '**Hover / pointer handler survey**',
+      '',
+      '> **ANSWER NOW** from these in-repo hover handlers + snippets. Do not Grep `onHover` again unless a named Type is still missing.',
+      '',
+    ];
+    for (const h of hits.slice(0, 18)) {
+      lines.push(`- \`${h.name}\` (${h.kind}) — \`${h.file}:${h.line}\``);
+      if (h.snippet) lines.push(`  \`${h.snippet}\``);
+    }
+    if (hits.length > 18) lines.push(`- … and ${hits.length - 18} more`);
+    lines.push('');
+    return { section: lines.join('\n'), hitCount: hits.length };
   }
 
   /**
@@ -4147,28 +4940,52 @@ export class ToolHandler {
 
     const resolveImportLine = (node: Node): string => resolveImportLineFromNode(node, projectRoot);
 
+    const tryPushImport = (node: Node): void => {
+      if (isOhosApiFilePath(node.filePath)) return;
+      const lineText = resolveImportLine(node);
+      const lineLc = lineText.toLowerCase();
+      const symbols = parseImportedSymbols(lineText);
+      if (!matchesSubmodule(lineText, symbols)) return;
+      if (kitTerms.length > 0) {
+        const matchesKit = kitTerms.some((k) => lineLc.includes(`@kit.${k.toLowerCase()}`));
+        if (!matchesKit) return;
+      }
+      const key = `${node.filePath}:${node.startLine}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      imports.push({
+        file: node.filePath,
+        line: node.startLine,
+        lineText,
+        symbols,
+      });
+    };
+
+    // Prefer searching the named export/API (taskpool, util, …) — kit-only FTS
+    // with a low limit misses focused import sites among popular @kit modules.
+    const focusSearch = submodules.length > 0 ? submodules : [];
+    for (const sym of focusSearch) {
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(sym, { kinds: ['import'], limit: 200 });
+      } catch {
+        continue;
+      }
+      for (const r of hits) tryPushImport(r.node);
+    }
+
     for (const term of kitSearchTerms) {
       const termLc = term.toLowerCase().replace(/^@kit\./, '');
       let hits: SearchResult[] = [];
       try {
-        hits = cg.searchNodes(term, { kinds: ['import'], limit: 80 });
+        hits = cg.searchNodes(term, { kinds: ['import'], limit: focusSearch.length > 0 ? 40 : 120 });
       } catch {
         continue;
       }
       for (const r of hits) {
         const lineText = resolveImportLine(r.node);
         if (!lineText.toLowerCase().includes(termLc) && !lineText.toLowerCase().includes('@kit.')) continue;
-        const symbols = parseImportedSymbols(lineText);
-        if (!matchesSubmodule(lineText, symbols)) continue;
-        const key = `${r.node.filePath}:${r.node.startLine}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        imports.push({
-          file: r.node.filePath,
-          line: r.node.startLine,
-          lineText,
-          symbols,
-        });
+        tryPushImport(r.node);
       }
     }
 
@@ -4257,20 +5074,45 @@ export class ToolHandler {
     const rel = (p: string) => p.replace(/\\/g, '/');
     const lines: string[] = ['**Inheritance survey**', ''];
     let listed = 0;
+    const projectRoot = (() => {
+      try { return cg.getProjectRoot(); } catch { return ''; }
+    })();
 
     for (const typeName of extractTypeNamesFromQuery(query).slice(0, 2)) {
       const bases = cg.getNodesByName(typeName).filter(
         (n) => (n.kind === 'class' || n.kind === 'struct' || n.kind === 'interface') && !isTestFile(n.filePath),
       );
       for (const base of bases.slice(0, 2)) {
-        const subs: Node[] = [];
+        const publicSubs: Node[] = [];
+        const otherSubs: Node[] = [];
         for (const e of cg.getIncomingEdges(base.id)) {
           if (e.kind !== 'extends' && e.kind !== 'implements') continue;
           try {
             const child = cg.getNode(e.source);
-            if (child && !isTestFile(child.filePath)) subs.push(child);
+            if (!child || isTestFile(child.filePath)) continue;
+            const isCpp = /\.(hpp|h|hh|hxx|cpp|cc|cxx)$/i.test(child.filePath);
+            if (isCpp && projectRoot) {
+              const abs = validatePathWithinRoot(projectRoot, child.filePath);
+              if (abs && existsSync(abs) && child.startLine > 0) {
+                try {
+                  const fileLines = readFileSync(abs, 'utf-8').split('\n');
+                  // Class decl may span a few lines (`class Foo\n: public Bar`).
+                  const from = Math.max(0, child.startLine - 1);
+                  const decl = fileLines.slice(from, Math.min(fileLines.length, from + 4)).join(' ');
+                  const pub = cppExtendsLooksPublic(decl, base.name);
+                  if (pub === false) {
+                    otherSubs.push(child);
+                    continue;
+                  }
+                } catch { /* keep as public-ish */ }
+              }
+            }
+            publicSubs.push(child);
           } catch { /* skip */ }
         }
+        // Prefer public / language-default is-a; only fall back to private if
+        // nothing else is indexed (avoids empty answers).
+        const subs = publicSubs.length > 0 ? publicSubs : otherSubs;
         if (subs.length === 0) continue;
         lines.push(`### Subtypes of \`${base.name}\` (\`${rel(base.filePath)}\`)`);
         for (const s of subs.slice(0, 30)) {
@@ -4278,6 +5120,12 @@ export class ToolHandler {
           listed++;
         }
         if (subs.length > 30) lines.push(`- … and ${subs.length - 30} more`);
+        if (publicSubs.length > 0 && otherSubs.length > 0) {
+          lines.push(
+            `- _(also private/protected C++ inherits, omitted: ${otherSubs.map((s) => s.name).slice(0, 8).join(', ')})` +
+            `${otherSubs.length > 8 ? ', …' : ''})_`,
+          );
+        }
         lines.push('');
       }
     }
@@ -4300,6 +5148,10 @@ export class ToolHandler {
     // Literal chains in quotes: .width('100%')
     for (const m of query.matchAll(/(\.[a-zA-Z_][\w]*\s*\([^)]*\))/g)) {
       patterns.push(m[1]!.replace(/\s+/g, ''));
+    }
+    // Bare field / mutex names (m_eglMutex) — text-scan without a leading dot.
+    for (const f of extractFieldLikeSymbolsFromQuery(query)) {
+      patterns.push(f);
     }
     if (patterns.length === 0) return '';
 
@@ -4326,7 +5178,9 @@ export class ToolHandler {
 
     // Scan top FTS files for literal pattern in source
     for (const pat of patterns.slice(0, 3)) {
-      const literal = pat.startsWith('.') ? pat : `.${pat}`;
+      const literal = pat.startsWith('.') || pat.startsWith('m_') || /(?:Mutex|Lock)$/.test(pat)
+        ? pat
+        : `.${pat}`;
       const re = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
       let files: SearchResult[] = [];
       try {
@@ -4367,43 +5221,219 @@ export class ToolHandler {
   /**
    * API call-site survey — where a named API/symbol (statfs, napi_*) appears in repo source.
    */
+  /**
+   * In-repo how-to for system settings/capabilities (language/locale/…).
+   * Lists concrete `@ohos.i18n` / `getSystemLanguage` call sites — not every
+   * file that mentions the word "language".
+   */
+  private buildSystemCapabilityHowtoSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const searchTerms = [
+      'getSystemLanguage',
+      'getSystemRegion',
+      'System.getSystemLanguage',
+      '@ohos.i18n',
+      'i18n.System',
+    ];
+    // Topic tokens from the question (language/locale) only as secondary filters.
+    if (/\blanguage\b|语言/i.test(query)) searchTerms.push('getSystemLanguage');
+    if (/\blocale\b|地区/i.test(query)) searchTerms.push('getSystemRegion');
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const rows: string[] = [];
+    const seen = new Set<string>();
+
+    for (const term of searchTerms) {
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(term.replace(/^@/, ''), { limit: 35 });
+      } catch { continue; }
+      for (const r of hits) {
+        if (isTestFile(r.node.filePath) || isOhosApiFilePath(r.node.filePath)) continue;
+        if (/\.d\.ts$/i.test(r.node.filePath)) continue;
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs || !existsSync(abs)) continue;
+        let content: string;
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        const re = new RegExp(
+          term.startsWith('@')
+            ? term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            : `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+        );
+        for (let i = 0; i < fileLines.length; i++) {
+          const lineText = fileLines[i] ?? '';
+          if (!re.test(lineText)) continue;
+          // Prefer real get/import sites over comments.
+          if (/getSystemLanguage|getSystemRegion|@ohos\.i18n|i18n\.System/i.test(lineText)
+            || /import\s+.*i18n/i.test(lineText)) {
+            const key = `${r.node.filePath}:${i + 1}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            rows.push(`- \`${rel(r.node.filePath)}:${i + 1}\`  \`${lineText.trim().slice(0, 120)}\``);
+            if (rows.length >= 16) break;
+          }
+        }
+        if (rows.length >= 16) break;
+      }
+      if (rows.length >= 16) break;
+    }
+
+    if (rows.length === 0) {
+      return {
+        section: [
+          '**System capability howto (in-repo)**',
+          '',
+          'No `getSystemLanguage` / `@ohos.i18n` call sites indexed. **ANSWER NOW** from SDK docs if the project does not wrap this API.',
+          '',
+        ].join('\n'),
+        hitCount: 0,
+      };
+    }
+
+    return {
+      section: [
+        '**System capability howto (in-repo)**',
+        '',
+        '> Concrete call/import sites for system language/locale. **ANSWER NOW** — do not Grep `language` broadly.',
+        '',
+        ...rows,
+        '',
+      ].join('\n'),
+      hitCount: rows.length,
+    };
+  }
+
+  /**
+   * Declaration / id / native-binding sites for a named UI/native Type (XComponent…).
+   */
+  private buildDeclarationSiteSurveySection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number } {
+    const types = extractTypeNamesFromQuery(query)
+      .filter((t) => !isFrameworkUiDecoratorName(t))
+      .slice(0, 3);
+    if (types.length === 0) return { section: '', hitCount: 0 };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const rows: string[] = [];
+    const seen = new Set<string>();
+
+    for (const typeName of types) {
+      let hits: SearchResult[] = [];
+      try {
+        hits = cg.searchNodes(typeName, { limit: 40 });
+      } catch { continue; }
+      for (const r of hits) {
+        if (isTestFile(r.node.filePath)) continue;
+        if (isOhosApiFilePath(r.node.filePath) && /\.d\.ts$/i.test(r.node.filePath)) continue;
+        const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+        if (!abs || !existsSync(abs)) continue;
+        let content: string;
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        const typeRe = new RegExp(`\\b${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        for (let i = 0; i < fileLines.length; i++) {
+          const lineText = fileLines[i] ?? '';
+          if (!typeRe.test(lineText)) continue;
+          // Prefer construction / JSX / register / id= / native bind sites.
+          if (
+            !new RegExp(`${typeName}\\s*\\(|<${typeName}\\b|id\\s*[:=]|OH_Native|RegisterCallback|Export\\s*\\(|napi_`, 'i')
+              .test(lineText)
+            && !/id\s*[:=]/.test(fileLines[i + 1] ?? '')
+          ) {
+            continue;
+          }
+          const key = `${r.node.filePath}:${i + 1}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const clip = [lineText, fileLines[i + 1] ?? '', fileLines[i + 2] ?? '']
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .join(' / ')
+            .slice(0, 160);
+          rows.push(`- \`${typeName}\` — \`${rel(r.node.filePath)}:${i + 1}\`  \`${clip}\``);
+          if (rows.length >= 20) break;
+        }
+        if (rows.length >= 20) break;
+      }
+    }
+
+    if (rows.length === 0) return { section: '', hitCount: 0 };
+    return {
+      section: [
+        '**Declaration / id / native-binding survey**',
+        '',
+        '> Construction sites with nearby `id` / native register cues. **ANSWER NOW** — do not Grep the same Type again.',
+        '',
+        ...rows,
+        '',
+      ].join('\n'),
+      hitCount: rows.length,
+    };
+  }
+
   private buildApiUsageSection(
     cg: HomeGraph,
     query: string,
     projectRoot: string,
   ): { section: string; fileCount: number } {
     // Include PascalCase SDK modules (Telephony) — deps-only missed them.
-    const symbols = extractApiUsageTokens(query).slice(0, 6);
-    if (symbols.length === 0) return { section: '', fileCount: 0 };
+    const rawSymbols = extractApiUsageTokens(query).slice(0, 6);
+    if (rawSymbols.length === 0) return { section: '', fileCount: 0 };
+    // Expand Telephony → telephony / @ohos.telephony so import call sites hit.
+    const symbols: string[] = [];
+    for (const sym of rawSymbols) {
+      symbols.push(sym);
+      if (/^[A-Z][A-Za-z0-9]+$/.test(sym) && sym.length >= 4) {
+        const lc = sym.toLowerCase();
+        if (!symbols.includes(lc)) symbols.push(lc);
+        const ohos = `@ohos.${lc}`;
+        if (!symbols.includes(ohos)) symbols.push(ohos);
+      }
+    }
 
     const rel = (p: string) => p.replace(/\\/g, '/');
-    const hits = new Map<string, number[]>();
+    const hits = new Map<string, { lines: number[]; stub: boolean }>();
 
     const addHit = (file: string, line: number): void => {
       if (isTestFile(file)) return;
       const fp = rel(file);
-      const arr = hits.get(fp) ?? [];
-      if (!arr.includes(line)) arr.push(line);
-      hits.set(fp, arr);
+      const stub = /\.d\.ts$/i.test(fp) || /windowsceneinterfaces|@ohos\.|\/api\//i.test(fp);
+      const prev = hits.get(fp) ?? { lines: [], stub };
+      if (!prev.lines.includes(line)) prev.lines.push(line);
+      prev.stub = prev.stub && stub;
+      hits.set(fp, prev);
     };
 
-    for (const sym of symbols.slice(0, 4)) {
+    for (const sym of symbols.slice(0, 6)) {
       const symLc = sym.toLowerCase();
       let nodes: SearchResult[] = [];
       try {
-        nodes = cg.searchNodes(sym, { limit: 40 });
+        nodes = cg.searchNodes(sym.replace(/^@/, ''), { limit: 40 });
       } catch { /* skip */ }
       for (const r of nodes) {
         const n = r.node;
-        if (n.name.toLowerCase() === symLc || (n.signature || '').toLowerCase().includes(symLc)) {
+        const hay = `${n.name} ${n.signature || ''} ${n.filePath}`.toLowerCase();
+        if (hay.includes(symLc) || n.name.toLowerCase() === symLc) {
           addHit(n.filePath, n.startLine);
         }
       }
 
-      const wordRe = new RegExp(`\\b${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      const wordRe = new RegExp(
+        sym.startsWith('@')
+          ? sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          : `\\b${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+        'i',
+      );
       let scanHits: SearchResult[] = [];
       try {
-        scanHits = cg.searchNodes(sym, { limit: 30 });
+        scanHits = cg.searchNodes(sym.replace(/^@/, ''), { limit: 35 });
       } catch { continue; }
       const seenFiles = new Set<string>();
       for (const r of scanHits) {
@@ -4424,26 +5454,80 @@ export class ToolHandler {
 
     if (hits.size === 0) return { section: '', fileCount: 0 };
 
+    // Prefer project call/import sites over SDK .d.ts stubs.
+    const rankedFiles = [...hits.entries()].sort((a, b) => {
+      if (a[1].stub !== b[1].stub) return a[1].stub ? 1 : -1;
+      return a[0].localeCompare(b[0]);
+    });
+    const projectHits = rankedFiles.filter(([, v]) => !v.stub);
+    const display = projectHits.length > 0 ? projectHits : rankedFiles;
+
+    // Extract concrete API method names from snippets (telephony.call.xxx / radio.getY).
+    const methodNames = new Set<string>();
+    for (const [fp, info] of display.slice(0, 40)) {
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      if (!abs || !existsSync(abs)) continue;
+      let fileLines: string[] = [];
+      try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { continue; }
+      for (const ln of info.lines.slice(0, 8)) {
+        const lineText = fileLines[ln - 1] ?? '';
+        for (const sym of rawSymbols) {
+          const esc = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const re = new RegExp(
+            `(?:@ohos\\.)?${esc}(?:\\.[A-Za-z_][\\w]*)*\\.([A-Za-z_][\\w]*)\\s*\\(`,
+            'g',
+          );
+          for (const m of lineText.matchAll(re)) {
+            if (m[1] && m[1].length >= 2) methodNames.add(`${sym}.${m[1]}`);
+          }
+          // import X from '@ohos.telephony.call' → module surface
+          const imp = lineText.match(new RegExp(`from\\s+['"]@ohos\\.${esc}(?:\\.(\\w+))?['"]`, 'i'));
+          if (imp) methodNames.add(imp[1] ? `@ohos.${sym.toLowerCase()}.${imp[1]}` : `@ohos.${sym.toLowerCase()}`);
+        }
+      }
+    }
+
     const lines = [
       '**API usage sites**',
       '',
-      `> Files referencing \`${symbols.join('`, `')}\` in this repo (${hits.size} file(s)). Answer from this list; source bodies omitted.`,
+      `> In-repo references to \`${rawSymbols.join('`, `')}\` (${display.length} file(s)` +
+      `${projectHits.length > 0 && projectHits.length < rankedFiles.length ? `; SDK stubs omitted` : ''}). ` +
+      '**ANSWER NOW** from this list (+ snippets); do not Grep the same API again.',
       '',
     ];
+    if (methodNames.size > 0) {
+      lines.push('**Called / imported API surfaces**');
+      for (const m of [...methodNames].sort().slice(0, 24)) lines.push(`- \`${m}\``);
+      if (methodNames.size > 24) lines.push(`- … and ${methodNames.size - 24} more`);
+      lines.push('');
+    }
     let shown = 0;
-    for (const [fp, lineNos] of [...hits.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      if (shown >= 45) break;
-      const sortedLines = [...lineNos].sort((a, b) => a - b).slice(0, 6);
+    for (const [fp, info] of display) {
+      if (shown >= 28) break;
+      const sortedLines = [...info.lines].sort((a, b) => a - b).slice(0, 4);
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      let snippet = '';
+      if (abs && existsSync(abs)) {
+        try {
+          const fileLines = readFileSync(abs, 'utf-8').split('\n');
+          const ln = sortedLines[0]!;
+          snippet = (fileLines[ln - 1] ?? '').trim().slice(0, 100);
+        } catch { /* */ }
+      }
       const lineStr = sortedLines.map((l) => `L${l}`).join(', ');
-      const more = lineNos.length > sortedLines.length ? ` +${lineNos.length - sortedLines.length} more` : '';
-      lines.push(`- \`${fp}\` (${lineStr}${more})`);
+      const more = info.lines.length > sortedLines.length ? ` +${info.lines.length - sortedLines.length} more` : '';
+      lines.push(
+        snippet
+          ? `- \`${fp}\` (${lineStr}${more})  \`${snippet}\``
+          : `- \`${fp}\` (${lineStr}${more})`,
+      );
       shown++;
     }
-    if (hits.size > shown) lines.push(`- … and ${hits.size - shown} more file(s)`);
+    if (display.length > shown) lines.push(`- … and ${display.length - shown} more file(s)`);
     lines.push('');
-    lines.push(`> API usage survey complete — **${hits.size}** file(s) listed.`);
+    lines.push(`> API usage survey complete — **${display.length}** file(s). **ANSWER NOW.**`);
     lines.push('');
-    return { section: lines.join('\n'), fileCount: hits.size };
+    return { section: lines.join('\n'), fileCount: display.length };
   }
 
   /**
@@ -4710,15 +5794,20 @@ export class ToolHandler {
     // ranking all see the same canonical spelling (Erlang `mod:fn/arity`).
     const query = normalizeQuerySpelling(rawQuery);
 
+    const deferKind = queryShouldDeferToBuiltinTools(query);
+    if (deferKind) {
+      return this.textResult(homegraphDeferGuidance(deferKind, query));
+    }
+
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const projectRoot = cg.getProjectRoot();
 
     const compactLocal = this.tryFastInventoryExplore(cg, query, projectRoot)
+      ?? this.tryLightMechanismExplore(cg, query, projectRoot)
       ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
     if (compactLocal) return compactLocal;
 
-    const lightMechanism = this.tryLightMechanismExplore(cg, query, projectRoot);
-    if (lightMechanism) return lightMechanism;
+    // Light mechanism already attempted above.
 
     // Resolve adaptive output budget from project size.
     // largest-tier defaults if stats aren't available, which preserves
@@ -5366,9 +6455,10 @@ export class ToolHandler {
     const homonymSection = this.buildHomonymDefinitionsSection(cg, query);
     if (homonymSection) lines.push(homonymSection);
 
-    const kitUsageResult = shouldBuildKitModuleUsageSurvey(query)
-      ? this.buildKitModuleUsageSection(cg, query, projectRoot)
-      : { section: '', symbolCount: 0 };
+    const kitUsageResult =
+      shouldBuildKitModuleUsageSurvey(query) && !(importResult.compactListing && importResult.siteCount > 0)
+        ? this.buildKitModuleUsageSection(cg, query, projectRoot)
+        : { section: '', symbolCount: 0 };
     if (kitUsageResult.section) lines.push(kitUsageResult.section);
 
     const domainFileResult = shouldBuildDomainFileSurvey(query)
@@ -5466,40 +6556,43 @@ export class ToolHandler {
       }
       if (kitUsageResult.section) {
         return finishCompact(
-          `Kit module usage survey — **${kitUsageResult.symbolCount}** imported symbol(s) across the repo. SDK definitions are not in this project; answer from the usage list above.`,
+          `Kit module **in-repo usage** survey — **${kitUsageResult.symbolCount}** imported symbol(s). ` +
+          'Not an SDK catalog. **ANSWER NOW** from the usage list; do not Grep the same `@kit` path.',
         );
       }
       if (domainFileResult.section && domainFileResult.fileCount > 0) {
         return finishCompact(
-          `Domain file survey — **${domainFileResult.fileCount}** related file(s) listed above. Source bodies omitted; answer from the inventory.`,
+          `Domain file survey — **${domainFileResult.fileCount}** related file(s) listed above. **ANSWER NOW.**`,
         );
       }
       if (apiUsageResult.section && apiUsageResult.fileCount > 0) {
         return finishCompact(
-          `API usage survey — **${apiUsageResult.fileCount}** file(s) referencing the queried symbol(s). Source bodies omitted; answer from the list above.`,
+          `API usage survey — **${apiUsageResult.fileCount}** file(s). **ANSWER NOW** from the list above.`,
         );
       }
       if (dataSourceResult.section && dataSourceResult.edgeCount > 0) {
         return finishCompact(
-          `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s) listed above. Source bodies omitted; answer from the inventory.`,
+          `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s). **ANSWER NOW.**`,
         );
       }
       if (inheritanceListed) {
-        return finishCompact('Inheritance survey above lists all direct subtypes found — source bodies omitted.');
+        return finishCompact(
+          'Inheritance survey above lists all direct subtypes found. **ANSWER NOW** — do not grep `extends`.',
+        );
       }
       if (importResult.compactListing) {
         return finishCompact(
-          `Listed **${importResult.siteCount}** import site(s) for the queried symbol(s). Source bodies omitted — answer from the dependency list above.`,
+          `Listed **${importResult.siteCount}** import site(s). **ANSWER NOW** from the dependency list above.`,
         );
       }
       if (callerBulletCount >= 1) {
         return finishCompact(
-          `Caller inventory above lists **${callerBulletCount}** method(s) with external callers — source bodies omitted.`,
+          `Caller inventory above lists **${callerBulletCount}** method(s). **ANSWER NOW.**`,
         );
       }
       if (memberSection && memberFileCount >= 2) {
         return finishCompact(
-          `Member/pattern usage in **${memberFileCount}** file(s) — source bodies omitted; answer from the inventory above.`,
+          `Member/pattern usage in **${memberFileCount}** file(s). **ANSWER NOW** from the inventory above.`,
         );
       }
     }
@@ -6239,7 +7332,11 @@ export class ToolHandler {
         const stats = cg.getStats();
         const callBudget = getExploreBudget(stats.fileCount);
         lines.push('');
-        lines.push(`> **Explore budget: ${callBudget} calls for this project (${stats.fileCount.toLocaleString()} files indexed).** Each call covers ~6 files; if your question spans more, spend your remaining calls on the uncovered area BEFORE falling back to Read — another explore is cheaper and more complete than reading those files. Synthesize once you've used ${callBudget}.`);
+        lines.push(
+          `> **Usually one explore is enough** (budget ≤${callBudget} for ${stats.fileCount.toLocaleString()} files). ` +
+          'Answer from Flow + Source above. Extra explore/`homegraph_node`/Read for the **same** symbols multiplies tokens — ' +
+          'only call again for a missing **named** symbol.',
+        );
       } catch {
         // Stats unavailable — skip budget note
       }
@@ -6274,7 +7371,7 @@ export class ToolHandler {
     if (!finalText.includes('**Partial result**') && !finalText.includes('> **Explore complete**')) {
       finalText +=
         '\n\n> **Explore complete — ANSWER NOW.** Flow + Source above are authoritative for this query. ' +
-        'Do **not** grep/read/`homegraph_node`/`homegraph_search` for the same symbols or files. ' +
+        'Do **not** grep/read/`homegraph_node`/`homegraph_search` for the same symbols or files (multiplies tokens). ' +
         'Only call one tighter `homegraph_explore` if a named symbol essential to the answer is missing.';
     }
 
@@ -7552,6 +8649,46 @@ export class ToolHandler {
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * At caller sites, list nearby `#include` / `import` lines — answers
+   * "which call makes Type X's definition visible" without a second Grep/Read
+   * when the agent only called `homegraph_callers`.
+   */
+  private formatCallerIncludeVisibility(cg: HomeGraph, callers: Node[]): string {
+    if (callers.length === 0) return '';
+    let projectRoot = '';
+    try { projectRoot = cg.getProjectRoot(); } catch { return ''; }
+    const rows: string[] = [];
+    const seen = new Set<string>();
+    for (const caller of callers.slice(0, 8)) {
+      const abs = validatePathWithinRoot(projectRoot, caller.filePath);
+      if (!abs || !existsSync(abs)) continue;
+      let content: string;
+      try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+      const fileLines = content.split('\n');
+      const scanTo = Math.min(fileLines.length, Math.max(120, (caller.startLine || 1) + 5));
+      for (let i = 0; i < scanTo; i++) {
+        const lineText = fileLines[i] ?? '';
+        if (!/^\s*(?:#\s*include|import\s)/.test(lineText)) continue;
+        const key = `${caller.filePath}:${i + 1}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push(`- \`${caller.filePath}:${i + 1}\`  \`${lineText.trim().slice(0, 140)}\``);
+        if (rows.length >= 12) break;
+      }
+      if (rows.length >= 12) break;
+    }
+    if (rows.length === 0) return '';
+    return [
+      '',
+      '**Include / import at caller files** (definition visibility cues)',
+      '',
+      ...rows,
+      '',
+      '> Use these includes with the caller list when asking which call makes another type visible.',
+    ].join('\n');
   }
 
   /**

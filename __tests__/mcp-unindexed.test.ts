@@ -26,7 +26,7 @@ import { removeTempDir } from './helpers/fs';
 const BIN = path.resolve(__dirname, '../dist/bin/homegraph.js');
 
 function spawnServer(cwd: string): ChildProcessWithoutNullStreams {
-  return spawn(process.execPath, [BIN, 'serve', '--mcp'], {
+  return spawn(process.execPath, [BIN, 'serve', 'mcp'], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     // Direct (in-process) mode — the unindexed path never has a daemon

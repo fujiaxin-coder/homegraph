@@ -4,7 +4,7 @@
  * Validates the daemon architecture in `src/mcp/{daemon,proxy,session,index}.ts`
  * AFTER the review fixes:
  *
- *   - The daemon is a *detached* background process; every `serve --mcp`
+ *   - The daemon is a *detached* background process; every `serve mcp`
  *     invocation is a thin proxy to it. Two invocations against one project
  *     share ONE daemon.
  *   - Concurrent launchers converge on a single daemon (the must-fix-1
@@ -50,7 +50,7 @@ interface SpawnedServer {
 }
 
 function spawnServer(cwd: string, env: NodeJS.ProcessEnv = {}): SpawnedServer {
-  const child = spawn(process.execPath, [BIN, 'serve', '--mcp'], {
+  const child = spawn(process.execPath, [BIN, 'serve', 'mcp'], {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     // #618: the daemon-attach log line is now off by default; opt the test

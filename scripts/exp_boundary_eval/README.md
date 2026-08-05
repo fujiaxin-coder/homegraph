@@ -206,7 +206,7 @@ npm run build
 | 组别 | MCP | Agent Prompt | homegraph 工具 |
 |------|-----|--------------|----------------|
 | **baseline** | 无 | 仅用 grep/read | `deny` |
-| **homegraph** | `homegraph serve --mcp --path <repo>` | 优先 `homegraph_explore` | 启用 |
+| **homegraph** | `homegraph serve mcp --path <repo>` | 优先 `homegraph_explore` | 启用 |
 
 - 每次实验前 `setup.py` 会重置仓库并**重新写入**上述配置；`deveco run --dir <repo>` 读取项目级配置。
 - homegraph 组的 `git clean` 保留 `.homegraph/` 索引，避免重复 `init -i`。

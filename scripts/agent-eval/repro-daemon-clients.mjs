@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Reproduction harness B — the FAITHFUL opencode scenario.
 //
-// Spawns N real `codegraph serve --mcp --path <repo>` processes (each becomes a
+// Spawns N real `homegraph serve mcp --path <repo>` processes (each becomes a
 // proxy that attaches to ONE shared daemon — exactly what opencode does with N
 // subagents), drives clean MCP JSON-RPC over each child's stdio, then fires ONE
 // concurrent wave of codegraph_explore tools/call across all N and measures
@@ -37,7 +37,7 @@ const QUERIES = [
 ];
 
 function makeClient(id) {
-  const child = spawn('node', [CLI, 'serve', '--mcp', '--path', repo], {
+  const child = spawn('node', [CLI, 'serve', 'mcp', '--path', repo], {
     env: { ...process.env, CODEGRAPH_TELEMETRY: '0', DO_NOT_TRACK: '1', CODEGRAPH_MCP_LOG_ATTACH: '0' },
     stdio: ['pipe', 'pipe', 'inherit'],
   });

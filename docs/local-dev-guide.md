@@ -112,7 +112,7 @@ CLI 适合脚本与快速自检；Cursor 适合自然语言 + 多步推理。
       "args": [
         "/home/you/code/homegraph/dist/bin/homegraph.js",
         "serve",
-        "--mcp",
+        "mcp",
         "--path",
         "${workspaceFolder}"
       ]

@@ -1037,7 +1037,7 @@ sequenceDiagram
 | ----- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 库 API | `HomeGraph` 类（`src/index.ts`） | 索引：`init`/`indexAll`/`sync`/`watch`；查询：`searchNodes`、`getCallers`/`getCallees`、`getImpactRadius`、`findPath`、`traverse`；上下文：`buildContext`/`getContext`/`findRelevantContext`；统计：`getStats`、`findDeadCode` 等 |
 | CLI   | 见下表                           | 命令行索引与查询                                                                                                                                                                                                    |
-| MCP   | 见下表                           | AI Agent 工具（`homegraph serve --mcp` 启动）                                                                                                                                                                     |
+| MCP   | 见下表                           | AI Agent 工具（`homegraph serve mcp` 启动）                                                                                                                                                                     |
 
 
 **CLI 子命令（完整）**
@@ -1052,7 +1052,7 @@ sequenceDiagram
 | 查询   | `files [options]`                                                  | 列出已索引文件树                                         |
 | 查询   | `callers <symbol>` / `callees <symbol>` / `impact <symbol>`        | 调用者、被调用者、影响半径                                    |
 | 查询   | `affected [files...]`                                              | 根据改动文件找受影响的测试                                    |
-| 服务   | `serve --mcp [--path]`                                             | 以 MCP stdio 模式启动（Agent 实际走这条）                    |
+| 服务   | `serve mcp [--path]`                                             | 以 MCP stdio 模式启动（Agent 实际走这条）                    |
 
 
 > 说明：CLI 头注释里写过 `context <task>`，当前 **未注册** 该子命令；等价能力在库 API 的 `buildContext` 和 MCP 的 `homegraph_explore` 里。
@@ -1099,7 +1099,7 @@ sequenceDiagram
 - 把用户问题拆成四个子问题：定义在哪、谁调用、内部调谁、改动影响面。
 - 从 `AlbumUtils.useNewPhotoGrid()` 抽出两个符号名：`AlbumUtils`、`useNewPhotoGrid`。
 - 选择 PRIMARY 工具 `homegraph_explore`（一次调用尽量拿到定义 + 相关源码 + 调用关系概览）。
-- 通过 IDE 发起 MCP 调用（Cursor 会把 Agent 的 tool call 转成 `tools/call` 发给 `homegraph serve --mcp` 子进程）。
+- 通过 IDE 发起 MCP 调用（Cursor 会把 Agent 的 tool call 转成 `tools/call` 发给 `homegraph serve mcp` 子进程）。
 
 **MCP 入参**
 
