@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.5.1] - 2026-08-05
+
 ### New Features
 
 - MCP **`homegraph_diff_impact`**: pass a unified `diff` (or explicit `hunks`) to get a code-review evidence pack — only symbols whose spans intersect changed **new-side** lines, plus capped callers, impact summary, ArkUI/ViewTree UI edges, and optional Commit4Spec links (`includeSpecs`). Does not dump every symbol in touched files.
@@ -674,3 +677,4 @@ Thanks @andreinknv for the substantive draft this release was based on.
 [1.1.5]: https://github.com/colbymchenry/homegraph/releases/tag/v1.1.5
 [1.1.6]: https://github.com/colbymchenry/homegraph/releases/tag/v1.1.6
 [1.2.0]: https://github.com/colbymchenry/homegraph/releases/tag/v1.2.0
+[1.5.1]: https://github.com/homegraph/homegraph/releases/tag/v1.5.1
