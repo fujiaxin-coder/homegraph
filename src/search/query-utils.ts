@@ -93,7 +93,9 @@ export function extractKitModuleNamesFromQuery(query: string): string[] {
   return [...names];
 }
 
-/** Submodule tokens from queries like `util模块` / `util 模块`. */
+/** Submodule / named-export tokens from kit usage questions.
+ *  Covers `util模块`, `util 模块`, and `@kit.Foo的bar` / `@kit.Foo bar` (export focus).
+ */
 export function extractKitSubmoduleNamesFromQuery(query: string): string[] {
   const names = new Set<string>();
   for (const m of query.matchAll(/([a-z][a-z0-9_]{1,24})模块/gi)) {
@@ -101,6 +103,13 @@ export function extractKitSubmoduleNamesFromQuery(query: string): string[] {
   }
   for (const m of query.matchAll(/\b([a-z][a-z0-9_]*)\s+模块\b/gi)) {
     if (m[1] && m[1].length >= 2) names.add(m[1]);
+  }
+  // `@kit.ArkTS的taskpool` / `@kit.ArkTS的 foo` — named export, not a catalog.
+  for (const m of query.matchAll(/@kit\.[A-Za-z][A-Za-z0-9]*的\s*([a-z][a-zA-Z0-9_]{2,24})\b/gi)) {
+    if (m[1]) names.add(m[1]);
+  }
+  for (const m of query.matchAll(/@kit\.[A-Za-z][A-Za-z0-9]*[\s.]+([a-z][a-zA-Z0-9_]{2,24})\b/gi)) {
+    if (m[1] && !STOP_WORDS.has(m[1].toLowerCase())) names.add(m[1]);
   }
   return [...names];
 }
@@ -161,9 +170,11 @@ export function queryAsNamedComponentAction(query: string): boolean {
   );
   if (!looksUi) return false;
   const deps = extractDependencySymbolsFromQuery(query);
-  if (deps.some((d) => /^on[A-Z]/.test(d) || /^(click|tap|press)$/i.test(d))) return true;
+  if (deps.some((d) => /^on[A-Z]/.test(d) || /^(click|tap|press|hover)$/i.test(d))) return true;
   // Optional thin intent — only with a UI-looking Type already present.
-  return /点击|单击|按下|按钮|onClick|onTap|会发生什么|what\s+happens|when\s+(?:clicked|pressed)/i.test(query);
+  return /点击|单击|按下|按钮|悬停|hover|onClick|onTap|onHover|会发生什么|what\s+happens|when\s+(?:clicked|pressed|hovered)/i.test(
+    query,
+  );
 }
 
 /**
@@ -177,6 +188,98 @@ export function queryAsOutOfRepoSdkCatalog(query: string): boolean {
     );
   if (!catalog) return false;
   return /@kit\.|\b[A-Z][A-Za-z0-9]*Kit\b/i.test(query);
+}
+
+/**
+ * Query shapes where HomeGraph usually loses to Grep/Glob/SDK docs.
+ * Shape-driven only — no product nouns, no eval-corpus fingerprints.
+ * Short-circuits explore/search with success-shaped "do not retry" guidance.
+ */
+export type HomeGraphDeferKind =
+  | 'sdk-catalog'
+  | 'file-listing'
+  | 'concept-or-existence';
+
+export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKind | null {
+  const q = query.trim();
+  if (!q) return null;
+
+  // Pre-existing catalog classifiers (@kit / *Kit + "what features/APIs").
+  // Checked before named-member heuristics — `@kit.X` can look like Type.member.
+  if (queryAsOutOfRepoSdkCatalog(q) || queryAsKitModuleCapabilitySurvey(q)) {
+    return 'sdk-catalog';
+  }
+
+  // Structural / in-repo usage surveys must still run.
+  if (queryAsMechanismSurvey(q) || queryAsCrossModuleFlowSurvey(q)) return null;
+  if (shouldBuildKitModuleUsageSurvey(q) || shouldBuildApiUsageSurvey(q)) return null;
+  if (shouldBuildCallerInventory(q) || shouldTryLightMechanismExplore(q)) return null;
+  if (queryAsNamedComponentAction(q) || queryHasNamedMemberFocus(q)) return null;
+  if (queryAsInterpretationSurvey(q) || queryAsLocalSymbolDetail(q)) return null;
+  if (queryHasFocusedNamedAnchors(q)) return null;
+
+  const hasType = extractTypeNamesFromQuery(q).length > 0;
+  const hasFile = extractFileBasenamesFromQuery(q).length > 0;
+  const hasMember = extractMemberAccessFromQuery(q).length > 0;
+  const hasKit = /@kit\.|@ohos\./i.test(q);
+
+  // "Which files relate to <topic>?" with no Type/file anchor → Glob/Grep.
+  if (
+    /哪些文件|有哪些.*文件|相关的?\s*文件|涉及.*文件|which\s+files?|files?\s+(?:are\s+)?related/i.test(q)
+    && !hasType
+    && !hasFile
+  ) {
+    return 'file-listing';
+  }
+
+  // Existence / concept-compare with no graph anchor → Grep/docs.
+  if (
+    /有使用|是否使用|有没有使用|使用了.*吗|有什么不同|区别|difference|vs\.?|versus|对比/i.test(q)
+    && !hasType
+    && !hasFile
+    && !hasMember
+    && !hasKit
+  ) {
+    return 'concept-or-existence';
+  }
+
+  // Hover / 悬停 without a named Type → inventory of hover handlers (not Skip).
+  if (shouldBuildHoverHandlerSurvey(q)) return null;
+
+  // Behavioral / interaction outcome with zero graph anchors → Grep (no symbol to seed).
+  // Do NOT include hover/悬停 here — those have a graph inventory path above.
+  if (
+    !hasType
+    && !hasFile
+    && !hasMember
+    && !hasKit
+    && /会有什么|会发生什么|什么反应|what\s+happens|what\s+(?:is|are)\s+the\s+(?:reaction|response)|when\s+(?:the\s+)?user\b/i.test(
+      q,
+    )
+  ) {
+    return 'concept-or-existence';
+  }
+
+  return null;
+}
+
+/** Short success-shaped reply when explore/search should not run. */
+export function homegraphDeferGuidance(kind: HomeGraphDeferKind, query: string): string {
+  const q = query.trim().slice(0, 120);
+  const reasons: Record<HomeGraphDeferKind, string> = {
+    'sdk-catalog':
+      'Official SDK / @kit feature catalogs are outside this repo index — use SDK docs.',
+    'file-listing':
+      'Topic → file lists need Grep/Glob (keyword paths), not the symbol graph.',
+    'concept-or-existence':
+      'Concept compare / UI-behavior / existence checks without a named in-repo Type/file/@kit target — Grep (and docs) beat HomeGraph.',
+  };
+  return [
+    'Skip HomeGraph for this question shape — do **not** retry any `homegraph_*` tool for it.',
+    reasons[kind],
+    `Query: "${q}${query.trim().length > 120 ? '…' : ''}"`,
+    'Next: Grep / Glob / Read / SDK docs. Call HomeGraph only for in-repo wiring, callers/callees, or named-symbol flows.',
+  ].join('\n');
 }
 
 /**
@@ -199,6 +302,70 @@ export function queryShouldPreferExploreOverSearch(query: string): boolean {
 }
 
 /**
+ * In-repo pointer/hover handler inventory — no named Type yet, but the graph
+ * still has onHover / Hover* symbols. Soft-skip→Grep lost accuracy; inventory wins.
+ */
+export function shouldBuildHoverHandlerSurvey(query: string): boolean {
+  if (extractTypeNamesFromQuery(query).length > 0) return false;
+  if (extractMemberAccessFromQuery(query).length > 0) return false;
+  if (queryAsNamedComponentAction(query)) return false;
+  return /悬停|\bhover\b|onHover|hoverEffect|HoverAnimation|HoverConstants/i.test(query);
+}
+
+/**
+ * Framework decorator / ambient UI names — agents paste `@CustomDialog` etc.
+ * Keep real *Page/*Dialog types; drop these when counting UI surfaces / anchors.
+ */
+export const FRAMEWORK_UI_DECORATOR_NAMES = new Set([
+  'customdialog', 'component', 'entry', 'builder', 'preview', 'observed', 'observable',
+  'state', 'prop', 'link', 'objectlink', 'provide', 'consume', 'watch', 'builderparam',
+]);
+
+export function isFrameworkUiDecoratorName(name: string): boolean {
+  return FRAMEWORK_UI_DECORATOR_NAMES.has(name.toLowerCase());
+}
+
+/** PascalCase names that look like UI surfaces (Page / View / … / ThemeHome). */
+export function queryLooksLikeUiComponentType(name: string): boolean {
+  // `@CustomDialog` / bare `Component` match the suffix regex but are not app Types.
+  if (isFrameworkUiDecoratorName(name)) return false;
+  return /(Button|Component|View|Page|Dialog|Bar|Item|Panel|Menu|Chip|Card|Home)$/i.test(name);
+}
+
+/**
+ * 2–3 concrete UI Types named together (Page+Dialog, View+Panel, …).
+ * Must stay on compact explore — full findRelevantContext is a 15–30k / multi-minute
+ * dump for what is a local composition / resource question.
+ */
+export function queryAsFocusedUiCluster(query: string): boolean {
+  if (queryAsMechanismSurvey(query) || queryAsCrossModuleFlowSurvey(query)) return false;
+  const types = extractTypeNamesFromQuery(query).filter(
+    (t) => queryLooksLikeUiComponentType(t) && !isFrameworkUiDecoratorName(t),
+  );
+  return types.length >= 2 && types.length <= 3;
+}
+
+/**
+ * Named Page/Component overview: which UI children / where does it navigate /
+ * how does Page embed Dialog. Needs component bodies, not full-graph explore.
+ */
+export function queryAsComponentSurfaceSurvey(query: string): boolean {
+  if (queryAsFocusedUiCluster(query)) return true;
+  const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+  if (types.length < 1 || types.length > 3) return false;
+  if (!types.some(queryLooksLikeUiComponentType)) return false;
+  if (
+    /使用了哪些|哪些UI|哪些组件|UI组件|跳转到|可以跳转|内嵌|嵌入|preview|加载|page\s+navigation|which\s+(?:ui\s+)?components|navigat|embed/i.test(
+      query,
+    )
+  ) {
+    return true;
+  }
+  // Bare / near-bare `ThemeHome` / `FooPage` — agents search("ThemeHome") for overview.
+  return queryIsTypeNameFocus(query);
+}
+
+/**
  * In-repo kit/import **usage** inventory (call sites / which files import).
  */
 export function shouldBuildKitModuleUsageSurvey(query: string): boolean {
@@ -216,6 +383,7 @@ export function shouldBuildKitModuleUsageSurvey(query: string): boolean {
 
 /**
  * Member-access patterns from a query — `obj.method`, `Type.method`, or `.member`.
+ * Skips `@kit.X` / `@ohos.X` module paths (those are imports, not Type.member).
  */
 export function extractMemberAccessFromQuery(query: string): QueryMemberAccess[] {
   const results: QueryMemberAccess[] = [];
@@ -224,6 +392,10 @@ export function extractMemberAccessFromQuery(query: string): QueryMemberAccess[]
   for (const m of query.matchAll(/\b([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)+)\b/g)) {
     const dotted = m[1];
     if (!dotted || seen.has(dotted)) continue;
+    const idx = m.index ?? 0;
+    // `@kit.ArkTS` / `@ohos.foo` — module specifier, not receiver.member
+    if (idx > 0 && query[idx - 1] === '@') continue;
+    if (/^(?:kit|ohos)\./i.test(dotted)) continue;
     const parts = dotted.split('.');
     if (parts.length < 2) continue;
     const member = parts[parts.length - 1]!;
@@ -238,6 +410,10 @@ export function extractMemberAccessFromQuery(query: string): QueryMemberAccess[]
 
   for (const m of query.matchAll(/\.([A-Za-z_][\w]*)\b/g)) {
     const member = m[1]!;
+    const idx = m.index ?? 0;
+    // Skip the `.X` inside `@kit.X` / `@ohos.X`
+    const before = query.slice(0, idx);
+    if (/@(?:kit|ohos)$/i.test(before)) continue;
     const dotted = `.${member}`;
     if (seen.has(dotted)) continue;
     seen.add(dotted);
@@ -355,21 +531,36 @@ export const STOP_WORDS = new Set([
  * Lowercase API / import symbol names in a dependency question (taskpool, formInfo).
  * Used to filter import sites to the symbol actually asked about, not every @kit.ArkTS import.
  */
+/**
+ * Generic verbs agents put in rewritten how-implemented bags ("xml parse").
+ * Not useful as dependency/import inventory filters or local-detail anchors —
+ * they match every `parse`/`load` method and drown the distinctive token (xml).
+ */
+export const GENERIC_VERB_ANCHOR_NOISE = new Set([
+  'parse', 'parsing', 'load', 'save', 'read', 'write', 'update', 'delete', 'create',
+  'init', 'handle', 'process', 'run', 'start', 'stop', 'open', 'close', 'convert',
+  'get', 'set', 'add', 'remove', 'list', 'show', 'find',
+]);
+
 export function extractDependencySymbolsFromQuery(query: string): string[] {
   const symbols = new Set<string>();
   for (const ma of extractMemberAccessFromQuery(query)) {
     if (ma.member.length >= 3 && !STOP_WORDS.has(ma.member.toLowerCase())) {
-      symbols.add(ma.member);
+      if (!GENERIC_VERB_ANCHOR_NOISE.has(ma.member.toLowerCase())) symbols.add(ma.member);
     }
   }
-  for (const m of query.matchAll(/\b([a-z][a-zA-Z0-9]{3,})\b/g)) {
+  // ≥3-char lowercase tokens (includes xml); drop generic verbs.
+  for (const m of query.matchAll(/\b([a-z][a-zA-Z0-9]{2,})\b/g)) {
     const sym = m[1]!;
-    if (!STOP_WORDS.has(sym.toLowerCase())) symbols.add(sym);
+    if (STOP_WORDS.has(sym.toLowerCase())) continue;
+    if (GENERIC_VERB_ANCHOR_NOISE.has(sym.toLowerCase())) continue;
+    symbols.add(sym);
   }
   // Lowercase API tokens (statfs, napi_wrap) when the query is clearly about code.
   if (queryMentionsCodeContext(query)) {
     for (const m of query.matchAll(/\b([a-z][a-z0-9_]{4,})\b/g)) {
       const sym = m[1]!;
+      if (GENERIC_VERB_ANCHOR_NOISE.has(sym)) continue;
       if (!STOP_WORDS.has(sym) && isDistinctiveIdentifier(sym)) symbols.add(sym);
       else if (!STOP_WORDS.has(sym) && sym.length >= 6) symbols.add(sym);
     }
@@ -550,6 +741,10 @@ export function extractLocalDetailAnchors(query: string): string[] {
     'calls', 'call', 'calling', 'called', 'callers', 'caller', 'include', 'includes', 'import', 'imports',
     'render', 'frame', 'sync', 'thread', 'subthread', 'layout', 'method', 'methods',
     'function', 'functions', 'file', 'files', 'src', 'main', 'define', 'visible',
+    // Generic UI nouns agents leave in NL (not the PascalCase Type).
+    'dialog', 'page', 'view', 'button', 'component', 'card', 'icon', 'background',
+    'animation', 'hover', 'preview', 'image', 'resource', 'network', 'application',
+    ...GENERIC_VERB_ANCHOR_NOISE,
   ]);
   const ranked = [...names].filter((n) => n.length >= 3 && !ANCHOR_NOISE.has(n.toLowerCase()));
   // Prefer PascalCase / dotted members first — they're the real anchors.
@@ -557,7 +752,15 @@ export function extractLocalDetailAnchors(query: string): string[] {
     const score = (s: string) => (/^[A-Z]/.test(s) ? 2 : 0) + (s.includes('.') ? 1 : 0) + Math.min(s.length, 20) / 20;
     return score(b) - score(a) || a.localeCompare(b);
   });
-  return ranked.slice(0, 4);
+  // Drop framework decorator names when a concrete UI Type is also present
+  // (`@CustomDialog` + WallpaperApplyDialog → keep only the Apply* types).
+  const hasConcreteUi = ranked.some(
+    (n) => queryLooksLikeUiComponentType(n) && !isFrameworkUiDecoratorName(n),
+  );
+  const filtered = hasConcreteUi
+    ? ranked.filter((n) => !isFrameworkUiDecoratorName(n))
+    : ranked;
+  return filtered.slice(0, 4);
 }
 
 /**
@@ -586,6 +789,9 @@ export function queryAsLocalSymbolDetail(query: string): boolean {
 
   // Named UI control + event: compact body + callees (not import inventory).
   if (queryAsNamedComponentAction(query)) return true;
+
+  // Page/Component surface or 2–3 UI Type cluster — body, not full-graph explore.
+  if (queryAsComponentSurfaceSurvey(query) || queryAsFocusedUiCluster(query)) return true;
 
   // Type.member / Type + isFoo co-named — even if the agent stripped Chinese verbs.
   if (queryHasNamedMemberFocus(query) && !queryAsMechanismSurvey(query)) return true;
@@ -617,7 +823,13 @@ export function queryHasFocusedNamedAnchors(query: string): boolean {
   if (queryAsMechanismSurvey(query) || queryAsCrossModuleFlowSurvey(query)) return false;
   if (shouldTryFastInventoryExplore(query)) return false;
   const anchors = extractLocalDetailAnchors(query);
-  return anchors.length >= 1 && anchors.length <= 3;
+  if (anchors.length < 1 || anchors.length > 3) return false;
+  // Require a real code anchor (PascalCase Type / member-like), not leftover
+  // English topic nouns that survived domain extraction (application, …).
+  return (
+    extractMemberAccessFromQuery(query).length > 0
+    || anchors.some((a) => /^[A-Z]/.test(a) || isMemberLikeIdentifier(a))
+  );
 }
 
 /**
@@ -629,11 +841,13 @@ export function shouldUseCompactExploreBudget(query: string): boolean {
   // Inventory surveys own the type-name / hierarchy / "who calls Type" shape —
   // do not shrink those into a definition-only budget.
   if (shouldTryFastInventoryExplore(query)) return false;
-  if (queryAsLocalSymbolDetail(query)) return true;
+  if (queryAsLocalSymbolDetail(query) || queryAsFocusedUiCluster(query) || queryAsComponentSurfaceSurvey(query)) {
+    return true;
+  }
   if (queryIsTypeNameFocus(query)) return false;
-  const types = extractTypeNamesFromQuery(query);
+  const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
   const deps = extractDependencySymbolsFromQuery(query);
-  return types.length + deps.length >= 1 && types.length <= 2;
+  return types.length + deps.length >= 1 && types.length <= 3;
 }
 
 /** Keep rendering to files that define symbols named in the query. */
@@ -696,14 +910,49 @@ export function extractMechanismEntrySeeds(query: string): string[] {
 /**
  * Lightweight mechanism explore — seed symbols + flow spine only, no full
  * findRelevantContext (keeps MCP calls fast and avoids agent grep fallback).
+ *
+ * Domain-mechanism *bag*: agents often strip the how-phrase and keep only
+ * keywords (`xml parse`, `foo convert`). Structural — distinctive ASCII token
+ * plus an action verb or a CJK domain token; named Types take other paths.
  */
+export function queryAsDomainMechanismBag(query: string): boolean {
+  if (queryAsMechanismSurvey(query)) return false;
+  if (queryAsInterpretationSurvey(query)) return false;
+  // Named Type / Type.member / UI control → compact / inventory / click-flow.
+  if (extractTypeNamesFromQuery(query).length > 0) return false;
+  if (extractMemberAccessFromQuery(query).length > 0) return false;
+  if (queryAsNamedComponentAction(query)) return false;
+  // Hover/悬停 bags without a how-implemented cue are UI-behavior, not mechanism.
+  if (
+    /悬停|\bhover\b|onHover/i.test(query)
+    && !/\b(?:parse|implement|manage|handle|process|subscribe|convert)\b/i.test(query)
+  ) {
+    return false;
+  }
+
+  const domain = extractDomainSearchTerms(query);
+  const distinct = domain.filter(
+    (t) => /^[A-Za-z][A-Za-z0-9._-]{2,}$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()),
+  );
+  if (distinct.length === 0) return false;
+
+  const hasActionVerb =
+    domain.some((t) => GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()))
+    || /\b(?:parse|implement|manage|handle|process|subscribe|convert|encode|decode)(?:s|d|ing)?\b/i.test(
+      query,
+    );
+  // Remaining CJK tokens are the topic half of a rewritten how-question bag.
+  const hasCjkDomain = domain.some((t) => /[\u4e00-\u9fff]/.test(t));
+  return hasActionVerb || hasCjkDomain;
+}
+
 export function shouldTryLightMechanismExplore(query: string): boolean {
   if (queryAsCrossModuleFlowSurvey(query)) return false;
   if (queryAsInterpretationSurvey(query)) return false;
-  // Named UI control + event → seed the control and follow callees (click flow).
-  if (queryAsNamedComponentAction(query)) {
-    return extractTypeNamesFromQuery(query).length >= 1
-      || extractMechanismEntrySeeds(query).length >= 1;
+  // Named UI control + event → compact (body + callees + usage sites), not light-mechanism.
+  if (queryAsNamedComponentAction(query)) return false;
+  if (queryAsDomainMechanismBag(query)) {
+    return extractDomainSearchTerms(query).length >= 1;
   }
   if (!queryAsMechanismSurvey(query)) return false;
   return extractMechanismEntrySeeds(query).length >= 1
@@ -719,33 +968,56 @@ export function shouldTryFastInventoryExplore(query: string): boolean {
   if (queryAsInterpretationSurvey(query)) return false;
   // Caller paths alone cannot answer "which call makes Type X visible" — compact.
   if (queryNeedsCoNamedUseBridge(query)) return false;
-  // One named symbol / UI action / Type.member — inventory path is the wrong shape
-  // (returns import sites for isExpired/onClick and agents fall back to Grep).
-  if (queryAsLocalSymbolDetail(query) || queryHasNamedMemberFocus(query) || queryAsNamedComponentAction(query)) {
+
+  // Import / kit-usage / domain / API / config / data-source listings win even if
+  // a dotted `@kit.X` once looked like Type.member (defense in depth).
+  if (
+    shouldBuildKitModuleUsageSurvey(query)
+    || shouldBuildApiUsageSurvey(query)
+    || shouldBuildDomainFileSurvey(query)
+    || shouldBuildConfigSection(query)
+    || queryAsDataSourceSurvey(query)
+    || shouldBuildHoverHandlerSurvey(query)
+  ) {
+    return true;
+  }
+
+  // One named symbol / UI action / Type.member / component surface — inventory is wrong.
+  if (
+    queryAsLocalSymbolDetail(query)
+    || queryHasNamedMemberFocus(query)
+    || queryAsNamedComponentAction(query)
+    || queryAsComponentSurfaceSurvey(query)
+    || queryAsFocusedUiCluster(query)
+  ) {
     return false;
   }
   const types = extractTypeNamesFromQuery(query);
-  if (types.length >= 2 && !queryAsCallerOrMethodSurvey(query)) return false;
+  if (types.length >= 2 && !queryAsCallerOrMethodSurvey(query) && !queryAsInheritanceSurvey(query)) {
+    return false;
+  }
   const inventoryDeps = extractDependencySymbolsFromQuery(query).filter((d) => !isMemberLikeIdentifier(d));
   return (
-    shouldBuildDomainFileSurvey(query)
-    || shouldBuildApiUsageSurvey(query)
-    || shouldBuildKitModuleUsageSurvey(query)
-    || (hasImportInventoryFilter(query)
+    (hasImportInventoryFilter(query)
       && (inventoryDeps.length > 0 || extractKitModuleNamesFromQuery(query).length > 0)
       && inventoryDeps.length > 0)
     || shouldBuildCallerInventory(query)
     || shouldBuildInheritanceSurvey(query)
     || shouldBuildMemberSurvey(query)
-    || shouldBuildConfigSection(query)
-    || queryAsDataSourceSurvey(query)
   );
 }
 
 export function shouldBuildInheritanceSurvey(query: string): boolean {
   if (queryAsInheritanceSurvey(query) && extractTypeNamesFromQuery(query).length > 0) return true;
+  // UI Page/Component overview needs the body — not an empty subtype list.
+  if (queryAsComponentSurfaceSurvey(query)) return false;
   // Bare / near-bare type queries — agent search("Foo") for subtypes/overview.
-  return queryIsTypeNameFocus(query);
+  if (queryIsTypeNameFocus(query)) {
+    const types = extractTypeNamesFromQuery(query);
+    if (types.some(queryLooksLikeUiComponentType)) return false;
+    return true;
+  }
+  return false;
 }
 
 export function shouldBuildMemberSurvey(query: string): boolean {
@@ -777,24 +1049,24 @@ export function extractDomainSearchTerms(query: string): string[] {
     terms.delete(kit.charAt(0).toLowerCase() + kit.slice(1));
   }
 
+  // Always keep ASCII code tokens (xml, parse, subscribe…) — mechanism NL often
+  // mixes them with Chinese and used to drop them unless a @kit/path was present.
+  for (const m of query.matchAll(/\b([A-Za-z][A-Za-z0-9]{2,})\b/g)) {
+    const w = m[1]!;
+    if (!STOP_WORDS.has(w.toLowerCase())) terms.add(w);
+  }
+
   const stripped = query
     .replace(/[@#][\w.]+/g, ' ')
     .replace(
-      /哪些文件|有哪些|什么|如何|怎样|怎么|项目中|项目里|项目|涉及|相关的?|文件|模块|功能|吗|？|\?|有使用|是否|有没有|使用|不同|区别|对比|这个|那个|是怎样|是如何|怎么|如何|它与|它和/g,
+      /哪些文件|有哪些|什么|如何|怎样|怎么|项目中|项目里|项目|涉及|相关的?|文件|模块|功能|吗|？|\?|有使用|是否|有没有|使用|不同|区别|对比|这个|那个|是怎样|是如何|怎么|如何|它与|它和|实现|的/g,
       ' ',
     )
     .replace(/\s+/g, ' ')
     .trim();
-  for (const m of stripped.matchAll(/[\u4e00-\u9fff]{2,12}/g)) {
+  for (const m of stripped.matchAll(/[\u4e00-\u9fff]{2,8}/g)) {
     let t = m[0]!.replace(/^与/, '');
     if (t.length >= 2) terms.add(t);
-  }
-
-  if (queryMentionsCodeContext(query)) {
-    for (const m of query.matchAll(/\b([a-z][a-zA-Z0-9]{4,})\b/g)) {
-      const w = m[1]!;
-      if (!STOP_WORDS.has(w.toLowerCase())) terms.add(w);
-    }
   }
 
   return [...terms].filter((t) => t.length >= 2).slice(0, 12);

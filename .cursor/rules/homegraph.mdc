@@ -1,24 +1,34 @@
----
-description: HomeGraph MCP usage guide — homegraph_explore primary, full tool surface
-alwaysApply: true
----
-<!-- HOMEGRAPH_START -->
-## HomeGraph
-
-This project has a HomeGraph MCP server configured with the full tool surface (search, node, explore, spec tools, …). For structural questions, reach for `homegraph_explore` first. HomeGraph is a tree-sitter-parsed knowledge graph of every symbol, edge, and file. Reads are sub-millisecond and return structural information grep cannot.
-
-### Use homegraph_explore instead of reading files
-
-Reach for `homegraph_explore` before grep/find or Read for any **structural** question — how does X work, how does X reach Y, what calls what, where is X defined, or surveying an area. It takes a natural-language question or a bag of symbol/file names and returns the relevant symbols' **verbatim, line-numbered source** grouped by file (the same `<n>\t<line>` shape Read gives you, safe to Edit from), plus the call paths between them — including dynamic-dispatch hops (callbacks, React re-render, JSX children) grep can't follow — and a blast-radius summary of what depends on them. Name a file or symbol in the query to read its current source.
-
-### Rules of thumb
-
-- **Answer directly — don't delegate exploration.** ONE `homegraph_explore` usually answers the whole question; follow up with another `homegraph_explore` naming more specific symbols if you need more. HomeGraph IS the pre-built index, so spawning a separate file-reading sub-task/agent — or running a grep + read loop — repeats work homegraph already did and costs more for the same answer.
-- **Trust homegraph results.** They come from a full AST parse. Do NOT re-verify them with grep — that's slower, less accurate, and wastes context.
-- **Don't grep or Read first** to find or understand indexed code — one `homegraph_explore` returns the relevant source in a single round-trip. Reach for raw Read/Grep only to confirm a specific detail homegraph didn't cover, or for what it doesn't index (configs, docs).
-- **Index lag — check the staleness banner, don't guess a wait.** When a homegraph response starts with "⚠️ Some files referenced below were edited since the last index sync…", the listed files are pending re-index — Read those specific files for accurate content. Files NOT in that banner are fresh and homegraph is authoritative for them.
-
-### If `.homegraph/` doesn't exist
-
-The MCP server returns "not initialized." Ask the user: *"I notice this project doesn't have HomeGraph initialized. Want me to run `homegraph init -i` to build the index?"*
-<!-- HOMEGRAPH_END -->
+---
+description: HomeGraph MCP — mechanism first via explore; skip wrong shapes; prefer lean tools
+alwaysApply: true
+---
+<!-- HOMEGRAPH_START -->
+## HomeGraph
+
+This project has a HomeGraph MCP server (search, node, explore, spec tools, …). It is a tree-sitter symbol graph — use it for **in-repo structure**.
+
+### Call first (before Grep/Read)
+
+For how/mechanism/wiring, named Type/Component/`Type.member`, inheritance/subtypes, or in-repo `@kit`/`@ohos` **usages**: call `homegraph_explore` immediately — **no Grep-first**, no parallel Grep on that turn. Domain keywords are enough when names are unknown.
+
+Prefer the smallest tool when a name is already known: `callers`/`callees`/`node` for one symbol; `explore` for multi-file flows and usage inventories.
+
+### Do not call HomeGraph
+
+Skip every `homegraph_*` tool for topic file-lists, concept/UI-behavior with no named anchors, SDK/`@kit` **feature catalogs** (not usages), and literal pattern hunts. If a tool returns **Skip HomeGraph**, do not retry.
+
+`@kit` usages in this repo ≠ SDK catalog. Usages → explore. Catalogs → SDK docs.
+
+### After explore
+
+Treat returned line-numbered source as already Read — do not re-grep/node/read the same symbols.
+
+### Index lag
+
+If a response starts with "⚠️ Some files referenced below were edited since the last index sync…", Read only those listed files.
+
+### If `.homegraph/` doesn't exist
+
+Ask the user whether to run `homegraph init -i`.
+<!-- HOMEGRAPH_END -->
+

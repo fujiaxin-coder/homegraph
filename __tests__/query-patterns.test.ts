@@ -15,6 +15,8 @@ import {
   queryNamesMultipleExploreAnchors,
   queryAsKitModuleCapabilitySurvey,
   queryAsOutOfRepoSdkCatalog,
+  queryShouldDeferToBuiltinTools,
+  homegraphDeferGuidance,
   queryShouldPreferExploreOverSearch,
   queryHasNamedMemberFocus,
   queryAsNamedComponentAction,
@@ -49,6 +51,12 @@ import {
   shouldFocusOnQueryNamedDefs,
   queryNeedsCoNamedUseBridge,
   queryHasFocusedNamedAnchors,
+  queryAsDomainMechanismBag,
+  extractLocalDetailAnchors,
+  shouldBuildHoverHandlerSurvey,
+  queryAsComponentSurfaceSurvey,
+  queryAsFocusedUiCluster,
+  queryLooksLikeUiComponentType,
 } from '../src/search/query-utils';
 
 describe('extractFileBasenamesFromQuery', () => {
@@ -278,6 +286,131 @@ describe('shouldOmitSourceBodies', () => {
   });
 });
 
+describe('queryShouldDeferToBuiltinTools', () => {
+  it('defers shape-only: SDK catalogs, topic file-lists, concept compares', () => {
+    expect(queryShouldDeferToBuiltinTools('@kit.SomeKit的foo模块有哪些功能')).toBe('sdk-catalog');
+    expect(queryShouldDeferToBuiltinTools('与缓存策略相关的文件有哪些')).toBe('file-listing');
+    expect(
+      queryShouldDeferToBuiltinTools('项目中有使用共享缓存吗？它与普通缓存有什么不同？'),
+    ).toBe('concept-or-existence');
+    expect(
+      queryShouldDeferToBuiltinTools("检索所有 .width('100%') 和 .height('100%') 同时出现的组件"),
+    ).toBeNull();
+  });
+
+  it('does not defer structural / in-repo usage questions', () => {
+    expect(queryShouldDeferToBuiltinTools('项目中是如何实现xml解析功能的')).toBeNull();
+    expect(queryShouldDeferToBuiltinTools('哪些代码依赖@kit.ArkTS的taskpool')).toBeNull();
+    expect(
+      queryShouldDeferToBuiltinTools(
+        'OpenFolderDragHandler.test.ets里getSummary() 返回 Summary，这个对象起什么作用？',
+      ),
+    ).toBeNull();
+    expect(queryShouldDeferToBuiltinTools('DrawerUninstallButton onClick')).toBeNull();
+    expect(
+      queryShouldDeferToBuiltinTools(
+        'WallpaperApplyPage WallpaperApplyDialog preview image load',
+      ),
+    ).toBeNull();
+  });
+
+  it('defers pure outcome questions without hover/Type anchors', () => {
+    expect(queryShouldDeferToBuiltinTools('用户拖拽时会发生什么')).toBe('concept-or-existence');
+  });
+
+  it('inventories hover handlers instead of soft-skipping', () => {
+    expect(queryShouldDeferToBuiltinTools('鼠标悬停在应用图标背景上会有什么反应')).toBeNull();
+    expect(shouldBuildHoverHandlerSurvey('鼠标悬停在应用图标背景上会有什么反应')).toBe(true);
+    expect(
+      shouldBuildHoverHandlerSurvey('鼠标悬停应用图标背景 hover application icon background'),
+    ).toBe(true);
+    expect(shouldTryFastInventoryExplore('鼠标悬停在应用图标背景上会有什么反应')).toBe(true);
+  });
+
+  it('routes named UI hover/click to compact, not light-mechanism or defer', () => {
+    expect(queryShouldDeferToBuiltinTools('AppIconCommonView hover background')).toBeNull();
+    expect(queryAsNamedComponentAction('AppIconCommonView hover background')).toBe(true);
+    expect(shouldTryLightMechanismExplore('AppIconCommonView hover background')).toBe(false);
+    expect(queryAsLocalSymbolDetail('AppIconCommonView hover background')).toBe(true);
+    expect(shouldTryLightMechanismExplore('点击DrawerUninstallButton按钮后会发生什么事情')).toBe(
+      false,
+    );
+    expect(queryAsLocalSymbolDetail('点击DrawerUninstallButton按钮后会发生什么事情')).toBe(true);
+  });
+
+  it('treats Page/Component overview as local surface (not inheritance inventory)', () => {
+    expect(queryAsComponentSurfaceSurvey('ThemeHome使用了哪些UI组件，可以跳转到哪些页面')).toBe(true);
+    expect(queryAsComponentSurfaceSurvey('ThemeHome')).toBe(true);
+    expect(queryAsLocalSymbolDetail('ThemeHome')).toBe(true);
+    expect(shouldTryFastInventoryExplore('ThemeHome')).toBe(false);
+    expect(shouldBuildInheritanceSurvey('ThemeHome')).toBe(false);
+    expect(shouldBuildInheritanceSurvey('Rectangle')).toBe(true);
+  });
+
+  it('routes 2–3 UI Type clusters to compact (drops @CustomDialog noise)', () => {
+    const nl =
+      'WallpaperApplyPage 内嵌了 @CustomDialog 的 WallpaperApplyDialog，dialog 内的壁纸预览图片加载使用的是 $r 系统资源还是网络下载？';
+    const bag = 'WallpaperApplyPage WallpaperApplyDialog @CustomDialog wallpaper preview image';
+    for (const q of [nl, bag]) {
+      expect(queryAsFocusedUiCluster(q)).toBe(true);
+      expect(queryAsComponentSurfaceSurvey(q)).toBe(true);
+      expect(queryAsLocalSymbolDetail(q)).toBe(true);
+      expect(shouldUseCompactExploreBudget(q)).toBe(true);
+      expect(shouldTryFastInventoryExplore(q)).toBe(false);
+      expect(shouldTryLightMechanismExplore(q)).toBe(false);
+      const anchors = extractLocalDetailAnchors(q);
+      expect(anchors).toContain('WallpaperApplyPage');
+      expect(anchors).toContain('WallpaperApplyDialog');
+      expect(anchors).not.toContain('CustomDialog');
+      expect(anchors).not.toContain('dialog');
+    }
+    expect(queryLooksLikeUiComponentType('CustomDialog')).toBe(false);
+    expect(queryLooksLikeUiComponentType('WallpaperApplyDialog')).toBe(true);
+    // Cross-module flow bags stay out of the cluster compact path.
+    expect(
+      queryAsFocusedUiCluster(
+        '壁纸设置从 WallpaperApplyPage 到 ScreenLockWallpaperManager 落盘再到引擎渲染经过哪些调用',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps multi-Type Page/Dialog questions focused (drops generic dialog noun)', () => {
+    const q =
+      'WallpaperApplyPage 内嵌了 @CustomDialog 的 WallpaperApplyDialog，dialog 内的壁纸预览图片加载使用的是 $r 系统资源还是网络下载？';
+    expect(extractLocalDetailAnchors(q)).not.toContain('dialog');
+    expect(queryHasFocusedNamedAnchors(q)).toBe(true);
+    expect(queryShouldDeferToBuiltinTools(q)).toBeNull();
+  });
+
+  it('emits skip guidance that tells the agent not to retry', () => {
+    const text = homegraphDeferGuidance('file-listing', '与缓存策略相关的文件有哪些');
+    expect(text).toMatch(/Skip HomeGraph/);
+    expect(text).toMatch(/do \*\*not\*\* retry/);
+    expect(text).toMatch(/Grep/);
+  });
+});
+
+describe('mechanism domain anchors', () => {
+  it('keeps ascii tokens like xml for how-implemented questions', () => {
+    const terms = extractDomainSearchTerms('项目中是如何实现xml解析功能的');
+    expect(terms.map((t) => t.toLowerCase())).toContain('xml');
+    expect(shouldTryLightMechanismExplore('项目中是如何实现xml解析功能的')).toBe(true);
+  });
+
+  it('treats rewritten domain+verb bags as light-mechanism, not compact verb-seeds', () => {
+    expect(queryAsDomainMechanismBag('xml parse 解析 xml文件解析')).toBe(true);
+    expect(shouldTryLightMechanismExplore('xml parse 解析 xml文件解析')).toBe(true);
+    expect(extractLocalDetailAnchors('xml parse 解析')).not.toContain('parse');
+    // Distinctive token `xml` may remain as an anchor; compact still yields to light-mechanism.
+    expect(shouldTryLightMechanismExplore('xml parse 解析')).toBe(true);
+    expect(extractDependencySymbolsFromQuery('xml parse 解析 XML parsing')).toContain('xml');
+    expect(extractDependencySymbolsFromQuery('xml parse 解析 XML parsing')).not.toContain('parse');
+    expect(extractDependencySymbolsFromQuery('xml parse 解析 XML parsing')).not.toContain('parsing');
+    // Named Type takes compact / inventory — not the domain bag.
+    expect(queryAsDomainMechanismBag('ThemeHome UI components')).toBe(false);
+  });
+});
+
 describe('kit module capability survey', () => {
   it('detects @kit module feature questions', () => {
     expect(queryAsKitModuleCapabilitySurvey('@kit.ArkTS的util模块有哪些功能')).toBe(true);
@@ -290,10 +423,27 @@ describe('kit module capability survey', () => {
   it('builds usage survey for in-repo dependency questions', () => {
     expect(shouldBuildKitModuleUsageSurvey('哪些代码依赖@kit.ArkTS的taskpool')).toBe(true);
     expect(queryAsOutOfRepoSdkCatalog('哪些代码依赖@kit.ArkTS的taskpool')).toBe(false);
+    // `@kit.X` must not look like Type.member and block inventory.
+    expect(queryHasNamedMemberFocus('哪些代码依赖@kit.ArkTS的taskpool')).toBe(false);
+    expect(shouldTryFastInventoryExplore('哪些代码依赖@kit.ArkTS的taskpool')).toBe(true);
+    expect(
+      extractMemberAccessFromQuery('哪些代码依赖@kit.ArkTS的taskpool').map((m) => m.dotted),
+    ).not.toContain('kit.ArkTS');
+  });
+
+  it('extracts named export focus from @kit.X的foo', () => {
+    expect(extractKitSubmoduleNamesFromQuery('哪些代码依赖@kit.ArkTS的taskpool这个api端点')).toContain(
+      'taskpool',
+    );
+    expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS的util模块有哪些功能')).toEqual(
+      expect.arrayContaining(['util']),
+    );
   });
 
   it('extracts kit submodules', () => {
-    expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS的util模块有哪些功能')).toEqual(['util']);
+    expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS的util模块有哪些功能')).toEqual(
+      expect.arrayContaining(['util']),
+    );
   });
 });
 

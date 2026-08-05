@@ -10,8 +10,31 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { getExploreOutputBudget, getExploreBudget, normalizeQuerySpelling, ToolHandler } from '../src/mcp/tools';
+import { getExploreOutputBudget, getExploreBudget, normalizeQuerySpelling, ToolHandler, tightenExploreBudgetForQuery } from '../src/mcp/tools';
 import HomeGraph from '../src/index';
+
+describe('tightenExploreBudgetForQuery', () => {
+  it('caps mechanism+flow explores below the full tier ceiling', () => {
+    const base = getExploreOutputBudget(10000);
+    const tightened = tightenExploreBudgetForQuery(
+      base,
+      'How is notification subscription management implemented with multithreading?',
+      { hasFlowPath: true },
+    );
+    expect(tightened.maxOutputChars).toBeLessThanOrEqual(12000);
+    expect(tightened.maxOutputChars).toBeLessThan(base.maxOutputChars);
+    expect(tightened.includeBudgetNote).toBe(false);
+  });
+
+  it('still tightens local-detail questions', () => {
+    const base = getExploreOutputBudget(10000);
+    const tightened = tightenExploreBudgetForQuery(
+      base,
+      'What does getSummary mean in OpenFolderDragHandler.test.ets',
+    );
+    expect(tightened.maxOutputChars).toBeLessThanOrEqual(9000);
+  });
+});
 
 describe('getExploreOutputBudget', () => {
   it('returns a strictly smaller total cap for small projects than for huge ones', () => {
