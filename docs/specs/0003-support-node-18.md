@@ -60,7 +60,6 @@
 ### 2.2 不纳入
 
 - 不要求 Node 18 获得与 ≥22.5 同等的 `node:sqlite` 性能；
-- 不把 `telemetry-worker/` 等子包 engines 强行对齐（除非阻塞本包安装）；
 - 不借机重写 CLI / MCP / 索引算法；
 - 不承诺 **Node &lt;18**；
 - 不承诺跟踪每一个未来 Node major 的 V8 回归——但 **解除阻断的前提是：当前目标 major（实现时的 latest current，至少 25）已验证通过**；若日后新 major 再炸，允许另开 hotfix 再阻断或换 flag（须更新本 Spec 或新 Spec）。
@@ -79,7 +78,7 @@
 
 - `MIN_NODE_MAJOR = 18`，与 `engines` 下限一致。
 - `engines` 目标：`"node": ">=18.0.0"`（**无上限**）。若 npm/工具链对无上限有顾虑，可用 `"≥18.0.0"` 等价写法；**禁止**再写 `<25`。
-- `buildNode25BlockBanner`：实现时二选一并写清——**(A) 删除**导出与测试；或 **(B) 保留为仅文档/telemetry 用的弃用警告且默认不 exit**。推荐 **A**，避免「半阻断」误导。
+- `buildNode25BlockBanner`：实现时二选一并写清——**(A) 删除**导出与测试；或 **(B) 保留为仅文档用的弃用警告且默认不 exit**。推荐 **A**，避免「半阻断」误导。
 - `HOMEGRAPH_ALLOW_UNSAFE_NODE`：25+ 阻断去掉后，该 env 仅服务于「&lt;18 强制跑」；文案须改到不再暗示「用来强开 Node 25」。
 
 ### 3.2 SQLite 后端期望

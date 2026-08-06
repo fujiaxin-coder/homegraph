@@ -9,7 +9,7 @@
  * as a one-line notice (stderr log, MCP initialize instructions, and
  * `homegraph_status`) telling the user to run `homegraph upgrade`.
  *
- * Invariants (mirrors the telemetry module's contract):
+ * Invariants:
  *   - Never stdout — stdio is the MCP protocol channel.
  *   - Never blocking: the network refresh is fire-and-forget; every reader
  *     (`getUpdateNotice`) is a cheap synchronous cache read, so the #172
@@ -23,7 +23,7 @@
  * The check itself reuses `resolveLatestVersion` — the GitHub release-redirect
  * trick with the API fallback — so version resolution can't drift from what
  * `homegraph upgrade` installs. Results are cached in `~/.homegraph/` (the
- * same global state dir telemetry and the daemon registry use) with a 24h TTL
+ * same global state dir the daemon registry uses) with a 24h TTL
  * on success and a 1h backoff after failure, shared across every proxy /
  * daemon process on the machine.
  */
@@ -84,7 +84,8 @@ function envTruthy(raw: string | undefined): boolean {
 
 /**
  * True when the update check must not run at all — no network call, no
- * notice. `DO_NOT_TRACK` uses the same truthiness the telemetry opt-out does.
+ * notice. `DO_NOT_TRACK` uses the same truthiness convention as other
+ * don't-phone-home opt-outs (`0` / `false` / empty = off).
  */
 export function updateCheckDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return envTruthy(env.HOMEGRAPH_NO_UPDATE_CHECK) || envTruthy(env.DO_NOT_TRACK);

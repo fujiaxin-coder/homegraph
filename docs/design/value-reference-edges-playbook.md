@@ -277,7 +277,7 @@ Index the same repo twice (on vs `HOMEGRAPH_VALUE_REFS=0`); node count **must be
 set -uo pipefail
 SRC="$1"; NAME="$2"; WORK="${WORK:-/tmp/cg-vr}"
 CG="$(pwd)/dist/bin/homegraph.js"
-export HOMEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 HOMEGRAPH_NO_DAEMON=1
+export DO_NOT_TRACK=1 HOMEGRAPH_NO_DAEMON=1
 ON="$WORK/$NAME-on"; OFF="$WORK/$NAME-off"
 rm -rf "$ON" "$OFF"; mkdir -p "$WORK"
 rsync -a --exclude='.git' "$SRC/" "$ON/"; rsync -a --exclude='.git' "$SRC/" "$OFF/"

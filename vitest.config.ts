@@ -31,13 +31,6 @@ export default defineConfig({
     env: {
       HOMEGRAPH_ALLOW_UNSAFE_NODE: '1',
       /**
-       * The suite spawns real CLI/MCP processes; without this they would write
-       * telemetry state into the contributor's real ~/.homegraph and count test
-       * tool calls as real usage. The telemetry unit tests are unaffected —
-       * they inject their own `env` via the Telemetry constructor.
-       */
-      HOMEGRAPH_TELEMETRY: '0',
-      /**
        * Vitest loads the full HomeGraph + tree-sitter grammar set into one
        * long-lived process. The production MCP RSS ceiling (1024MB) is for
        * daemons serving a single project — trip it mid-suite and every later

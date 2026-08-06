@@ -41,7 +41,6 @@ function spawnServer(cwd: string, handshakeTimeoutMs: number): ChildProcessWitho
       HOMEGRAPH_WASM_RELAUNCHED: '1',
       // One less helper child; the liveness watchdog is not under test.
       HOMEGRAPH_NO_WATCHDOG: '1',
-      HOMEGRAPH_TELEMETRY: '0',
       DO_NOT_TRACK: '1',
       HOMEGRAPH_STARTUP_HANDSHAKE_TIMEOUT_MS: String(handshakeTimeoutMs),
     },

@@ -19,7 +19,6 @@ import { tools } from './tools';
 import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX } from './server-instructions';
 import { HomeGraphPackageVersion } from './version';
 import { findNearestHomeGraphRoot } from '../directory';
-import { getTelemetry, ClientInfo } from '../telemetry';
 import { getUpdateNotice } from '../upgrade/update-check';
 
 /**
@@ -105,8 +104,6 @@ export interface MCPSessionOptions {
  */
 export class MCPSession {
   private clientSupportsRoots = false;
-  /** From the initialize handshake — attributes usage rollups to the agent host. */
-  private clientInfo: ClientInfo | undefined;
   private rootsAttempted = false;
   private resolvePromise: Promise<void> | null = null;
   private explicitProjectPath: string | null;
@@ -187,16 +184,9 @@ export class MCPSession {
       rootUri?: string;
       workspaceFolders?: Array<{ uri: string; name: string }>;
       capabilities?: { roots?: unknown };
-      clientInfo?: { name?: unknown; version?: unknown };
     } | undefined;
 
     this.clientSupportsRoots = !!params?.capabilities?.roots;
-    if (params?.clientInfo) {
-      this.clientInfo = {
-        name: typeof params.clientInfo.name === 'string' ? params.clientInfo.name : undefined,
-        version: typeof params.clientInfo.version === 'string' ? params.clientInfo.version : undefined,
-      };
-    }
 
     // Explicit project signal, strongest first: client-provided rootUri /
     // workspaceFolders (LSP-style), else the --path the server was launched
@@ -289,9 +279,6 @@ export class MCPSession {
     const result = await this.engine.getToolHandler().execute(toolName, toolArgs);
     if (process.env.HOMEGRAPH_MCP_DEBUG) process.stderr.write(`[mcp-debug] toolsCall ${toolName} id=${String(request.id)} done\n`);
     this.transport.sendResult(request.id, result);
-    // After the reply is on the wire — telemetry must never delay a tool
-    // response (in-memory increment only; see src/telemetry).
-    getTelemetry().recordUsage('mcp_tool', toolName, !result.isError, this.clientInfo);
   }
 
   /**

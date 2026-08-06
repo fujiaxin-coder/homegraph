@@ -16,6 +16,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking Changes
 
 - Standalone installers (`install.sh` / `install.ps1`) and self-contained platform bundles are retired. Install and upgrade with `npm i -g homegraph`; `homegraph upgrade` on a leftover bundle install refuses and points you at npm. `homegraph uninstall` still removes leftover bundle artifacts.
+- Anonymous usage telemetry is removed. HomeGraph no longer records or sends usage stats; `homegraph telemetry` and the installer share-stats prompt are gone. `DO_NOT_TRACK=1` still disables the background update check.
 
 ### Fixes
 

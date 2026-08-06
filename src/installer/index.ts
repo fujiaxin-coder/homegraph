@@ -28,7 +28,6 @@ import type { AgentTarget, Location, TargetId } from './targets/types';
 import { watchDisabledReason } from '../sync/watch-policy';
 import { isGitRepo, isSyncHookInstalled, installGitSyncHook } from '../sync/git-hooks';
 import { getHomeGraphDir, homeGraphDirName } from '../directory';
-import { getTelemetry, TELEMETRY_DOCS } from '../telemetry';
 
 // Backwards-compat: keep these named exports — downstream code may
 // import them. The shim in `config-writer.ts` continues to re-export
@@ -180,29 +179,6 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     autoAllow = false;
   }
 
-  // Step 4½: anonymous usage telemetry — a visible default-on toggle, asked
-  // exactly once. Skipped when an env var (DO_NOT_TRACK / HOMEGRAPH_TELEMETRY)
-  // already decides, or when a previous run stored a choice — re-runs and
-  // upgrades never re-ask.
-  if (!useDefaults && getTelemetry().getStatus().decidedBy === 'default' && !getTelemetry().hasStoredChoice()) {
-    const share = await clack.confirm({
-      message: 'Share anonymous usage stats? (No code, paths, or names — see TELEMETRY.md)',
-      initialValue: true,
-    });
-    if (clack.isCancel(share)) {
-      // Don't kill the install over the telemetry question — leave it
-      // undecided (the documented default + first-run notice applies later).
-      clack.log.info('Skipped — manage anytime with `homegraph telemetry on|off`.');
-    } else {
-      getTelemetry().setEnabled(share, 'installer');
-      clack.log.info(
-        share
-          ? `Thanks! Exactly what is collected: ${TELEMETRY_DOCS}`
-          : 'Telemetry disabled — nothing will be collected or sent.',
-      );
-    }
-  }
-
   // Step 4¾: front-load prompt hook (Claude Code only). A UserPromptSubmit hook
   // that runs `homegraph prompt-hook` — it injects homegraph_explore context on
   // structural ("how / where / trace / impact") prompts so the agent reliably
@@ -229,9 +205,6 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
   }
 
   // Step 5: per-target install loop.
-  const installedIds: TargetId[] = [];
-  let sawCreated = false;
-  let sawUpdated = false;
   for (const target of targets) {
     if (!target.supportsLocation(location)) {
       clack.log.warn(
@@ -240,10 +213,7 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
       continue;
     }
     const result = target.install(location, { autoAllow, promptHook });
-    installedIds.push(target.id);
     for (const file of result.files) {
-      if (file.action === 'created') sawCreated = true;
-      if (file.action === 'updated') sawUpdated = true;
       const verb = file.action === 'unchanged'
         ? 'Unchanged'
         : file.action === 'created' ? 'Created'
@@ -254,16 +224,6 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     for (const note of result.notes ?? []) {
       clack.log.info(`${target.displayName}: ${note}`);
     }
-  }
-
-  // Telemetry: which agents were configured, where, fresh-vs-upgrade (derived
-  // from the file actions above). Target IDs and the location enum only.
-  if (installedIds.length > 0) {
-    getTelemetry().recordLifecycle('install', {
-      targets: installedIds,
-      scope: location,
-      kind: sawCreated ? 'fresh' : sawUpdated ? 'upgrade' : 'reinstall',
-    });
   }
 
   // Step 6: install wires up agents only — it deliberately does NOT index.
@@ -277,10 +237,6 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
       : 'cd <your-project>\nhomegraph init        # build a project’s graph (one time; auto-syncs after)',
     'Next: index a project',
   );
-
-  // Deliver buffered telemetry while we're already in a long interactive
-  // command — bounded (~1.5s worst case), invisible after a multi-second install.
-  await getTelemetry().flushNow();
 
   const finalNote = targets.length > 0
     ? `Done! Restart your agent${targets.length > 1 ? 's' : ''} to use HomeGraph.`
@@ -551,13 +507,6 @@ export async function runUninstaller(opts: RunUninstallerOptions): Promise<void>
         clack.log.info('Kept the CLI. Remove it later with `homegraph uninstall` or `npm uninstall -g homegraph`.');
       }
     }
-  }
-
-  // Telemetry churn signal (agent IDs only) — flush now, since after an
-  // uninstall there is usually no "next run" to deliver it.
-  if (removed.length > 0) {
-    getTelemetry().recordLifecycle('uninstall', { targets: removed.map((r) => r.id) });
-    await getTelemetry().flushNow();
   }
 
   // Step 5: summary.

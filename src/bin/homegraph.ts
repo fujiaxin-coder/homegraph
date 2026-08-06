@@ -38,8 +38,6 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
-import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
-
 // Lazy-load heavy modules (HomeGraph, runInstaller) to keep CLI startup fast.
 async function loadHomeGraph(): Promise<typeof import('../index')> {
   try {
@@ -156,27 +154,6 @@ program
   .name('homegraph')
   .description('Code intelligence and knowledge graph for any codebase')
   .version(packageJson.version);
-
-// Anonymous usage telemetry (see TELEMETRY.md): record the invoked subcommand
-// NAME only — never arguments or paths. Counts buffer locally; network sends
-// piggyback on commands that run long anyway (quick commands only append to
-// the local buffer at exit, costing nothing).
-// install/uninstall are absent on purpose: the installer flushes at its own
-// end, AFTER its consent prompt — a flush here would fire the first-run
-// notice before the user ever sees the toggle.
-const TELEMETRY_FLUSH_COMMANDS = new Set(['init', 'uninit', 'index', 'sync', 'upgrade']);
-program.hook('preAction', (_thisCommand, actionCommand) => {
-  try {
-    // The detached daemon re-invokes `serve mcp` internally — not a user action.
-    if (process.env.HOMEGRAPH_DAEMON_INTERNAL) return;
-    const name = actionCommand.name();
-    if (name === 'telemetry') return; // managing telemetry is not usage
-    getTelemetry().recordUsage('cli_command', name, true);
-    if (TELEMETRY_FLUSH_COMMANDS.has(name)) getTelemetry().maybeFlush();
-  } catch {
-    /* telemetry must never break the CLI */
-  }
-});
 
 // =============================================================================
 // Helper Functions
@@ -487,19 +464,6 @@ function writeErrorLog(projectPath: string, errors: Array<{ message: string; fil
   fs.writeFileSync(logPath, lines.join('\n') + '\n');
 }
 
-/**
- * Telemetry for a completed full index (see TELEMETRY.md). The bounded flush
- * keeps init/index responsive (these commands just ran for seconds anyway)
- * while delivering the event promptly.
- */
-async function recordIndexTelemetry(
-  cg: { getStats(): { filesByLanguage: Record<string, number> }; getBackend(): string },
-  result: IndexResult,
-): Promise<void> {
-  recordIndexEvent(cg, result);
-  await getTelemetry().flushNow();
-}
-
 // =============================================================================
 // Commands
 // =============================================================================
@@ -571,7 +535,6 @@ program
         supervision.stop();
       }
       printIndexResult(clack, result, projectPath);
-      await recordIndexTelemetry(cg, result);
 
       try {
         const { offerWatchFallback } = await import('../installer');
@@ -634,13 +597,6 @@ program
       } catch { /* non-fatal */ }
 
       success(`Removed HomeGraph from ${projectPath}`);
-
-      // Churn signal — and flush now, since after an uninit there may be no
-      // "next run" to deliver it.
-      try {
-        getTelemetry().recordLifecycle('uninstall', {});
-        await getTelemetry().flushNow();
-      } catch { /* non-fatal */ }
     } catch (err) {
       error(`Failed to uninitialize: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
@@ -718,7 +674,6 @@ program
         }
 
         printIndexResult(clack, result, projectPath);
-        await recordIndexTelemetry(cg, result);
 
         if (!result.success) {
           process.exit(1);
@@ -3233,50 +3188,6 @@ evolveCommand
     } finally {
       try { db?.close(); } catch { /* best effort */ }
     }
-  });
-
-/**
- * homegraph telemetry [on|off|status]
- */
-program
-  .command('telemetry [action]')
-  .description('Show or change anonymous usage telemetry (status, on, off)')
-  .action((action?: string) => {
-    const t = getTelemetry();
-
-    if (action === 'on' || action === 'off') {
-      t.setEnabled(action === 'on', 'cli');
-      if (action === 'on') {
-        success('Telemetry enabled — anonymous usage stats only (no code, paths, or names).');
-      } else {
-        success('Telemetry disabled. Buffered, unsent data was deleted.');
-      }
-      const effective = t.getStatus();
-      if (effective.decidedBy === 'DO_NOT_TRACK' || effective.decidedBy === 'HOMEGRAPH_TELEMETRY') {
-        warn(
-          `The ${effective.decidedBy} environment variable overrides this choice — ` +
-          `effective state right now: ${effective.enabled ? 'enabled' : 'disabled'}.`
-        );
-      }
-      return;
-    }
-
-    if (action !== undefined && action !== 'status') {
-      error(`Unknown action: ${action} (expected status, on, or off)`);
-      process.exit(1);
-    }
-
-    const s = t.getStatus();
-    const decidedBy: Record<typeof s.decidedBy, string> = {
-      DO_NOT_TRACK: 'DO_NOT_TRACK environment variable',
-      HOMEGRAPH_TELEMETRY: 'HOMEGRAPH_TELEMETRY environment variable',
-      config: 'your saved choice',
-      default: 'default',
-    };
-    console.log(`\nTelemetry: ${s.enabled ? chalk.green('enabled') : chalk.yellow('disabled')} ${chalk.dim(`(${decidedBy[s.decidedBy]})`)}`);
-    console.log(`Machine ID: ${s.machineId ?? chalk.dim('(random UUID, created on first use)')}`);
-    console.log(`Config:     ${s.configPath}`);
-    console.log(chalk.dim(`\nExactly what is collected (and never collected): ${TELEMETRY_DOCS}\n`));
   });
 
 /**

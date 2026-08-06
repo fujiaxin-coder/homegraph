@@ -21,11 +21,11 @@
  *   - A project-local npm install is left alone — the project's
  *     package.json owns it, not the machine-level uninstaller.
  *   - On unix the default install dir (`~/.homegraph`) doubles as the
- *     machine-level state dir (telemetry choice, daemon records, the
- *     update-check cache) — only the install ARTIFACTS (`versions/`,
- *     `current`) are removed there, never the whole dir. A dedicated
- *     install dir (Windows `%LOCALAPPDATA%\homegraph`, or a custom
- *     `HOMEGRAPH_INSTALL_DIR`) is removed wholesale.
+ *     machine-level state dir (daemon records, the update-check cache) —
+ *     only the install ARTIFACTS (`versions/`, `current`) are removed there,
+ *     never the whole dir. A dedicated install dir (Windows
+ *     `%LOCALAPPDATA%\homegraph`, or a custom `HOMEGRAPH_INSTALL_DIR`) is
+ *     removed wholesale.
  *   - The bin-dir shim is removed only when it verifiably points into a
  *     detected install dir — a user's unrelated `homegraph` file survives.
  *   - Windows cannot DELETE a running exe but CAN rename it: a locked
