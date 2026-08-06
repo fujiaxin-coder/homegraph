@@ -249,8 +249,8 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
   const hasField = extractFieldLikeSymbolsFromQuery(q).length > 0;
   const hasPath = extractPathSegmentsFromQuery(q).length > 0;
 
-  // Literal / layout copy hunts with no code anchors → Grep (before light-mechanism
-  // can claim a rewritten "text 常量" bag).
+  // Literal / layout / "import text from graphics package" hunts → Grep.
+  // No PascalCase Type — light-mechanism must not claim these.
   if (
     !hasType
     && !hasFile
@@ -259,7 +259,7 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
     && !hasCaps
     && !hasField
     && !hasPath
-    && /全搜|字面量|中文\s*(?:text|字符串)|绑了.*(?:text|文案)|literal\s+strings?/i.test(q)
+    && queryLooksLikeLiteralOrCopyHunt(q)
   ) {
     return 'concept-or-existence';
   }
@@ -292,7 +292,9 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
 
   // Existence / concept-compare with no graph anchor → Grep/docs.
   if (
-    /有使用|是否使用|有没有使用|使用了.*吗|有什么不同|区别|difference|vs\.?|versus|对比/i.test(q)
+    /有使用|是否使用|有没有使用|使用了.*吗|是否存在|有没有完整|有什么不同|区别|difference|vs\.?|versus|对比|does\s+(?:this\s+)?(?:project|repo)\s+have|is\s+there\s+(?:a\s+)?complete/i.test(
+      q,
+    )
     && !hasType
     && !hasFile
     && !hasMember
@@ -346,6 +348,7 @@ export function homegraphDeferGuidance(kind: HomeGraphDeferKind, query: string):
 export function queryShouldPreferExploreOverSearch(query: string): boolean {
   const q = query.trim();
   if (!q) return false;
+  if (queryLooksLikeLiteralOrCopyHunt(query)) return false;
   if (/^[A-Za-z_][\w]*$/.test(q)) return true;
   if (
     extractFileBasenamesFromQuery(query).length > 0
@@ -363,6 +366,12 @@ export function queryShouldPreferExploreOverSearch(query: string): boolean {
     || shouldBuildApiUsageSurvey(query)
     || queryAsAssignedFlagImpactSurvey(query)
     || queryAsNativeRenderThreadSurvey(query)
+    || queryAsInRepoSystemCapabilityHowto(query)
+    || shouldBuildHoverHandlerSurvey(query)
+    || queryAsDataSourceSurvey(query)
+    || queryAsksKitInstallDeps(query)
+    || queryAsTypeLifecycleSurvey(query)
+    || shouldBuildCallerInventory(query)
   ) {
     return true;
   }
@@ -455,8 +464,11 @@ export function shouldBuildKitModuleUsageSurvey(query: string): boolean {
 
 /** "需要额外安装哪些依赖" — kit survey must include oh-package, not only imports. */
 export function queryAsksKitInstallDeps(query: string): boolean {
-  return /额外安装|还需.*依赖|需要.*依赖|install(?:ing)?\s+(?:extra\s+)?deps?|which\s+deps?/i.test(
-    query,
+  return (
+    /额外安装|还需.*依赖|需要.*依赖|引入.*依赖|其他参数和依赖|other\s+(?:params?.{0,24})?deps?/i.test(
+      query,
+    )
+    || /install(?:ing)?\s+(?:extra\s+)?deps?|which\s+deps?|need(?:s)?\s+(?:other\s+)?deps?/i.test(query)
   );
 }
 
@@ -941,13 +953,60 @@ export function queryAsModuleDependencySurvey(query: string): boolean {
  * Single named Type + state/lifecycle/callback surface — needs the type body,
  * not a thin callers stub.
  */
+/**
+ * Repo-wide literal / copy / "imported text object" hunts — Grep territory.
+ * Shape-only: no PascalCase Type / file / member / kit anchors.
+ */
+export function queryLooksLikeLiteralOrCopyHunt(query: string): boolean {
+  if (extractTypeNamesFromQuery(query).length > 0) return false;
+  if (extractFileBasenamesFromQuery(query).length > 0) return false;
+  if (extractMemberAccessFromQuery(query).length > 0) return false;
+  if (extractKitModuleNamesFromQuery(query).length > 0) return false;
+  if (extractFieldLikeSymbolsFromQuery(query).length > 0) return false;
+  return (
+    /全仓|全搜|字面量|中文\s*(?:text|字符串)|绑了.*(?:text|文案)|literal\s+strings?/i.test(query)
+    || /从.{0,16}包.{0,40}(?:导入|import).{0,20}\btext\b|导入的\s*text\s*对象|imported\s+text\s+objects?/i.test(
+      query,
+    )
+  );
+}
+
 export function queryAsTypeLifecycleSurvey(query: string): boolean {
   if (queryAsCrossModuleFlowSurvey(query)) return false;
+  // "状态来源" is a data-source inventory, not a lifecycle body dump.
+  if (/状态来源|status\s+source|state\s+source/i.test(query)) return false;
+  // Release ↔ destructor compare may name CB + Manager + Render.
+  if (
+    /析构|destructor/i.test(query)
+    && /Release|做了哪些|有没有重复|跟.+做的事|same\s+(?:work|things?)|overlap/i.test(query)
+  ) {
+    return extractLocalDetailAnchors(query).length >= 1;
+  }
   const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
-  if (types.length !== 1) return false;
-  return /状态机|状态变化|状态来源|状态转换|状态.*回调|回调.*状态|foreground|background|lifecycle|state\s*machine|哪些状态|status\s+source|state\s+source|state\s+change|how\s+(?:are|is)\s+.+states?\s+(?:unified|distinguished)/i.test(
+  if (types.length < 1 || types.length > 2) return false;
+  return /状态机|状态变化|状态转换|状态.*回调|回调.*状态|foreground|background|lifecycle|state\s*machine|哪些状态|state\s+change|how\s+(?:are|is)\s+.+states?\s+(?:unified|distinguished)/i.test(
     query,
   );
+}
+
+/**
+ * Member-access inventory ("which files use .drawModifier") — not Type×method
+ * interaction / Export fail wiring / Release↔dtor (those need compact bodies).
+ */
+export function shouldPreferMemberUsageInventory(query: string): boolean {
+  if (queryAsCoNamedTypeMethodInteraction(query)) return false;
+  if (queryAsTypeLifecycleSurvey(query)) return false;
+  if (queryAsFieldUsageSurvey(query)) return true;
+  if (extractMemberAccessFromQuery(query).length === 0) return false;
+  // Conditional wiring / interaction / purpose → compact, not member-file list.
+  if (
+    /失败时|还会被|是怎么|交互|析构|destructor|做了哪些|什么作用|做什么|purpose|what\s+does/i.test(
+      query,
+    )
+  ) {
+    return false;
+  }
+  return /哪些|哪里|where|which|使用了|谁用|call\s*sites?/i.test(query);
 }
 
 /** API / SDK tokens named in the query — lowercase deps + PascalCase modules (Telephony). */
@@ -1110,7 +1169,7 @@ export function queryAsCrossModuleFlowSurvey(query: string): boolean {
 
 /** Data-source / upstream-service intent (来源于哪个服务 / which service). */
 export function queryAsDataSourceSurvey(query: string): boolean {
-  return /来源于|数据来源|来自哪个|哪个系统服务|来自什么服务|data\s+source|which\s+service|来源.*服务/i.test(
+  return /来源于|数据来源|状态来源|来自哪个|哪个系统服务|来自什么服务|data\s+source|status\s+source|state\s+source|which\s+service|来源.*服务|如何统一或区分/i.test(
     query,
   );
 }
@@ -1338,6 +1397,26 @@ export function extractMechanismEntrySeeds(query: string): string[] {
     seeds.add('PluginRender');
     if (/\bCMakeLists\b|\.so\b|链接|link/i.test(query)) seeds.add('CMakeLists');
   }
+  // Theme pack download→parse→install — agents often omit PascalCase names.
+  if (/主题|theme\s*pack|theme\s*package/i.test(query) && /安装|解析|下载|install|parse|download/i.test(query)) {
+    for (const s of [
+      'ThemePackParser', 'ThemePackageInstaller', 'SkinInstaller', 'IconsInstaller', 'FontInstaller',
+    ]) {
+      seeds.add(s);
+    }
+  }
+  // Notification subscribe/manage howto — same pattern (CJK domain, no Type named).
+  if (/通知|notification/i.test(query) && /订阅|subscribe|管理|manage|多线程|multithread/i.test(query)) {
+    for (const s of ['NotificationManager', 'NotificationSubscriber', 'AnsManager', 'SubscribeCallback']) {
+      seeds.add(s);
+    }
+  }
+  // XML parse howto — seed the real API, not bare `xml` (which floods every Xml* path).
+  if (/\bxml\b|xml解析|解析xml/i.test(query) && /解析|parse|convert|实现/i.test(query)) {
+    for (const s of ['convertxml', 'XmlParseUtil', 'ConvertXML', 'fastConvertToJSObject']) {
+      seeds.add(s);
+    }
+  }
 
   return [...seeds].filter((s) => s.length >= 3).slice(0, 12);
 }
@@ -1384,10 +1463,14 @@ export function queryAsDomainMechanismBag(query: string): boolean {
 export function shouldTryLightMechanismExplore(query: string): boolean {
   if (queryAsCrossModuleFlowSurvey(query)) return false;
   if (queryAsInterpretationSurvey(query)) return false;
+  // Literal / copy hunts → Grep (never light dump).
+  if (queryLooksLikeLiteralOrCopyHunt(query)) return false;
   // System-setting howto → lean capability inventory, not every `language` import.
   if (queryAsInRepoSystemCapabilityHowto(query)) return false;
   // Return-value consumers → callers of the member, not a seed+flow dump.
   if (queryAsReturnValueConsumerSurvey(query)) return false;
+  // Manager data/status source → inventory, not light-mechanism.
+  if (queryAsDataSourceSurvey(query)) return false;
   // Named UI control + event → compact (body + callees + usage sites), not light-mechanism.
   if (queryAsNamedComponentAction(query)) return false;
   if (queryAsAssignedFlagImpactSurvey(query) || queryAsNamedControlStateSyncSurvey(query)) {
@@ -1422,14 +1505,7 @@ export function shouldTryLightMechanismExplore(query: string): boolean {
   // lib*.so + GLES/EGL + which thread → CMake/EGLCore spine, not `.so` member dump.
   if (queryAsNativeRenderThreadSurvey(query)) return true;
   if (queryAsDomainMechanismBag(query)) {
-    // Literal copy bags must not become light-mechanism dumps.
-    if (
-      /全搜|字面量|中文\s*(?:text|字符串)|绑了.*(?:text|文案)|literal\s+strings?/i.test(query)
-      && extractTypeNamesFromQuery(query).length === 0
-      && extractFileBasenamesFromQuery(query).length === 0
-    ) {
-      return false;
-    }
+    if (queryLooksLikeLiteralOrCopyHunt(query)) return false;
     return extractDomainSearchTerms(query).length >= 1;
   }
   if (!queryAsMechanismSurvey(query)) return false;
@@ -1444,14 +1520,17 @@ export function shouldTryFastInventoryExplore(query: string): boolean {
   if (queryAsCrossModuleFlowSurvey(query)) return false;
   if (shouldTryLightMechanismExplore(query)) return false;
   if (queryAsInterpretationSurvey(query)) return false;
+  if (queryLooksLikeLiteralOrCopyHunt(query)) return false;
   // Caller paths alone cannot answer "which call makes Type X visible" — compact.
   if (queryNeedsCoNamedUseBridge(query)) return false;
   // Type lifecycle / Release↔destructor compares need bodies, not path lists.
   if (queryAsTypeLifecycleSurvey(query)) return false;
+  // Type×method interaction (CanPlace/Place ↔ Grid) → compact, not member inventory.
+  if (queryAsCoNamedTypeMethodInteraction(query)) return false;
 
   // Import / kit-usage / domain / API / config / data-source listings win even if
   // a dotted `@kit.X` once looked like Type.member (defense in depth).
-  // Member-pattern / module-export surveys must run *before* the local/member veto.
+  // Member-pattern inventories only when the question is a usage listing.
   if (
     shouldBuildKitModuleUsageSurvey(query)
     || shouldBuildApiUsageSurvey(query)
@@ -1463,7 +1542,7 @@ export function shouldTryFastInventoryExplore(query: string): boolean {
     || queryAsModuleDependencySurvey(query)
     || queryAsDtsWrapSurvey(query)
     || queryAsNamedControlStateSyncSurvey(query)
-    || shouldBuildMemberSurvey(query)
+    || shouldPreferMemberUsageInventory(query)
     || queryAsInRepoSystemCapabilityHowto(query)
     || queryAsReturnValueConsumerSurvey(query)
     || queryAsDeclarationSiteSurvey(query)
@@ -1576,6 +1655,7 @@ export function queryAsMechanismSurvey(query: string): boolean {
  */
 export function queryAsDomainFileSurvey(query: string): boolean {
   if (queryAsKitModuleCapabilitySurvey(query)) return false;
+  if (queryLooksLikeLiteralOrCopyHunt(query)) return false;
   if (queryAsCallerOrMethodSurvey(query)) return false;
   if (shouldBuildApiUsageSurvey(query)) return false;
   if (hasImportInventoryFilter(query)) return false;

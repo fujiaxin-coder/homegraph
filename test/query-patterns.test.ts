@@ -945,7 +945,10 @@ describe('P0 explore shapes', () => {
     expect(extractMechanismEntrySeeds('NotificationManager如何订阅通知')).toContain(
       'NotificationManager',
     );
-    expect(extractMechanismEntrySeeds('如何实现XML解析功能')).not.toContain('convertxml');
+    // XML howto deliberately seeds convertxml / XmlParseUtil (not bare `xml` flood).
+    expect(extractMechanismEntrySeeds('如何实现XML解析功能')).toEqual(
+      expect.arrayContaining(['convertxml', 'XmlParseUtil']),
+    );
     expect(extractMechanismEntrySeeds('备份与恢复是如何实现的')).not.toContain('BackupManager');
     expect(shouldTryLightMechanismExplore('项目中是如何实现xml解析功能的')).toBe(true);
     expect(shouldTryLightMechanismExplore('与用户首选项相关的文件有哪些')).toBe(false);
