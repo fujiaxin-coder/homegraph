@@ -3816,7 +3816,7 @@ export class ToolHandler {
     const rel = (p: string) => p.replace(/\\/g, '/');
     // Prefer system/SDK / service APIs — not local UI helpers (getBadgeOffsetX).
     const SERVICE_RE =
-      /notification|@ohos|ans|subscribe|publish|bundle|ability|vibrator|telephony|NumBadge|notificationManager|badgeManager|wantAgent|distributed/i;
+      /notification|@ohos|ans|subscribe|publish|bundle|ability|vibrator|telephony|NumBadge|notificationManager|badgeManager|wantAgent|distributed|account|osAccount|AppAccount|distributedAccount|userId|getOsAccount/i;
     const lines = ['**Data sources / upstream services**', ''];
     let edgeCount = 0;
 
@@ -3868,7 +3868,10 @@ export class ToolHandler {
             if (r.node.filePath !== cls.filePath) continue;
             addEdge(upstream, r.node, 'import', 0, { importAlways: true });
           }
-          for (const term of ['notification', 'badge', 'NumBadge', 'subscribe', 'bundle', 'ability']) {
+          for (const term of [
+            'notification', 'badge', 'NumBadge', 'subscribe', 'bundle', 'ability',
+            'account', 'osAccount', 'AppAccount', 'distributedAccount',
+          ]) {
             for (const r of cg.searchNodes(term, { kinds: ['import'], limit: 30 })) {
               if (r.node.filePath !== cls.filePath) continue;
               addEdge(upstream, r.node, 'import', 1, { importAlways: true });
@@ -3897,7 +3900,14 @@ export class ToolHandler {
         lines.push('');
       }
     }
-    if (edgeCount === 0) return { section: '', edgeCount: 0 };
+    if (edgeCount === 0) {
+      lines.push(
+        '- No `@ohos`/`@kit` / service-like upstream edges indexed for the named Manager. ' +
+        '**ANSWER NOW** from the Manager definition file (prefer in-repo `AccountManager` / `*Manager.ets`, not SDK `.d.ts`).',
+      );
+      lines.push('');
+      return { section: lines.join('\n'), edgeCount: 0 };
+    }
     lines.push(
       '> Data-source survey — **ANSWER NOW** from upstream symbols above (system `@ohos`/`@kit` imports first). ' +
       'Do not Grep/search/callers the same Manager for the service name.',
@@ -4047,7 +4057,11 @@ export class ToolHandler {
       : { section: '', hitCount: 0, attempted: false };
     if (declarationResult.section) lines.push(declarationResult.section);
 
-    const apiUsageResult = shouldBuildApiUsageSurvey(query) && !queryAsDeclarationSiteSurvey(query)
+    // Kit usage surveys already list @kit import sites — a second API-usage dump
+    // (taskpool × 32 files) doubles tokens without new signal.
+    const apiUsageResult = shouldBuildApiUsageSurvey(query)
+      && !queryAsDeclarationSiteSurvey(query)
+      && !shouldBuildKitModuleUsageSurvey(query)
       ? this.buildApiUsageSection(cg, query, projectRoot)
       : { section: '', fileCount: 0 };
     if (apiUsageResult.section) lines.push(apiUsageResult.section);
@@ -4156,9 +4170,11 @@ export class ToolHandler {
         `Control/Toggle state-sync survey — **${controlSyncResult.hitCount}** file(s). **ANSWER NOW** from Manager/Service sites above.`,
       );
     }
-    if (kitUsageResult.section && queryAsksKitInstallDeps(query)) {
+    if (kitUsageResult.section && shouldBuildKitModuleUsageSurvey(query)) {
       return finishCompact(
-        `Kit install/deps survey — **ANSWER NOW** from imports + oh-package lines above; do not Grep oh-package again.`,
+        queryAsksKitInstallDeps(query)
+          ? 'Kit install/deps survey — **ANSWER NOW** from imports + oh-package lines above; do not Grep oh-package again.'
+          : `Kit module **in-repo usage** — **${kitUsageResult.symbolCount}** imported symbol(s). **ANSWER NOW**; do not Grep the same \`@kit\` path.`,
       );
     }
     if (moduleExportResult.section) {
@@ -4176,9 +4192,12 @@ export class ToolHandler {
         `Module dependency / cycle survey — **ANSWER NOW** from the edges above; do not glob every oh-package.`,
       );
     }
-    if (dataSourceResult.edgeCount > 0 && !apiUsageResult.section) {
+    // Data-source intent must stop even when edges=0 (empty still beats a 20k dump).
+    if (dataSourceResult.section && queryAsDataSourceSurvey(query)) {
       return finishCompact(
-        `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s). **ANSWER NOW** from system \`@ohos\`/\`@kit\` imports first.`,
+        dataSourceResult.edgeCount > 0
+          ? `Data-source survey — **${dataSourceResult.edgeCount}** upstream symbol(s). **ANSWER NOW** from system \`@ohos\`/\`@kit\` imports first.`
+          : 'Data-source survey complete (0 service edges). **ANSWER NOW** from the note + Manager defs above; do not Grep broadly.',
       );
     }
     if (apiUsageResult.fileCount > 0 && !dataSourceResult.section) {
@@ -4471,18 +4490,31 @@ export class ToolHandler {
       '',
     ];
 
-    // Import inventory: only distinctive deps (xml), never bare parse/parsing.
+    // Import inventory: prefer concrete API seeds (convertxml / XmlParseUtil) over
+    // bare domain tokens like `xml` that flood every path containing the substring.
+    const seedImportFocus = extractMechanismEntrySeeds(query).filter(
+      (s) =>
+        !GENERIC_VERB_ANCHOR_NOISE.has(s.toLowerCase())
+        && (s.length >= 6 || /convert|xml|parse|manager|service/i.test(s)),
+    );
     const distinctiveDeps = extractDependencySymbolsFromQuery(query)
       .filter((s) => !GENERIC_VERB_ANCHOR_NOISE.has(s.toLowerCase()));
-    const importQuery = distinctiveDeps.length > 0
-      ? distinctiveDeps.join(' ')
-      : extractDomainSearchTerms(query)
-          .filter((t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()))
-          .join(' ');
+    const importQuery = (
+      seedImportFocus.length > 0
+        ? seedImportFocus
+        : distinctiveDeps.length > 0
+          ? distinctiveDeps
+          : extractDomainSearchTerms(query)
+              .filter((t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()))
+    ).slice(0, 4).join(' ');
     const importResult = importQuery
       ? this.buildImportSitesSection(cg, importQuery, projectRoot)
       : { section: '', siteCount: 0, compactListing: false };
-    if (importResult.section) lines.push(importResult.section);
+    // Light path: keep ≤8 import bullets (full inventory belongs to kit/API surveys).
+    if (importResult.section) {
+      const trimmed = this.trimLightImportSection(importResult.section, 8);
+      if (trimmed) lines.push(trimmed);
+    }
     if (flow.text) lines.push(flow.text);
 
     // Shared-lib + GLES/EGL thread: surface CMake link lines before bodies.
@@ -4523,17 +4555,21 @@ export class ToolHandler {
     const distinctiveForScore = extractDomainSearchTerms(query).filter(
       (t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()),
     );
+    const apiSeeds = extractMechanismEntrySeeds(query).map((s) => s.toLowerCase());
     const fileScores = new Map<string, number>();
     for (const [fp, nodes] of fileNodes) {
       if (isOhosApiFilePath(fp)) continue;
       let score = 0;
       const fpLc = fp.toLowerCase();
       if (distinctiveForScore.some((t) => fpLc.includes(t.toLowerCase()))) score += 30;
+      // Prefer real wrappers (XmlParseUtil / convertxml) over incidental Xml* paths.
+      if (apiSeeds.some((s) => s.length >= 6 && fpLc.includes(s))) score += 40;
+      if (/convertxml|xmlparseutil/i.test(fpLc)) score += 50;
       for (const n of nodes) {
         const line = n.kind === 'import' ? resolveImportLineFromNode(n, projectRoot) : '';
         const blob = `${n.name}\n${n.signature || ''}\n${line}`.toLowerCase();
         if (distinctiveForScore.some((t) => blob.includes(t.toLowerCase()))) score += 20;
-        // Prefer files whose imports/modules compound the domain token (convertxml ⊃ xml).
+        if (apiSeeds.some((s) => s.length >= 6 && blob.includes(s))) score += 25;
         if (
           n.kind === 'import'
           && distinctiveForScore.some((t) => {
@@ -4543,6 +4579,7 @@ export class ToolHandler {
         ) {
           score += 20;
         }
+        if (/convertxml|@kit\.|@ohos\./i.test(line)) score += 30;
         if (flow.pathNodeIds.has(n.id)) score += 20;
         else if (flow.uniqueNamedNodeIds.has(n.id)) score += 10;
         else score += 5;
@@ -4553,7 +4590,7 @@ export class ToolHandler {
     const sortedFiles = [...fileScores.entries()]
       .filter(([, s]) => s > 0)
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
+      .slice(0, 3);
 
     lines.push('**Source Code**', '');
     lines.push(
@@ -4564,8 +4601,9 @@ export class ToolHandler {
     let totalChars = lines.join('\n').length;
     let filesRendered = 0;
     for (const [fp] of sortedFiles) {
-      if (filesRendered >= 4 || totalChars > 12_000) break;
-      const chunk = this.renderLightMechanismSource(projectRoot, fp, fileNodes.get(fp) ?? [], 3800);
+      // Token budget: light howto must stay ~3–5k so explore+answer can beat Grep/Read.
+      if (filesRendered >= 2 || totalChars > 4_800) break;
+      const chunk = this.renderLightMechanismSource(projectRoot, fp, fileNodes.get(fp) ?? [], 2000);
       if (!chunk) continue;
       lines.push(chunk);
       totalChars += chunk.length;
@@ -4585,6 +4623,31 @@ export class ToolHandler {
     return this.textResult(lines.join('\n'));
   }
 
+  /** Cap import bullets inside a light-mechanism response. */
+  private trimLightImportSection(section: string, maxBullets: number): string {
+    const lines = section.split('\n');
+    const out: string[] = [];
+    let bullets = 0;
+    let truncated = false;
+    for (const line of lines) {
+      if (line.startsWith('- `')) {
+        if (bullets >= maxBullets) {
+          truncated = true;
+          continue;
+        }
+        bullets++;
+      }
+      if (/^\s*- … and \d+ more/i.test(line)) continue;
+      out.push(line);
+    }
+    if (truncated) {
+      out.push(
+        `- … (light-mechanism: showing ${maxBullets} sites — **ANSWER NOW**, do not Grep the same import)`,
+      );
+    }
+    return out.join('\n');
+  }
+
   /**
    * Compact explore for local-symbol behavior questions — skips findRelevantContext
    * and caps to 1–2 defining files (avoids the ~24K related-file dump).
@@ -4600,7 +4663,16 @@ export class ToolHandler {
     // Mechanism / domain-mechanism bags belong to light-mechanism (or full explore),
     // never compact — agents rewrite "如何实现 xml 解析" to "xml parse" and would
     // otherwise seed every method named `parse`.
-    if (shouldTryLightMechanismExplore(query) || queryAsMechanismSurvey(query)) {
+    // Light-mechanism owns domain howtos. Bare "how/如何" NL must NOT veto compact
+    // when a local/flag/lifecycle shape already owns the query (flag impact was
+    // falling through to a 20k Dynamic-dispatch dump).
+    if (shouldTryLightMechanismExplore(query)) return null;
+    if (
+      queryAsMechanismSurvey(query)
+      && !queryAsLocalSymbolDetail(query)
+      && !queryAsAssignedFlagImpactSurvey(query)
+      && !queryAsTypeLifecycleSurvey(query)
+    ) {
       return null;
     }
     const bareId = /^[A-Za-z_][\w]*$/.test(query.trim());
@@ -5429,13 +5501,14 @@ export class ToolHandler {
       '> **ANSWER NOW** from these in-repo hover handlers + snippets. Do not Grep `onHover` again unless a named Type is still missing.',
       '',
     ];
-    for (const h of hits.slice(0, 18)) {
+    const shown = hits.slice(0, 12);
+    for (const h of shown) {
       lines.push(`- \`${h.name}\` (${h.kind}) — \`${h.file}:${h.line}\``);
-      if (h.snippet) lines.push(`  \`${h.snippet}\``);
+      if (h.snippet) lines.push(`  \`${h.snippet.slice(0, 100)}\``);
     }
-    if (hits.length > 18) lines.push(`- … and ${hits.length - 18} more`);
+    if (hits.length > shown.length) lines.push(`- … and ${hits.length - shown.length} more`);
     lines.push('');
-    return { section: lines.join('\n'), hitCount: hits.length };
+    return { section: lines.join('\n'), hitCount: shown.length };
   }
 
   /**
@@ -5556,6 +5629,7 @@ export class ToolHandler {
       }
     }
 
+    const importCap = submodules.length > 0 ? 16 : 28;
     const lines = [
       '**Kit module usage (this repo)**',
       '',
@@ -5564,18 +5638,25 @@ export class ToolHandler {
       `Imports from ${kitTerms.map((k) => `\`@kit.${k}\``).join(', ')} (${imports.length} site(s)):`,
       '',
     ];
-    for (const imp of imports.slice(0, 35)) {
+    for (const imp of imports.slice(0, importCap)) {
       const symStr = imp.symbols.length > 0 ? imp.symbols.join(', ') : '(namespace)';
-      lines.push(`- \`${imp.file}:${imp.line}\` — \`${imp.lineText}\` (${symStr})`);
+      lines.push(`- \`${imp.file}:${imp.line}\` — \`${imp.lineText.slice(0, 120)}\` (${symStr})`);
     }
-    if (imports.length > 35) lines.push(`- … and ${imports.length - 35} more import site(s)`);
+    if (imports.length > importCap) lines.push(`- … and ${imports.length - importCap} more import site(s)`);
 
     if (symbolFiles.size > 0) {
       lines.push('');
       lines.push('**Symbols imported (unique):**');
-      for (const [sym, files] of [...symbolFiles.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(0, 40)) {
-        const fileList = [...files].slice(0, 5).map((f) => `\`${f}\``).join(', ');
-        const more = files.size > 5 ? ` +${files.size - 5} files` : '';
+      const focused = submodules.length > 0
+        ? [...symbolFiles.entries()].filter(([sym]) =>
+          submodules.some((sm) => sym.toLowerCase() === sm.toLowerCase() || sym.toLowerCase().startsWith(`${sm.toLowerCase()}.`)))
+        : [...symbolFiles.entries()];
+      const ranked = (focused.length > 0 ? focused : [...symbolFiles.entries()])
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .slice(0, submodules.length > 0 ? 8 : 20);
+      for (const [sym, files] of ranked) {
+        const fileList = [...files].slice(0, 4).map((f) => `\`${f}\``).join(', ');
+        const more = files.size > 4 ? ` +${files.size - 4} files` : '';
         lines.push(`- \`${sym}\` — imported in ${fileList}${more}`);
       }
     }
@@ -7240,6 +7321,7 @@ export class ToolHandler {
     if (domainFileResult.section) lines.push(domainFileResult.section);
 
     const apiUsageResult = shouldBuildApiUsageSurvey(query)
+      && !shouldBuildKitModuleUsageSurvey(query)
       ? this.buildApiUsageSection(cg, query, projectRoot)
       : { section: '', fileCount: 0 };
     if (apiUsageResult.section) lines.push(apiUsageResult.section);

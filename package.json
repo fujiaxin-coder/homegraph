@@ -20,6 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:eval": "vitest run __tests__/evaluation/",
+    "test:explore-routing": "node scripts/run-explore-routing.mjs",
     "eval": "npm run build && npx tsx __tests__/evaluation/runner.ts",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },
