@@ -252,7 +252,7 @@ ride that path with no additional plumbing.
 
 ## 5. Validation corpus (the small/medium/large bar)
 
-Following CLAUDE.md's validation methodology — **≥3 flow prompts each on
+Following AGENTS.md's validation methodology — **≥3 flow prompts each on
 small / medium / large repos, with deterministic probes + agent A/B,
 ≥2 runs/arm**. Picks below are candidates to commit to in the
 implementation branch; the implementation PR confirms the choices after

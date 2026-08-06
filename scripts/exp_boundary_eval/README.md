@@ -40,7 +40,7 @@ scripts/exp_boundary_eval/
 ├── run_one.py             ← 单个 one-shot 实验
 ├── run_session.py         ← 多轮会话实验（实验 5）
 ├── analyze.py             ← 分析脚本（也可单独对历史结果目录运行）
-├── setup.py               ← 每次实验前：重置仓库、清 CLAUDE.md、生成 session
+├── setup.py               ← 每次实验前：重置仓库、清 AGENTS.md、生成 session
 ├── _utils.py              ← 公共工具：Agent 注册、输出解析、目录创建
 │
 ├── data/                  ← 配置与共用 clone（clone/ 在 .gitignore）

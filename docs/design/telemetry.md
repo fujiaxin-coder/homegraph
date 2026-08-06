@@ -182,7 +182,7 @@ The private `homegraph-pro` fork ships inside customer containers whose guarante
 "nothing leaves the box" — including telemetry. In the fork, telemetry must be **default-off
 and not enableable by the installer** (compile-time constant or stripped module), and the
 container sets `HOMEGRAPH_TELEMETRY=0` as belt-and-braces. This rule lives in the fork's
-CLAUDE.md and must survive every upstream merge.
+AGENTS.md and must survive every upstream merge.
 
 ## Rollout
 

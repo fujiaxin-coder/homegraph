@@ -7690,7 +7690,7 @@ export class ToolHandler {
           // a Read of the very file just skeletonized; on a central, wanted file
           // (Session.swift, DataRequest.swift) that fired an over-investigation
           // spiral (the agent Read the skeletonized file, then kept digging).
-          // CLAUDE.md: explore output must never tell the agent to Read.
+          // AGENTS.md: explore output must never tell the agent to Read.
           const tag = bodyIds.size > 0
             ? 'focused (the methods you named in full, the rest as signatures — homegraph_explore a signature by name for its body; do NOT Read)'
             : 'skeleton (signatures only — homegraph_explore a name for its full body; do NOT Read)';
