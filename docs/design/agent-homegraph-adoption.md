@@ -46,7 +46,7 @@ You keep diverging away from using homegraph rather than pursuing the fix."*
 - Content is the **default** (no `includeCode` needed); `symbolsOnly: true` returns
   the cheap structural map instead. Security preserved: `yaml`/`properties`
   summarized by key, never dumped (#383); reads via `validatePathWithinRoot` (#527).
-- Tests: `__tests__/node-file-view.test.ts` (9, incl. strict format parity
+- Tests: `test/node-file-view.test.ts` (9, incl. strict format parity
   `^1000\t  const v998 = 998;` and unpadded `^1\timport …`). Full suite green
   (1270). Descriptions / `server-instructions.ts` / CHANGELOG reframed: "read a
   source file with homegraph_node instead of Read — same bytes, faster."

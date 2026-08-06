@@ -10,8 +10,19 @@ export default defineConfig({
     // "minThreads and maxThreads must not conflict".
     maxWorkers: 4,
     minWorkers: 1,
-    include: ['__tests__/**/*.test.ts'],
-    exclude: ['__tests__/evaluation/**'],
+    // Vitest forks load tree-sitter WASM grammars. Without `--liftoff-only` on
+    // the worker's node argv, Node ≥22 hits V8 turboshaft Zone OOM
+    // (`Fatal process out of memory: Zone`) → "Worker exited unexpectedly"
+    // (the suite's "Errors N" count). Forks accept this flag; worker_threads
+    // reject it (ERR_WORKER_INVALID_EXEC_ARGV) — keep pool=forks.
+    pool: 'forks',
+    poolOptions: {
+      forks: {
+        execArgv: ['--liftoff-only', '--max-old-space-size=4096'],
+      },
+    },
+    include: ['test/**/*.test.ts'],
+    exclude: ['test/evaluation/**'],
     /**
      * The suite spawns real CLI/MCP processes that call the Node-version guard;
      * set this so tests run on whatever Node the contributor has installed.

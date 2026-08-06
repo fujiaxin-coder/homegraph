@@ -998,7 +998,11 @@ function runArkTSBatchFullCore(
     const index = buildArkTSIndex(rootDir, etsFiles);
     if (index.fileResults.size === 0) {
       const fatal = index.errors.find((e) => e.severity === 'error');
-      throw new Error(fatal?.message ?? 'ArkTS batch produced no indexed files');
+      const detail = index.errors.map((e) => `[${e.severity}] ${e.message}`).join(' | ');
+      throw new Error(
+        fatal?.message ??
+          `ArkTS batch produced no indexed files${detail ? ` (${detail})` : ' (no Scene/adapter errors recorded)'}`
+      );
     }
     queries.deleteArkTSCrossFileCallEdges();
     persistBatchResultsSync(rootDir, queries, index);
@@ -1182,7 +1186,11 @@ export async function primeArkTSBatch(
     const streamed = index.streamedPersistedPaths?.size ?? 0;
     if (index.fileResults.size === 0 && streamed === 0) {
       const fatal = index.errors.find((e) => e.severity === 'error');
-      throw new Error(fatal?.message ?? 'ArkTS batch produced no indexed files');
+      const detail = index.errors.map((e) => `[${e.severity}] ${e.message}`).join(' | ');
+      throw new Error(
+        fatal?.message ??
+          `ArkTS batch produced no indexed files${detail ? ` (${detail})` : ' (no Scene/adapter errors recorded)'}`
+      );
     }
     if (!streamModular) {
       queries.deleteArkTSCrossFileCallEdges();
@@ -1400,8 +1408,32 @@ interface ModelWithModifiers {
   getDecorators?: () => Iterable<{ getKind: () => string }>;
 }
 
+/**
+ * Project-relative path for an ArkAnalyzer absolute file path.
+ *
+ * ArkAnalyzer returns realpath'd absolutes (macOS: `/private/var/...`), while
+ * HomeGraph's `rootDir` from `mkdtemp` / callers is often the unresolved form
+ * (`/var/...`). Without canonicalizing both sides, `path.relative` escapes the
+ * project (`../../../../private/var/.../file.ets`) and every file is skipped
+ * by the `scanned` set → empty batch / "no indexed files".
+ */
 function normalizeRelPath(rootDir: string, absolutePath: string): string {
-  return path.relative(rootDir, absolutePath).replace(/\\/g, '/');
+  const root = realpathExisting(rootDir);
+  const abs = realpathExisting(absolutePath);
+  return path.relative(root, abs).replace(/\\/g, '/');
+}
+
+/** `realpathSync` when the path (or its dirname) exists; otherwise `path.resolve`. */
+function realpathExisting(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    try {
+      return path.join(fs.realpathSync(path.dirname(p)), path.basename(p));
+    } catch {
+      return path.resolve(p);
+    }
+  }
 }
 
 /** Map ArkAnalyzer synthetic files (e.g. @dummyFile) to our virtual indexed path. */

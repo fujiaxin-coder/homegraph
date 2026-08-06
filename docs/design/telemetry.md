@@ -198,7 +198,7 @@ Tests (no DB mocking, per repo convention; fetch mocked at `globalThis.fetch`):
 consent precedence (env > config > default), off ⇒ zero fetch calls, rollup aggregation
 across days, buffer cap + corrupt-buffer recovery, no-stdout invariant under MCP transport,
 flush abort honors timeout, installer toggle persists + re-run doesn't re-ask
-(`__tests__/installer-targets.test.ts` per house rules).
+(`test/installer-targets.test.ts` per house rules).
 
 ## Open questions
 

@@ -104,7 +104,7 @@ Status legend (matches the playbook): ✅ done+validated · 🟡 shipped but und
    function*. trezor's long unique thunk names hid this. **Fix:** resolution now prefers a
    thunk-signature const > other const > same-file callable > first match (single-candidate
    unaffected). Verified: octo-call's 2 edges now target the thunk (`call.ts:201`); uwave's 5
-   unchanged; regression test in `__tests__/redux-thunk-synthesizer.test.ts`.
+   unchanged; regression test in `test/redux-thunk-synthesizer.test.ts`.
 2. **Surfacing: synth edges between non-callable nodes were invisible — ✅ ROOT-CAUSED + FIXED
    (2026-06-20).** redux-thunk connects `constant` nodes (thunks are `const X=createAsyncThunk`),
    but explore's flow machinery assumed callables, so the hop fell through both surfacing
@@ -119,7 +119,7 @@ Status legend (matches the playbook): ✅ done+validated · 🟡 shipped but und
    callable-only); plus a generic `synthEdgeNote` fallback so any synth hop reads
    `dynamic: <kind> @wiring-site`, not a bare `[calls]`. Verified: uwave `shufflePlaylist→
    loadPlaylist` and `register→login→initState` now surface; trezor unchanged; full suite +
-   new `__tests__/explore-synth-constant-endpoints.test.ts` pass. **No-op for callable flows**
+   new `test/explore-synth-constant-endpoints.test.ts` pass. **No-op for callable flows**
    (dynNamed stays empty) — so it generalizes: any future constant/variable/field-connecting
    synth (RTK Query, Vuex) surfaces for free.
 

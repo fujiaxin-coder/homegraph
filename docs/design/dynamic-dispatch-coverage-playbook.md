@@ -231,7 +231,7 @@ were found). Confirm it's dynamic by reading the break symbol's body.
 Probe scripts use the built `dist/` — run `npm run build` first. Reindex after any
 extraction or resolution change (`rm -rf <repo>/.homegraph && homegraph init -i`) — the
 synthesizer/resolvers run at index time. Test fixtures: keep a tiny per-pattern fixture
-(see `/tmp/cb-fixture/bus.js`; **move into `__tests__/`** when shipping).
+(see `/tmp/cb-fixture/bus.js`; **move into `test/`** when shipping).
 
 ---
 

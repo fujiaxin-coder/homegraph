@@ -20,7 +20,7 @@ Design rationale + the validation matrix already done live in the companion doc:
    language. Hunt FPs. **Fix FP clusters; record singletons.** (See §3 for what a real FP
    looks like vs an acceptable one.)
 4. Add a **row to the matrix** in `value-reference-edges.md` and a **test case** in
-   `__tests__/value-reference-edges.test.ts`.
+   `test/value-reference-edges.test.ts`.
 5. Commit on a branch, open a PR. (§6 has the git workflow + how the prior PRs were done.)
 
 Scope rule (hard): **never eval on the maintainer's own repos** — clone a real public OSS
@@ -152,7 +152,7 @@ targets** (see §3).
   constants cross-unit more than same-file (horse: 4 edges). **Caveat:** Pascal is case-insensitive,
   but the reader-scan matches exact text, so a differently-cased reference is missed (no FP, just a
   miss); not worth normalizing.
-- **Tests:** `__tests__/value-reference-edges.test.ts` — same-file readers edged; surfaced in
+- **Tests:** `test/value-reference-edges.test.ts` — same-file readers edged; surfaced in
   impact radius; shadowed const NOT edged (verified to fail without the guard); JSX-only read
   edged (tsx); `HOMEGRAPH_VALUE_REFS=0` emits nothing.
 - **Memory:** `value-reference-edges-default-on` (the A/B finding + shadow guard rationale).
@@ -439,8 +439,8 @@ come out as something else, adjust the target gate.
 4. Run §4.2 FP hunts on each. Fix FP clusters (extend a guard); record singletons.
 5. Run §4.3 impact delta on a few targets.
 6. Add a **matrix row** to `value-reference-edges.md` (per language) and a **test** to
-   `__tests__/value-reference-edges.test.ts` (positive read + a shadow/negative case).
-7. `npx vitest run __tests__/value-reference-edges.test.ts` and the full suite.
+   `test/value-reference-edges.test.ts` (positive read + a shadow/negative case).
+7. `npx vitest run test/value-reference-edges.test.ts` and the full suite.
 
 **Pass bar:** node count identical on/off at every size; precision samples clean (FP clusters
 fixed); impact delta shows the blind→real radius win; full test suite green.
@@ -538,7 +538,7 @@ fixed); impact delta shows the blind→real radius win; full test suite green.
 - Code: `src/extraction/tree-sitter.ts` (`VALUE_REF_LANGS`, `captureValueRefScope`,
   `flushValueRefs`), `src/extraction/generated-detection.ts` (`isGeneratedFile`).
 - Design + matrix: `docs/design/value-reference-edges.md`.
-- Tests: `__tests__/value-reference-edges.test.ts`.
+- Tests: `test/value-reference-edges.test.ts`.
 - PRs: **#895** (default-on + shadow prune), **#897** (TS/JS/tsx validation).
 - Memories: `value-reference-edges-default-on`, `agent-eval-targets-public-oss-only`,
   `agent-eval-nested-attach`, `gh-merge-needs-admin`, `impact-coverage-findings`.

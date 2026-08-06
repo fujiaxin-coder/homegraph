@@ -159,7 +159,7 @@ npx tree-sitter build --wasm -o tree-sitter-vbnet.wasm   # needs emscripten or D
 Upstream's checked-in `test/corpus` expectations predate its own grammar.js
 (every corpus test fails at the pinned commit, before any patching), so the
 five-repo parse-health sweep above — plus 16 construct repros and the
-`__tests__/extraction.test.ts` VB.NET block — is the regression baseline.
+`test/extraction.test.ts` VB.NET block — is the regression baseline.
 
 ## Upstreaming
 

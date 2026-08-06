@@ -177,7 +177,9 @@ describe('No-root-index session policy', () => {
     const init = await request(child, { id: 0, method: 'initialize', params: initializeParams(tempDir) });
     const instructions = (init.result as { instructions: string }).instructions;
     expect(instructions).toMatch(/homegraph_explore/);
-    expect(instructions).toMatch(/Use `homegraph_explore`|When to call homegraph_explore/i);
+    // Playbook wording drifts (`Use` / `open` / section title) — pin the
+    // structural cue that this is the full indexed-workspace guide.
+    expect(instructions).toMatch(/Call HomeGraph first|open `homegraph_explore`|Use `homegraph_explore`/i);
     expect(instructions).not.toMatch(/inactive/i);
 
     const list = await request(child, { id: 1, method: 'tools/list' });
