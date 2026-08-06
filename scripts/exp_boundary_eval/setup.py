@@ -65,18 +65,20 @@ def prepare_environment(exp_id: str, clean_mode: str = "full",
 
     # Step 1c: Index rebuilt once at homegraph suite start (run_all / prebuild).
     # Per-experiment git reset restores the same commit — no second index here.
-    # Step 2: Clear CLAUDE.md
-    claude_md = repo_root / "CLAUDE.md"
-    if claude_md.exists() and claude_md.stat().st_size > 0:
-        backup_dir = _state_dir / "claude_md_backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = backup_dir / f"CLAUDE.md.{ts}"
-        backup_path.write_text(claude_md.read_text())
-        log(f"Backed up CLAUDE.md → {backup_path}")
-    with open(claude_md, "w") as f:
-        f.write("")
-    log("Cleared CLAUDE.md")
+    # Step 2: Clear AGENTS.md (and legacy CLAUDE.md if present)
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        agents_md = repo_root / name
+        if agents_md.exists() and agents_md.stat().st_size > 0:
+            backup_dir = _state_dir / "agents_md_backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = backup_dir / f"{name}.{ts}"
+            backup_path.write_text(agents_md.read_text())
+            log(f"Backed up {name} → {backup_path}")
+        if agents_md.exists() or name == "AGENTS.md":
+            with open(agents_md, "w") as f:
+                f.write("")
+            log(f"Cleared {name}")
 
     for f in [".cursorrules", ".cursor/rules"]:
         p = repo_root / f

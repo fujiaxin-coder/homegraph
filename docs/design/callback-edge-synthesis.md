@@ -47,7 +47,7 @@ node scripts/agent-eval/probe-explore.mjs /tmp/homegraph-corpus/excalidraw "trig
 ```
 Probe scripts (dev-only, in `scripts/agent-eval/`): `probe-node.mjs` (symbol + trail),
 `probe-explore.mjs` (relevant source + the flow among named symbols). EventEmitter
-fixture lives at `/tmp/cb-fixture/bus.js` (ephemeral — recreate or move into `__tests__/`).
+fixture lives at `/tmp/cb-fixture/bus.js` (ephemeral — recreate or move into `test/`).
 
 ---
 

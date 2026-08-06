@@ -4,10 +4,10 @@
  *
  * Always:
  *   1. npm run build
- *   2. vitest __tests__/explore-routing/routing.test.ts  (+ query-patterns)
+ *   2. vitest test/explore-routing/routing.test.ts  (+ query-patterns)
  *
  * When HOMEGRAPH_PROBE_ROOT points at an indexed repo (e.g. scene_board_ext):
- *   3. vitest __tests__/explore-routing/live-explore.test.ts
+ *   3. vitest test/explore-routing/live-explore.test.ts
  *
  * Exit non-zero if anything fails — do not ship a fix that greened one probe
  * while regressing another.
@@ -45,7 +45,7 @@ run('build', 'npm', ['run', 'build']);
 run(
   'routing + query-patterns (always)',
   'npx',
-  ['vitest', 'run', '__tests__/explore-routing/routing.test.ts', '__tests__/query-patterns.test.ts'],
+  ['vitest', 'run', 'test/explore-routing/routing.test.ts', 'test/query-patterns.test.ts'],
 );
 
 if (probeRoot) {
@@ -53,7 +53,7 @@ if (probeRoot) {
   run(
     'live explore corpus (size + mustContain)',
     'npx',
-    ['vitest', 'run', '__tests__/explore-routing/live-explore.test.ts'],
+    ['vitest', 'run', 'test/explore-routing/live-explore.test.ts'],
     { HOMEGRAPH_PROBE_ROOT: probeRoot },
   );
 } else {
@@ -63,7 +63,7 @@ if (probeRoot) {
   run(
     'live skipped placeholder',
     'npx',
-    ['vitest', 'run', '__tests__/explore-routing/live-explore.test.ts'],
+    ['vitest', 'run', 'test/explore-routing/live-explore.test.ts'],
   );
 }
 

@@ -260,7 +260,7 @@ the agent's real query — that mismatch is what this refinement corrects.)
     `definesPolymorphicSupertype()` (a node HAS ≥3 incoming `implements`/`extends`
     — i.e. the file is the family base). The skeleton branch:
     `off-spine && isPolymorphicSibling && !(namedInFile && !definesSupertype)`.
-- `__tests__/adaptive-explore-sizing.test.ts` — 7 cases incl. the named-callable
+- `test/adaptive-explore-sizing.test.ts` — 7 cases incl. the named-callable
   spare (RealCall) and the supertype-family override (compiler.py).
 
 ## Frontier / future work

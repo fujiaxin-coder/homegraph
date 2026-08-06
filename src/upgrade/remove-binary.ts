@@ -2,18 +2,18 @@
  * CLI binary removal for `homegraph uninstall` (the #1071 shadow, uninstall
  * edition).
  *
- * Before this module, three disconnected paths each removed PART of an
- * installation and none removed it all: `homegraph uninstall` swept agent
- * configs only, `install.sh --uninstall` deleted the bundle only, and npm's
- * `preuninstall` hook cleaned configs when npm removed its own package. A
- * user with more than one install method (the common drift: npm first, the
- * bundle later — or vice versa) ran `homegraph uninstall` and still had a
- * working `homegraph` on PATH.
+ * Before this module, uninstall paths each removed PART of an installation
+ * and none removed it all: `homegraph uninstall` swept agent configs only,
+ * and npm's `preuninstall` hook cleaned configs when npm removed its own
+ * package. A user with more than one install method (the common drift: npm
+ * first, a leftover standalone bundle later — or vice versa) ran
+ * `homegraph uninstall` and still had a working `homegraph` on PATH.
  *
  * This module makes `homegraph uninstall` complete: PLAN every binary
- * install present on the machine (bundle layout(s), the npm global package,
- * the bin-dir shim), then EXECUTE the removals. Split planner/executor with
- * injected side effects, same convention as the upgrade orchestrator.
+ * install present on the machine (legacy bundle layout(s), the npm global
+ * package, the bin-dir shim), then EXECUTE the removals. Split
+ * planner/executor with injected side effects, same convention as the
+ * upgrade orchestrator.
  *
  * Safety rules:
  *   - A source checkout is REPORTED, never deleted — a git repo is the
@@ -28,10 +28,10 @@
  *     `HOMEGRAPH_INSTALL_DIR`) is removed wholesale.
  *   - The bin-dir shim is removed only when it verifiably points into a
  *     detected install dir — a user's unrelated `homegraph` file survives.
- *   - Windows cannot DELETE a running exe but CAN rename it (the same
- *     trick the in-place upgrade uses): a locked `node.exe` is renamed
- *     aside and reported as a leftover for the user to delete after the
- *     window closes, instead of failing the whole removal.
+ *   - Windows cannot DELETE a running exe but CAN rename it: a locked
+ *     `node.exe` is renamed aside and reported as a leftover for the user
+ *     to delete after the window closes, instead of failing the whole
+ *     removal.
  */
 
 import * as fs from 'fs';
@@ -177,8 +177,7 @@ export function planBinaryRemoval(p: RemoveBinaryProbes): BinaryRemovalPlan {
     const shim = P.join(binDir, 'homegraph');
     const target = p.readlink(shim);
     // Only when the link demonstrably points into a bundle install dir —
-    // resolved against the link's own directory, since install.sh links an
-    // absolute target but a hand-made relative link must still verify.
+    // resolved against the link's own directory (absolute or relative targets).
     if (target !== null) {
       const resolved = P.resolve(binDir, target);
       const ours = installDirs.some((d) => resolved.startsWith(P.resolve(d) + P.sep))

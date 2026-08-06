@@ -3364,9 +3364,9 @@ program
 /**
  * homegraph upgrade [version]
  *
- * Self-update, however HomeGraph was installed (bundle via install.sh/.ps1,
- * npm-global, npx, or a source checkout). See ../upgrade for the detection and
- * per-method upgrade logic.
+ * Self-update for npm-global / npx / source installs. A leftover standalone
+ * bundle install is detected and refused (guide the user to `npm i -g`).
+ * See ../upgrade for detection and per-method upgrade logic.
  */
 program
   .command('upgrade [version]')

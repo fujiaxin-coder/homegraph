@@ -4,7 +4,7 @@
 > **(P1)** agents still reach for `Read`/`grep` during implementation instead of homegraph;
 > **(P2)** on startup the homegraph MCP server can be `pending` when the agent's first turn fires, so the agent runs with *no* homegraph at all.
 >
-> Read `homegraph/CLAUDE.md` → "Retrieval performance & dynamic-dispatch coverage" first — it's the doctrine these ideas must respect.
+> Read `homegraph/AGENTS.md` → "Retrieval performance & dynamic-dispatch coverage" first — it's the doctrine these ideas must respect.
 
 ---
 
@@ -17,7 +17,7 @@
   - So the reframe *did* move tool-choice — but the agent used `homegraph_explore`, **never the file-view**, and still Read 5×. n=1/arm.
 - **Eval harness fix** (`#735`): nested attach is a *startup-latency* problem, not a hard block. `scripts/agent-eval/ab-new-vs-baseline.sh` now pre-warms a daemon + skips the re-exec; use it (run non-nested for cleanest results).
 
-**Doctrine constraints (from CLAUDE.md — do not relitigate):**
+**Doctrine constraints (from AGENTS.md — do not relitigate):**
 - *Adapt the tool to the agent.* Changing tool descriptions / `server-instructions.ts` is **low-salience** and has *regressed* wall-clock before. Wording alone won't reliably move tool-choice.
 - *New tools fare worse than extending an existing one* (the agent under-picks even `trace`; `homegraph_context` was removed).
 - The real levers that landed historically: **coverage** (more flows connect statically → `explore` surfaces them) and **sufficiency** (output complete enough that the agent *stops* reading).
@@ -46,7 +46,7 @@ You keep diverging away from using homegraph rather than pursuing the fix."*
 - Content is the **default** (no `includeCode` needed); `symbolsOnly: true` returns
   the cheap structural map instead. Security preserved: `yaml`/`properties`
   summarized by key, never dumped (#383); reads via `validatePathWithinRoot` (#527).
-- Tests: `__tests__/node-file-view.test.ts` (9, incl. strict format parity
+- Tests: `test/node-file-view.test.ts` (9, incl. strict format parity
   `^1000\t  const v998 = 998;` and unpadded `^1\timport …`). Full suite green
   (1270). Descriptions / `server-instructions.ts` / CHANGELOG reframed: "read a
   source file with homegraph_node instead of Read — same bytes, faster."
@@ -118,7 +118,7 @@ artifact (`scripts/agent-eval/redirect-read-hook.sh` + `ab-hook.sh`).
 - **Hooks (existing):** `scripts/agent-eval/block-read-hook.sh`, `scripts/agent-eval/hook-settings.json` (the eval's force-Read-0 hook — basis for the P1 redirect hook).
 - **Installer (where to add a recommended hook):** `src/installer/targets/claude.ts`.
 - **Eval harness:** `scripts/agent-eval/ab-new-vs-baseline.sh` (new-vs-baseline, pre-warm baked in), `run-all.sh` (with-vs-without), `parse-run.mjs` (tool-by-type counts; `homegraph tools exposed: 0` + 0 homegraph calls = ran without).
-- **Doctrine:** `CLAUDE.md` → "Retrieval performance & dynamic-dispatch coverage" + the agent-eval note under "Validation methodology".
+- **Doctrine:** `AGENTS.md` → "Retrieval performance & dynamic-dispatch coverage" + the agent-eval note under "Validation methodology".
 
 ## How to validate anything here
 - **P1 (Read displacement):** `bash scripts/agent-eval/ab-new-vs-baseline.sh <indexed-repo> "<implementation task>" [baseline-ref]` — compare `Read` vs `mcp__homegraph__*` counts. ≥2 runs/arm (n=1 is noisy). Run non-nested for cleanest results. Use a *genuinely new* feature task (verify it doesn't already exist — the first A/B attempt wasted a run on an already-implemented `--quiet`).

@@ -4707,10 +4707,17 @@ export class ToolHandler {
     const rawTokens = query.split(/[\s,()[\]]+/).filter(
       (t) => t.length >= 3 && /^[A-Za-z_][\w]*$/.test(t),
     );
-    if (!stayOnCompact && (names.length >= 2 || rawTokens.length >= 2)) {
+    // Multi-anchor: prefer full explore when Flow / Dynamic-dispatch has content.
+    // Type.member / UI-cluster bags stay on compact UNLESS the flow surfaces
+    // @Prop/@Link state transfers — those hops are the answer for decorator
+    // dependency questions and must not be buried under a compact UI trail.
+    if (names.length >= 2 || rawTokens.length >= 2) {
       try {
         const flow = this.buildFlowFromNamedSymbols(cg, query);
-        if (flow.text.length > 0) return null;
+        if (flow.text.length > 0) {
+          if (!stayOnCompact) return null;
+          if (/state: @(?:Prop|Link)\b/.test(flow.text)) return null;
+        }
       } catch {
         // Probe is best-effort — stay on compact if flow build fails.
       }
@@ -7772,7 +7779,7 @@ export class ToolHandler {
           // a Read of the very file just skeletonized; on a central, wanted file
           // (Session.swift, DataRequest.swift) that fired an over-investigation
           // spiral (the agent Read the skeletonized file, then kept digging).
-          // CLAUDE.md: explore output must never tell the agent to Read.
+          // AGENTS.md: explore output must never tell the agent to Read.
           const tag = bodyIds.size > 0
             ? 'focused (the methods you named in full, the rest as signatures — homegraph_explore a signature by name for its body; do NOT Read)'
             : 'skeleton (signatures only — homegraph_explore a name for its full body; do NOT Read)';

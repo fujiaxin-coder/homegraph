@@ -241,7 +241,7 @@ TypeScript / JavaScript、Python、Go、Rust、Java、C#、PHP、Ruby、C / C++�
 
 ## 从源码构建
 
-适用于开发或二次修改：
+适用于开发或二次修改。协作约定（代码拉取、Commit、PR 清单）见 [DEVELOPMENT.md](./DEVELOPMENT.md)。
 
 ```bash
 git clone <your-repo-url>

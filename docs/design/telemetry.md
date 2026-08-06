@@ -182,7 +182,7 @@ The private `homegraph-pro` fork ships inside customer containers whose guarante
 "nothing leaves the box" — including telemetry. In the fork, telemetry must be **default-off
 and not enableable by the installer** (compile-time constant or stripped module), and the
 container sets `HOMEGRAPH_TELEMETRY=0` as belt-and-braces. This rule lives in the fork's
-CLAUDE.md and must survive every upstream merge.
+AGENTS.md and must survive every upstream merge.
 
 ## Rollout
 
@@ -198,7 +198,7 @@ Tests (no DB mocking, per repo convention; fetch mocked at `globalThis.fetch`):
 consent precedence (env > config > default), off ⇒ zero fetch calls, rollup aggregation
 across days, buffer cap + corrupt-buffer recovery, no-stdout invariant under MCP transport,
 flush abort honors timeout, installer toggle persists + re-run doesn't re-ask
-(`__tests__/installer-targets.test.ts` per house rules).
+(`test/installer-targets.test.ts` per house rules).
 
 ## Open questions
 

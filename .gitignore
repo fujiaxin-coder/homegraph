@@ -42,11 +42,11 @@ npm-debug.log*
 .claude/scheduled_tasks.lock
 .claude/handoffs/
 
-# Parallels Windows VM SSH/connection config (local machine, see CLAUDE.md)
+# Parallels Windows VM SSH/connection config (local machine, see AGENTS.md)
 .parallels
 
 # Confidential business / product / strategy docs — must NOT land in the
-# public engine repo (see the IP boundary in CLAUDE.md)
+# public engine repo (see the IP boundary in AGENTS.md)
 docs/business/
 
 # HomeGraph data directories (in test projects)
@@ -65,10 +65,7 @@ release/
 # Local-only: browser-based tmux session launcher (see tmux-web/README.md)
 tmux-web/
 
-assets/__pycache__/
 **/__pycache__/
 *.pyc
-
-assets/generate-waitlist.py
 
 .kommandr/

@@ -8,7 +8,7 @@
 # Env:   CG_BIN          homegraph binary (default: command -v homegraph)
 #        AGENT_EVAL_OUT  output dir (default: /tmp/agent-eval)
 #        MODEL / EFFORT  claude model/effort (default: sonnet / high — the
-#                        standing A/B policy; see CLAUDE.md, don't raise)
+#                        standing A/B policy; see AGENTS.md, don't raise)
 set -uo pipefail
 
 REPO="${1:?usage: run-all.sh <repo-path> \"<question>\" [headless|tmux|all]}"

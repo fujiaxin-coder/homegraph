@@ -3,25 +3,17 @@
  *
  * Self-update for the CLI, whatever way it was installed:
  *
- *   - **bundle** — the self-contained runtime+app installed by `install.sh`
- *     (Linux/macOS) or `install.ps1` (Windows). Upgrading re-runs the SAME
- *     canonical installer script (single source of truth) so the download /
- *     version-resolution / PATH logic never drifts between first-install and
- *     upgrade.
- *   - **npm** — installed via `npm i -g homegraph`. Upgrading
- *     shells out to npm.
+ *   - **npm** — installed via `npm i -g homegraph`. Upgrading shells out to npm.
  *   - **npx** — ephemeral; nothing to upgrade (next `npx` fetches latest).
  *   - **source** — a git checkout running its own `dist/`; `git pull` + rebuild.
+ *   - **bundle** — legacy self-contained runtime+app layout (vendored node +
+ *     launcher). Standalone installers are retired; upgrade refuses and points
+ *     the user at `npm i -g homegraph` (and `homegraph uninstall` can still
+ *     remove leftover bundle artifacts).
  *
- * Detection is structural (see `detectInstallMethod`): a bundle carries a
- * vendored `node` binary and a `bin/homegraph` launcher next to its `lib/`, so
- * we can recognize it from the running file's path without a marker file.
- *
- * Windows wrinkle: a running `node.exe` is locked and can't be deleted, so the
- * bundle's `current\` dir can't be overwritten in place by the process doing
- * the upgrade. We therefore spawn a DETACHED helper that waits for this
- * process to exit (releasing the lock), then runs `install.ps1`. This is the
- * conventional Windows self-update dance (rustup/nvm-windows do the same).
+ * Detection is structural (see `detectInstallMethod`): a leftover bundle still
+ * carries a vendored `node` binary and a `bin/homegraph` launcher next to its
+ * `lib/`, so we can recognize it from the running file's path without a marker.
  */
 
 import * as fs from 'fs';
@@ -31,8 +23,6 @@ import { spawnSync } from 'child_process';
 
 export const REPO = 'homegraph/homegraph';
 export const NPM_PACKAGE = 'homegraph';
-const RAW_BASE = `https://raw.githubusercontent.com/${REPO}/main`;
-export const INSTALL_SH_URL = `${RAW_BASE}/install.sh`;
 
 // ---------------------------------------------------------------------------
 // Install-method detection (pure — fully unit-testable via injected probes)
@@ -101,15 +91,11 @@ export function detectInstallMethod(input: DetectInput): InstallMethod {
 
   const norm = toPosix(input.filename);
 
-  // Path-based checks come FIRST. The npm thin-installer's per-platform
-  // package (homegraph-<platform>-<arch>) is itself a complete
-  // bundle — vendored node + bin/ launcher — living inside node_modules, so
-  // the layout sniff below would misread every npm install as a standalone
-  // bundle. `upgrade` would then curl install.sh into ~/.homegraph: a SECOND
-  // install that never wins the PATH race against npm's shim, leaving
-  // `homegraph -v` permanently on the old version (the #1071 shadow,
-  // self-inflicted). A path under node_modules is authoritative about HOW the
-  // user installed, whatever the artifact inside looks like.
+  // Path-based checks come FIRST. An npm install (or a nested platform
+  // package that looks like a vendored bundle) lives under node_modules —
+  // that path is authoritative about HOW the user installed, whatever the
+  // artifact inside looks like. Otherwise a leftover standalone layout under
+  // node_modules would be misread as `kind: 'bundle'`.
 
   // npx cache: <…>/_npx/<hash>/node_modules/homegraph/…
   // (checked before npm — the npx cache path also contains /node_modules/).
@@ -235,10 +221,9 @@ function httpsGet(
  * Resolve the latest release tag (e.g. `v0.9.9`).
  *
  * Primary: read the redirect `Location` from `github.com/<repo>/releases/latest`
- * — same trick install.sh uses, because the unauthenticated GitHub API is
- * rate-limited to 60 req/h/IP and 403s on shared/cloud hosts (issue #325). The
- * redirect has no such limit. Fall back to the API only if the redirect can't
- * be read.
+ * — the unauthenticated GitHub API is rate-limited to 60 req/h/IP and 403s on
+ * shared/cloud hosts (issue #325); the redirect has no such limit. Fall back
+ * to the API only if the redirect can't be read.
  */
 export async function resolveLatestVersion(repo = REPO, timeoutMs = 12000): Promise<string> {
   try {
@@ -353,16 +338,17 @@ export async function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps): Promi
     return 0;
   }
 
-  // Dispatch by install method. bundle/npm perform a real binary update, so
-  // after they succeed we self-heal the front-load hook (below); npx/source/
+  // Dispatch by install method. npm performs a real binary update, so after
+  // it succeeds we self-heal the front-load hook (below); npx/source/bundle/
   // unknown don't update anything here, so they return directly.
   let code: number;
   switch (method.kind) {
     case 'bundle':
-      code = await (method.os === 'windows'
-        ? upgradeWindowsBundle(method, latest, deps)
-        : upgradeUnixBundle(method, opts.version ? latest : undefined, deps));
-      break;
+      deps.error('This HomeGraph was installed with the retired standalone bundle installer.');
+      deps.log(c.dim('Standalone installers are no longer published. Switch to npm:'));
+      deps.log(`  ${c.cyan(`npm i -g ${NPM_PACKAGE}@latest`)}`);
+      deps.log(c.dim('Then remove the leftover bundle with `homegraph uninstall` if you still have one on PATH.'));
+      return 1;
     case 'npm':
       // npm version specs have no leading "v" (`@0.9.8`, not `@v0.9.8` — the
       // latter resolves as a nonexistent dist-tag).
@@ -378,7 +364,7 @@ export async function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps): Promi
       return 0;
     default:
       deps.error(`Couldn’t determine how HomeGraph was installed (${method.reason}).`);
-      deps.log(c.dim(`Reinstall manually — see https://github.com/${REPO}#install`));
+      deps.log(c.dim(`Reinstall with: npm i -g ${NPM_PACKAGE}`));
       return 1;
   }
 
@@ -423,9 +409,9 @@ type VersionProbe = 'match' | 'mismatch' | 'inconclusive';
  * Prove the upgrade actually took: spawn the `homegraph` this terminal's PATH
  * resolves and compare its reported version to the target. Catches the silent
  * failure mode where ANOTHER install shadows the one we just upgraded (issue
- * #1071 — e.g. a stale `npm i -g` copy earlier on PATH than the bundle
- * launcher): the upgrade "succeeds" but `homegraph -v` — in this terminal and
- * every future one — keeps serving the old version. Exported for unit tests.
+ * #1071 — e.g. a stale global copy earlier on PATH): the upgrade "succeeds"
+ * but `homegraph -v` — in this terminal and every future one — keeps serving
+ * the old version. Exported for unit tests.
  */
 export function verifyResolvedVersion(latest: string, deps: UpgradeDeps): VersionProbe {
   if (!deps.hasCommand('homegraph')) return 'inconclusive';
@@ -517,97 +503,6 @@ async function selfHealPromptHook(deps: UpgradeDeps): Promise<void> {
       c.dim('Enabled the HomeGraph front-load hook for Claude Code (structural prompts). Disable any time: HOMEGRAPH_NO_PROMPT_HOOK=1'),
     );
   }
-}
-
-function upgradeUnixBundle(
-  method: Extract<InstallMethod, { kind: 'bundle' }>,
-  pinned: string | undefined,
-  deps: UpgradeDeps
-): number {
-  const downloader = deps.hasCommand('curl')
-    ? `curl -fsSL ${INSTALL_SH_URL}`
-    : deps.hasCommand('wget')
-      ? `wget -qO- ${INSTALL_SH_URL}`
-      : null;
-  if (!downloader) {
-    deps.error('Neither curl nor wget is available to download the installer.');
-    deps.log(c.dim(`Install curl, or run manually:  ${INSTALL_SH_URL} | sh`));
-    return 1;
-  }
-
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (method.installDir) env.HOMEGRAPH_INSTALL_DIR = method.installDir;
-  if (pinned) env.HOMEGRAPH_VERSION = pinned;
-
-  deps.log(c.dim(`Running the installer (${downloader} | sh)…`));
-  const code = deps.run('sh', ['-c', `${downloader} | sh`], env);
-  if (code !== 0) {
-    deps.error(`Installer exited with code ${code}.`);
-    return 1;
-  }
-  deps.log('');
-  // No "open a new terminal" hedge here — after the swap, runUpgrade probes
-  // the PATH-resolved `homegraph --version` and reports the real outcome.
-  deps.log(c.green('✓ Upgrade complete.'));
-  deps.log(reindexAdvisory());
-  return 0;
-}
-
-/** Build the in-place Windows upgrade script (exported for unit-testing). */
-export function buildWindowsUpgradeScript(bundleRoot: string, version: string, arch: string): string {
-  const target = `win32-${arch}`;
-  const url = `https://github.com/${REPO}/releases/download/${version}/homegraph-${target}.zip`;
-  // Windows can't DELETE a running exe but CAN rename it, so we upgrade IN
-  // PLACE: download → rename the locked node.exe aside → extract the new bundle
-  // over current\. Synchronous, no detached helper (which dies under SSH/job
-  // objects and has worse UX). The running process keeps its renamed node.exe
-  // mapped; the NEXT `homegraph` invocation uses the new one. We can't reuse
-  // install.ps1 here — it `Remove-Item`s current\, which fails on the locked exe.
-  return [
-    `$ErrorActionPreference='Stop'`,
-    `$dest='${bundleRoot}'`,
-    `$url='${url}'`,
-    `Write-Host "Downloading $url"`,
-    `$tmp=Join-Path $env:TEMP ('cg-up-'+[guid]::NewGuid().ToString('N'))`,
-    `New-Item -ItemType Directory -Force -Path $tmp | Out-Null`,
-    `$zip=Join-Path $tmp 'cg.zip'`,
-    `Invoke-WebRequest -Uri $url -OutFile $zip`,
-    `$stage=Join-Path $tmp 'stage'`,
-    `Expand-Archive -Path $zip -DestinationPath $stage -Force`,
-    `$inner=Join-Path $stage 'homegraph-${target}'`,
-    `$src=if(Test-Path $inner){$inner}else{$stage}`,
-    `$node=Join-Path $dest 'node.exe'`,
-    `if(Test-Path $node){Rename-Item -Path $node -NewName ('node.exe.old-'+[guid]::NewGuid().ToString('N')) -Force}`,
-    `Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force`,
-    `Get-ChildItem -Path $dest -Filter 'node.exe.old-*' -ErrorAction SilentlyContinue | ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch {} }`,
-    `Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue`,
-    `Write-Host "Installed HomeGraph ${version} to $dest"`,
-  ].join(';');
-}
-
-function upgradeWindowsBundle(
-  method: Extract<InstallMethod, { kind: 'bundle' }>,
-  latest: string,
-  deps: UpgradeDeps
-): number {
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  const script = buildWindowsUpgradeScript(method.bundleRoot, latest, arch);
-  // -EncodedCommand (base64 UTF-16LE), NOT -Command: Node's Windows argv→command
-  // -line quoting mangles a long multi-statement script, so PowerShell never
-  // parses it. Encoding sidesteps all shell quoting — the canonical approach.
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  deps.log(c.dim(`Downloading and installing ${latest}…`));
-  const code = deps.run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded]);
-  if (code !== 0) {
-    deps.error(`Installer exited with code ${code}.`);
-    return 1;
-  }
-  deps.log('');
-  // The running node.exe was renamed aside, so the version probe in
-  // runUpgrade already exercises the NEW binary — no terminal hedge needed.
-  deps.log(c.green('✓ Upgrade complete.'));
-  deps.log(reindexAdvisory());
-  return 0;
 }
 
 /**

@@ -305,7 +305,7 @@ class:PaymentService ──contains──▶ method:constructor
 class:PaymentService ──contains──▶ method:charge
 ```
 
-> 以上结构与 `__tests__/extraction.test.ts` 中 `extractFromSource('service.ts', code)` 的断言一致。
+> 以上结构与 `test/extraction.test.ts` 中 `extractFromSource('service.ts', code)` 的断言一致。
 
 ### 1.4 Node 类型定义（项目源码）
 
@@ -412,7 +412,7 @@ private extractCall(node: SyntaxNode): void {
 ```
 
 > 提取时**不知道** `processData` 对应哪个节点 ID，所以先记 `UnresolvedReference`，等全库索引完再消解。  
-> 测试用例见 `__tests__/extraction.test.ts`：`extractFromSource('main.ts', code)` 断言 `referenceName === 'processData'`。
+> 测试用例见 `test/extraction.test.ts`：`extractFromSource('main.ts', code)` 断言 `referenceName === 'processData'`。
 
 #### 消解成功后：变成真正的 Edge
 
@@ -1272,7 +1272,7 @@ TimelineDataSource.constructor:440、AlbumSetPage.onPickerOperationBackToNewAlbu
 | 数据库操作      | `src/db/queries.ts`                        | `insertNode`, `searchNodes`, `getIncomingEdges`    |
 | 图遍历        | `src/graph/traversal.ts`                   | `GraphTraverser`                                   |
 | 主入口        | `src/index.ts`                             | `HomeGraph` 类, `indexAll`                          |
-| 测试示例       | `__tests__/extraction.test.ts`             | 各语言提取的断言用例                                         |
+| 测试示例       | `test/extraction.test.ts`             | 各语言提取的断言用例                                         |
 
 
 ---

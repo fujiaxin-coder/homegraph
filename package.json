@@ -19,9 +19,9 @@
     "cli": "npm run build && node dist/bin/homegraph.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:eval": "vitest run __tests__/evaluation/",
+    "test:eval": "vitest run test/evaluation/",
     "test:explore-routing": "node scripts/run-explore-routing.mjs",
-    "eval": "npm run build && npx tsx __tests__/evaluation/runner.ts",
+    "eval": "npm run build && npx tsx test/evaluation/runner.ts",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },
   "keywords": [
