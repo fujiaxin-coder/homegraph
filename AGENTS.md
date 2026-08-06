@@ -226,11 +226,9 @@ Releases are built and published by the **GitHub Actions "Release" workflow**
 (`.github/workflows/release.yml`). It runs `scripts/prepare-release.mjs` to
 promote `[Unreleased]` into `[<version>]` (and auto-commit + push that
 CHANGELOG change back to `main` so on-disk truth matches the published
-notes), then bundles a Node runtime per platform (`scripts/build-bundle.sh`)
-and publishes both the GitHub Release and the npm thin-installer
-(`scripts/pack-npm.sh`: a shim package + per-platform packages).
-Publishing manually is **wrong** now — a plain `npm publish` ships the root
-package (non-bundled), which breaks anyone on Node < 22.5.
+notes), then builds `dist/` and publishes the single npm package
+(`files: ["dist","README.md"]`) plus a GitHub Release with notes from
+CHANGELOG. Users run it on their own Node (`engines: >=20 <25`).
 
 **Claude does NOT bump the version unless explicitly asked.** The maintainer
 typically does it themselves — often by editing `package.json` directly via
@@ -251,9 +249,9 @@ Once `package.json` is at the target version on `main`, trigger
 
 1. Syncs `package-lock.json` to `package.json`'s version if they've drifted; commits + pushes that change.
 2. Runs `prepare-release.mjs <X.Y.Z>` → promotes `[Unreleased]` → `[X.Y.Z] - <today>` in `CHANGELOG.md`, appends the link reference, commits + pushes the move with `[skip ci]`.
-3. Builds every platform bundle on one runner, generates `SHA256SUMS`.
+3. Builds `dist/` and runs the test suite as a gate.
 4. Creates the GitHub Release with notes from the freshly-promoted `[X.Y.Z]` block.
-5. Publishes the npm shim + per-platform packages. Requires the `NPM_TOKEN` repo secret.
+5. Publishes the `homegraph` npm package. Requires the `NPM_TOKEN` repo secret.
 
 **Do not run `npm publish`, `git push`, or `git tag` yourself** — these are
 publish actions on shared state. Write the files, hand the user the commands.
@@ -268,4 +266,4 @@ publish actions on shared state. Write the files, hand the user the commands.
   - The **last main commit** — `git log --first-parent main -1 --format='%ai %h %s'`. A comment after the last release but before a fix on main may already be addressed there but unreleased.
   - The **current branch's tip** — your own unmerged work obviously can't be what the comment is reacting to.
   Always disambiguate "released," "merged-but-unreleased," and "in-progress" before agreeing that a user-reported problem is unfixed (or that a fix is incomplete). A user saying "your fix only covers X" about a recent PR is usually pointing at the *released* shortcomings — your in-flight branch may already address them but they have no way to know that.
-- **Version-tag every image referenced in `README.md`.** GitHub caches README images (`raw.githubusercontent.com` with a 5-minute TTL; third-party hosts sit behind the long-lived camo proxy), so updating an asset in place can keep showing the stale version. Give each README image URL a `?v=N` query tag and **bump `N` in the same commit whenever the asset bytes change** — e.g. `assets/waitlist.svg?v=2`. The changed URL sidesteps every cache so the new image shows immediately instead of waiting on a TTL to expire.
+- **Version-tag every image referenced in `README.md`.** GitHub caches README images (`raw.githubusercontent.com` with a 5-minute TTL; third-party hosts sit behind the long-lived camo proxy), so updating an asset in place can keep showing the stale version. Give each README image URL a `?v=N` query tag and **bump `N` in the same commit whenever the asset bytes change** — e.g. `docs/img/diagram.svg?v=2`. The changed URL sidesteps every cache so the new image shows immediately instead of waiting on a TTL to expire.

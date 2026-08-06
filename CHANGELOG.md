@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Standalone installers (`install.sh` / `install.ps1`) and self-contained platform bundles are retired. Install and upgrade with `npm i -g homegraph`; `homegraph upgrade` on a leftover bundle install refuses and points you at npm. `homegraph uninstall` still removes leftover bundle artifacts.
+
 ### Fixes
 
 - `homegraph serve mcp --path <repo>` again honors `--path`. A nested Commander subcommand had been dropping it, so the shared daemon keyed off the process cwd instead of the project — MCP prewarm looked timed out and agents attached to the wrong index.

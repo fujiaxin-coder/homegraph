@@ -14,7 +14,6 @@ import {
   reindexAdvisory,
   runUpgrade,
   verifyResolvedVersion,
-  buildWindowsUpgradeScript,
   NPM_PACKAGE,
   type InstallMethod,
   type UpgradeDeps,
@@ -90,11 +89,9 @@ describe('detectInstallMethod', () => {
     expect(m).toEqual({ kind: 'npx' });
   });
 
-  // The npm thin-installer's per-platform package IS a complete bundle
-  // (vendored node + bin/ launcher) sitting inside node_modules. The layout
-  // sniff must not win over the node_modules path check, or `upgrade` curls
-  // install.sh into ~/.homegraph — a second install that loses the PATH race
-  // to npm's shim, so `homegraph -v` stays on the old version forever.
+  // The npm installer's nested platform package can look like a vendored
+  // bundle (node + bin/ launcher) under node_modules. Path under node_modules
+  // must win so upgrade stays on the npm path, not legacy bundle detection.
   it('detects the npm thin-installer platform package as npm, not bundle', () => {
     const root = '/usr/local/lib/node_modules/homegraph/node_modules/homegraph-linux-x64';
     const filename = `${root}/lib/dist/bin/homegraph.js`;
@@ -209,16 +206,6 @@ describe('version helpers', () => {
     expect(a).toContain('homegraph sync');
     expect(a).toContain('homegraph index -f');
   });
-
-  it('buildWindowsUpgradeScript targets the right asset per arch and renames-not-deletes the exe', () => {
-    const arm = buildWindowsUpgradeScript('C:\\cg\\current', 'v1.2.3', 'arm64');
-    expect(arm).toContain('releases/download/v1.2.3/homegraph-win32-arm64.zip');
-    expect(arm).toContain("$dest='C:\\cg\\current'");
-    expect(arm).toContain('Rename-Item'); // never Remove-Item on the locked exe
-    expect(arm).not.toMatch(/Remove-Item[^;]*\$dest'?\s*;/); // doesn't delete current\
-    const x64 = buildWindowsUpgradeScript('C:\\cg\\current', 'v1.2.3', 'x64');
-    expect(x64).toContain('homegraph-win32-x64.zip');
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -260,13 +247,6 @@ function makeDeps(
   return { deps, calls };
 }
 
-/** Decode a `-EncodedCommand` base64 (UTF-16LE) payload back to its script. */
-function decodeEncodedCommand(args: string[]): string {
-  const i = args.indexOf('-EncodedCommand');
-  if (i < 0) throw new Error('no -EncodedCommand in args');
-  return Buffer.from(args[i + 1]!, 'base64').toString('utf16le');
-}
-
 describe('runUpgrade', () => {
   it('does nothing when already up to date', async () => {
     const { deps, calls } = makeDeps({ method: { kind: 'npm', scope: 'global' }, currentVersion: '0.9.9' });
@@ -287,64 +267,28 @@ describe('runUpgrade', () => {
     expect(calls.logs.join('\n')).toMatch(/update is available/i);
   });
 
-  it('unix bundle: runs the installer via sh with the derived install dir', async () => {
+  it('legacy bundle: refuses upgrade and points at npm', async () => {
     const { deps, calls } = makeDeps({
       method: { kind: 'bundle', os: 'unix', bundleRoot: '/h/.homegraph/versions/v0.9.8', installDir: '/h/.homegraph' },
       currentVersion: '0.9.8',
     });
     const code = await runUpgrade({}, deps);
-    expect(code).toBe(0);
-    expect(calls.runs).toHaveLength(1);
-    expect(calls.runs[0].cmd).toBe('sh');
-    expect(calls.runs[0].args[0]).toBe('-c');
-    expect(calls.runs[0].args[1]).toContain('curl -fsSL');
-    expect(calls.runs[0].args[1]).toContain('| sh');
-    expect(calls.runs[0].env?.HOMEGRAPH_INSTALL_DIR).toBe('/h/.homegraph');
-    expect(calls.logs.join('\n')).toMatch(/homegraph sync/); // re-index advisory printed
-  });
-
-  it('unix bundle: falls back to wget, and errors when neither downloader exists', async () => {
-    const { deps, calls } = makeDeps({
-      method: { kind: 'bundle', os: 'unix', bundleRoot: '/h/.homegraph/versions/v0.9.8', installDir: null },
-      currentVersion: '0.9.8',
-      hasCommand: () => false,
-    });
-    const code = await runUpgrade({}, deps);
     expect(code).toBe(1);
     expect(calls.runs).toHaveLength(0);
-    expect(calls.errors.join('\n')).toMatch(/curl nor wget/i);
+    expect(calls.errors.join('\n')).toMatch(/retired standalone bundle/i);
+    expect(calls.logs.join('\n')).toMatch(/npm i -g/);
   });
 
-  it('windows bundle: runs a synchronous in-place (rename + extract) powershell upgrade', async () => {
+  it('legacy windows bundle: also refuses and points at npm', async () => {
     const { deps, calls } = makeDeps({
       method: { kind: 'bundle', os: 'windows', bundleRoot: 'C:/x/homegraph/current', installDir: 'C:/x/homegraph' },
       currentVersion: '0.9.8',
       platform: 'win32',
     });
     const code = await runUpgrade({}, deps);
-    expect(code).toBe(0);
-    expect(calls.runs).toHaveLength(1);
-    expect(calls.runs[0].cmd).toBe('powershell.exe');
-    const decoded = decodeEncodedCommand(calls.runs[0].args);
-    // Downloads the right asset, renames the locked exe aside, copies over current\.
-    expect(decoded).toContain('releases/download/v0.9.9/homegraph-win32-');
-    expect(decoded).toContain('Rename-Item');
-    expect(decoded).toContain('node.exe.old-');
-    expect(decoded).toContain('Copy-Item');
-  });
-
-  it('windows bundle: a non-zero installer exit is a failure', async () => {
-    const { deps, calls } = makeDeps(
-      {
-        method: { kind: 'bundle', os: 'windows', bundleRoot: 'C:/x/homegraph/current', installDir: 'C:/x/homegraph' },
-        currentVersion: '0.9.8',
-        platform: 'win32',
-      },
-      1
-    );
-    const code = await runUpgrade({}, deps);
     expect(code).toBe(1);
-    expect(calls.errors.join('\n')).toMatch(/exited with code/i);
+    expect(calls.runs).toHaveLength(0);
+    expect(calls.errors.join('\n')).toMatch(/retired standalone bundle/i);
   });
 
   it('npm global: shells out to npm install -g @pkg@latest', async () => {

@@ -3,10 +3,10 @@
  * edition).
  *
  * Before this feature, `homegraph uninstall` removed agent configs only:
- * a user with both a bundle install and an npm global install (the shadow
- * scenario) still had a working `homegraph` on PATH afterward. The planner
- * must find EVERY install present on the machine — not just the one the
- * running binary belongs to — and the executor must remove them all, with
+ * a user with both a leftover bundle install and an npm global install (the
+ * shadow scenario) still had a working `homegraph` on PATH afterward. The
+ * planner must find EVERY install present on the machine — not just the one
+ * the running binary belongs to — and the executor must remove them all, with
  * the Windows locked-exe rename dance instead of a hard failure.
  */
 import { describe, it, expect } from 'vitest';
