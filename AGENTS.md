@@ -31,7 +31,7 @@ npx vitest run test/extraction.test.ts -t "TypeScript"
 
 `copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
 
-Node engines: `>=20.0.0 <25.0.0`. There is a hard exit on Node 25.x and below 20 (see `src/bin/node-version-check.ts`).
+Node engines: `>=18.0.0`. There is a hard exit below 18 (see `src/bin/node-version-check.ts`). Node ≥22 WASM Zone OOM is mitigated with `--liftoff-only` relaunch (`src/extraction/wasm-runtime-flags.ts`), including Node 25+.
 
 ## Architecture
 
@@ -52,7 +52,7 @@ The public API surface is `src/index.ts` — the `HomeGraph` class wires all the
 ### Module layout
 
 - `src/index.ts` — `HomeGraph` class: `init`/`open`/`close`, `indexAll`, `sync`, `searchNodes`, `getCallers`/`getCallees`, `getImpactRadius`, `buildContext`, `watch`/`unwatch`.
-- `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`, `sqlite-adapter.ts`. Three-tier SQLite: **`node:sqlite`** (Node ≥22.5, real WAL + FTS5) → **better-sqlite3** (optionalDependency) → **node-sqlite3-wasm** (last resort, no WAL). `homegraph status` reports `node-sqlite`, `native`, or `wasm`. Override with `HOMEGRAPH_SQLITE_BACKEND`.
+- `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`, `sqlite-adapter.ts`. Three-tier SQLite: **`node:sqlite`** (Node ≥22.5 **with FTS5**; builds without FTS5 such as Node 23.x are skipped) → **better-sqlite3** (optionalDependency) → **node-sqlite3-wasm** (last resort, no WAL). `homegraph status` reports `node-sqlite`, `native`, or `wasm`. Override with `HOMEGRAPH_SQLITE_BACKEND`.
 - `src/extraction/` — `ExtractionOrchestrator`, tree-sitter wrappers, per-language extractors under `languages/` (one file per language), plus standalone extractors for non-tree-sitter formats (`svelte-extractor.ts`, `vue-extractor.ts`, `liquid-extractor.ts`, `dfm-extractor.ts` for Delphi). `parse-worker.ts` runs heavy parsing off the main thread.
 - `src/resolution/` — `ReferenceResolver` orchestrates `import-resolver.ts` (with `path-aliases.ts` for tsconfig path aliases + cargo workspace member globs), `name-matcher.ts`, and `frameworks/` (Express, Laravel, Rails, FastAPI, Django, Flask, Spring, Gin, Axum, ASP.NET, Vapor, React Router, SvelteKit, Vue/Nuxt, Cargo workspaces). Frameworks emit `route` nodes and `references` edges.
 - `src/graph/` — `GraphTraverser` (BFS/DFS, impact radius, path finding) and `GraphQueryManager` (high-level queries).
@@ -228,7 +228,7 @@ promote `[Unreleased]` into `[<version>]` (and auto-commit + push that
 CHANGELOG change back to `main` so on-disk truth matches the published
 notes), then builds `dist/` and publishes the single npm package
 (`files: ["dist","README.md"]`) plus a GitHub Release with notes from
-CHANGELOG. Users run it on their own Node (`engines: >=20 <25`).
+CHANGELOG. Users run it on their own Node (`engines: >=18`).
 
 **Claude does NOT bump the version unless explicitly asked.** The maintainer
 typically does it themselves — often by editing `package.json` directly via

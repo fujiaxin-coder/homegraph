@@ -20,6 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:eval": "vitest run test/evaluation/",
+    "test:node-matrix": "bash scripts/test-node-matrix.sh",
     "test:explore-routing": "node scripts/run-explore-routing.mjs",
     "eval": "npm run build && npx tsx test/evaluation/runner.ts",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
@@ -32,9 +33,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@clack/prompts": "^1.3.0",
+    "@clack/prompts": "1.0.0",
     "arkanalyzer": "^1.0.92",
-    "commander": "^14.0.2",
+    "commander": "^13.1.0",
     "fast-string-width": "^3.0.2",
     "fast-wrap-ansi": "^0.2.0",
     "ignore": "^7.0.5",
@@ -54,9 +55,9 @@
     "vitest": "^2.1.9"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^12.4.1"
+    "better-sqlite3": "^11.10.0"
   },
   "engines": {
-    "node": ">=20.0.0 <25.0.0"
+    "node": ">=18.0.0"
   }
 }

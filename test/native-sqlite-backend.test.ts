@@ -7,10 +7,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import HomeGraph from '../src';
-import { isNativeSqliteAvailable, isNodeSqliteAvailable } from '../src/db/sqlite-adapter';
+import { isNativeSqliteAvailable, isNodeSqliteFts5Available } from '../src/db/sqlite-adapter';
 import { removeTempDir } from './helpers/fs';
 
-const hasWalBackend = isNodeSqliteAvailable() || isNativeSqliteAvailable();
+const hasWalBackend = isNodeSqliteFts5Available() || isNativeSqliteAvailable();
 
 describe.skipIf(!hasWalBackend)('WAL SQLite backend — real index + queries', () => {
   let dir: string;

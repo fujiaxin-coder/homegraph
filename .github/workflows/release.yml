@@ -12,7 +12,7 @@ name: Release
 #
 # This is the "traditional single-package" publish path: the package is pure
 # JS + WASM (no native compilation), so one Ubuntu runner builds it once and
-# `npm publish` ships it. Users run it on their own Node (engines: >=20 <25).
+# `npm publish` ships it. Users run it on their own Node (engines: >=18).
 #
 # Before triggering: bump package.json. CHANGELOG.md entries can live under
 # `## [Unreleased]` — step 2 takes care of moving them. Set the NPM_TOKEN

@@ -9,8 +9,10 @@ import * as os from 'os';
 import {
   buildWasmFallbackBanner,
   WASM_FALLBACK_FIX_RECIPE,
+  createDatabase,
   isNativeSqliteAvailable,
   isNodeSqliteAvailable,
+  isNodeSqliteFts5Available,
 } from '../src/db/sqlite-adapter';
 import { DatabaseConnection } from '../src/db';
 import { HomeGraph } from '../src';
@@ -69,11 +71,27 @@ describe('DatabaseConnection — backend reporting', () => {
     conn.close();
   });
 
-  it('prefers node:sqlite when available', () => {
-    if (!isNodeSqliteAvailable()) return;
+  it('prefers node:sqlite when available with FTS5', () => {
+    if (!isNodeSqliteFts5Available()) return;
     const conn = DatabaseConnection.initialize(path.join(dir, 'pref-node.db'));
     expect(conn.getBackend()).toBe('node-sqlite');
     conn.close();
+  });
+
+  it('falls through when node:sqlite lacks FTS5', () => {
+    if (!isNodeSqliteAvailable() || isNodeSqliteFts5Available()) return;
+    // Node 23.x (and similar): DatabaseSync exists but schema init needs FTS5.
+    const conn = DatabaseConnection.initialize(path.join(dir, 'no-fts5.db'));
+    expect(conn.getBackend()).not.toBe('node-sqlite');
+    expect(['native', 'wasm']).toContain(conn.getBackend());
+    conn.close();
+  });
+
+  it('selected auto backend can create FTS5 virtual tables', () => {
+    const { db, backend } = createDatabase(path.join(dir, 'fts-probe.db'));
+    expect(['node-sqlite', 'native', 'wasm']).toContain(backend);
+    expect(() => db.exec('CREATE VIRTUAL TABLE t USING fts5(content)')).not.toThrow();
+    db.close();
   });
 
   it('prefers better-sqlite3 when forced and the native binding is available', () => {

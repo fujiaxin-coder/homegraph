@@ -9,12 +9,17 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- Node.js **18+** is supported again (`engines: >=18.0.0`), and **Node 25+** is no longer hard-blocked. Tree-sitter WASM Zone OOM on Node ≥22 (including 25+) continues to be mitigated by the `--liftoff-only` relaunch. Prefer Node 22.5+ for built-in `node:sqlite`. Optional `better-sqlite3` is pinned to 11.x so Node 18 can still use a native WAL backend when the addon builds; otherwise SQLite falls back to wasm. CLI prompts use `@clack/prompts@1.0.0` (avoids Node 20+ `util.styleText`). Use `npm run test:node-matrix` (nvm) to exercise majors 18–25 locally.
+
 ### Breaking Changes
 
 - Standalone installers (`install.sh` / `install.ps1`) and self-contained platform bundles are retired. Install and upgrade with `npm i -g homegraph`; `homegraph upgrade` on a leftover bundle install refuses and points you at npm. `homegraph uninstall` still removes leftover bundle artifacts.
 
 ### Fixes
 
+- SQLite no longer picks built-in `node:sqlite` when that Node build lacks **FTS5** (seen on Node 23.x). Selection probes FTS5 and falls through to `better-sqlite3` / wasm so `init` and indexing work again. Off-thread WAL checkpoint workers now open with the **same** backend as the main connection, so a native primary is not checkpointed via a mismatched `node:sqlite` handle.
 - `homegraph serve mcp --path <repo>` again honors `--path`. A nested Commander subcommand had been dropping it, so the shared daemon keyed off the process cwd instead of the project — MCP prewarm looked timed out and agents attached to the wrong index.
 - Explore inventories stop **wrong-tool fallthrough** that raised tokens and hurt accuracy: declaration-site surveys no longer become include-path "API usage" dumps; return-value consumers prefer the `通过/via` member (with text call-site fallback) instead of SDK `.d.ts` bodies; circular/`*common` module-dep questions get a lean cycle survey; `Type::method` and enum `Type.MEMBER` route as named anchors. Startup instructions match these shapes.
 - Field **new/delete** lifetime questions (`m_eglCore` …) route to a field usage inventory instead of seeding unrelated `new`/`delete` methods; `lib*.so` is not treated as a member access; GLES/EGL **thread** questions take light-mechanism (EGLCore/PluginRender); Type + listed methods (Set/Test/Fill) stay on that type's caller inventory; conditional `Export` fail wiring skips `logInfo` fan-out; API usage lists prefer call-site snippets over imports.

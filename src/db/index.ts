@@ -11,7 +11,14 @@ import { SchemaVersion } from '../types';
 import { runMigrations, getCurrentVersion, CURRENT_SCHEMA_VERSION } from './migrations';
 import { getHomeGraphDir } from '../directory';
 
-export { SqliteDatabase, SqliteBackend, WASM_FALLBACK_FIX_RECIPE, isNodeSqliteAvailable, isNativeSqliteAvailable } from './sqlite-adapter';
+export {
+  SqliteDatabase,
+  SqliteBackend,
+  WASM_FALLBACK_FIX_RECIPE,
+  isNodeSqliteAvailable,
+  isNodeSqliteFts5Available,
+  isNativeSqliteAvailable,
+} from './sqlite-adapter';
 
 /**
  * Apply connection-level PRAGMAs. Shared by `initialize` and `open` so the two
@@ -521,6 +528,11 @@ export class DatabaseConnection {
         return null;
       }
     }
+    // WASM has no real WAL; mixing node:sqlite with a better-sqlite3 main
+    // connection (e.g. Node 23 where node:sqlite lacks FTS5) corrupts WAL state.
+    if (this.backend !== 'node-sqlite' && this.backend !== 'native') {
+      return null;
+    }
     try {
       const { Worker } = await import('node:worker_threads');
       const workerSource = `
@@ -529,12 +541,12 @@ export class DatabaseConnection {
         let err = null;
         try {
           let db = null;
-          try {
-            const { DatabaseSync } = require('node:sqlite');
-            db = new DatabaseSync(workerData.dbPath);
-          } catch {
+          if (workerData.backend === 'native') {
             const Database = require('better-sqlite3');
             db = new Database(workerData.dbPath);
+          } else {
+            const { DatabaseSync } = require('node:sqlite');
+            db = new DatabaseSync(workerData.dbPath);
           }
           const mode = workerData.mode === 'TRUNCATE' ? 'TRUNCATE' : 'PASSIVE';
           try {
@@ -553,7 +565,10 @@ export class DatabaseConnection {
           resolve(row ? { busy: Number(row.busy), log: Number(row.log), checkpointed: Number(row.checkpointed) } : null);
         };
         try {
-          const worker = new Worker(workerSource, { eval: true, workerData: { dbPath: this.dbPath, mode } });
+          const worker = new Worker(workerSource, {
+            eval: true,
+            workerData: { dbPath: this.dbPath, mode, backend: this.backend },
+          });
           worker.once('message', (m: { row?: Record<string, number> | null; err?: string | null }) => {
             if (m?.err && process.env.HOMEGRAPH_WAL_VALVE_DEBUG) {
               console.error(`[wal-valve] checkpoint worker (${mode}): ${m.err}`);

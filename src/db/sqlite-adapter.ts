@@ -3,11 +3,15 @@
  *
  * Three-tier selection (first success wins):
  *   1. `node:sqlite` (`DatabaseSync`) — real SQLite + WAL + FTS5, Node ≥22.5
+ *      (skipped when the build lacks FTS5 — e.g. some Node 23.x official builds)
  *   2. `better-sqlite3` — native addon (optionalDependency)
  *   3. `node-sqlite3-wasm` — last-resort fallback (no WAL; slower / lock-prone)
  *
- * Library hosts on Node 20–22.4 land on (2) or (3). Node ≥22.5 prefers (1) and
- * skips the native build. Override with `HOMEGRAPH_SQLITE_BACKEND=node-sqlite|native|wasm`.
+ * Library hosts on Node 18–22.4 land on (2) or (3). Node ≥22.5 prefers (1) when
+ * FTS5 is present and skips the native build. Override with
+ * `HOMEGRAPH_SQLITE_BACKEND=node-sqlite|native|wasm`.
+ * optionalDependency `better-sqlite3` is pinned to 11.x so Node 18 can still load native
+ * when the addon builds; otherwise wasm remains the last resort.
  */
 
 export interface SqliteStatement {
@@ -142,6 +146,35 @@ export function isNodeSqliteAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * True when built-in `node:sqlite` can create FTS5 virtual tables.
+ * Some Node majors ship `DatabaseSync` without FTS5 (observed on Node 23.x);
+ * HomeGraph requires FTS5 for schema init, so those builds must fall through.
+ */
+let cachedNodeSqliteFts5: boolean | null = null;
+
+export function isNodeSqliteFts5Available(): boolean {
+  if (cachedNodeSqliteFts5 !== null) return cachedNodeSqliteFts5;
+  if (!isNodeSqliteAvailable()) {
+    cachedNodeSqliteFts5 = false;
+    return false;
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite');
+    const probe = new DatabaseSync(':memory:');
+    try {
+      probe.exec('CREATE VIRTUAL TABLE homegraph_fts5_probe USING fts5(x)');
+      cachedNodeSqliteFts5 = true;
+    } finally {
+      probe.close();
+    }
+  } catch {
+    cachedNodeSqliteFts5 = false;
+  }
+  return cachedNodeSqliteFts5!;
 }
 
 /** True when `require('better-sqlite3')` succeeds. */
@@ -381,6 +414,13 @@ function tryOpenBackend(
 ): { db: SqliteDatabase; backend: SqliteBackend } | { error: string } {
   try {
     if (backend === 'node-sqlite') {
+      if (!isNodeSqliteFts5Available()) {
+        return {
+          error: isNodeSqliteAvailable()
+            ? 'node:sqlite is available but this Node build lacks FTS5'
+            : 'node:sqlite is not available',
+        };
+      }
       return { db: new NodeSqliteAdapter(dbPath, opts), backend: 'node-sqlite' };
     }
     if (backend === 'native') {
@@ -397,7 +437,7 @@ function tryOpenBackend(
 
 /**
  * Create a database connection.
- * Order: node:sqlite → better-sqlite3 → node-sqlite3-wasm (unless overridden).
+ * Order: node:sqlite (with FTS5) → better-sqlite3 → node-sqlite3-wasm (unless overridden).
  */
 export function createDatabase(
   dbPath: string,

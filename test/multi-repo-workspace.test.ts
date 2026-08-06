@@ -173,6 +173,9 @@ describe('multi-repo workspaces (#514) + .gitignore-respect default (#970, #976)
       expect(scope.ignores('src/app.ts')).toBe(false);
     });
 
+    // Node 19 is outside vitest's engines (`^18 || >=20`) and runs this
+    // index+sync path ~3× slower than 18/20/22 (~6–7s vs ~2–3s), so the
+    // default 5s testTimeout flakes under matrix/CI load.
     it('sync picks up a change inside an opted-in gitignored embedded repo', async () => {
       write(path.join(ws, 'packages/proj-a/src/auth.ts'), 'export function login() { return 1; }\n');
       makeRepo(path.join(ws, 'packages/proj-a'));
@@ -194,7 +197,7 @@ describe('multi-repo workspaces (#514) + .gitignore-respect default (#970, #976)
       } finally {
         cg.destroy();
       }
-    });
+    }, 20_000);
   });
 
   describe('discovery/classifier machinery (exercised under opt-in)', () => {

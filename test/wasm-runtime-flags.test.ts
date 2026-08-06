@@ -1,16 +1,20 @@
 /**
  * WASM runtime flags — the workaround for the V8 turboshaft WASM Zone OOM
  * (`Fatal process out of memory: Zone`) that crashed `homegraph index` on large
- * polyglot repos under Node >= 22. See issues #293 and #298.
+ * polyglot repos under Node >= 22 (reproduced on 24 and 25). See issues #293
+ * and #298, and docs/specs/0003-support-node-18.md §3.4.
  *
- * The crash was reproduced with the real indexer on the bundled Node 24 runtime;
- * empirically only `--liftoff-only` prevents it (`--no-wasm-tier-up` /
+ * Crash trigger (not mere Language.load): load a large tree-sitter grammar
+ * WASM, then parse enough for V8's background turboshaft optimizing compiler
+ * to run — it exhausts an internal Zone arena. Empirically only
+ * `--liftoff-only` prevents it (`--no-wasm-tier-up` /
  * `--no-wasm-dynamic-tiering` do not), and the flag must be on node's command
  * line — `setFlagsFromString`, worker `execArgv`, and `NODE_OPTIONS` all fail.
  * These tests pin that contract so it can't silently regress.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { spawnSync } from 'child_process';
+import type { SpawnSyncReturns } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -23,6 +27,33 @@ import {
   resolveMaxOldSpaceSizeMb,
   PROCESS_RSS_CAP_MB,
 } from '../src/extraction/wasm-runtime-flags';
+
+const NODE_MAJOR = Number(process.versions.node.split('.')[0]);
+const ZONE_OOM_HARNESS = path.join(__dirname, 'fixtures/wasm-zone-oom-harness.cjs');
+const REPO_ROOT = path.join(__dirname, '..');
+
+/** Spawn the Zone-OOM harness under a fresh node with explicit exec argv. */
+function runZoneOomHarness(
+  execArgv: string[],
+  env: NodeJS.ProcessEnv = {}
+): SpawnSyncReturns<string> {
+  return spawnSync(process.execPath, [...execArgv, ZONE_OOM_HARNESS], {
+    encoding: 'utf8',
+    cwd: REPO_ROOT,
+    env: { ...process.env, ...env },
+    // Crash path is ~1s; liftoff success is a few seconds. Cap so a hang
+    // can't stall the suite.
+    timeout: 30_000,
+  });
+}
+
+function combinedOutput(res: SpawnSyncReturns<string>): string {
+  return `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
+}
+
+function sawZoneOom(res: SpawnSyncReturns<string>): boolean {
+  return combinedOutput(res).includes('Fatal process out of memory: Zone');
+}
 
 describe('WASM_RUNTIME_FLAGS', () => {
   it('pins --liftoff-only (the only flag shown to stop the turboshaft Zone OOM)', () => {
@@ -124,5 +155,41 @@ describe('buildRelaunchArgv', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Live Zone-OOM repro. Gated to Node ≥24: the same harness completes cleanly
+ * on Node 18/22 (no turboshaft Zone abort), and crashes deterministically on
+ * 24/25 without `--liftoff-only`. Vitest forks already inject liftoff, so we
+ * spawn a *fresh* node with an explicit argv — never rely on the parent.
+ */
+describe.runIf(NODE_MAJOR >= 24)('tree-sitter WASM Zone OOM (Node ≥24, incl. 25)', () => {
+  it('load-only of a large grammar does not Zone-OOM without liftoff', () => {
+    // Documents the real trigger: turboshaft kicks in on a background compile
+    // job after the module is hot from parse — not on Language.load alone.
+    const res = runZoneOomHarness([], { LOAD_ONLY: '1' });
+    expect(res.status, combinedOutput(res)).toBe(0);
+    expect(res.stdout).toContain('LOAD_OK');
+    expect(sawZoneOom(res)).toBe(false);
+  });
+
+  it('hot-parsing a large grammar without --liftoff-only hits Zone OOM', () => {
+    const res = runZoneOomHarness([]);
+    expect(sawZoneOom(res), combinedOutput(res)).toBe(true);
+    expect(res.status).not.toBe(0);
+  });
+
+  it('hot-parsing the same grammar under --liftoff-only completes without Zone OOM', () => {
+    const res = runZoneOomHarness(['--liftoff-only']);
+    expect(sawZoneOom(res), combinedOutput(res)).toBe(false);
+    expect(res.status, combinedOutput(res)).toBe(0);
+    expect(res.stdout).toContain('OK');
+  });
+
+  it('--no-wasm-tier-up does not prevent the Zone OOM (only liftoff-only does)', () => {
+    const res = runZoneOomHarness(['--no-wasm-tier-up']);
+    expect(sawZoneOom(res), combinedOutput(res)).toBe(true);
+    expect(res.status).not.toBe(0);
   });
 });

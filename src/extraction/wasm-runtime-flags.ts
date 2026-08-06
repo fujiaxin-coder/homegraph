@@ -6,8 +6,12 @@
  * arena while compiling these grammars on a background thread, aborting the
  * whole process with `Fatal process out of memory: Zone` — even with tens of
  * GB of system memory free, because the Zone is a V8-internal arena, not the
- * JS heap. Reproduced on Node 22 and 24; Node 25 is already hard-blocked for
- * the same crash (see ../bin/node-version-check.ts). See issues #293 and #298.
+ * JS heap. The trigger is not mere `Language.load` (lazy compile stays on
+ * Liftoff): after a large grammar is hot from repeated parse, turboshaft's
+ * background optimizing compile OOMs the Zone. Reproduced on Node 24 and 25+
+ * (see test/fixtures/wasm-zone-oom-harness.cjs); mitigated here rather than by
+ * blocking majors (see ../bin/node-version-check.ts for the supported floor
+ * only). See issues #293 and #298.
  *
  * `--liftoff-only` forces every WASM module to the Liftoff baseline compiler
  * and never runs turboshaft, which eliminates the crash. Parsing stays fully
