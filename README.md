@@ -4,7 +4,7 @@
 
 在开源知识图谱能力之上，**HomeGraph 新增了对 ArkTS（HarmonyOS）的支持**，通过 [arkanalyzer](https://www.npmjs.com/package/arkanalyzer) 解析 `.ets` / `.ts` 工程中的符号、调用关系与模块结构。
 
-数据全部保存在本机 `.homegraph/` 目录，不上传云端。
+项目索引保存在工程根目录的 `.homegraph/` 中，不上传云端。
 
 [![npm version](https://img.shields.io/npm/v/homegraph.svg)](https://www.npmjs.com/package/homegraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -302,7 +302,7 @@ Cursor 等项目级配置写入 `./.cursor/mcp.json`，格式相同。推荐使�
 |------|------|
 | 上游 | 持续同步 colbymchenry 开源知识图谱项目 main 分支 |
 | 包名 / CLI | `homegraph`（npm：`npm install -g homegraph`） |
-| 数据目录 | `.homegraph/` |
+| 数据目录 | 工程根目录 `.homegraph/` |
 | 主要差异 | 新增 **ArkTS** 语言支持与相关索引逻辑 |
 
 ---
