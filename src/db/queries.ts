@@ -206,6 +206,12 @@ export class QueryBuilder {
   /** Attached prebuilt OHOS API db (see arkts.ts). */
   private ohosApiDbPath: string | null = null;
 
+  /**
+   * When false, name/search lookups skip the project `nodes` table and only
+   * return attached `ohos_api` rows (`HOMEGRAPH_SOURCES=sdk`). Default true.
+   */
+  private includeProjectNodes = true;
+
   // Prepared statements (lazily initialized)
   private stmts: {
     insertNode?: SqliteStatement;
@@ -291,6 +297,18 @@ export class QueryBuilder {
     this.db = db;
     this.stmts = {};
     this.batchStmts.clear();
+  }
+
+  /**
+   * Toggle whether project-index nodes participate in lookups.
+   * SDK-only sessions set this false after opening the project db for ATTACH.
+   */
+  setIncludeProjectNodes(include: boolean): void {
+    this.includeProjectNodes = include;
+  }
+
+  getIncludeProjectNodes(): boolean {
+    return this.includeProjectNodes;
   }
 
   /** Attach a versioned OHOS API db for federated symbol lookup. */
@@ -1037,11 +1055,14 @@ export class QueryBuilder {
    * Get nodes by exact name match (uses idx_nodes_name index)
    */
   getNodesByName(name: string): Node[] {
-    if (!this.stmts.getNodesByName) {
-      this.stmts.getNodesByName = this.db.prepare('SELECT * FROM nodes WHERE name = ?');
+    const main: Node[] = [];
+    if (this.includeProjectNodes) {
+      if (!this.stmts.getNodesByName) {
+        this.stmts.getNodesByName = this.db.prepare('SELECT * FROM nodes WHERE name = ?');
+      }
+      const rows = this.stmts.getNodesByName.all(name) as NodeRow[];
+      main.push(...rows.map(rowToNode));
     }
-    const rows = this.stmts.getNodesByName.all(name) as NodeRow[];
-    const main = rows.map(rowToNode);
     if (!this.hasOhosApiAttached()) return main;
 
     const apiRows = this.db
@@ -1112,12 +1133,17 @@ export class QueryBuilder {
     const kinds = mergedKinds;
     const languages = mergedLanguages;
 
+    // SDK-only: skip project FTS entirely; federate OHOS API hits only.
+    if (!this.includeProjectNodes) {
+      if (!this.hasOhosApiAttached() || text.length < 2) return [];
+      return this.mergeOhosApiTextSearch(text, { kinds, languages, limit }, []);
+    }
+
     // First try FTS5 with prefix matching
     let results = text
       ? this.searchNodesFTS(text, { kinds, languages, limit, offset })
       // Over-fetch by 5× when running filter-only (no text). The
-      // post-scoring path: + name: filters can be very selective, so
-      // a smaller multiplier risks returning fewer than `limit`
+      // post-scoring path: + name: filters can be very selective, so      // a smaller multiplier risks returning fewer than `limit`
       // results despite the DB having plenty of matches.
       : this.searchAllByFilters({ kinds, languages, limit: limit * 5 });
 
@@ -1482,6 +1508,41 @@ export class QueryBuilder {
     if (names.length === 0) return [];
 
     const { kinds, languages, limit = 50 } = options;
+
+    // SDK-only: skip project co-location passes; exact-name against ohos_api only.
+    if (!this.includeProjectNodes) {
+      if (!this.hasOhosApiAttached()) return [];
+      const perNameLimit = Math.max(8, Math.ceil(limit / names.length));
+      const allResults: SearchResult[] = [];
+      const seenIds = new Set<string>();
+      for (const name of names) {
+        let apiSql = `
+          SELECT nodes.*, 0.95 as score
+          FROM ohos_api.nodes
+          WHERE name COLLATE NOCASE = ?
+        `;
+        const apiParams: (string | number)[] = [name];
+        if (kinds && kinds.length > 0) {
+          apiSql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+          apiParams.push(...kinds);
+        }
+        if (languages && languages.length > 0) {
+          apiSql += ` AND language IN (${languages.map(() => '?').join(',')})`;
+          apiParams.push(...languages);
+        }
+        apiSql += ' LIMIT ?';
+        apiParams.push(perNameLimit);
+        const apiRows = this.db.prepare(apiSql).all(...apiParams) as (NodeRow & { score: number })[];
+        for (const row of apiRows) {
+          const node = this.mapOhosApiNodeRow(row);
+          if (seenIds.has(node.id)) continue;
+          seenIds.add(node.id);
+          allResults.push({ node, score: row.score });
+        }
+      }
+      allResults.sort((a, b) => b.score - a.score);
+      return allResults.slice(0, limit);
+    }
 
     // Two-pass approach to handle common names (e.g., "run" has 40+ matches):
     // Pass 1: Find which files contain distinctive (rare) symbols from the query.

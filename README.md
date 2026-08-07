@@ -157,6 +157,9 @@ homegraph spec evolve install  # 安装 post-commit 钩子（默认累计 3 次�
 homegraph spec evolve uninstall# 移除 post-commit 钩子
 homegraph spec evolve process  # 手动触发一次Spec演化
 homegraph serve mcp             # 启动 MCP 服务（一般由 Agent 自动拉起；兼容 serve --mcp）
+# 可选：限制查询用的图 — both(默认)|project|sdk|none
+# homegraph serve mcp --sources sdk
+# 或 HOMEGRAPH_SOURCES=project
 ```
 
 `explore` / `node` 等命令与同名 MCP 工具共享同一套输出，适合没有 MCP 的子 Agent 或脚本直接调用。
@@ -170,6 +173,8 @@ Agent 侧工具名前缀为 `homegraph_`。
 **暴露规则：** 默认注册全部工具。索引文件数 **少于 500** 的小项目会自动收缩为三个核心工具（`explore` / `search` / `node`）。可通过环境变量 `HOMEGRAPH_MCP_TOOLS`（逗号分隔短名，如 `explore,node`）自定义暴露列表。
 
 **跨项目查询：** 所有工具均支持可选参数 `projectPath`（绝对路径），用于在 monorepo 中查询子项目，或当 MCP 服务器根目录没有索引时指定目标项目。
+
+**图谱数据源（`--sources` / `HOMEGRAPH_SOURCES`）：** 控制 MCP 查询是否使用工程索引、OHOS SDK API 库，或两者。取值 `both`（默认）| `project` | `sdk` | `none`。CLI 优先于环境变量。评测示例：`homegraph serve mcp --path <app> --sources sdk`。`homegraph_status` 会打印当前模式。
 
 | 工具 | 用途 |
 |------|------|
