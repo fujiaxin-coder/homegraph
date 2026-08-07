@@ -38,6 +38,7 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
+import { registerAddonCommands } from './addon-commands';
 // Lazy-load heavy modules (HomeGraph, runInstaller) to keep CLI startup fast.
 async function loadHomeGraph(): Promise<typeof import('../index')> {
   try {
@@ -3189,6 +3190,11 @@ evolveCommand
       try { db?.close(); } catch { /* best effort */ }
     }
   });
+
+// =============================================================================
+// Addon commands (HomeGraph addon management)
+// =============================================================================
+registerAddonCommands(program, { success, info, warn, error });
 
 /**
  * homegraph index-api <input> [version]

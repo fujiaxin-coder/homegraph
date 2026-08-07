@@ -103,6 +103,16 @@ export {
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
 export { MCPServer } from './mcp';
+// Addon contract (api 1) — types addon authors import from 'homegraph'
+// (see the `homegraph addon init` scaffold). Only types: no runtime code is
+// pulled into the host by re-exporting them.
+export type {
+  AddonCommitInput,
+  EnrichInput,
+  Supplement,
+  BuildPromptContext,
+  SpecMineAddon,
+} from './spec/mine/addon/types';
 
 /**
  * Options for initializing a new HomeGraph project

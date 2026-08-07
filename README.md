@@ -149,6 +149,7 @@ homegraph impact <符号>         # 修改该符号的影响范围
 homegraph affected [files...]  # 根据变更文件查找受影响的测试（支持 --stdin）
 homegraph spec build           # 从已有 .spec 目录（或用户指定目录）构建Spec知识图谱（Commit4Spec）
 homegraph spec mine            # 从 Git 历史挖掘设计Spec文档（AST 分析 + LLM 聚类生成）
+homegraph addon ...            # 管理 用户自定义插件（init/install/list/remove/enable/disable/update）
 homegraph spec match <文本>     # 全文搜索相似历史Spec
 homegraph spec find <文件>      # 查找与指定文件关联的Spec
 homegraph spec trace <符号>     # 追溯代码符号关联的Spec
@@ -214,6 +215,20 @@ Commit4Spec 提供两条互补路径将设计Spec与 Git 历史关联，存入 `
   }
 }
 ```
+
+**Addons（插件扩展）：**
+
+`homegraph addon` 管理可插拔扩展包，为 `spec mine` 注入外部需求上下文（如 Jira 工单详情），无需 HomeGraph 认识任何工单格式：
+
+```bash
+homegraph addon init my-jira       # 生成 addon 脚手架（内置 Jira 示例）
+homegraph addon install ./my-jira  # 安装并登记（记录具体版本号）
+homegraph addon list               # 查看已登记的 addon 及状态
+homegraph addon disable my-jira    # 停用（保留安装）
+homegraph addon remove my-jira     # 注销（--purge 同时删除文件）
+```
+
+Addon 实现 `enrich` 钩子：HomeGraph 按 commit 簇传入其已有的 commit 数据（hash / 消息 / 作者 / 时间戳），addon 返回带去重键的需求补充文本，HomeGraph 去重后渲染进生成 prompt 的 `## Supplement` 段。每个 addon 独立超时（15s）且失败不影响生成；包需在 package.json 声明 `"homegraph": { "addon": true, "api": 1 }`。登记表存于 `.homegraph/addons.json`，仅显式登记且启用的 addon 才会被加载。
 
 **查询与分析：**
 

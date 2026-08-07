@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- New `homegraph addon` command group installs and manages pluggable addons (`init`, `install`, `list`, `remove`, `enable`, `disable`, `update`) from npm packages or local paths. Addons extend `homegraph spec mine` with external requirement context — e.g. map commit messages to Jira tickets and inject the fetched details into the spec-generation prompt — without HomeGraph knowing any ticket format. Enrichment runs per commit cluster with per-addon timeouts and failure isolation, so a broken addon never blocks spec generation.
 - Node.js **18+** is supported again (`engines: >=18.0.0`), and **Node 25+** is no longer hard-blocked. Tree-sitter WASM Zone OOM on Node ≥22 (including 25+) continues to be mitigated by the `--liftoff-only` relaunch. Prefer Node 22.5+ for built-in `node:sqlite`. Optional `better-sqlite3` is pinned to 11.x so Node 18 can still use a native WAL backend when the addon builds; otherwise SQLite falls back to wasm. CLI prompts use `@clack/prompts@1.0.0` (avoids Node 20+ `util.styleText`). Use `npm run test:node-matrix` (nvm) to exercise majors 18–25 locally.
 
 ### Breaking Changes
