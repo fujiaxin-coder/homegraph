@@ -49,6 +49,7 @@ import {
 } from './daemon';
 import { connectWithHello, runLocalHandshakeProxy } from './proxy';
 import { getDaemonSocketCandidates } from './daemon-paths';
+import { resolveGraphSources } from '../graph-sources';
 import { checkForUpdateInBackground } from '../upgrade/update-check';
 import { EARLY_PPID } from './early-ppid';
 import { supervisionLostReason, parsePpidPollMs, parseHostPpid } from './ppid-watchdog';
@@ -155,9 +156,10 @@ function spawnDetachedDaemon(root: string): void {
     // where a long-dead session's host pid would trigger spurious shutdowns.
     const env: NodeJS.ProcessEnv = { ...process.env, [DAEMON_INTERNAL_ENV]: '1' };
     delete env[HOST_PPID_ENV];
+    const sources = resolveGraphSources();
     const child = spawn(
       process.execPath,
-      [...process.execArgv, scriptPath, 'serve', 'mcp', '--path', root],
+      [...process.execArgv, scriptPath, 'serve', 'mcp', '--path', root, '--sources', sources],
       {
         detached: true,
         stdio,

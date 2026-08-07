@@ -11,6 +11,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- MCP can limit which graphs answer queries via `--sources both|project|sdk|none` on `homegraph serve mcp` (or `HOMEGRAPH_SOURCES`; CLI wins). Default remains **both** (project index + OHOS SDK API db when bound). Use `project` / `sdk` for eval arms; `none` leaves tools registered but returns guidance. Different sources use separate daemon sockets so arms do not share state. `homegraph status` / `homegraph_status` report the active mode.
+
 - Node.js **18+** is supported again (`engines: >=18.0.0`), and **Node 25+** is no longer hard-blocked. Tree-sitter WASM Zone OOM on Node ≥22 (including 25+) continues to be mitigated by the `--liftoff-only` relaunch. Prefer Node 22.5+ for built-in `node:sqlite`. Optional `better-sqlite3` is pinned to 11.x so Node 18 can still use a native WAL backend when the addon builds; otherwise SQLite falls back to wasm. CLI prompts use `@clack/prompts@1.0.0` (avoids Node 20+ `util.styleText`). Use `npm run test:node-matrix` (nvm) to exercise majors 18–25 locally.
 
 ### Breaking Changes

@@ -124,6 +124,23 @@ CLI 适合脚本与快速自检；Cursor 适合自然语言 + 多步推理。
 3. Reload Window → Settings → Tools & MCPs 显示homegraph已经安装且打开 -> 确认已连接
 4. **打开被测工程**为工作区根，新开 Agent 会话
 
+### 3.1.1 图谱数据源开关（评测 / 省资源）
+
+默认 MCP 同时使用 **工程索引** 与已绑定的 **OHOS SDK API 库**。可用 CLI 或环境变量收窄：
+
+| 模式 | 含义 |
+| --- | --- |
+| `both`（默认） | 工程 + SDK |
+| `project` | 仅工程 |
+| `sdk` | 仅 SDK（仍需项目已 `init`，用于解析 API db 绑定） |
+| `none` | 不打开图；工具返回说明（非错误） |
+
+```json
+"args": ["serve", "mcp", "--path", "${workspaceFolder}", "--sources", "sdk"]
+```
+
+或 `"env": { "HOMEGRAPH_SOURCES": "project" }`。优先级：`--sources` > 环境变量 > `both`。不同 mode 使用独立 daemon socket，避免评测臂串台。详见 `docs/specs/0005-mcp-graph-sources-switch.md`。
+
 ### 3.2 提问示例
 
 ```

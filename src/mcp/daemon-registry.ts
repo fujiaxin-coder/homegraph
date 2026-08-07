@@ -23,6 +23,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { getDaemonPidPath, getDaemonSocketCandidates, decodeLockInfo } from './daemon-paths';
+import { resolveGraphSources } from '../graph-sources';
 
 export interface DaemonRecord {
   /** Realpath'd project root the daemon serves. */
@@ -43,7 +44,9 @@ export function getRegistryDir(): string {
 }
 
 function recordPath(root: string): string {
-  const hash = crypto.createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 16);
+  const mode = resolveGraphSources();
+  const key = mode === 'both' ? path.resolve(root) : `${path.resolve(root)}\0${mode}`;
+  const hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
   return path.join(getRegistryDir(), `${hash}.json`);
 }
 

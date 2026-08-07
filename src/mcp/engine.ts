@@ -18,6 +18,7 @@ import { ToolHandler } from './tools';
 import { QueryPool, resolvePoolSize } from './query-pool';
 import { isOverRssBudget, shouldSkipCatchUpSync } from './memory-budget';
 import { getDatabasePath } from '../db';
+import { resolveGraphSources, graphSourceFlags } from '../graph-sources';
 
 // Lazy-load the heavy HomeGraph chain (sqlite + query/graph/context layers) OFF
 // the MCP startup path. It's only needed once a tool actually opens a project —
@@ -162,12 +163,14 @@ export class MCPEngine {
     const resolvedRoot = findNearestHomeGraphRoot(searchFrom);
     if (!resolvedRoot) return;
     try {
+      const mode = resolveGraphSources();
+      if (!graphSourceFlags(mode).openProjectDb) return;
       // Close any previously failed instance to avoid leaking resources.
       if (this.cg) {
         try { this.cg.close(); } catch { /* ignore */ }
         this.cg = null;
       }
-      this.cg = loadHomeGraph().openSync(resolvedRoot);
+      this.cg = loadHomeGraph().openSync(resolvedRoot, { sources: mode });
       this.projectPath = resolvedRoot;
       this.toolHandler.setDefaultHomeGraph(this.cg);
       this.startWatching();
@@ -211,7 +214,14 @@ export class MCPEngine {
 
     this.projectPath = resolvedRoot;
     try {
-      this.cg = await loadHomeGraph().open(resolvedRoot);
+      const mode = resolveGraphSources();
+      if (!graphSourceFlags(mode).openProjectDb) {
+        process.stderr.write(
+          `[HomeGraph MCP] Graph sources=${mode} — skipping project/SDK open (tools return guidance).\n`
+        );
+        return;
+      }
+      this.cg = await loadHomeGraph().open(resolvedRoot, { sources: mode });
       this.toolHandler.setDefaultHomeGraph(this.cg);
       this.startWatching();
       this.catchUpSync();

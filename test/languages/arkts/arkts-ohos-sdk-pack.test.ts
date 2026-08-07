@@ -247,8 +247,8 @@ describe('languages/arkts ohos-sdk-pack', () => {
     }
   }, 120_000);
 
-  it('returns a warning (not throw) when local SDK is missing', async () => {
-    const apiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ohos-api-miss-'));
+  it('falls back to an existing 6.1.0 db when the requested version is missing', async () => {
+    const apiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ohos-api-fb-'));
     tempDirs.push(apiDir);
     const prevHome = process.env.HOME;
     const prevUserProfile = process.env.USERPROFILE;
@@ -256,19 +256,25 @@ describe('languages/arkts ohos-sdk-pack', () => {
     const prevOhos = process.env.OHOS_SDK_HOME;
     const prevDevEco = process.env.DEVECO_SDK_HOME;
     const prevHos = process.env.HOS_SDK_HOME;
+    const prevNoDl = process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD;
     process.env.HOME = apiDir;
     process.env.USERPROFILE = apiDir;
+    process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD = '1';
     delete process.env.HOMEGRAPH_OHOS_SDK;
     delete process.env.OHOS_SDK_HOME;
     delete process.env.DEVECO_SDK_HOME;
     delete process.env.HOS_SDK_HOME;
 
+    const apiRoot = path.join(apiDir, '.homegraph', 'api');
+    fs.mkdirSync(apiRoot, { recursive: true });
+    fs.writeFileSync(path.join(apiRoot, 'ohos-api-6.1.0.db'), 'sqlite-placeholder');
+
     try {
       const ensured = await ensureOhosApiDb('9.9.9', { build: true });
-      expect('code' in ensured).toBe(true);
-      if (!('code' in ensured)) return;
-      expect(ensured.code).toBe('ohos_api_sdk_missing');
-      expect(ensured.message).toMatch(/not found/i);
+      expect('code' in ensured).toBe(false);
+      if ('code' in ensured) return;
+      expect(ensured.version).toBe('6.1.0');
+      expect(path.basename(ensured.dbPath)).toBe('ohos-api-6.1.0.db');
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
@@ -282,6 +288,50 @@ describe('languages/arkts ohos-sdk-pack', () => {
       else process.env.DEVECO_SDK_HOME = prevDevEco;
       if (prevHos === undefined) delete process.env.HOS_SDK_HOME;
       else process.env.HOS_SDK_HOME = prevHos;
+      if (prevNoDl === undefined) delete process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD;
+      else process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD = prevNoDl;
+    }
+  });
+
+  it('returns a warning (not throw) when local SDK is missing and downloads are disabled', async () => {
+    const apiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ohos-api-miss-'));
+    tempDirs.push(apiDir);
+    const prevHome = process.env.HOME;
+    const prevUserProfile = process.env.USERPROFILE;
+    const prevSdk = process.env.HOMEGRAPH_OHOS_SDK;
+    const prevOhos = process.env.OHOS_SDK_HOME;
+    const prevDevEco = process.env.DEVECO_SDK_HOME;
+    const prevHos = process.env.HOS_SDK_HOME;
+    const prevNoDl = process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD;
+    process.env.HOME = apiDir;
+    process.env.USERPROFILE = apiDir;
+    process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD = '1';
+    delete process.env.HOMEGRAPH_OHOS_SDK;
+    delete process.env.OHOS_SDK_HOME;
+    delete process.env.DEVECO_SDK_HOME;
+    delete process.env.HOS_SDK_HOME;
+
+    try {
+      const ensured = await ensureOhosApiDb('9.9.9', { build: true });
+      expect('code' in ensured).toBe(true);
+      if (!('code' in ensured)) return;
+      expect(ensured.code).toBe('ohos_api_sdk_missing');
+      expect(ensured.message).toMatch(/unavailable|not found/i);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevUserProfile;
+      if (prevSdk === undefined) delete process.env.HOMEGRAPH_OHOS_SDK;
+      else process.env.HOMEGRAPH_OHOS_SDK = prevSdk;
+      if (prevOhos === undefined) delete process.env.OHOS_SDK_HOME;
+      else process.env.OHOS_SDK_HOME = prevOhos;
+      if (prevDevEco === undefined) delete process.env.DEVECO_SDK_HOME;
+      else process.env.DEVECO_SDK_HOME = prevDevEco;
+      if (prevHos === undefined) delete process.env.HOS_SDK_HOME;
+      else process.env.HOS_SDK_HOME = prevHos;
+      if (prevNoDl === undefined) delete process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD;
+      else process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD = prevNoDl;
     }
   });
 });
