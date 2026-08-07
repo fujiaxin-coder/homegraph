@@ -149,6 +149,7 @@ git rebase origin/main
 - `scope`：可选，模块名（如 `mcp`、`arkts`、`installer`、`db`）
 - `subject`：祈使句、现在时；英文或中文均可，同一 PR 内保持一致；**不加**句末句号
 - 首行建议 ≤ 72 字符
+- **SDD 实现类 commit** 须在 footer 用固定格式关联 Spec（见 §3.3）
 
 ### 3.2 Type 一览
 
@@ -164,26 +165,63 @@ git rebase origin/main
 | `ci` | CI / workflow |
 | `release` | 版本与发布相关（如 lock 同步）；日常功能勿用 |
 
-### 3.3 示例
+### 3.3 Spec 关联（commit footer）
+
+按 SDD 落地的实现 / 验收修补类 commit，**必须**在 message footer 用下列固定行关联 Spec（与 Conventional Commits trailer 同形：`Token: value`）：
+
+```text
+Spec: docs/specs/<NNNN>-<english-slug>.md
+```
+
+规则：
+
+| 项 | 约定 |
+| --- | --- |
+| 关键字 | 固定为 `Spec:`（大小写敏感；后面一个空格） |
+| 路径 | 相对仓库根目录；与磁盘文件一致，含四位编号与 slug |
+| 多 Spec | 每行一条 `Spec:`；勿写成逗号拼接 |
+| 空行 | footer 与 subject（或 body）之间空一行 |
+| 何时必填 | 实现已确认 Spec、或该 Spec 的直接验收修补 |
+| 何时可省略 | §1.5 豁免项；以及**仅新增/修订 Spec 文档本身**的 `docs:` commit（可选仍写 `Spec:` 自指） |
+
+完整示例：
+
+```text
+feat(mcp): prefer homegraph serve mcp, keep serve --mcp compatible
+
+Spec: docs/specs/0003-prefer-serve-mcp-subcommand.md
+```
+
+多 Spec：
+
+```text
+fix(arkts): pause watchdog during Scene build to avoid false unresponsive
+
+Spec: docs/specs/0004-arkts-scene-watchdog.md
+Spec: docs/specs/0005-arkts-build-lifecycle.md
+```
+
+仅落盘 Spec（可省略 footer）：
+
+```text
+docs: add spec for prefer serve mcp subcommand
+```
+
+### 3.4 示例（无 Spec / 豁免）
 
 ```text
 docs: add SDD workflow and spec naming under docs/specs
 
-feat(mcp): prefer homegraph serve mcp, keep serve --mcp compatible
-
-fix(arkts): pause watchdog during Scene build to avoid false unresponsive
-
 chore: remove unused assets after inventory
 ```
 
-### 3.4 注意
+### 3.5 注意
 
-- **一条 commit 一件事**；大改动拆成可读的小步。Spec 可单独先提交（`docs: …`），再提交实现。
+- **一条 commit 一件事**；大改动拆成可读的小步。Spec 可单独先提交（`docs: …`），再提交实现（实现 commit 带 `Spec:`）。
 - 改 MCP 工具行为或 Agent 指引时，同步 `src/mcp/server-instructions.ts`（唯一对外指引源）。
 - 改 `src/installer/`（尤其 `targets/`）须带对应测试，并在 `CHANGELOG.md` 的 `[Unreleased]` 记一笔。
 - **不要**本地 `npm publish` / 打 release tag / 强推 `main`；发布走 Actions → Release（见 AGENTS.md）。
 - 密钥、token、本机路径、大型二进制勿进提交。
-
 ---
 
 ## 4. PR 检查清单
@@ -194,7 +232,7 @@ chore: remove unused assets after inventory
 
 - [ ] 标题清晰，对应主要 type（如 `feat: …` / `fix: …`）
 - [ ] 正文写清：**改了什么、为什么、如何验证**
-- [ ] **关联 Spec**：`docs/specs/NNNN-….md`（豁免项见 §1.5，须在 PR 中注明）
+- [ ] **关联 Spec**：PR 描述写路径；实现类 commit footer 用 `Spec: docs/specs/NNNN-….md`（§3.3；豁免见 §1.5，须在 PR 中注明）
 - [ ] 破坏性变更、迁移步骤、兼容策略已写明（如有）
 
 ### 4.2 代码与质量
@@ -234,7 +272,7 @@ chore: remove unused assets after inventory
 fetch/pull main
   → 编写 Spec 到 docs/specs/NNNN-<english-slug>.md（先确认）
   → 开分支 → 按 Spec 实现 → build + test
-  → commit（规范 type）→ push → 开 PR（关联 Spec + 清单自检）→ 评审合入
+  → commit（规范 type；实现类带 Spec: footer）→ push → 开 PR（关联 Spec + 清单自检）→ 评审合入
 ```
 
 合入后删除已合并的本地/远端特性分支，保持仓库分支列表干净。
