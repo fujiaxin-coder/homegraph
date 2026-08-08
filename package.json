@@ -9,7 +9,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc && npm run copy-assets && node -e \"require('fs').chmodSync('dist/bin/homegraph.js', 0o755)\"",
