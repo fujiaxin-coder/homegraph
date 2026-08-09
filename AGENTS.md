@@ -227,7 +227,7 @@ Releases are built and published by the **GitHub Actions "Release" workflow**
 promote `[Unreleased]` into `[<version>]` (and auto-commit + push that
 CHANGELOG change back to `main` so on-disk truth matches the published
 notes), then builds `dist/` and publishes the single npm package
-(`files: ["dist","README.md"]`) plus a GitHub Release with notes from
+(`files: ["dist","README.md","CHANGELOG.md","LICENSE"]`) plus a GitHub Release with notes from
 CHANGELOG. Users run it on their own Node (`engines: >=18`).
 
 **Claude does NOT bump the version unless explicitly asked.** The maintainer

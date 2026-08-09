@@ -68,9 +68,22 @@ import { segmentLookupVariants, splitIdentifierSegments } from './search/identif
 import { createYielder } from './resolution/cooperative-yield';
 import { minRefsForPool } from './resolution/resolver-pool';
 import { HomeGraphPackageVersion } from './mcp/version';
+import {
+  type GraphSourcesMode,
+  resolveGraphSources,
+  graphSourceFlags,
+} from './graph-sources';
 
 // Re-export types for consumers
 export * from './types';
+export {
+  type GraphSourcesMode,
+  GRAPH_SOURCES_ENV,
+  GRAPH_SOURCES_MODES,
+  resolveGraphSources,
+  graphSourceFlags,
+  parseGraphSourcesMode,
+} from './graph-sources';
 // Storage building blocks for embedded/SDK consumers that drive the graph
 // directly (open a DB, run prepared queries) rather than through the HomeGraph
 // facade. Exposed from the package entry so they no longer require deep imports
@@ -134,6 +147,12 @@ export interface OpenOptions {
 
   /** Whether to run in read-only mode */
   readOnly?: boolean;
+
+  /**
+   * Which graph sources to use for lookups (project index and/or OHOS SDK API).
+   * Defaults to `HOMEGRAPH_SOURCES` env, then `both`. See Spec 0005.
+   */
+  sources?: GraphSourcesMode | string;
 }
 
 /**
@@ -180,14 +199,19 @@ export class HomeGraph {
   // File watcher for auto-sync on file changes
   private watcher: FileWatcher | null = null;
 
+  /** Effective graph sources for this instance (Spec 0005). */
+  private graphSources: GraphSourcesMode;
+
   private constructor(
     db: DatabaseConnection,
     queries: QueryBuilder,
-    projectRoot: string
+    projectRoot: string,
+    sources?: GraphSourcesMode
   ) {
     this.db = db;
     this.queries = queries;
     this.projectRoot = projectRoot;
+    this.graphSources = sources ?? 'both';
     bindExtractionContext(projectRoot, queries);
     this.fileLock = new FileLock(
       path.join(getHomeGraphDir(projectRoot), 'homegraph.lock')
@@ -218,10 +242,16 @@ export class HomeGraph {
       this.queries,
       this.traverser
     );
-    restoreOhosApiDbAttach(this.queries);
-    if (!this.queries.getOhosApiDbPath()) {
-      // Open path: attach a prebuilt ~/.homegraph/api db only — never build here.
-      attachExistingOhosApiDbForProject(this.projectRoot, this.queries);
+    const flags = graphSourceFlags(this.graphSources);
+    this.queries.setIncludeProjectNodes(flags.project);
+    if (flags.sdk) {
+      restoreOhosApiDbAttach(this.queries);
+      if (!this.queries.getOhosApiDbPath()) {
+        // Open path: attach a prebuilt ~/.homegraph/api db only — never build here.
+        attachExistingOhosApiDbForProject(this.projectRoot, this.queries);
+      }
+    } else {
+      this.queries.attachOhosApiDb(null);
     }
   }
 
@@ -328,6 +358,13 @@ export class HomeGraph {
   static async open(projectRoot: string, options: OpenOptions = {}): Promise<HomeGraph> {
     await initGrammars();
     const resolvedRoot = path.resolve(projectRoot);
+    const sources = resolveGraphSources(options.sources);
+    if (!graphSourceFlags(sources).openProjectDb) {
+      throw new Error(
+        `Cannot open HomeGraph when graph sources are "${sources}". ` +
+          `Use --sources both|project|sdk or unset HOMEGRAPH_SOURCES.`
+      );
+    }
 
     // Check if initialized
     if (!isInitialized(resolvedRoot)) {
@@ -345,7 +382,7 @@ export class HomeGraph {
     const db = DatabaseConnection.open(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    const instance = new HomeGraph(db, queries, resolvedRoot);
+    const instance = new HomeGraph(db, queries, resolvedRoot, sources);
 
     // Sync if requested
     if (options.sync) {
@@ -406,8 +443,15 @@ export class HomeGraph {
   /**
    * Open synchronously (without sync)
    */
-  static openSync(projectRoot: string): HomeGraph {
+  static openSync(projectRoot: string, options: OpenOptions = {}): HomeGraph {
     const resolvedRoot = path.resolve(projectRoot);
+    const sources = resolveGraphSources(options.sources);
+    if (!graphSourceFlags(sources).openProjectDb) {
+      throw new Error(
+        `Cannot open HomeGraph when graph sources are "${sources}". ` +
+          `Use --sources both|project|sdk or unset HOMEGRAPH_SOURCES.`
+      );
+    }
 
     // Check if initialized
     if (!isInitialized(resolvedRoot)) {
@@ -425,7 +469,7 @@ export class HomeGraph {
     const db = DatabaseConnection.open(dbPath);
     const queries = new QueryBuilder(db.getDb());
 
-    return new HomeGraph(db, queries, resolvedRoot);
+    return new HomeGraph(db, queries, resolvedRoot, sources);
   }
 
   /**
@@ -450,6 +494,11 @@ export class HomeGraph {
    */
   getProjectRoot(): string {
     return this.projectRoot;
+  }
+
+  /** Effective graph sources for this open (`both` | `project` | `sdk`). */
+  getGraphSources(): GraphSourcesMode {
+    return this.graphSources;
   }
 
   // ===========================================================================

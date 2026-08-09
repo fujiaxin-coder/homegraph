@@ -710,7 +710,7 @@ program
       }
 
       const { default: HomeGraph } = await loadHomeGraph();
-      const cg = await HomeGraph.open(projectPath);
+      const cg = await HomeGraph.open(projectPath, { sources: 'both' });
 
       if (options.quiet) {
         await cg.sync();
@@ -827,6 +827,7 @@ program
           ohosApi: ohosApi
             ? { version: ohosApi.version, packageName: ohosApi.packageName, dbPath: ohosApi.dbPath }
             : null,
+          graphSources: cg.getGraphSources(),
           index: {
             state: indexState,
             builtWithVersion: buildInfo.version,
@@ -866,6 +867,7 @@ program
         ? chalk.green('wal')
         : chalk.yellow(`${journalMode || 'unknown'} ${getGlyphs().dash} WAL inactive; reads can block on writes`);
       console.log(`  Journal:   ${journalLabel}`);
+      console.log(`  Sources:   ${cg.getGraphSources()} (project index / OHOS SDK API)`);
       console.log();
 
       // Node breakdown
@@ -1509,13 +1511,30 @@ program
  * from the listing. See the interactive-TTY guard in `runServeMcp`, which
  * explains this to anyone who runs it by hand.
  */
-async function runServeMcp(options: { path?: string; watch?: boolean }): Promise<void> {
+async function runServeMcp(options: {
+  path?: string;
+  watch?: boolean;
+  sources?: string;
+}): Promise<void> {
   const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
   // Commander sets watch=false when --no-watch is passed. Route it through
   // the same env-var chokepoint the watcher and MCP server already honor.
   if (options.watch === false) {
     process.env.HOMEGRAPH_NO_WATCH = '1';
+  }
+
+  // Spec 0005: resolve --sources over HOMEGRAPH_SOURCES, then stamp env so
+  // detached daemons and in-process opens share the same mode.
+  const { resolveGraphSources, applyGraphSourcesToEnv, GRAPH_SOURCES_MODES } =
+    await import('../graph-sources');
+  try {
+    const mode = resolveGraphSources(options.sources);
+    applyGraphSourcesToEnv(mode);
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
+    error(`Valid values: ${GRAPH_SOURCES_MODES.join(', ')}`);
+    process.exit(1);
   }
 
   // The stdio MCP server an AI agent launches for itself — not a command to
@@ -1554,6 +1573,7 @@ function printServeUsage(): void {
   }
 }
 `));
+  console.error('Optional: --sources both|project|sdk|none (or HOMEGRAPH_SOURCES) to limit project vs OHOS SDK graphs.');
   console.error('Available tools:');
   console.error(chalk.cyan('  homegraph_explore') + '   - Primary: source of the relevant symbols for any question');
   console.error(chalk.cyan('  homegraph_search') + '    - Search for code symbols');
@@ -1578,7 +1598,16 @@ program
   .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
   .option('--mcp', 'Legacy alias for `serve mcp` (stdio MCP server)')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
-  .action(async (mode: string | undefined, options: { path?: string; mcp?: boolean; watch?: boolean }) => {
+  .option(
+    '--sources <mode>',
+    'Graph sources for MCP queries: both|project|sdk|none (default both; env HOMEGRAPH_SOURCES)'
+  )
+  .action(async (mode: string | undefined, options: {
+    path?: string;
+    mcp?: boolean;
+    watch?: boolean;
+    sources?: string;
+  }) => {
     try {
       if (mode === 'mcp' || options.mcp) {
         await runServeMcp(options);

@@ -4908,9 +4908,80 @@ function attachOhosApiDbBinding(
   }
 }
 
+/** Last-resort prebuilt npm package when the project's API version cannot be obtained. */
+const OHOS_API_FALLBACK_VERSION = '6.1.0';
+
+function runNpmPack(args: string[], cwd: string): void {
+  const inv =
+    process.platform === 'win32'
+      ? { cmd: 'cmd.exe', args: ['/d', '/s', '/c', ['npm', ...args].join(' ')] }
+      : { cmd: 'npm', args };
+  execFileSync(inv.cmd, inv.args, {
+    cwd,
+    stdio: 'pipe',
+    timeout: 180_000,
+    windowsHide: true,
+    env: process.env,
+  });
+}
+
 /**
- * Build (or reuse) ~/.homegraph/api/ohos-api-<version>.db from a local SDK.
- * Never throws — missing SDK / build failure returns a warning.
+ * Fetch `homegraph-ohos-api-db-<version>` from npm and copy the db into
+ * `~/.homegraph/api/`. Returns null when downloads are disabled, the package
+ * is missing, or install fails. Opt out: HOMEGRAPH_OHOS_API_NO_DOWNLOAD=1.
+ */
+export function tryDownloadOhosApiDbFromNpm(version: string): OhosApiDbBinding | null {
+  if (process.env.HOMEGRAPH_OHOS_API_NO_DOWNLOAD === '1') return null;
+
+  const dbPath = ohosApiDbInstallPath(version);
+  const packageName = ohosApiDbPackageName(version);
+  if (fs.existsSync(dbPath)) {
+    return { version, dbPath, packageName, installed: false };
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-ohos-api-npm-'));
+  try {
+    runNpmPack(['pack', packageName, '--silent'], tmp);
+    const tgz = fs.readdirSync(tmp).find((f) => f.endsWith('.tgz'));
+    if (!tgz) return null;
+
+    const extractDir = path.join(tmp, 'extract');
+    fs.mkdirSync(extractDir, { recursive: true });
+    execFileSync('tar', ['-xzf', path.join(tmp, tgz), '-C', extractDir], {
+      stdio: 'pipe',
+      timeout: 60_000,
+      windowsHide: true,
+    });
+
+    const dbName = ohosApiDbFilename(version);
+    const src =
+      [
+        path.join(extractDir, 'package', dbName),
+        path.join(extractDir, dbName),
+      ].find((p) => fs.existsSync(p)) ?? null;
+    if (!src) return null;
+
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    fs.copyFileSync(src, dbPath);
+    return { version, dbPath, packageName, installed: true };
+  } catch {
+    return null;
+  } finally {
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Build (or reuse) ~/.homegraph/api/ohos-api-<version>.db from a local SDK,
+ * then npm prebuilts. Never throws — missing SDK / build / download failure
+ * returns a warning.
+ *
+ * Order: existing db → local SDK build → npm pack for that version →
+ * npm pack homegraph-ohos-api-db-6.1.0 fallback.
  */
 export async function ensureOhosApiDb(
   version: string,
@@ -4919,6 +4990,7 @@ export async function ensureOhosApiDb(
   const dbPath = ohosApiDbInstallPath(version);
   const packageName = ohosApiDbPackageName(version);
 
+  // 1. Local db for the requested version
   if (fs.existsSync(dbPath)) {
     return { version, dbPath, packageName, installed: false };
   }
@@ -4933,6 +5005,7 @@ export async function ensureOhosApiDb(
     };
   }
 
+  // 2. Build from a local DevEco / OpenHarmony SDK
   let sdkHome: string | null = null;
   if (options.sdkHomeHint) {
     const hintHomes = expandLocalOhosSdkHomes(options.sdkHomeHint);
@@ -4943,85 +5016,89 @@ export async function ensureOhosApiDb(
     sdkHome = findLocalOhosSdkForVersion(version)?.sdkHome ?? null;
   }
 
-  if (!sdkHome) {
-    return {
-      code: 'ohos_api_sdk_missing',
-      message:
-        `Local OHOS SDK for API ${version} not found (set OHOS_SDK_HOME / DEVECO_SDK_HOME / HOMEGRAPH_OHOS_SDK, ` +
-        'or install the matching DevEco SDK). SDK API lookup disabled; project indexing continues normally.',
-    };
-  }
+  if (sdkHome) {
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-
-  options.onProgress?.({
-    phase: 'ohos-api',
-    current: 0,
-    total: 1,
-    currentFile: version,
-  });
-
-  try {
-    const result = await indexOhosApiDb({
-      sdkHome,
-      version,
-      outputPath: dbPath,
-      onProgress: options.onProgress
-        ? (progress) => {
-            options.onProgress?.({
-              phase: 'ohos-api',
-              current: progress.current,
-              total: progress.total || 1,
-              currentFile: progress.currentFile
-                ? `${version} ${path.basename(progress.currentFile)}`
-                : version,
-              subphase: progress.subphase,
-            });
-          }
-        : undefined,
+    options.onProgress?.({
+      phase: 'ohos-api',
+      current: 0,
+      total: 1,
+      currentFile: version,
     });
 
-    if (!result.success || !fs.existsSync(dbPath)) {
+    try {
+      const result = await indexOhosApiDb({
+        sdkHome,
+        version,
+        outputPath: dbPath,
+        onProgress: options.onProgress
+          ? (progress) => {
+              options.onProgress?.({
+                phase: 'ohos-api',
+                current: progress.current,
+                total: progress.total || 1,
+                currentFile: progress.currentFile
+                  ? `${version} ${path.basename(progress.currentFile)}`
+                  : version,
+                subphase: progress.subphase,
+              });
+            }
+          : undefined,
+      });
+
+      if (result.success && fs.existsSync(dbPath)) {
+        options.onProgress?.({
+          phase: 'ohos-api',
+          current: 1,
+          total: 1,
+          currentFile: version,
+        });
+        return { version, dbPath, packageName, installed: true };
+      }
+
       try {
         fs.unlinkSync(dbPath);
       } catch {
         /* ignore */
       }
-      const detail = result.errors
-        .filter((e) => e.severity === 'error')
-        .map((e) => e.message)
-        .join('; ');
+    } catch {
+      try {
+        if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  // 3. Download prebuilt for the requested version from npm
+  const fromNpm = tryDownloadOhosApiDbFromNpm(version);
+  if (fromNpm) return fromNpm;
+
+  // 4. Last resort: homegraph-ohos-api-db-6.1.0
+  if (version !== OHOS_API_FALLBACK_VERSION) {
+    const fallbackPath = ohosApiDbInstallPath(OHOS_API_FALLBACK_VERSION);
+    if (fs.existsSync(fallbackPath)) {
       return {
-        code: 'ohos_api_build_failed',
-        message:
-          `Failed to build OHOS API db for ${version} from ${sdkHome}` +
-          (detail ? ` (${detail})` : '') +
-          '. SDK API lookup disabled; project indexing continues normally.',
+        version: OHOS_API_FALLBACK_VERSION,
+        dbPath: fallbackPath,
+        packageName: ohosApiDbPackageName(OHOS_API_FALLBACK_VERSION),
+        installed: false,
       };
     }
-
-    options.onProgress?.({
-      phase: 'ohos-api',
-      current: 1,
-      total: 1,
-      currentFile: version,
-    });
-
-    return { version, dbPath, packageName, installed: true };
-  } catch (err) {
-    try {
-      if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-    } catch {
-      /* ignore */
-    }
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      code: 'ohos_api_build_failed',
-      message:
-        `Failed to build OHOS API db for ${version} from ${sdkHome} (${msg}). ` +
-        'SDK API lookup disabled; project indexing continues normally.',
-    };
+    const fallback = tryDownloadOhosApiDbFromNpm(OHOS_API_FALLBACK_VERSION);
+    if (fallback) return fallback;
   }
+
+  return {
+    code: 'ohos_api_sdk_missing',
+    message:
+      `OHOS API db for ${version} unavailable (no local SDK build, npm ${packageName} failed` +
+      (version !== OHOS_API_FALLBACK_VERSION
+        ? `, and fallback ${ohosApiDbPackageName(OHOS_API_FALLBACK_VERSION)} failed`
+        : '') +
+      '). Set OHOS_SDK_HOME / DEVECO_SDK_HOME or install the matching DevEco SDK. ' +
+      'SDK API lookup disabled; project indexing continues normally.',
+  };
 }
 
 /**

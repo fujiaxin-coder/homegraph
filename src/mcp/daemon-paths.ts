@@ -32,13 +32,25 @@ import * as crypto from 'crypto';
 import * as os from 'os';
 import * as path from 'path';
 import { getHomeGraphDir } from '../directory';
+import { type GraphSourcesMode, resolveGraphSources } from '../graph-sources';
 
 /** Soft upper bound for in-project socket paths. */
 const POSIX_SOCKET_PATH_LIMIT = 100;
 
+/**
+ * Stable identity for daemon rendezvous. `both` (default) keeps the historical
+ * hash-of-root-only key so existing pid/socket paths stay compatible. Other
+ * sources modes include the mode so arms don't share a daemon (Spec 0005).
+ */
+function daemonIdentity(projectRoot: string, sources: GraphSourcesMode): string {
+  const root = path.resolve(projectRoot);
+  return sources === 'both' ? root : `${root}\0${sources}`;
+}
+
 /** Short stable identifier for a project root — used in tmpdir/pipe names. */
-function projectHash(projectRoot: string): string {
-  return crypto.createHash('sha256').update(path.resolve(projectRoot)).digest('hex').slice(0, 16);
+function projectHash(projectRoot: string, sources?: GraphSourcesMode): string {
+  const mode = sources ?? resolveGraphSources();
+  return crypto.createHash('sha256').update(daemonIdentity(projectRoot, mode)).digest('hex').slice(0, 16);
 }
 
 /**
@@ -48,8 +60,8 @@ function projectHash(projectRoot: string): string {
  * function of the root means the daemon and the proxy compute the identical
  * path without talking to each other.
  */
-function tmpdirSocketPath(projectRoot: string): string {
-  return path.join(os.tmpdir(), `homegraph-${projectHash(projectRoot)}.sock`);
+function tmpdirSocketPath(projectRoot: string, sources?: GraphSourcesMode): string {
+  return path.join(os.tmpdir(), `homegraph-${projectHash(projectRoot, sources)}.sock`);
 }
 
 /**
@@ -66,12 +78,17 @@ function tmpdirSocketPath(projectRoot: string): string {
  *   - Long in-project path (deep monorepos, Bazel out dirs): `[ <tmpdir> ]` only
  *     — bind would throw ENAMETOOLONG, so we skip straight to tmpdir.
  */
-export function getDaemonSocketCandidates(projectRoot: string): string[] {
+export function getDaemonSocketCandidates(
+  projectRoot: string,
+  sources?: GraphSourcesMode
+): string[] {
+  const mode = sources ?? resolveGraphSources();
   if (process.platform === 'win32') {
-    return [`\\\\.\\pipe\\homegraph-${projectHash(projectRoot)}`];
+    return [`\\\\.\\pipe\\homegraph-${projectHash(projectRoot, mode)}`];
   }
-  const inProject = path.join(getHomeGraphDir(projectRoot), 'daemon.sock');
-  const tmp = tmpdirSocketPath(projectRoot);
+  const sockName = mode === 'both' ? 'daemon.sock' : `daemon-${mode}.sock`;
+  const inProject = path.join(getHomeGraphDir(projectRoot), sockName);
+  const tmp = tmpdirSocketPath(projectRoot, mode);
   if (inProject.length > POSIX_SOCKET_PATH_LIMIT) return [tmp];
   return [inProject, tmp];
 }
@@ -83,14 +100,22 @@ export function getDaemonSocketCandidates(projectRoot: string): string[] {
  * {@link getDaemonSocketCandidates} list — the daemon may bind a fallback when
  * candidate 0 is unusable.
  */
-export function getDaemonSocketPath(projectRoot: string): string {
+export function getDaemonSocketPath(
+  projectRoot: string,
+  sources?: GraphSourcesMode
+): string {
   // The candidate list is never empty (≥1 on every platform), so [0] is safe.
-  return getDaemonSocketCandidates(projectRoot)[0]!;
+  return getDaemonSocketCandidates(projectRoot, sources)[0]!;
 }
 
 /** Absolute path to the daemon pid lockfile for `projectRoot`. */
-export function getDaemonPidPath(projectRoot: string): string {
-  return path.join(getHomeGraphDir(projectRoot), 'daemon.pid');
+export function getDaemonPidPath(
+  projectRoot: string,
+  sources?: GraphSourcesMode
+): string {
+  const mode = sources ?? resolveGraphSources();
+  const name = mode === 'both' ? 'daemon.pid' : `daemon-${mode}.pid`;
+  return path.join(getHomeGraphDir(projectRoot), name);
 }
 
 /** Structured contents of the pid lockfile. */

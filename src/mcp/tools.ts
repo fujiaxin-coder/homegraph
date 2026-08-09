@@ -24,6 +24,11 @@ import {
 } from '../sync/worktree';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
+import {
+  resolveGraphSources,
+  graphSourceFlags,
+  graphSourcesDisabledGuidance,
+} from '../graph-sources';
 import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps } from '../search/query-utils';
 
 import {
@@ -73,6 +78,9 @@ import { WASM_FALLBACK_FIX_RECIPE } from '../db/sqlite-adapter';
  * malfunctions.
  */
 export class NotIndexedError extends Error {}
+
+/** `HOMEGRAPH_SOURCES=none` (or equivalent) — success-shaped, not isError. */
+export class GraphSourcesDisabledError extends Error {}
 
 /**
  * A security refusal (sensitive system path). Stays `isError: true` WITHOUT
@@ -1424,6 +1432,11 @@ export class ToolHandler {
    * similar to how git finds .git/ directories.
    */
   private getHomeGraph(projectPath?: string): HomeGraph {
+    const sourcesMode = resolveGraphSources();
+    if (!graphSourceFlags(sourcesMode).openProjectDb) {
+      throw new GraphSourcesDisabledError(graphSourcesDisabledGuidance(sourcesMode));
+    }
+
     if (!projectPath) {
       if (!this.cg) {
         const searched = this.defaultProjectHint ?? process.cwd();
@@ -1495,7 +1508,7 @@ export class ToolHandler {
     const cached = this.projectCache.get(resolvedRoot);
     if (cached) return this.freshen(cached);
 
-    const cg = loadHomeGraph().openSync(resolvedRoot);
+    const cg = loadHomeGraph().openSync(resolvedRoot, { sources: sourcesMode });
     this.projectCache.set(resolvedRoot, cg);
     return cg;
   }
@@ -1917,6 +1930,9 @@ export class ToolHandler {
       if (err instanceof NotIndexedError) {
         return this.textResult(err.message);
       }
+      if (err instanceof GraphSourcesDisabledError) {
+        return this.textResult(err.message);
+      }
       // Security refusal: a clean error, no retry encouragement.
       if (err instanceof PathRefusalError) {
         return this.errorResult(err.message);
@@ -2019,6 +2035,9 @@ export class ToolHandler {
       return await this.dispatchTool(toolName, args);
     } catch (err) {
       if (err instanceof NotIndexedError) {
+        return this.textResult(err.message);
+      }
+      if (err instanceof GraphSourcesDisabledError) {
         return this.textResult(err.message);
       }
       if (err instanceof PathRefusalError) {
@@ -8610,6 +8629,19 @@ export class ToolHandler {
    * Handle homegraph_status
    */
   private async handleStatus(args: Record<string, unknown>): Promise<ToolResult> {
+    const sourcesMode = resolveGraphSources();
+    if (!graphSourceFlags(sourcesMode).openProjectDb) {
+      return this.textResult(
+        [
+          '**HomeGraph Status**',
+          '',
+          `**Graph sources:** ${sourcesMode}`,
+          '',
+          graphSourcesDisabledGuidance(sourcesMode),
+        ].join('\n')
+      );
+    }
+
     let cg = this.getHomeGraph(args.projectPath as string | undefined);
     // Same trick as withStalenessNotice — when an explicit projectPath
     // resolves to the same project as the default session cg, prefer the
@@ -8643,6 +8675,7 @@ export class ToolHandler {
       `**Total nodes:** ${stats.nodeCount}`,
       `**Total edges:** ${stats.edgeCount}`,
       `**Database size:** ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`,
+      `**Graph sources:** ${cg.getGraphSources()}`,
     );
 
     // Surface the active SQLite backend: node:sqlite → better-sqlite3 → wasm.
