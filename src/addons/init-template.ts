@@ -73,15 +73,35 @@ function indexSource(name: string, lang: 'js' | 'ts'): string {
  * ${name} — HomeGraph spec-mine addon.
  *
  * Contract (api 1) — implement at least one hook:
- *   - enrich(input):  add external requirement context (e.g. Jira) as
- *                     supplements; HomeGraph dedupes by \`key\` and renders
- *                     them into a "## Supplement" prompt section.
- *   - buildPrompt(ctx): optional escape hatch that takes over the whole
- *                     prompt assembly (see ctx.limits — a soft contract).
+ *   - enrich(input):      add external requirement context (e.g. Jira) as
+ *                         supplements; HomeGraph dedupes by \`key\` and renders
+ *                         them into a "## Supplement" prompt section.
+ *   - buildPrompt(ctx):   optional escape hatch that takes over the whole
+ *                         prompt assembly (see ctx.limits — a soft contract).
  *
- * All data is passed in — you never run git. Return one Supplement per
- * requirement, keyed by an opaque id (e.g. the ticket key).
- `;
+ * Data shapes (all passed in — you never run git):
+ *
+ *   input                { clusterId, commits }
+ *   input.commits[i]     { commitHash, commitMessage, author, timestamp }
+ *     - commitMessage    first line of the commit message
+ *     - timestamp        unix seconds
+ *
+ *   Supplement           { key?, text, commitHash? }
+ *     - key              opaque dedupe id (e.g. the ticket key); without it,
+ *                        exact-text dedup is used
+ *     - text             required — the requirement description you assembled
+ *     - commitHash       optional — surfaced for traceability
+ *
+ *   buildPrompt ctx      { cluster, supplements, template, limits }
+ *     - cluster          { id, commits, primaryFiles, primarySymbols }
+ *     - supplements      already deduplicated by HomeGraph
+ *     - template         output template (default or user --template)
+ *     - limits           { maxContextChars, maxSupplementChars } — soft
+ *                        contract you are expected to honor
+ *
+ * Return one Supplement per requirement. Both hooks are optional but at
+ * least one must be implemented.
+`;
 
   if (lang === 'ts') {
     return (
@@ -109,6 +129,9 @@ export async function enrich(input) {
 
 const JIRA_EXAMPLE = `// Worked example: fetch requirement details from Jira and render them as
 // supplements. Standalone — drop this file into any addon's examples/ dir.
+//
+// Data shapes (enrich input / Supplement / buildPrompt ctx): see the
+// contract comment at the top of index.mjs.
 //
 //   const JIRA_BASE = process.env.JIRA_BASE_URL ?? 'https://your-domain.atlassian.net';
 //   const JIRA_EMAIL = process.env.JIRA_EMAIL ?? '';
@@ -142,6 +165,45 @@ async function fetchTicket(key) {
 }
 `;
 
+const BUILD_PROMPT_EXAMPLE = `// buildPrompt example — the optional escape hatch that takes over the whole
+// prompt assembly. Copy it into index.mjs (or re-export it). When an addon
+// implements both hooks, buildPrompt wins for assembly while enrich still
+// runs first — its supplements reach you via ctx.supplements.
+//
+// Input  ctx: { cluster, supplements, template, limits }
+//   - cluster:     { id, commits, primaryFiles, primarySymbols }
+//   - supplements: already deduplicated by HomeGraph
+//   - template:    output template (default or user --template)
+//   - limits:      { maxContextChars, maxSupplementChars } — soft contract
+// Output: the full user prompt string. Throwing falls back to the default
+// assembler, so you can experiment freely.
+export async function buildPrompt(ctx) {
+  const { cluster, supplements, template } = ctx;
+
+  // Your own section first, then the built-in structure.
+  const supplementLines = supplements.map(
+    (s) => \`- \${s.text}\${s.commitHash ? \` (commit \${s.commitHash.slice(0, 7)})\` : ''}\`,
+  );
+
+  return [
+    supplements.length > 0 ? '## Supplement' : null,
+    ...(supplements.length > 0 ? supplementLines : []),
+    '',
+    \`## Cluster Context — \${cluster.commits.length} commits\`,
+    \`Primary files: \${cluster.primaryFiles.join(', ') || '(none)'}\`,
+    \`Primary symbols: \${cluster.primarySymbols.join(', ') || '(none)'}\`,
+    '',
+    '---',
+    '',
+    'Fill in this template:',
+    '',
+    template,
+  ]
+    .filter(Boolean)
+    .join('\\n');
+}
+`;
+
 const README = `# HomeGraph Addon
 
 A pluggable extension for \`homegraph spec mine\`: enrich cluster prompts with
@@ -150,14 +212,25 @@ HomeGraph knowing any ticket format.
 
 ## Contract (api 1)
 
-- \`enrich(input: { clusterId, commits: AddonCommitInput[] })\` → \`Supplement[]\`
-  - HomeGraph passes every commit it already knows (hash, message, author,
-    timestamp) — never re-run git.
-  - Return one \`Supplement\` per requirement: \`{ key?, text, commitHash? }\`.
-    \`key\` is an opaque dedupe id (e.g. the ticket key); without it, exact
-    text match is used. HomeGraph renders them into a \`## Supplement\` section.
+- \`enrich(input)\` → \`Supplement[]\`
+  - \`input\`: \`{ clusterId, commits }\` — HomeGraph passes every commit it
+    already knows, never re-runs git.
+  - \`input.commits[i]\`: \`{ commitHash, commitMessage, author, timestamp }\`
+    (commitMessage is the first line; timestamp is unix seconds).
+  - Return one \`Supplement\` per requirement:
+    - \`key\` (optional): opaque dedupe id (e.g. the ticket key); without it,
+      exact-text dedup is used.
+    - \`text\` (required): the requirement description you assembled
+      (title / URL / body all fine).
+    - \`commitHash\` (optional): surfaced for traceability.
+  - HomeGraph renders supplements into a \`## Supplement\` prompt section.
 - \`buildPrompt(ctx)\` (optional escape hatch) — takes over prompt assembly
-  entirely. \`ctx.limits\` is a soft contract you are expected to honor.
+  entirely. \`ctx\`: \`{ cluster, supplements, template, limits }\`
+  - \`cluster\`: \`{ id, commits, primaryFiles, primarySymbols }\`
+  - \`supplements\`: already deduplicated by HomeGraph.
+  - \`template\`: the output template (default or user \`--template\`).
+  - \`limits\`: \`{ maxContextChars, maxSupplementChars }\` — a soft contract
+    you are expected to honor.
 
 Implement at least one hook. The \`homegraph\` field in package.json must
 declare \`{ "addon": true, "api": 1 }\`.
@@ -166,7 +239,7 @@ declare \`{ "addon": true, "api": 1 }\`.
 
     homegraph addon install ./path/to/this/addon
 
-See \`examples/jira.mjs\` for a full fetch → supplement example.
+See \`examples/jira.mjs\` for enrich and \`examples/build-prompt.mjs\` for prompt assembly.
 `;
 
 /**
@@ -187,6 +260,7 @@ export function createAddonScaffold(
     'package.json': packageJson(name, lang),
     README: README,
     'examples/jira.mjs': JIRA_EXAMPLE,
+    'examples/build-prompt.mjs': BUILD_PROMPT_EXAMPLE,
   };
   if (lang === 'ts') {
     files['tsconfig.json'] = tsconfig();
