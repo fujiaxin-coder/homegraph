@@ -462,11 +462,18 @@ function normIndexPath(filePath: string): string {
   return filePath.replace(/\\/g, '/');
 }
 
-/** Member calls through a native `.so` binding: `sdk.Asset_setCropRect(`. */
+/** Photos-style member calls: `sdk.Asset_setCropRect(`. */
 const NAPI_MEMBER_CALL_RE = /\.\s*([A-Z][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+)+)\s*\(/g;
+
+/** `libFoo.so` module path from ArkAnalyzer import infos. */
+const LIB_SO_MODULE_RE = /^lib[A-Za-z0-9_]+\.so$/;
 
 function isNapiSymbolName(name: string): boolean {
   return /^[A-Z][A-Za-z0-9_]*_[A-Za-z0-9_]+$/.test(name);
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 interface ArkTSBatchIndex {
@@ -2481,6 +2488,12 @@ class ArkTSAdapter {
   private readonly crossFileEdges: Edge[] = [];
   /** Per-module `@dummyMain@…` created during analyseByModule (for scene aggregator). */
   private readonly moduleDummyMains: ArkMethod[] = [];
+  /**
+   * Local import binding names from `lib*.so` per relative file path.
+   * Filled before method bodies are scanned so `multimodalinput.getTidByName(`
+   * can emit NAPI call refs (not only photos-style `Class_method` names).
+   */
+  private readonly soImportBindingsByFile = new Map<string, Set<string>>();
 
   constructor(rootDir: string, scannedFiles: Iterable<string>) {
     this.rootDir = rootDir;
@@ -3122,6 +3135,9 @@ class ArkTSAdapter {
     const result = this.ensureFileResult(relativePath, lineCount);
     const fileId = `file:${relativePath}`;
 
+    // Before methods: record `lib*.so` bindings so body NAPI call scan can see them.
+    this.collectSoImportBindings(relativePath, arkFile);
+
     for (const ns of arkFile.getNamespaces()) {
       this.indexNamespace(relativePath, language, result, ns, fileId);
     }
@@ -3131,6 +3147,17 @@ class ArkTSAdapter {
     this.indexTypeAliases(relativePath, language, result, arkFile, undefined, fileId);
     this.indexModuleLocals(relativePath, language, result, arkFile, undefined, fileId);
     this.indexImports(relativePath, language, result, arkFile, fileId);
+  }
+
+  private collectSoImportBindings(relativePath: string, arkFile: ArkFile): void {
+    const set = new Set<string>();
+    for (const importInfo of arkFile.getImportInfos()) {
+      const modulePath = importInfo.getFrom();
+      if (!modulePath || !LIB_SO_MODULE_RE.test(modulePath)) continue;
+      const clause = importInfo.getImportClauseName();
+      if (clause) set.add(clause);
+    }
+    if (set.size > 0) this.soImportBindingsByFile.set(relativePath, set);
   }
 
   private indexModuleLocals(
@@ -3823,15 +3850,12 @@ class ArkTSAdapter {
 
     const baseLine = method.getImplOriginFullPosition()?.getFirstLine() ?? 1;
     const seenAtLine = new Set<string>();
-    NAPI_MEMBER_CALL_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = NAPI_MEMBER_CALL_RE.exec(code)) !== null) {
-      const symbol = m[1]!;
-      if (!isNapiSymbolName(symbol)) continue;
-      const lineOffset = code.slice(0, m.index).split('\n').length - 1;
+    const pushCall = (symbol: string, matchIndex: number): void => {
+      if (!symbol) return;
+      const lineOffset = code.slice(0, matchIndex).split('\n').length - 1;
       const line = baseLine + lineOffset;
       const dedupKey = `${symbol}:${line}`;
-      if (seenAtLine.has(dedupKey)) continue;
+      if (seenAtLine.has(dedupKey)) return;
       seenAtLine.add(dedupKey);
       result.unresolvedReferences.push({
         fromNodeId,
@@ -3842,6 +3866,39 @@ class ArkTSAdapter {
         filePath: relativePath,
         language,
       });
+    };
+
+    // Photos-style `Class_method` on any receiver.
+    NAPI_MEMBER_CALL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = NAPI_MEMBER_CALL_RE.exec(code)) !== null) {
+      const symbol = m[1]!;
+      if (!isNapiSymbolName(symbol)) continue;
+      pushCall(symbol, m.index);
+    }
+
+    // `import x from 'libFoo.so'` → `x.draw(` / `x.getTidByName(` (camelCase OK).
+    const soBindings = this.soImportBindingsByFile.get(relativePath);
+    if (soBindings) {
+      for (const binding of soBindings) {
+        const re = new RegExp(
+          `\\b${escapeRegExp(binding)}\\s*\\.\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\(`,
+          'g'
+        );
+        while ((m = re.exec(code)) !== null) {
+          pushCall(m[1]!, m.index);
+        }
+      }
+
+      // define_class / instance path: `this.inst?.addVerticalRuler(` — receiver is
+      // not the import binding. Only in files that already import a lib*.so.
+      const anyMemberRe = /\?\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(|\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      while ((m = anyMemberRe.exec(code)) !== null) {
+        const symbol = m[1] ?? m[2];
+        if (!symbol) continue;
+        // Skip photos-style names already handled above; keep camelCase / plain ids.
+        pushCall(symbol, m.index);
+      }
     }
   }
 
