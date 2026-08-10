@@ -1037,6 +1037,27 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
+    name: 'homegraph_arkui_migrate',
+    description:
+      'ArkUI migrate / state-semantics snapshot in ONE call (components, state decorators + args, ' +
+      'data-passage types, Provide/Consume/Storage key channels, @Observed classes). ' +
+      'PRIMARY for ArkUI V1↔V2 migration decisions — do NOT stitch with explore. ' +
+      'Scope: component name, relative .ets path, or directory prefix. Returns JSON (no source bodies).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        scope: {
+          type: 'string',
+          description:
+            'Component name (e.g. "ParentPage"), relative file (e.g. "pages/Index.ets"), or directory prefix.',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['scope'],
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
     name: 'homegraph_files',
     description:
       'Indexed directory tree (paths and symbol counts only — NO source). ' +
@@ -2067,6 +2088,7 @@ export class ToolHandler {
       case 'homegraph_explore': return await this.handleExplore(args);
       case 'homegraph_node': return await this.handleNode(args);
       case 'homegraph_files': return await this.handleFiles(args);
+      case 'homegraph_arkui_migrate': return await this.handleArkuiMigrate(args);
       case 'homegraph_spec_match': return await this.handleSpecMatch(args);
       case 'homegraph_spec_find': return await this.handleSpecFind(args);
       case 'homegraph_spec_trace': return await this.handleSpecTrace(args);
@@ -8748,6 +8770,29 @@ export class ToolHandler {
     }
 
     return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * Handle homegraph_arkui_migrate — one-shot ArkUI migrate / state snapshot (spec 0007).
+   */
+  private async handleArkuiMigrate(args: Record<string, unknown>): Promise<ToolResult> {
+    const scope = this.validateString(args.scope, 'scope');
+    if (typeof scope !== 'string') return scope;
+
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    try {
+      const snapshot = cg.getArkUIMigrateSnapshot(scope);
+      return this.textResult(JSON.stringify(snapshot, null, 2));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return this.textResult(
+        [
+          `No ArkUI migrate snapshot for scope "${scope}".`,
+          message,
+          'Pass a component name, relative .ets path, or directory prefix. Ensure the project is indexed (`homegraph init` / `index`).',
+        ].join('\n')
+      );
+    }
   }
 
   /**
