@@ -149,6 +149,7 @@ homegraph impact <符号>         # 修改该符号的影响范围
 homegraph affected [files...]  # 根据变更文件查找受影响的测试（支持 --stdin）
 homegraph spec build           # 从已有 .spec 目录（或用户指定目录）构建Spec知识图谱（Commit4Spec）
 homegraph spec mine            # 从 Git 历史挖掘设计Spec文档（AST 分析 + LLM 聚类生成）
+homegraph addon ...            # 管理 用户自定义插件（init/install/list/remove/enable/disable/update）
 homegraph spec match <文本>     # 全文搜索相似历史Spec
 homegraph spec find <文件>      # 查找与指定文件关联的Spec
 homegraph spec trace <符号>     # 追溯代码符号关联的Spec
@@ -197,7 +198,31 @@ Commit4Spec 提供两条互补路径将设计Spec与 Git 历史关联，存入 `
 
 **路径 1：`spec build`（已有Spec导入）**
 
-从项目已有的 `.spec` 目录（或用户指定目录）读取Spec文档，解析其中的 Git 引用和变更片段，直接构建知识图谱节点与关系。
+从项目已有的 `.spec` 目录（或用户指定目录）读取 Spec 文档，通过内置的启发式规则将 Git 提交与 Spec 文档配对，解析配对提交的变更片段，直接构建知识图谱节点与关系。
+
+默认规则与文档发现逻辑可通过 `.homegraph/commit4spec/configs.json` 的 `discovery` 与 `commitScope` 段进行用户自定义
+
+```json
+{
+  //Spec 文档发现：
+  // {specId}.md 平铺文件，或 {specId}/ 目录下按 `primaryDocCandidates` 顺序取第一个存在的主文档；
+  // 目录内匹配 `supplementaryGlobs` 的补充 `.md`文档标题并入 Spec 子标题。
+  "discovery": {
+    "primaryDocCandidates": ["plan.md", "README.md", "spec.md", "design.md", "{spec_dir_name}.md", "spec-{spec_dir_name}.md",],
+    "supplementaryGlobs": ["logic/**/*.md", "design/**/*.md"]
+  },
+  //commit-spec匹配：
+  // 优先从 commit message 的第一行提取 conventional-commit scope（如 `feat(spec03): ...`），归一化后若能在磁盘上找到对应 spec 则直接采用、不回退正文；
+  // 若第一行 scope 对应的 spec 在磁盘上不存在（或第一行完全未命中 scope）且配置了 `bodyRegex`，则回退从正文/footer 提取 spec 引用（如 `Spec: spec03` trailer）；
+  // `bodyRegex` 为可选配置，未配置时仅用标题通道；
+  // 默认提取后归一化（`normalize`）：剥 `review/` 前缀 → 转小写 → `spec3` 补零为 `spec03`。
+  "commitScope": {
+    "scopeRegex": "^(?:feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)\\((?:review\\/)?(spec\\d+)\\)",
+    "bodyRegex": "^Spec:\\s*(spec\\d+)\\s*$",
+    "normalize": { "stripPrefixes": ["review/"], "lowercase": true, "padSpecNumber": true }
+  }
+}
+```
 
 **路径 2：`spec mine`（Spec逆向挖掘）**
 
@@ -205,7 +230,9 @@ Commit4Spec 提供两条互补路径将设计Spec与 Git 历史关联，存入 `
 
 支持增量模式（`meta.json` 记录已处理范围）、commit过滤和聚类输出模式（`--skip-llm`）。
 
-`spec mine`逆向挖掘和`spec evolve process`演化更新涉及到模型访问，优先选择用户本地已有的Agent平台（Claude Code >> Codex >> 用户配置LLM），若未安装Claude Code或Codex，则需用户自主配置模型服务，编辑配置文件`.homegraph/commit4spec/configs.json`
+`spec mine`逆向挖掘和`spec evolve process`演化更新涉及到模型访问，优先选择用户本地已有的Agent平台（Claude Code >> Codex >> DevEco Code >> 用户配置LLM），可用环境变量 `HOMEGRAPH_SPEC_AGENT` 强制指定（取值 `claude-code`、`codex`、`deveco-code`，`none` 表示禁用）。
+
+若未安装Claude Code、Codex或DevEco Code，则需用户自主配置模型服务，编辑配置文件`.homegraph/commit4spec/configs.json`
 
 ```json
 // All available options (fields marked * are required):
@@ -229,6 +256,25 @@ homegraph spec match "用户登录"    # CLI/MCP 全文搜索
 homegraph spec find src/auth.ts   # 哪些Spec涉及该文件
 homegraph spec trace UserService  # 追溯符号关联的设计Spec
 ```
+
+**Addons（插件扩展）：**
+
+`homegraph addon` 管理可插拔扩展包，为 `spec mine` 注入外部需求上下文（如 Jira 工单详情），无需 HomeGraph 认识任何工单格式：
+
+```bash
+homegraph addon init my-jira       # 生成 addon 脚手架（内置示例）
+homegraph addon install ./my-jira  # 安装并登记（记录具体版本号）
+homegraph addon list               # 查看已登记的 addon 及状态
+homegraph addon update my-jira     # 更新（默认按记录 range 内最新；--latest 强制 @latest，仅 registry 包）
+homegraph addon disable my-jira    # 停用（保留安装）
+homegraph addon remove my-jira     # 注销（--purge 同时删除文件）
+```
+
+Addon 实现 `enrich` 钩子：HomeGraph 按 commit 簇传入其已有的 commit 数据（hash / 消息 / 作者 / 时间戳），addon 返回带去重键的需求补充文本，HomeGraph 去重后渲染进生成 prompt 的 `## Supplement` 段。
+
+（可选） `buildPrompt` 钩子：用于整体接管 prompt 组装——HomeGraph 传入簇数据、已去重的补充文本、输出模板与字符预算（软约定），由 addon 自行组装完整 prompt，第一个提供该钩子的 addon 生效，调用失败自动回退到默认组装。
+
+每个 addon 独立超时（15s）且失败不影响生成；包需在 package.json 声明 `"homegraph": { "addon": true, "api": 1 }`；登记表存于 `.homegraph/addons.json`，仅显式登记且启用的 addon 才会被加载。
 
 ---
 

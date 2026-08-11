@@ -11,7 +11,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { createDatabase, SqliteDatabase } from '../src/db/sqlite-adapter';
 import { silentLogger, setLogger } from '../src/errors';
-import { DEFAULT_CONFIG, SpecConfig } from '../src/spec/config';
+import { DEFAULT_CONFIG, loadSpecConfig, SpecConfig } from '../src/spec/config';
 import { writeMeta, discoverSpecs } from '../src/spec/utils';
 
 // ---------------------------------------------------------------------------
@@ -34,6 +34,7 @@ import {
 } from '../src/spec/build/spec-extractor';
 import {
   extractScope,
+  extractBodyScope,
   normalizeScope,
   resolveScopeToSpec,
 } from '../src/spec/build/scope-resolver';
@@ -81,6 +82,13 @@ function createSpecOnDisk(specStoragePath: string, specId: string, planContent: 
   const specDir = path.join(specStoragePath, specId);
   fs.mkdirSync(specDir, { recursive: true });
   fs.writeFileSync(path.join(specDir, 'plan.md'), planContent, 'utf-8');
+}
+
+/** Write a spec config file at `${repo}/.homegraph/commit4spec/configs.json`. */
+function writeSpecConfigFile(repoDir: string, config: Record<string, unknown>): void {
+  const dir = path.join(repoDir, '.homegraph', 'commit4spec');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'configs.json'), JSON.stringify(config), 'utf-8');
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +291,47 @@ describe('git-scanner — scope extraction', () => {
   });
 });
 
+describe('scope-resolver — extractBodyScope', () => {
+  const bodyRegex = '^Spec:\\s*(spec\\d+)\\s*$';
+
+  it('parses a Spec: trailer from the body', () => {
+    const msg = 'feat: add feature\n\nSpec: spec03';
+    expect(extractBodyScope(msg, bodyRegex)).toBe('spec03');
+  });
+
+  it('ignores the first line and only scans the body', () => {
+    const msg = 'feat(spec10): title\nSpec: spec03';
+    expect(extractBodyScope(msg, bodyRegex)).toBe('spec03');
+  });
+
+  it('returns null when there is no body', () => {
+    expect(extractBodyScope('feat: only title', bodyRegex)).toBeNull();
+  });
+
+  it('handles CRLF line endings (lines are trimmed)', () => {
+    const msg = 'feat: add feature\r\n\r\nSpec: spec03\r\n';
+    expect(extractBodyScope(msg, bodyRegex)).toBe('spec03');
+  });
+
+  it('is case-sensitive by default (user regex controls matching)', () => {
+    const msg = 'feat: add feature\nspec: spec03';
+    expect(extractBodyScope(msg, bodyRegex)).toBeNull();
+  });
+
+  it('returns null for an invalid regex', () => {
+    expect(extractBodyScope('Spec: spec03', '(')).toBeNull();
+  });
+
+  it('returns null when the regex has no capture group', () => {
+    expect(extractBodyScope('Spec: spec03', '^Spec:.*$')).toBeNull();
+  });
+
+  it('returns null when the trailer references a non-spec token', () => {
+    const msg = 'feat: add feature\nSpec: fixme';
+    expect(extractBodyScope(msg, bodyRegex)).toBeNull();
+  });
+});
+
 describe('git-scanner — normalizeScope', () => {
   const normConfig = {
     stripPrefixes: ['review/'],
@@ -393,6 +442,49 @@ describe('git-scanner — scan', () => {
       expect(t.total).toBe(2);
     }
     expect(ticks.some((t) => t.message?.includes('feat(spec01)'))).toBe(true);
+  });
+
+  it('bodyRegex end-to-end: body trailer pairs when configured in configs.json', () => {
+    // Full chain: configs.json → loadSpecConfig → scan
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    writeSpecConfigFile(repo, {
+      commitScope: { bodyRegex: '^Spec:\\s*(spec\\d+)\\s*$' },
+    });
+    commitFile(repo, 'src/a.ts', 'x\n', 'feat: body trailer\n\nSpec: spec03');
+
+    const config = loadSpecConfig(repo);
+    expect(config.commitScope.bodyRegex).toBe('^Spec:\\s*(spec\\d+)\\s*$');
+
+    const pairs = scan(repo, specStorage, config);
+    expect(pairs.length).toBe(1);
+    expect(pairs[0]!.specId).toBe('spec03');
+    expect(pairs[0]!.commitMetadata!.message).toContain('Spec: spec03');
+  });
+
+  it('bodyRegex end-to-end: body trailer ignored when not configured', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    writeSpecConfigFile(repo, {}); // no bodyRegex
+    commitFile(repo, 'src/a.ts', 'x\n', 'feat: body trailer\n\nSpec: spec03');
+
+    const config = loadSpecConfig(repo);
+    expect(config.commitScope.bodyRegex).toBeUndefined();
+
+    const pairs = scan(repo, specStorage, config);
+    expect(pairs).toEqual([]);
+  });
+
+  it('bodyRegex end-to-end: title scope without existing spec falls back to body', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    writeSpecConfigFile(repo, {
+      commitScope: { bodyRegex: '^Spec:\\s*(spec\\d+)\\s*$' },
+    });
+    // Title scope (spec99) does not exist on disk; body references spec03.
+    commitFile(repo, 'src/a.ts', 'x\n', 'feat(spec99): stale title\n\nSpec: spec03');
+
+    const config = loadSpecConfig(repo);
+    const pairs = scan(repo, specStorage, config);
+    expect(pairs.length).toBe(1);
+    expect(pairs[0]!.specId).toBe('spec03');
   });
 });
 
@@ -804,6 +896,11 @@ describe('scope-resolver — resolveScopeToSpec', () => {
     specIds = new Set(discoverSpecs(specStorage).map((e) => e.specId));
   };
 
+  const withBodyRegex = (bodyRegex: string) => ({
+    ...DEFAULT_CONFIG,
+    commitScope: { ...DEFAULT_CONFIG.commitScope, bodyRegex },
+  });
+
   it('resolves existing spec on disk', () => {
     createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
     refreshSpecIds();
@@ -828,6 +925,64 @@ describe('scope-resolver — resolveScopeToSpec', () => {
     refreshSpecIds();
     const result = resolveScopeToSpec('feat(review/spec7): review', specIds, DEFAULT_CONFIG);
     expect(result).toBe('spec07');
+  });
+
+  it('resolves a body trailer when the title has no scope', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    refreshSpecIds();
+    const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
+    const result = resolveScopeToSpec('feat: add feature\n\nSpec: spec03', specIds, config);
+    expect(result).toBe('spec03');
+  });
+
+  it('normalizes a body reference (spec3 → spec03)', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    refreshSpecIds();
+    const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
+    const result = resolveScopeToSpec('feat: add feature\n\nSpec: spec3', specIds, config);
+    expect(result).toBe('spec03');
+  });
+
+  it('title scope wins over a body trailer', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    createSpecOnDisk(specStorage, 'spec07', '# Spec 07\n');
+    refreshSpecIds();
+    const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
+    const result = resolveScopeToSpec('feat(spec7): title\nSpec: spec03', specIds, config);
+    expect(result).toBe('spec07');
+  });
+
+  it('falls back to the body when the title scope does not exist on disk', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    refreshSpecIds();
+    const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
+    const result = resolveScopeToSpec('feat(spec99): stale title\n\nSpec: spec03', specIds, config);
+    expect(result).toBe('spec03');
+  });
+
+  it('returns null when the title scope misses on disk and the body misses too', () => {
+    refreshSpecIds();
+    const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
+    const result = resolveScopeToSpec('feat(spec99): stale title\n\nSpec: spec07', specIds, config);
+    expect(result).toBeNull();
+  });
+
+  it('body references are ignored when bodyRegex is not configured', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    refreshSpecIds();
+    const result = resolveScopeToSpec('feat: add feature\n\nSpec: spec03', specIds, DEFAULT_CONFIG);
+    expect(result).toBeNull();
+  });
+
+  it('does not crash when commitScope.normalize is absent (raw scope used)', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    refreshSpecIds();
+    const config = {
+      ...DEFAULT_CONFIG,
+      commitScope: { scopeRegex: DEFAULT_CONFIG.commitScope.scopeRegex },
+    };
+    const result = resolveScopeToSpec('feat(spec03): title', specIds, config);
+    expect(result).toBe('spec03');
   });
 });
 

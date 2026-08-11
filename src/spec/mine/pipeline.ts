@@ -19,6 +19,7 @@ import { readMeta, writeMeta } from '../utils';
 import { scanCommits } from './scanner';
 import { clusterCommits } from './clustering';
 import { generateSpecs } from './generator';
+import { loadSpecMineAddons } from './addon/adapter';
 import { logDebug, logWarn } from '../../errors';
 import { SqliteDatabase } from '../../db/sqlite-adapter';
 import { persistToGraph } from './persist';
@@ -190,12 +191,17 @@ export async function runMinePipeline(
       }
     }
 
+    // Load spec-mine addons once (enrichers + optional buildPrompt takeover).
+    // Registry-driven; only explicitly registered + enabled addons load.
+    const addonSet = await loadSpecMineAddons(repoPath);
+
     const genResult = await generateSpecs(
       clusterResult.clusters,
       client,
       config.outputDir,
       templateContent,
       onProgress,
+      addonSet,
     );
 
     specsGenerated = genResult.specs.length;

@@ -99,7 +99,7 @@ export function scan(
       phase: 'scanning',
       current,
       total,
-      message: `${commit.hash.slice(0, 7)} ${commit.message.slice(0, 30)}`,
+      message: `${commit.hash.slice(0, 7)} ${(commit.message.split('\n', 1)[0] ?? '').slice(0, 30)}`,
     });
 
     const { specId, metadata } = matchCommitToSpec(

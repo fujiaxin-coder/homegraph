@@ -42,6 +42,41 @@ export function extractScope(message: string, scopeRegex: string): string | null
   return null;
 }
 
+/**
+ * Extract a spec reference from the commit message BODY (all lines after
+ * the first). Opt-in second channel used only when `commitScope.bodyRegex`
+ * is configured and the title channel missed.
+ *
+ * Each body line is trimmed so `^`/`$` anchors behave on CRLF commits.
+ * Returns the contents of the first capture group, or `null` when there is
+ * no match, the regex has no capture group, or the regex is invalid.
+ */
+export function extractBodyScope(message: string, bodyRegex: string): string | null {
+  const body = message
+    .split('\n')
+    .slice(1)
+    .map((line) => line.trim())
+    .join('\n');
+  if (!body) return null;
+
+  let regex: RegExp;
+  try {
+    regex = new RegExp(bodyRegex, 'm');
+  } catch {
+    logDebug('extractBodyScope: invalid regex from config, returning null', {
+      bodyRegex,
+    });
+    return null;
+  }
+  const match = regex.exec(body);
+
+  if (match && match[1] !== undefined) {
+    return match[1];
+  }
+
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // normalizeScope
 // ---------------------------------------------------------------------------
@@ -94,28 +129,59 @@ export function normalizeScope(
 // ---------------------------------------------------------------------------
 
 /**
- * Extract a scope from a commit message, normalize it, then check whether the
- * resulting spec ID exists among the known on-disk spec IDs.
+ * Resolve a commit message to a spec ID, if possible.
  *
- * @param message - Commit message (only the first line is searched).
+ * Two channels are tried, each completing the full extract → normalize →
+ * on-disk-existence cycle independently:
+ *
+ * 1. **Title** — conventional-commit scope on the first line. When it
+ *    resolves to an existing spec it wins outright (the body is never
+ *    consulted).
+ * 2. **Body (opt-in)** — a `bodyRegex` footer/trailer reference, consulted
+ *    when the title channel produces no scope, or a scope that does not
+ *    resolve to an existing spec on disk.
+ *
+ * @param message - Full commit message (first line + body).
  * @param specIds - Known spec IDs (from `discoverSpecs`, hoisted by the
  *   caller so scanning N commits does not re-read the directory N times).
  * @param config  - Spec configuration (commitScope section).
  *
- * Returns the normalized spec ID when the scope resolves to an existing spec,
- * otherwise `null`.
+ * Returns the normalized spec ID when either channel resolves to an existing
+ * spec, otherwise `null`.
  */
 export function resolveScopeToSpec(
   message: string,
   specIds: Set<string>,
   config: SpecConfig,
 ): string | null {
-  const scope = extractScope(message, config.commitScope.scopeRegex);
-  if (!scope) {
-    return null;
+  const normalize = config.commitScope.normalize;
+  const resolve = (scope: string): string | null => {
+    // Guard: normalize is user-configurable and may be absent — without it
+    // the raw scope is used as-is.
+    const normalized = normalize ? normalizeScope(scope, normalize) : scope;
+    return specIds.has(normalized) ? normalized : null;
+  };
+
+  // Channel 1: conventional-commit scope on the first line. A title scope
+  // that resolves to an existing on-disk spec wins outright.
+  const titleScope = extractScope(message, config.commitScope.scopeRegex);
+  if (titleScope) {
+    const hit = resolve(titleScope);
+    if (hit) return hit;
+    // Title scope present but does not exist on disk — fall through to the
+    // opt-in body channel instead of failing the whole resolution.
   }
 
-  const normalized = normalizeScope(scope, config.commitScope.normalize);
+  // Channel 2 (opt-in): a body/footer reference (e.g. a "Spec: spec03"
+  // trailer). Consulted when the title channel is absent OR fails the
+  // on-disk existence check.
+  if (config.commitScope.bodyRegex) {
+    const bodyScope = extractBodyScope(message, config.commitScope.bodyRegex);
+    if (bodyScope) {
+      const hit = resolve(bodyScope);
+      if (hit) return hit;
+    }
+  }
 
-  return specIds.has(normalized) ? normalized : null;
+  return null;
 }

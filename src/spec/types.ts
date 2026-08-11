@@ -49,7 +49,7 @@ export interface CommitNode {
   /** Full commit hash (40-char hex) */
   hash: string;
 
-  /** Commit message (first line) */
+  /** Full commit message (may span multiple lines — subject + body) */
   message: string;
 
   /** Commit author name */

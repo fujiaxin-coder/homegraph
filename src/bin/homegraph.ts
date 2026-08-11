@@ -38,6 +38,7 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
+import { registerAddonCommands } from './addon-commands';
 // Lazy-load heavy modules (HomeGraph, runInstaller) to keep CLI startup fast.
 async function loadHomeGraph(): Promise<typeof import('../index')> {
   try {
@@ -2521,7 +2522,7 @@ specCommand
         for (const r of results) {
           console.log(chalk.bold(r.title));
           for (const commit of r.commits) {
-            console.log(`  ${chalk.yellow(commit.hash.slice(0, 7))} ${commit.message}`);
+            console.log(`  ${chalk.yellow(commit.hash.slice(0, 7))} ${commit.message.split('\n', 1)[0] ?? ''}`);
             if (includeFragments && commit.fragments && commit.fragments.length > 0) {
               for (const fragment of commit.fragments.slice(0, profile.maxFragments || 3)) {
                 console.log(chalk.dim(`    ${fragment.file_path}:${fragment.start_line}-${fragment.end_line} [${fragment.change_type}]`));
@@ -3232,6 +3233,11 @@ evolveCommand
       try { db?.close(); } catch { /* best effort */ }
     }
   });
+
+// =============================================================================
+// Addon commands (HomeGraph addon management)
+// =============================================================================
+registerAddonCommands(program, { success, info, warn, error });
 
 /**
  * homegraph index-api <input> [version]

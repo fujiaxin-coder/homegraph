@@ -41,6 +41,14 @@ export interface SpecDiscoveryConfig {
 
 export interface CommitScopeConfig {
   scopeRegex: string;
+  /**
+   * Optional body/footer reference regex (capture group 1 = spec reference).
+   * Consulted when the title channel produces no scope, or a scope that does
+   * not resolve to an existing spec on disk. Example for a "Spec: spec03"
+   * trailer: `^Spec:\s*(spec\d+)\s*$`. Opt-in — absent by default, keeping
+   * the title-only behavior.
+   */
+  bodyRegex?: string;
   normalize: {
     stripPrefixes: string[];
     lowercase: boolean;
@@ -291,6 +299,10 @@ function normalizeCommitScope(
       typeof val.scopeRegex === 'string' && val.scopeRegex.length > 0
         ? val.scopeRegex
         : def.scopeRegex,
+    bodyRegex:
+      typeof val.bodyRegex === 'string' && val.bodyRegex.length > 0
+        ? val.bodyRegex
+        : undefined,
     normalize: {
       stripPrefixes: normalizeStringArray(
         normalizeRaw.stripPrefixes,

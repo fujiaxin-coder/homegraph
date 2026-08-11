@@ -18,6 +18,9 @@ import { extractTitleFromMarkdown } from '../build/spec-extractor';
 import { writeFileContent } from '../utils';
 import { logDebug, logWarn } from '../../errors';
 import type { ProgressCallback } from '../ui';
+import { Supplement } from './addon/types';
+import { enrichCluster, SpecMineAddonSet } from './addon/adapter';
+import { renderSupplementSection } from './addon/render';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,12 +50,32 @@ export interface GenerationResult {
 const MAX_CONTEXT_CHARS = 48000;
 /** Maximum characters per commit symbol list (~1.5K tokens @ ~0.25 token/char). */
 const MAX_SYMBOL_CHARS = 6000;
+/** Maximum characters per supplement entry (~0.5K tokens @ ~0.25 token/char). */
+const MAX_SUPPLEMENT_CHARS = 2000;
 
 /**
  * Build the user prompt with commit-level context from a cluster.
+ *
+ * Addon supplements (external requirement context) render first, under the
+ * same total budget as the cluster context: everything competes for
+ * `MAX_CONTEXT_CHARS`.
  */
-function buildClusterPrompt(cluster: CommitCluster, template: string): string {
+function buildClusterPrompt(
+  cluster: CommitCluster,
+  template: string,
+  supplements: Supplement[] = [],
+): string {
   const parts: string[] = [];
+  let budget = MAX_CONTEXT_CHARS;
+
+  if (supplements.length > 0) {
+    const section = renderSupplementSection(supplements, MAX_SUPPLEMENT_CHARS, budget);
+    if (section) {
+      parts.push(section);
+      parts.push('');
+      budget -= section.length + 1;
+    }
+  }
 
   parts.push('## Cluster Context');
   parts.push('');
@@ -64,8 +87,11 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
   let totalChars = parts.join('\n').length;
 
   for (const change of cluster.commits) {
-    const header = `### ${change.commitHash.slice(0, 7)} — ${change.commitMessage}`;
-    if (totalChars + header.length > MAX_CONTEXT_CHARS) break;
+    // Header uses the one-line subject so multi-line commit messages
+    // (now surfaced via %B) do not break the markdown structure.
+    const subject = change.commitMessage.split('\n', 1)[0] ?? '';
+    const header = `### ${change.commitHash.slice(0, 7)} — ${subject}`;
+    if (totalChars + header.length > budget) break;
 
     const lines: string[] = [header, ''];
 
@@ -113,12 +139,12 @@ function buildClusterPrompt(cluster: CommitCluster, template: string): string {
         : symbolStr;
 
       const block = `${fileHeader}\n${truncated}`;
-      if (totalChars + block.length > MAX_CONTEXT_CHARS) break;
+      if (totalChars + block.length > budget) break;
       lines.push(block);
     }
 
     const commitBlock = lines.join('\n');
-    if (totalChars + commitBlock.length > MAX_CONTEXT_CHARS) break;
+    if (totalChars + commitBlock.length > budget) break;
     parts.push(commitBlock);
     parts.push('');
     totalChars += commitBlock.length + 1;
@@ -196,6 +222,9 @@ export function extractMarkdown(raw: string): string {
  * @param outputDir - Directory to write generated spec files.
  * @param templateContent - Optional custom template string.
  * @param onProgress - Optional progress callback (called per cluster).
+ * @param addonSet - Optional spec-mine addons. Per cluster: enrichers run
+ *   first (supplements feed the prompt), and the first addon exposing
+ *   `buildPrompt` takes over prompt assembly entirely.
  * @returns Generation result with generated specs and stats.
  */
 export async function generateSpecs(
@@ -204,6 +233,7 @@ export async function generateSpecs(
   outputDir: string,
   templateContent?: string,
   onProgress?: ProgressCallback,
+  addonSet?: SpecMineAddonSet,
 ): Promise<GenerationResult> {
   // Use custom template if provided, otherwise use default
   const effectiveTemplate = templateContent || DEFAULT_SPEC_TEMPLATE;
@@ -231,7 +261,48 @@ export async function generateSpecs(
       commitCount: cluster.commits.length,
     });
 
-    const userPrompt = buildClusterPrompt(cluster, effectiveTemplate);
+    // Run addon enrichers for this cluster (parallel, timed, failure-safe).
+    const supplements = addonSet
+      ? await enrichCluster(addonSet.enrichers, cluster)
+      : [];
+
+    // Prompt assembly: the first addon with buildPrompt takes over; otherwise
+    // the default assembler renders the supplement section itself.
+    let userPrompt: string;
+    if (addonSet?.buildPrompt) {
+      try {
+        userPrompt = await addonSet.buildPrompt.fn({
+          cluster: {
+            id: cluster.id,
+            commits: cluster.commits.map((c) => ({
+              commitHash: c.commitHash,
+              commitMessage: c.commitMessage,
+              author: c.author,
+              timestamp: c.timestamp,
+            })),
+            primaryFiles: cluster.primaryFiles,
+            primarySymbols: cluster.primarySymbols,
+          },
+          supplements,
+          template: effectiveTemplate,
+          limits: {
+            maxContextChars: MAX_CONTEXT_CHARS,
+            maxSupplementChars: MAX_SUPPLEMENT_CHARS,
+          },
+        });
+      } catch (err) {
+        logWarn(
+          `Addon ${addonSet.buildPrompt.addon.name} buildPrompt failed — falling back to default prompt assembly`,
+          {
+            specId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+        userPrompt = buildClusterPrompt(cluster, effectiveTemplate, supplements);
+      }
+    } else {
+      userPrompt = buildClusterPrompt(cluster, effectiveTemplate, supplements);
+    }
 
     let raw: string;
     try {
