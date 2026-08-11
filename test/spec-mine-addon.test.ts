@@ -638,6 +638,15 @@ describe('addon manager', () => {
     expect(isLocalPathSpec('foo@1.2.3')).toBe(false);
   });
 
+  it.runIf(process.platform === 'win32')(
+    'isLocalPathSpec recognizes Windows drive-letter and UNC paths',
+    () => {
+      expect(isLocalPathSpec('C:\\foo\\bar')).toBe(true);
+      expect(isLocalPathSpec('C:/foo/bar')).toBe(true);
+      expect(isLocalPathSpec('\\\\server\\share\\pkg')).toBe(true);
+    },
+  );
+
   it('resolvePackageInfo tags local path specs as local source', () => {
     writeFiles(fixtureDir, { 'package.json': validPkgJson('local-addon') });
     expect(resolvePackageInfo(fixtureDir)).toEqual({ name: 'local-addon', source: 'local' });

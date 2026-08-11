@@ -95,7 +95,7 @@ export function isLocalPathSpec(spec: string): boolean {
   return (
     spec.startsWith('./') ||
     spec.startsWith('../') ||
-    spec.startsWith('/') ||
+    path.isAbsolute(spec) || // POSIX '/…' and Windows drive/UNC absolute paths
     spec.startsWith('file:')
   );
 }
