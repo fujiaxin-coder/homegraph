@@ -157,4 +157,52 @@ export class Asset {
       )
     ).toBe(true);
   });
+
+  it('emits NAPI call refs for camelCase methods on lib*.so imports', () => {
+    const root = makeArktsProject({
+      'Util.ets': `
+import multimodalinput from 'libmultimodalinput.so';
+
+export class Util {
+  static getTid(name: string): string | undefined {
+    return multimodalinput.getTidByName(name, '/proc/1/tids');
+  }
+}
+`,
+    });
+
+    bindExtractionContext(root, mockArktsQueries() as never);
+    const result = new ArkTSExtractor('Util.ets', '').extract();
+    expect(result.errors.filter((e) => e.severity === 'error')).toHaveLength(0);
+    expect(
+      result.unresolvedReferences.some(
+        (r) => r.referenceName === 'getTidByName' && r.referenceKind === 'calls'
+      )
+    ).toBe(true);
+  });
+
+  it('emits NAPI call refs for define_class instance methods on lib*.so files', () => {
+    const root = makeArktsProject({
+      'PackProxy.ets': `
+import { LayoutRotatePacking } from 'libLayoutRotatePacking.so';
+
+export class PackProxy {
+  private inst: LayoutRotatePacking | null = null;
+
+  addRuler(): void {
+    this.inst?.addVerticalRuler(3);
+  }
+}
+`,
+    });
+
+    bindExtractionContext(root, mockArktsQueries() as never);
+    const result = new ArkTSExtractor('PackProxy.ets', '').extract();
+    expect(result.errors.filter((e) => e.severity === 'error')).toHaveLength(0);
+    expect(
+      result.unresolvedReferences.some(
+        (r) => r.referenceName === 'addVerticalRuler' && r.referenceKind === 'calls'
+      )
+    ).toBe(true);
+  });
 });

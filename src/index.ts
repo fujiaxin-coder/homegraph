@@ -58,6 +58,10 @@ import {
   ResolutionResult,
 } from './resolution';
 import { GraphTraverser, GraphQueryManager } from './graph';
+import {
+  buildArkUIMigrateSnapshot,
+  type ArkUIMigrateSnapshot,
+} from './arkui/migrate-snapshot';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
@@ -116,6 +120,12 @@ export {
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
 export { MCPServer } from './mcp';
+export {
+  buildArkUIMigrateSnapshot,
+  ARKUI_MIGRATE_SCHEMA_VERSION,
+  DEFAULT_DIRECTORY_COMPONENT_LIMIT,
+  type ArkUIMigrateSnapshot,
+} from './arkui';
 // Addon contract (api 1) — types addon authors import from 'homegraph'
 // (see the `homegraph addon init` scaffold). Only types: no runtime code is
 // pulled into the host by re-exporting them.
@@ -1431,6 +1441,25 @@ export class HomeGraph {
    */
   getIncomingEdges(nodeId: string): Edge[] {
     return this.queries.getIncomingEdges(nodeId);
+  }
+
+  /**
+   * ArkUI migrate / state-semantics snapshot for a scope (spec 0007).
+   * Scope: component name, relative file path, or directory prefix.
+   */
+  getArkUIMigrateSnapshot(scope: string): ArkUIMigrateSnapshot {
+    return buildArkUIMigrateSnapshot(
+      {
+        getNodesByKind: (kind) => this.getNodesByKind(kind),
+        getNodesByName: (name) => this.getNodesByName(name),
+        getNodesInFile: (filePath) => this.getNodesInFile(filePath),
+        getOutgoingEdges: (id) => this.getOutgoingEdges(id),
+        getIncomingEdges: (id) => this.getIncomingEdges(id),
+        getNode: (id) => this.getNode(id),
+        getAllFiles: () => this.getFiles(),
+      },
+      scope
+    );
   }
 
   // ===========================================================================

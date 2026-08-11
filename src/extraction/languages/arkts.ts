@@ -78,6 +78,14 @@ import { buildDefaultIgnore } from '../default-ignore';
 import { EXTRACTION_VERSION } from '../extraction-version';
 import { HomeGraphPackageVersion } from '../../mcp/version';
 import { runWithoutLivenessWatchdog } from '../../mcp/liveness-watchdog';
+import {
+  OBSERVATION_DECORATORS,
+  encodeDecoratorEntries,
+  lineOfOffset,
+  parseDecoratorArgFromContent,
+  scanStorageApiKeys,
+} from '../../arkui/migrate-semantics';
+import { collectPassagesForViewTreeNode } from '../../arkui/migrate-passage';
 import { generateNodeId } from '../tree-sitter-helpers';
 import { buildRelaunchArgv, maxOldSpaceSizeFlag, resolveMaxOldSpaceSizeMb } from '../wasm-runtime-flags';
 import ignore, { type Ignore } from 'ignore';
@@ -462,11 +470,18 @@ function normIndexPath(filePath: string): string {
   return filePath.replace(/\\/g, '/');
 }
 
-/** Member calls through a native `.so` binding: `sdk.Asset_setCropRect(`. */
+/** Photos-style member calls: `sdk.Asset_setCropRect(`. */
 const NAPI_MEMBER_CALL_RE = /\.\s*([A-Z][A-Za-z0-9_]*(?:_[A-Za-z0-9_]+)+)\s*\(/g;
+
+/** `libFoo.so` module path from ArkAnalyzer import infos. */
+const LIB_SO_MODULE_RE = /^lib[A-Za-z0-9_]+\.so$/;
 
 function isNapiSymbolName(name: string): boolean {
   return /^[A-Z][A-Za-z0-9_]*_[A-Za-z0-9_]+$/.test(name);
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 interface ArkTSBatchIndex {
@@ -1405,7 +1420,7 @@ interface ModelWithModifiers {
   isProtected?: () => boolean;
   isStatic?: () => boolean;
   containsModifier?: (modifier: number) => boolean;
-  getDecorators?: () => Iterable<{ getKind: () => string }>;
+  getDecorators?: () => Iterable<{ getKind: () => string; getContent?: () => string }>;
 }
 
 /**
@@ -1922,6 +1937,54 @@ export function stateDecoratorKinds(field: ArkField): string[] {
   return [...decs].map((d) => d.getKind()).filter(Boolean);
 }
 
+/** All field decorators with optional string args (Provide('theme') → theme). */
+export function fieldDecoratorEntries(
+  field: ArkField
+): Array<{ kind: string; arg?: string }> {
+  const out: Array<{ kind: string; arg?: string }> = [];
+  const seen = new Set<string>();
+  const push = (kind: string, arg?: string | null) => {
+    if (!kind || seen.has(kind)) return;
+    seen.add(kind);
+    out.push(arg ? { kind, arg } : { kind });
+  };
+  try {
+    for (const d of field.getDecorators?.() ?? []) {
+      push(d.getKind(), parseDecoratorArgFromContent(d.getContent?.() ?? ''));
+    }
+  } catch {
+    /* ignore */
+  }
+  if (out.length === 0) {
+    for (const kind of stateDecoratorKinds(field)) push(kind);
+  }
+  return out;
+}
+
+/** Encoded decorators list for node.decorators (bare kinds + Kind@arg). */
+export function fieldDecoratorsEncoded(field: ArkField): string[] {
+  return encodeDecoratorEntries(fieldDecoratorEntries(field));
+}
+
+function modelDecoratorEntries(
+  model: ModelWithModifiers
+): Array<{ kind: string; arg?: string }> {
+  const out: Array<{ kind: string; arg?: string }> = [];
+  const seen = new Set<string>();
+  try {
+    for (const d of model.getDecorators?.() ?? []) {
+      const kind = d.getKind();
+      if (!kind || seen.has(kind)) continue;
+      seen.add(kind);
+      const arg = parseDecoratorArgFromContent(d.getContent?.() ?? '');
+      out.push(arg ? { kind, arg } : { kind });
+    }
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
 /** Child @Prop / @Link — edge `via` uses the decorator name as-is. */
 export function stateTransferViaForField(field: ArkField): 'Prop' | 'Link' | null {
   for (const kind of stateDecoratorKinds(field)) {
@@ -1942,7 +2005,8 @@ interface ViewTreeIndexerContext {
     kind: Edge['kind'],
     callerFile: string,
     via: string,
-    line: number
+    line: number,
+    extraMeta?: Record<string, unknown>
   ): void;
   ensureMethodNode(
     method: ArkMethod,
@@ -2317,12 +2381,13 @@ function indexViewTreeForClass(
     target: string,
     kind: Edge['kind'],
     via: string,
-    line: number
+    line: number,
+    extraMeta?: Record<string, unknown>
   ) => {
     const key = `${source}>${target}>${kind}>${via}`;
     if (seen.has(key)) return;
     seen.add(key);
-    ctx.addEdge(result, source, target, kind, relativePath, via, line);
+    ctx.addEdge(result, source, target, kind, relativePath, via, line, extraMeta);
   };
 
   for (const [field] of viewTree.getStateValues()) {
@@ -2390,41 +2455,66 @@ function indexViewTreeForClass(
       }
     }
 
-    if (node.stateValuesTransfer) {
-      for (const [childField, parentValue] of node.stateValuesTransfer) {
-        const childFieldId = ctx.resolveFieldNodeId(childField);
-        if (parentValue instanceof ArkField) {
-          const via = stateTransferViaForField(childField);
-          if (!via || !childFieldId) continue;
-          ctx.markFieldStateDecorators?.(childField, childFieldId, result);
-          const parentFieldId = ctx.resolveFieldNodeId(parentValue);
-          if (parentFieldId) {
-            ctx.markFieldStateDecorators?.(parentValue, parentFieldId, result);
-            link(
-              parentFieldId,
-              childFieldId,
-              'references',
-              via,
-              childField.getOriginFullPosition()?.getFirstLine() ?? 1
-            );
-          }
-        } else if (parentValue instanceof ArkMethod) {
-          let builderId = ctx.ensureMethodNode(parentValue, relativePath, result, classNodeId);
-          if (!builderId) {
-            try {
-              builderId = ctx.resolveMethodIdBySig(parentValue.getSignature());
-            } catch {
-              builderId = null;
+    // Data passages for migrate snapshot (+ Prop/Link edges for explore).
+    try {
+      const passages = collectPassagesForViewTreeNode(node, ctx.scene, cls);
+      for (const p of passages) {
+        const toId = ctx.resolveFieldNodeId(p.toField);
+        if (!toId) continue;
+        ctx.markFieldStateDecorators?.(p.toField, toId, result);
+        let fromId: string | null = null;
+        if (p.fromField) {
+          fromId = ctx.resolveFieldNodeId(p.fromField);
+          if (fromId) ctx.markFieldStateDecorators?.(p.fromField, fromId, result);
+        }
+        if (!fromId && p.fromIsParentComponent) fromId = classNodeId;
+        if (!fromId) continue;
+        const line = p.toField.getOriginFullPosition()?.getFirstLine() ?? 1;
+        link(fromId, toId, 'references', p.via || 'data-passage', line, {
+          passageType: p.passageType,
+          valueType: p.valueType,
+          forcesMigration: p.forcesMigration,
+          parentExpression: p.parentExpression,
+        });
+      }
+    } catch {
+      // Fall back to legacy Prop/Link-only transfer below.
+      if (node.stateValuesTransfer) {
+        for (const [childField, parentValue] of node.stateValuesTransfer) {
+          const childFieldId = ctx.resolveFieldNodeId(childField);
+          if (parentValue instanceof ArkField) {
+            const via = stateTransferViaForField(childField);
+            if (!via || !childFieldId) continue;
+            ctx.markFieldStateDecorators?.(childField, childFieldId, result);
+            const parentFieldId = ctx.resolveFieldNodeId(parentValue);
+            if (parentFieldId) {
+              ctx.markFieldStateDecorators?.(parentValue, parentFieldId, result);
+              link(
+                parentFieldId,
+                childFieldId,
+                'references',
+                via,
+                childField.getOriginFullPosition()?.getFirstLine() ?? 1
+              );
             }
-          }
-          if (childFieldId && builderId) {
-            link(
-              builderId,
-              childFieldId,
-              'references',
-              'builder-param',
-              childField.getOriginFullPosition()?.getFirstLine() ?? 1
-            );
+          } else if (parentValue instanceof ArkMethod) {
+            let builderId = ctx.ensureMethodNode(parentValue, relativePath, result, classNodeId);
+            if (!builderId) {
+              try {
+                builderId = ctx.resolveMethodIdBySig(parentValue.getSignature());
+              } catch {
+                builderId = null;
+              }
+            }
+            if (childFieldId && builderId) {
+              link(
+                builderId,
+                childFieldId,
+                'references',
+                'builder-param',
+                childField.getOriginFullPosition()?.getFirstLine() ?? 1
+              );
+            }
           }
         }
       }
@@ -2481,6 +2571,12 @@ class ArkTSAdapter {
   private readonly crossFileEdges: Edge[] = [];
   /** Per-module `@dummyMain@…` created during analyseByModule (for scene aggregator). */
   private readonly moduleDummyMains: ArkMethod[] = [];
+  /**
+   * Local import binding names from `lib*.so` per relative file path.
+   * Filled before method bodies are scanned so `multimodalinput.getTidByName(`
+   * can emit NAPI call refs (not only photos-style `Class_method` names).
+   */
+  private readonly soImportBindingsByFile = new Map<string, Set<string>>();
 
   constructor(rootDir: string, scannedFiles: Iterable<string>) {
     this.rootDir = rootDir;
@@ -3059,6 +3155,62 @@ class ArkTSAdapter {
         }
       }
     }
+    this.indexObservedClassRefs();
+  }
+
+  /**
+   * State / Param fields whose type names an @Observed / @ObservedV2 class →
+   * `references` via `observed-ref` (arkui-migrate).
+   */
+  private indexObservedClassRefs(): void {
+    const observedByName = new Map<string, string[]>();
+    for (const [, result] of this.fileResults) {
+      for (const n of result.nodes) {
+        if (n.kind !== 'class' && n.kind !== 'struct') continue;
+        const decs = n.decorators ?? [];
+        if (!decs.some((d) => OBSERVATION_DECORATORS.has(d.split('@')[0]!))) continue;
+        const arr = observedByName.get(n.name) ?? [];
+        arr.push(n.id);
+        observedByName.set(n.name, arr);
+      }
+    }
+    if (observedByName.size === 0) return;
+
+    for (const [relativePath, result] of this.fileResults) {
+      for (const field of result.nodes) {
+        if (field.kind !== 'property' && field.kind !== 'field') continue;
+        const typeStr = field.signature ?? '';
+        const bare = typeStr.replace(/<.*>/, '').split(/[.\s|]/).filter(Boolean).pop();
+        if (!bare) continue;
+        const targets = observedByName.get(bare);
+        if (!targets || targets.length === 0) continue;
+        // Prefer unique name; if ambiguous, same-file first
+        let targetId = targets[0]!;
+        if (targets.length > 1) {
+          const sameFile = targets.find((id) => {
+            const n = result.nodes.find((x) => x.id === id);
+            return n?.filePath === relativePath;
+          });
+          if (sameFile) targetId = sameFile;
+          else continue; // ambiguous cross-file — skip (precision > recall)
+        }
+        const edgeKey = `${field.id}\0${targetId}\0observed-ref`;
+        if (this.emittedEdgeKeys.has(edgeKey)) continue;
+        this.emittedEdgeKeys.add(edgeKey);
+        const edge = arkEdge(field.id, targetId, 'references', {
+          metadata: {
+            synthesizedBy: 'arkui-migrate',
+            via: 'observed-ref',
+            registeredAt: `${relativePath}:${field.startLine}`,
+          },
+        });
+        if (this.nodeInFile(targetId, relativePath)) {
+          result.edges.push(edge);
+        } else {
+          this.crossFileEdges.push(edge);
+        }
+      }
+    }
   }
 
   /** Index ArkAnalyzer's in-scene @dummyMain (DummyMainCreater output), not a HomeGraph synthetic node. */
@@ -3122,6 +3274,9 @@ class ArkTSAdapter {
     const result = this.ensureFileResult(relativePath, lineCount);
     const fileId = `file:${relativePath}`;
 
+    // Before methods: record `lib*.so` bindings so body NAPI call scan can see them.
+    this.collectSoImportBindings(relativePath, arkFile);
+
     for (const ns of arkFile.getNamespaces()) {
       this.indexNamespace(relativePath, language, result, ns, fileId);
     }
@@ -3131,6 +3286,61 @@ class ArkTSAdapter {
     this.indexTypeAliases(relativePath, language, result, arkFile, undefined, fileId);
     this.indexModuleLocals(relativePath, language, result, arkFile, undefined, fileId);
     this.indexImports(relativePath, language, result, arkFile, fileId);
+    this.indexStorageApiKeys(relativePath, arkFile, result);
+  }
+
+  /** AppStorage / LocalStorage / … literal keys → arkui-migrate edges from each component. */
+  private indexStorageApiKeys(
+    relativePath: string,
+    arkFile: ArkFile,
+    result: ExtractionResult
+  ): void {
+    let code = '';
+    try {
+      code = arkFile.getCode() ?? '';
+    } catch {
+      return;
+    }
+    if (!code) return;
+    const hits = scanStorageApiKeys(code);
+    if (hits.length === 0) return;
+
+    const componentIds = result.nodes
+      .filter((n) => n.kind === 'component' && n.filePath === relativePath)
+      .map((n) => n.id);
+    if (componentIds.length === 0) return;
+
+    for (const hit of hits) {
+      const line = lineOfOffset(code, hit.index);
+      for (const compId of componentIds) {
+        const edgeKey = `${compId}\0storage-api\0${hit.channel}\0${hit.key}`;
+        if (this.emittedEdgeKeys.has(edgeKey)) continue;
+        this.emittedEdgeKeys.add(edgeKey);
+        result.edges.push(
+          arkEdge(compId, compId, 'references', {
+            metadata: {
+              synthesizedBy: 'arkui-migrate',
+              via: 'storage-api',
+              channel: hit.channel,
+              key: hit.key,
+              method: hit.method,
+              registeredAt: `${relativePath}:${line}`,
+            },
+          })
+        );
+      }
+    }
+  }
+
+  private collectSoImportBindings(relativePath: string, arkFile: ArkFile): void {
+    const set = new Set<string>();
+    for (const importInfo of arkFile.getImportInfos()) {
+      const modulePath = importInfo.getFrom();
+      if (!modulePath || !LIB_SO_MODULE_RE.test(modulePath)) continue;
+      const clause = importInfo.getImportClauseName();
+      if (clause) set.add(clause);
+    }
+    if (set.size > 0) this.soImportBindingsByFile.set(relativePath, set);
   }
 
   private indexModuleLocals(
@@ -3278,8 +3488,10 @@ class ArkTSAdapter {
     const qn = buildClassQualifiedName(cls);
     const kind = classNodeKind(cls);
     const { line, endLine, col } = linesFromPosition(cls.getOriginFullPosition());
+    const classDecs = encodeDecoratorEntries(modelDecoratorEntries(cls));
     const classNode = makeNode(relativePath, language, kind, displayName, qn, line, endLine, col, {
       ...modelModifiersToNodeExtras(cls),
+      ...(classDecs.length > 0 ? { decorators: classDecs } : {}),
     });
     this.addNode(result, classNode);
     this.classToId.set(cls, classNode.id);
@@ -3317,7 +3529,10 @@ class ArkTSAdapter {
         line,
         endLine,
         col,
-        { ...modelModifiersToNodeExtras(cls) }
+        {
+          ...modelModifiersToNodeExtras(cls),
+          ...(classDecs.length > 0 ? { decorators: classDecs } : {}),
+        }
       );
       this.addNode(result, componentNode);
       this.componentToId.set(cls, componentNode.id);
@@ -3428,10 +3643,10 @@ class ArkTSAdapter {
 
     const { line, endLine, col } = linesFromPosition(field.getOriginFullPosition());
     const qn = buildFieldQualifiedName(field);
-    const stateDecs = stateDecoratorKinds(field);
+    const encodedDecs = fieldDecoratorsEncoded(field);
     const fieldNode = makeNode(relativePath, language, kind, name, qn, line, endLine, col, {
       signature: field.getType()?.toString(),
-      ...(stateDecs.length > 0 ? { decorators: stateDecs } : {}),
+      ...(encodedDecs.length > 0 ? { decorators: encodedDecs } : {}),
       ...modelModifiersToNodeExtras(field),
     });
     this.addNode(result, fieldNode);
@@ -3464,8 +3679,9 @@ class ArkTSAdapter {
         kind: Edge['kind'],
         callerFile: string,
         via: string,
-        line: number
-      ) => this.addViewTreeEdge(result, source, target, kind, callerFile, via, line),
+        line: number,
+        extraMeta?: Record<string, unknown>
+      ) => this.addViewTreeEdge(result, source, target, kind, callerFile, via, line, extraMeta),
       ensureMethodNode: (
         method: ArkMethod,
         relativePath: string,
@@ -3479,10 +3695,10 @@ class ArkTSAdapter {
         this.resolveMethodIdBySig(sig, importer),
       resolveFieldNodeId: (field: ArkField) => this.resolveFieldNodeId(field),
       markFieldStateDecorators: (field: ArkField, fieldNodeId: string, result: ExtractionResult) => {
-        const kinds = stateDecoratorKinds(field);
-        if (kinds.length === 0) return;
+        const encoded = fieldDecoratorsEncoded(field);
+        if (encoded.length === 0) return;
         const node = result.nodes.find((n) => n.id === fieldNodeId);
-        if (node) node.decorators = kinds;
+        if (node) node.decorators = encoded;
       },
     };
   }
@@ -3717,7 +3933,8 @@ class ArkTSAdapter {
     kind: Edge['kind'],
     callerFile: string,
     via: string,
-    line: number
+    line: number,
+    extraMeta?: Record<string, unknown>
   ): void {
     const edgeKey = `${source}\0${target}\0${kind}\0${via}`;
     if (this.emittedEdgeKeys.has(edgeKey)) return;
@@ -3728,6 +3945,7 @@ class ArkTSAdapter {
         synthesizedBy: 'viewtree',
         via,
         registeredAt: `${callerFile}:${line}`,
+        ...(extraMeta ?? {}),
       },
     });
     if (this.nodeInFile(target, callerFile)) {
@@ -3823,15 +4041,12 @@ class ArkTSAdapter {
 
     const baseLine = method.getImplOriginFullPosition()?.getFirstLine() ?? 1;
     const seenAtLine = new Set<string>();
-    NAPI_MEMBER_CALL_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = NAPI_MEMBER_CALL_RE.exec(code)) !== null) {
-      const symbol = m[1]!;
-      if (!isNapiSymbolName(symbol)) continue;
-      const lineOffset = code.slice(0, m.index).split('\n').length - 1;
+    const pushCall = (symbol: string, matchIndex: number): void => {
+      if (!symbol) return;
+      const lineOffset = code.slice(0, matchIndex).split('\n').length - 1;
       const line = baseLine + lineOffset;
       const dedupKey = `${symbol}:${line}`;
-      if (seenAtLine.has(dedupKey)) continue;
+      if (seenAtLine.has(dedupKey)) return;
       seenAtLine.add(dedupKey);
       result.unresolvedReferences.push({
         fromNodeId,
@@ -3842,6 +4057,39 @@ class ArkTSAdapter {
         filePath: relativePath,
         language,
       });
+    };
+
+    // Photos-style `Class_method` on any receiver.
+    NAPI_MEMBER_CALL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = NAPI_MEMBER_CALL_RE.exec(code)) !== null) {
+      const symbol = m[1]!;
+      if (!isNapiSymbolName(symbol)) continue;
+      pushCall(symbol, m.index);
+    }
+
+    // `import x from 'libFoo.so'` → `x.draw(` / `x.getTidByName(` (camelCase OK).
+    const soBindings = this.soImportBindingsByFile.get(relativePath);
+    if (soBindings) {
+      for (const binding of soBindings) {
+        const re = new RegExp(
+          `\\b${escapeRegExp(binding)}\\s*\\.\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\(`,
+          'g'
+        );
+        while ((m = re.exec(code)) !== null) {
+          pushCall(m[1]!, m.index);
+        }
+      }
+
+      // define_class / instance path: `this.inst?.addVerticalRuler(` — receiver is
+      // not the import binding. Only in files that already import a lib*.so.
+      const anyMemberRe = /\?\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(|\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+      while ((m = anyMemberRe.exec(code)) !== null) {
+        const symbol = m[1] ?? m[2];
+        if (!symbol) continue;
+        // Skip photos-style names already handled above; keep camelCase / plain ids.
+        pushCall(symbol, m.index);
+      }
     }
   }
 
