@@ -204,12 +204,13 @@ Commit4Spec 提供两条互补路径将设计Spec与 Git 历史关联，存入 `
 {
   //Spec 文档发现：{specId}.md 平铺文件，或 {specId}/ 目录下按 `primaryDocCandidates` 顺序取第一个存在的主文档；目录内匹配 `supplementaryGlobs` 的补充 `.md`文档标题并入 Spec 子标题
   "discovery": {
-    "primaryDocCandidates": ["plan.md", "README.md", "spec.md", "design.md"],
+    "primaryDocCandidates": ["plan.md", "README.md", "spec.md", "design.md", "{spec_dir_name}.md", "spec-{spec_dir_name}.md",],
     "supplementaryGlobs": ["logic/**/*.md", "design/**/*.md"]
   },
-  //commit-spec匹配：从每条 commit message 的第一行提取 conventional-commit scope（如 `feat(spec03): ...`）识别specId；后进行归一化（`commitScope.normalize`）：剥 `review/` 前缀 → 转小写 → `spec3` 补零为 `spec03`
+  //commit-spec匹配：优先从 commit message 的第一行提取 conventional-commit scope（如 `feat(spec03): ...`）；第一行完全未命中 scope 且配置了 `bodyRegex` 时，再从正文/footer 提取 spec 引用（如 `Spec: spec03` trailer）。注意：第一行提取到 scope 后（无论该 spec 在磁盘上是否存在），不会回退到正文引用；`bodyRegex` 仅在第一行完全未命中 scope 时生效。提取后归一化（`commitScope.normalize`）：剥 `review/` 前缀 → 转小写 → `spec3` 补零为 `spec03`
   "commitScope": {
     "scopeRegex": "^(?:feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)\\((?:review\\/)?(spec\\d+)\\)",
+    "bodyRegex": "^Spec:\\s*(spec\\d+)\\s*$",
     "normalize": { "stripPrefixes": ["review/"], "lowercase": true, "padSpecNumber": true }
   }
 }

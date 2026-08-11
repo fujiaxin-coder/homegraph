@@ -42,6 +42,41 @@ export function extractScope(message: string, scopeRegex: string): string | null
   return null;
 }
 
+/**
+ * Extract a spec reference from the commit message BODY (all lines after
+ * the first). Opt-in second channel used only when `commitScope.bodyRegex`
+ * is configured and the title channel missed.
+ *
+ * Each body line is trimmed so `^`/`$` anchors behave on CRLF commits.
+ * Returns the contents of the first capture group, or `null` when there is
+ * no match, the regex has no capture group, or the regex is invalid.
+ */
+export function extractBodyScope(message: string, bodyRegex: string): string | null {
+  const body = message
+    .split('\n')
+    .slice(1)
+    .map((line) => line.trim())
+    .join('\n');
+  if (!body) return null;
+
+  let regex: RegExp;
+  try {
+    regex = new RegExp(bodyRegex, 'm');
+  } catch {
+    logDebug('extractBodyScope: invalid regex from config, returning null', {
+      bodyRegex,
+    });
+    return null;
+  }
+  const match = regex.exec(body);
+
+  if (match && match[1] !== undefined) {
+    return match[1];
+  }
+
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // normalizeScope
 // ---------------------------------------------------------------------------
@@ -110,12 +145,24 @@ export function resolveScopeToSpec(
   specIds: Set<string>,
   config: SpecConfig,
 ): string | null {
-  const scope = extractScope(message, config.commitScope.scopeRegex);
+  // Channel 1: conventional-commit scope on the first line (existing behavior).
+  let scope = extractScope(message, config.commitScope.scopeRegex);
+
+  // Channel 2 (opt-in): a body/footer reference (e.g. a "Spec: spec03"
+  // trailer). Consulted only when the title channel completely missed —
+  // a title scope that fails the on-disk existence check below does NOT
+  // fall back to the body.
+  if (!scope && config.commitScope.bodyRegex) {
+    scope = extractBodyScope(message, config.commitScope.bodyRegex);
+  }
   if (!scope) {
     return null;
   }
 
-  const normalized = normalizeScope(scope, config.commitScope.normalize);
+  // Guard: normalize is user-configurable and may be absent — without it the
+  // raw scope is used as-is.
+  const normalize = config.commitScope.normalize;
+  const normalized = normalize ? normalizeScope(scope, normalize) : scope;
 
   return specIds.has(normalized) ? normalized : null;
 }

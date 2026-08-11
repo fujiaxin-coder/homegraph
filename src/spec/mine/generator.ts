@@ -87,7 +87,10 @@ function buildClusterPrompt(
   let totalChars = parts.join('\n').length;
 
   for (const change of cluster.commits) {
-    const header = `### ${change.commitHash.slice(0, 7)} — ${change.commitMessage}`;
+    // Header uses the one-line subject so multi-line commit messages
+    // (now surfaced via %B) do not break the markdown structure.
+    const subject = change.commitMessage.split('\n', 1)[0] ?? '';
+    const header = `### ${change.commitHash.slice(0, 7)} — ${subject}`;
     if (totalChars + header.length > budget) break;
 
     const lines: string[] = [header, ''];

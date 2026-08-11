@@ -13,7 +13,7 @@
 /** One commit as seen by the mine pipeline (data HomeGraph already holds). */
 export interface AddonCommitInput {
   commitHash: string;
-  /** First line of the commit message. */
+  /** Full commit message (may span multiple lines — subject + body). */
   commitMessage: string;
   author: string;
   timestamp: number;

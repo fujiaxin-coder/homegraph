@@ -326,7 +326,8 @@ async function evaluateAndApply(
       let message = pr.commitHash.slice(0, 7);
       try {
         const info = getCommitInfo(repoPath, pr.commitHash);
-        if (info) message = info.message;
+        // Surface the one-line subject — the full message may span lines.
+        if (info) message = info.message.split('\n', 1)[0] ?? '';
       } catch { /* use short hash */ }
       commitInputs.push({
         commitHash: pr.commitHash,

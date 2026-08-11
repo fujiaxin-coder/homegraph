@@ -2508,7 +2508,7 @@ specCommand
         for (const r of results) {
           console.log(chalk.bold(r.title));
           for (const commit of r.commits) {
-            console.log(`  ${chalk.yellow(commit.hash.slice(0, 7))} ${commit.message}`);
+            console.log(`  ${chalk.yellow(commit.hash.slice(0, 7))} ${commit.message.split('\n', 1)[0] ?? ''}`);
             if (includeFragments && commit.fragments && commit.fragments.length > 0) {
               for (const fragment of commit.fragments.slice(0, profile.maxFragments || 3)) {
                 console.log(chalk.dim(`    ${fragment.file_path}:${fragment.start_line}-${fragment.end_line} [${fragment.change_type}]`));

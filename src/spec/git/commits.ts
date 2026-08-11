@@ -19,7 +19,11 @@ import { gitExecOptions } from './exec';
 export interface CommitInfo {
   /** Full 40-char commit hash */
   hash: string;
-  /** First line of commit message */
+  /**
+   * Full commit message (may span multiple lines — subject + body).
+   * Callers that only need the one-line subject should use the first line
+   * (`message.split('\n', 1)[0]`).
+   */
   message: string;
   /** Author name */
   author: string;
@@ -31,8 +35,8 @@ export interface CommitInfo {
 // git log parsing
 // ---------------------------------------------------------------------------
 
-/** NUL-separated `git log` format: hash, author ISO date, author name, subject. */
-const GIT_LOG_FORMAT = '--format=%H%x00%aI%x00%an%x00%s%x00';
+/** NUL-separated `git log` format: hash, author ISO date, author name, full message. */
+const GIT_LOG_FORMAT = '--format=%H%x00%aI%x00%an%x00%B%x00';
 
 /**
  * Convert an ISO-8601 string to Unix epoch milliseconds.
@@ -175,8 +179,9 @@ export function getCommitsUpTo(repoPath: string, toHash: string): CommitInfo[] {
 /**
  * Retrieve metadata for a single commit.
  *
- * Runs `git show -s --format='%H%n%aI%n%an%n%s' <commitHash>`.  Returns
- * `null` when the command fails (hash not found, invalid repo, etc.).
+ * Runs `git show -s --format='%H%x00%aI%x00%an%x00%B%x00' <commitHash>`
+ * (NUL-separated so the full message, which may span lines, survives).
+ * Returns `null` when the command fails (hash not found, invalid repo, etc.).
  */
 export function getCommitInfo(
   repoPath: string,
@@ -186,24 +191,24 @@ export function getCommitInfo(
   try {
     stdout = execFileSync(
       'git',
-      ['show', '-s', '--format=%H%n%aI%n%an%n%s', commitHash],
+      ['show', '-s', '--format=%H%x00%aI%x00%an%x00%B%x00', commitHash],
       gitExecOptions(repoPath),
     );
   } catch {
     return null;
   }
 
-  const lines = stdout.trim().split('\n');
-  if (lines.length < 4) return null;
+  const parts = stdout.split('\0');
+  if (parts.length < 4) return null;
 
-  const hash = lines[0]!.trim();
+  const hash = parts[0]!.trim();
   if (!hash) return null;
 
   return {
     hash,
-    timestamp: parseISOTimestamp(lines[1]!.trim()),
-    author: lines[2]!.trim(),
-    message: lines[3]!.trim(),
+    timestamp: parseISOTimestamp(parts[1]!.trim()),
+    author: parts[2]!.trim(),
+    message: parts[3]!.trim(),
   };
 }
 
