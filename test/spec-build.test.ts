@@ -473,7 +473,7 @@ describe('git-scanner — scan', () => {
     expect(pairs).toEqual([]);
   });
 
-  it('bodyRegex end-to-end: title scope hit without existing spec does not fall back to body', () => {
+  it('bodyRegex end-to-end: title scope without existing spec falls back to body', () => {
     createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
     writeSpecConfigFile(repo, {
       commitScope: { bodyRegex: '^Spec:\\s*(spec\\d+)\\s*$' },
@@ -483,7 +483,8 @@ describe('git-scanner — scan', () => {
 
     const config = loadSpecConfig(repo);
     const pairs = scan(repo, specStorage, config);
-    expect(pairs).toEqual([]);
+    expect(pairs.length).toBe(1);
+    expect(pairs[0]!.specId).toBe('spec03');
   });
 });
 
@@ -949,6 +950,21 @@ describe('scope-resolver — resolveScopeToSpec', () => {
     const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
     const result = resolveScopeToSpec('feat(spec7): title\nSpec: spec03', specIds, config);
     expect(result).toBe('spec07');
+  });
+
+  it('falls back to the body when the title scope does not exist on disk', () => {
+    createSpecOnDisk(specStorage, 'spec03', '# Spec 03\n');
+    refreshSpecIds();
+    const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
+    const result = resolveScopeToSpec('feat(spec99): stale title\n\nSpec: spec03', specIds, config);
+    expect(result).toBe('spec03');
+  });
+
+  it('returns null when the title scope misses on disk and the body misses too', () => {
+    refreshSpecIds();
+    const config = withBodyRegex('^Spec:\\s*(spec\\d+)\\s*$');
+    const result = resolveScopeToSpec('feat(spec99): stale title\n\nSpec: spec07', specIds, config);
+    expect(result).toBeNull();
   });
 
   it('body references are ignored when bodyRegex is not configured', () => {

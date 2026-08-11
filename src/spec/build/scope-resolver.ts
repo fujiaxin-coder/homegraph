@@ -129,40 +129,59 @@ export function normalizeScope(
 // ---------------------------------------------------------------------------
 
 /**
- * Extract a scope from a commit message, normalize it, then check whether the
- * resulting spec ID exists among the known on-disk spec IDs.
+ * Resolve a commit message to a spec ID, if possible.
  *
- * @param message - Commit message (only the first line is searched).
+ * Two channels are tried, each completing the full extract → normalize →
+ * on-disk-existence cycle independently:
+ *
+ * 1. **Title** — conventional-commit scope on the first line. When it
+ *    resolves to an existing spec it wins outright (the body is never
+ *    consulted).
+ * 2. **Body (opt-in)** — a `bodyRegex` footer/trailer reference, consulted
+ *    when the title channel produces no scope, or a scope that does not
+ *    resolve to an existing spec on disk.
+ *
+ * @param message - Full commit message (first line + body).
  * @param specIds - Known spec IDs (from `discoverSpecs`, hoisted by the
  *   caller so scanning N commits does not re-read the directory N times).
  * @param config  - Spec configuration (commitScope section).
  *
- * Returns the normalized spec ID when the scope resolves to an existing spec,
- * otherwise `null`.
+ * Returns the normalized spec ID when either channel resolves to an existing
+ * spec, otherwise `null`.
  */
 export function resolveScopeToSpec(
   message: string,
   specIds: Set<string>,
   config: SpecConfig,
 ): string | null {
-  // Channel 1: conventional-commit scope on the first line (existing behavior).
-  let scope = extractScope(message, config.commitScope.scopeRegex);
+  const normalize = config.commitScope.normalize;
+  const resolve = (scope: string): string | null => {
+    // Guard: normalize is user-configurable and may be absent — without it
+    // the raw scope is used as-is.
+    const normalized = normalize ? normalizeScope(scope, normalize) : scope;
+    return specIds.has(normalized) ? normalized : null;
+  };
+
+  // Channel 1: conventional-commit scope on the first line. A title scope
+  // that resolves to an existing on-disk spec wins outright.
+  const titleScope = extractScope(message, config.commitScope.scopeRegex);
+  if (titleScope) {
+    const hit = resolve(titleScope);
+    if (hit) return hit;
+    // Title scope present but does not exist on disk — fall through to the
+    // opt-in body channel instead of failing the whole resolution.
+  }
 
   // Channel 2 (opt-in): a body/footer reference (e.g. a "Spec: spec03"
-  // trailer). Consulted only when the title channel completely missed —
-  // a title scope that fails the on-disk existence check below does NOT
-  // fall back to the body.
-  if (!scope && config.commitScope.bodyRegex) {
-    scope = extractBodyScope(message, config.commitScope.bodyRegex);
-  }
-  if (!scope) {
-    return null;
+  // trailer). Consulted when the title channel is absent OR fails the
+  // on-disk existence check.
+  if (config.commitScope.bodyRegex) {
+    const bodyScope = extractBodyScope(message, config.commitScope.bodyRegex);
+    if (bodyScope) {
+      const hit = resolve(bodyScope);
+      if (hit) return hit;
+    }
   }
 
-  // Guard: normalize is user-configurable and may be absent — without it the
-  // raw scope is used as-is.
-  const normalize = config.commitScope.normalize;
-  const normalized = normalize ? normalizeScope(scope, normalize) : scope;
-
-  return specIds.has(normalized) ? normalized : null;
+  return null;
 }

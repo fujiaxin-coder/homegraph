@@ -43,9 +43,10 @@ export interface CommitScopeConfig {
   scopeRegex: string;
   /**
    * Optional body/footer reference regex (capture group 1 = spec reference).
-   * Only consulted when the title (`scopeRegex`) does not match. Example for
-   * a "Spec: spec03" trailer: `^Spec:\s*(spec\d+)\s*$`. Opt-in — absent by
-   * default, keeping the title-only behavior.
+   * Consulted when the title channel produces no scope, or a scope that does
+   * not resolve to an existing spec on disk. Example for a "Spec: spec03"
+   * trailer: `^Spec:\s*(spec\d+)\s*$`. Opt-in — absent by default, keeping
+   * the title-only behavior.
    */
   bodyRegex?: string;
   normalize: {
