@@ -247,6 +247,14 @@ Commit4Spec 提供两条互补路径将设计Spec与 Git 历史关联，存入 `
 }
 ```
 
+**查询与分析：**
+
+```bash
+homegraph spec match "用户登录"    # CLI/MCP 全文搜索
+homegraph spec find src/auth.ts   # 哪些Spec涉及该文件
+homegraph spec trace UserService  # 追溯符号关联的设计Spec
+```
+
 **Addons（插件扩展）：**
 
 `homegraph addon` 管理可插拔扩展包，为 `spec mine` 注入外部需求上下文（如 Jira 工单详情），无需 HomeGraph 认识任何工单格式：
@@ -255,6 +263,7 @@ Commit4Spec 提供两条互补路径将设计Spec与 Git 历史关联，存入 `
 homegraph addon init my-jira       # 生成 addon 脚手架（内置示例）
 homegraph addon install ./my-jira  # 安装并登记（记录具体版本号）
 homegraph addon list               # 查看已登记的 addon 及状态
+homegraph addon update my-jira     # 更新（默认按记录 range 内最新；--latest 强制 @latest，仅 registry 包）
 homegraph addon disable my-jira    # 停用（保留安装）
 homegraph addon remove my-jira     # 注销（--purge 同时删除文件）
 ```
@@ -264,14 +273,6 @@ Addon 实现 `enrich` 钩子：HomeGraph 按 commit 簇传入其已有的 commit
 （可选） `buildPrompt` 钩子：用于整体接管 prompt 组装——HomeGraph 传入簇数据、已去重的补充文本、输出模板与字符预算（软约定），由 addon 自行组装完整 prompt，第一个提供该钩子的 addon 生效，调用失败自动回退到默认组装。
 
 每个 addon 独立超时（15s）且失败不影响生成；包需在 package.json 声明 `"homegraph": { "addon": true, "api": 1 }`；登记表存于 `.homegraph/addons.json`，仅显式登记且启用的 addon 才会被加载。
-
-**查询与分析：**
-
-```bash
-homegraph spec match "用户登录"    # CLI/MCP 全文搜索
-homegraph spec find src/auth.ts   # 哪些Spec涉及该文件
-homegraph spec trace UserService  # 追溯符号关联的设计Spec
-```
 
 ---
 

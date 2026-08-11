@@ -24,6 +24,12 @@ export interface AddonRegistryEntry {
   version: string;
   /** Whether the addon is loaded at runtime. */
   enabled: boolean;
+  /**
+   * Where the package was installed from. Drives the install version gate
+   * (a local path is re-pointed by npm, never downgraded by us) and
+   * `update --latest` (registry packages only — local paths have no dist-tag).
+   */
+  source: 'registry' | 'local';
 }
 
 /** Shape of the repository-level addon registry file. */

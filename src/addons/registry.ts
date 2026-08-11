@@ -29,7 +29,8 @@ function isValidEntry(value: unknown): value is AddonRegistryEntry {
     typeof entry.name === 'string' &&
     entry.name.length > 0 &&
     typeof entry.version === 'string' &&
-    typeof entry.enabled === 'boolean'
+    typeof entry.enabled === 'boolean' &&
+    (entry.source === 'registry' || entry.source === 'local')
   );
 }
 
@@ -54,7 +55,16 @@ export function readRegistry(repoRoot: string): AddonRegistry {
     }
     const rawAddons = (parsed as { addons?: unknown }).addons;
     if (!Array.isArray(rawAddons)) return { addons: [] };
-    return { addons: rawAddons.filter(isValidEntry) };
+    const addons = rawAddons.filter(isValidEntry);
+    if (addons.length !== rawAddons.length) {
+      // Entries from a pre-`source` registry are dropped outright (no
+      // compatibility path) — surface it so a vanishing addon is diagnosable.
+      logWarn(
+        `Dropped ${rawAddons.length - addons.length} entry(ies) from ${file}: ` +
+          'missing "source" (registry format changed — reinstall them with "homegraph addon install")',
+      );
+    }
+    return { addons };
   } catch (err) {
     logWarn(`Ignoring ${file}: not a valid addon registry`, {
       file,

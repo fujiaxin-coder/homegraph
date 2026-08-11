@@ -224,17 +224,28 @@ export function registerAddonCommands(program: Command, log: AddonLog): void {
 
   addonCommand
     .command('update [name]')
-    .description('Update registered addon(s) to the latest version')
+    .description('Update registered addon(s) — default: latest within the recorded range; --latest: newest published version')
     .option('-p, --path <path>', 'Repository root')
-    .action(async (name: string | undefined, options: { path?: string }) => {
+    .option('-l, --latest', 'Update to the newest published version (registry packages only)')
+    .action(async (name: string | undefined, options: { path?: string; latest?: boolean }) => {
       try {
         const repoRoot = resolveAddonRoot(options.path || process.cwd());
         const { updateAddon } = await import('../addons/manager');
-        const updated = await updateAddon(repoRoot, name);
-        if (updated.length === 0) {
+        const results = await updateAddon(repoRoot, name, { latest: !!options.latest });
+        const changed = results.filter((r) => r.from !== r.to);
+        const unchanged = results.filter((r) => r.from === r.to);
+        if (changed.length > 0) {
+          log.success(
+            `Updated: ${changed.map((r) => `${r.name}@${r.from} -> ${r.to}`).join(', ')}`,
+          );
+        }
+        if (unchanged.length > 0) {
+          log.info(
+            `Already up to date: ${unchanged.map((r) => `${r.name}@${r.to}`).join(', ')}`,
+          );
+        }
+        if (changed.length === 0 && unchanged.length === 0) {
           log.info(name ? `No update performed for ${name}` : 'No registered addons to update.');
-        } else {
-          log.success(`Updated: ${updated.join(', ')}`);
         }
       } catch (err) {
         log.error(`Update failed: ${err instanceof Error ? err.message : String(err)}`);

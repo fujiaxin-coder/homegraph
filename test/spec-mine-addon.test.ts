@@ -59,7 +59,11 @@ import {
   listAddons,
   updateAddon,
   resolvePackageName,
+  resolvePackageInfo,
+  isLocalPathSpec,
+  resolveUpdateSpec,
 } from '../src/addons/manager';
+import { compareSemver } from '../src/addons/semver';
 import { renderSupplementSection } from '../src/spec/mine/addon/render';
 import {
   dedupeSupplements,
@@ -172,10 +176,10 @@ describe('addon registry', () => {
 
   it('write then read round-trips entries', () => {
     writeRegistry(repo, {
-      addons: [{ name: '@scope/foo', version: '1.0.0', enabled: true }],
+      addons: [{ name: '@scope/foo', version: '1.0.0', enabled: true, source: 'registry' }],
     });
     expect(readRegistry(repo)).toEqual({
-      addons: [{ name: '@scope/foo', version: '1.0.0', enabled: true }],
+      addons: [{ name: '@scope/foo', version: '1.0.0', enabled: true, source: 'registry' }],
     });
   });
 
@@ -184,17 +188,17 @@ describe('addon registry', () => {
   });
 
   it('upsertEntry inserts a new entry and creates the file', () => {
-    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true });
+    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true, source: 'registry' });
     expect(fs.existsSync(registryFilePath(repo))).toBe(true);
     expect(readRegistry(repo).addons).toEqual([
-      { name: 'a', version: '0.1.0', enabled: true },
+      { name: 'a', version: '0.1.0', enabled: true, source: 'registry' },
     ]);
   });
 
   it('upsertEntry replaces an existing entry preserving position', () => {
-    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true });
-    upsertEntry(repo, { name: 'b', version: '0.2.0', enabled: false });
-    upsertEntry(repo, { name: 'a', version: '0.1.1', enabled: false });
+    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true, source: 'registry' });
+    upsertEntry(repo, { name: 'b', version: '0.2.0', enabled: false, source: 'local' });
+    upsertEntry(repo, { name: 'a', version: '0.1.1', enabled: false, source: 'registry' });
     expect(readRegistry(repo).addons.map((e) => e.name)).toEqual(['a', 'b']);
     expect(readRegistry(repo).addons[0]!.version).toBe('0.1.1');
   });
@@ -204,14 +208,14 @@ describe('addon registry', () => {
   });
 
   it('removeEntry removes only the matching entry', () => {
-    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true });
-    upsertEntry(repo, { name: 'b', version: '0.2.0', enabled: true });
+    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true, source: 'registry' });
+    upsertEntry(repo, { name: 'b', version: '0.2.0', enabled: true, source: 'registry' });
     expect(removeEntry(repo, 'a')).toBe(true);
     expect(readRegistry(repo).addons.map((e) => e.name)).toEqual(['b']);
   });
 
   it('setEntryEnabled toggles the flag', () => {
-    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true });
+    upsertEntry(repo, { name: 'a', version: '0.1.0', enabled: true, source: 'registry' });
     expect(setEntryEnabled(repo, 'a', false)).toBe(true);
     expect(readRegistry(repo).addons[0]!.enabled).toBe(false);
     expect(setEntryEnabled(repo, 'missing', true)).toBe(false);
@@ -226,14 +230,15 @@ describe('addon registry', () => {
     writeFiles(path.dirname(registryFilePath(repo)), {
       'addons.json': JSON.stringify({
         addons: [
-          { name: 'ok', version: '1.0.0', enabled: true },
-          { name: 42, version: '1.0.0', enabled: true },
+          { name: 'ok', version: '1.0.0', enabled: true, source: 'registry' },
+          { name: 42, version: '1.0.0', enabled: true, source: 'registry' },
           { name: 'no-version' },
+          { name: 'legacy', version: '1.0.0', enabled: true }, // pre-`source` format — dropped, no compatibility path
         ],
       }),
     });
     expect(readRegistry(repo).addons).toEqual([
-      { name: 'ok', version: '1.0.0', enabled: true },
+      { name: 'ok', version: '1.0.0', enabled: true, source: 'registry' },
     ]);
   });
 });
@@ -388,7 +393,7 @@ describe('addon loader', () => {
         : JSON.stringify({ name, version: '1.0.0', main: 'index.mjs' }),
       'index.mjs': VALID_ENRICH,
     });
-    upsertEntry(repo, { name, version: '1.0.0', enabled });
+    upsertEntry(repo, { name, version: '1.0.0', enabled, source: 'registry' });
   }
 
   it('loads enabled registered addons in registry order', async () => {
@@ -405,7 +410,7 @@ describe('addon loader', () => {
   });
 
   it('skips registered-but-not-installed addons', async () => {
-    upsertEntry(repo, { name: 'ghost', version: '1.0.0', enabled: true });
+    upsertEntry(repo, { name: 'ghost', version: '1.0.0', enabled: true, source: 'registry' });
     expect(await loadAddons(repo)).toEqual([]);
   });
 
@@ -435,12 +440,12 @@ describe('addon loader', () => {
       'package.json': validPkgJson('enricher-only'),
       'index.mjs': VALID_ENRICH,
     });
-    upsertEntry(repo, { name: 'enricher-only', version: '1.0.0', enabled: true });
+    upsertEntry(repo, { name: 'enricher-only', version: '1.0.0', enabled: true, source: 'registry' });
     writeFiles(addonPkgDir(repo, 'taker'), {
       'package.json': validPkgJson('taker'),
       'index.mjs': `${VALID_ENRICH}\nexport async function buildPrompt(ctx) { return 'T'; }\n`,
     });
-    upsertEntry(repo, { name: 'taker', version: '1.0.0', enabled: true });
+    upsertEntry(repo, { name: 'taker', version: '1.0.0', enabled: true, source: 'registry' });
 
     const set = await loadSpecMineAddons(repo);
     expect(set.enrichers.length).toBe(2);
@@ -548,7 +553,7 @@ describe('addon manager', () => {
 
     const registry = readRegistry(repo);
     expect(registry.addons).toEqual([
-      { name: 'local-addon', version: '1.2.3', enabled: true },
+      { name: 'local-addon', version: '1.2.3', enabled: true, source: 'local' },
     ]);
     expect(fs.existsSync(path.join(addonPkgDir(repo, 'local-addon'), 'index.mjs'))).toBe(true);
   });
@@ -609,18 +614,167 @@ describe('addon manager', () => {
       'index.mjs': VALID_ENRICH,
     });
     await installAddon(repo, fixtureDir, { enable: true });
-    upsertEntry(repo, { name: 'ghost-addon', version: '2.0.0', enabled: true });
+    upsertEntry(repo, { name: 'ghost-addon', version: '2.0.0', enabled: true, source: 'registry' });
 
     const list = listAddons(repo);
     expect(list).toEqual([
-      { name: 'present-addon', version: '1.2.3', enabled: true, installed: true },
-      { name: 'ghost-addon', version: '2.0.0', enabled: true, installed: false },
+      { name: 'present-addon', version: '1.2.3', enabled: true, source: 'local', installed: true },
+      { name: 'ghost-addon', version: '2.0.0', enabled: true, source: 'registry', installed: false },
     ]);
   });
 
   it('updateAddon is a no-op for an empty registry and throws for unknown names', async () => {
     expect(await updateAddon(repo)).toEqual([]);
     await expect(updateAddon(repo, 'nope')).rejects.toThrow(/not registered/);
+  });
+
+  it('isLocalPathSpec detects local path specs', () => {
+    expect(isLocalPathSpec('./x')).toBe(true);
+    expect(isLocalPathSpec('../x')).toBe(true);
+    expect(isLocalPathSpec('/abs/x')).toBe(true);
+    expect(isLocalPathSpec('file:../x')).toBe(true);
+    expect(isLocalPathSpec('foo')).toBe(false);
+    expect(isLocalPathSpec('@scope/foo')).toBe(false);
+    expect(isLocalPathSpec('foo@1.2.3')).toBe(false);
+  });
+
+  it('resolvePackageInfo tags local path specs as local source', () => {
+    writeFiles(fixtureDir, { 'package.json': validPkgJson('local-addon') });
+    expect(resolvePackageInfo(fixtureDir)).toEqual({ name: 'local-addon', source: 'local' });
+  });
+
+  it('resolveUpdateSpec follows the recorded range or forces @latest', () => {
+    expect(resolveUpdateSpec('foo', false)).toBe('foo');
+    expect(resolveUpdateSpec('foo', true)).toBe('foo@latest');
+  });
+
+  it('installAddon refuses to downgrade an installed addon', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(repo, fixtureDir, { enable: true });
+
+    // Same source, lower version → rejected before npm touches the store.
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon', { version: '1.0.0' }),
+      'index.mjs': VALID_ENRICH,
+    });
+    await expect(installAddon(repo, fixtureDir, { enable: true })).rejects.toThrow(
+      /older than the installed/,
+    );
+    expect(readRegistry(repo).addons).toEqual([
+      { name: 'local-addon', version: '1.2.3', enabled: true, source: 'local' },
+    ]);
+  });
+
+  it('installAddon upgrades to a newer version and records it', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(repo, fixtureDir, { enable: true });
+
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon', { version: '2.0.0' }),
+      'index.mjs': VALID_ENRICH,
+    });
+    const result = await installAddon(repo, fixtureDir, { enable: true });
+    expect(result.version).toBe('2.0.0');
+    expect(readRegistry(repo).addons[0]!.version).toBe('2.0.0');
+    expect(readRegistry(repo).addons[0]!.source).toBe('local');
+  });
+
+  it('installAddon restores the previous version when an upgrade fails validation', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(repo, fixtureDir, { enable: true });
+
+    // The upgrade target is no longer a valid addon (no homegraph marker).
+    writeFiles(fixtureDir, {
+      'package.json': JSON.stringify({ name: 'local-addon', version: '3.0.0', main: 'index.mjs' }),
+      'index.mjs': VALID_ENRICH,
+    });
+    await expect(installAddon(repo, fixtureDir, { enable: true })).rejects.toThrow(
+      /not a valid HomeGraph addon/,
+    );
+
+    // Registry untouched and the store entry still resolves (link restored).
+    expect(readRegistry(repo).addons).toEqual([
+      { name: 'local-addon', version: '1.2.3', enabled: true, source: 'local' },
+    ]);
+    expect(fs.existsSync(path.join(addonPkgDir(repo, 'local-addon'), 'package.json'))).toBe(true);
+    // No rollback backups linger after the failed attempt.
+    expect(fs.readdirSync(addonsRootDir(repo)).some((f) => f.startsWith('.rollback-'))).toBe(false);
+  });
+
+  it('keeps source local when the name is pre-resolved (CLI path)', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    // The CLI resolves the name up front and passes it via options.name.
+    await installAddon(repo, fixtureDir, { enable: true, name: 'local-addon' });
+    expect(readRegistry(repo).addons[0]!.source).toBe('local');
+  });
+
+  it('refuses a versionless local package against an installed version', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(repo, fixtureDir, { enable: true });
+
+    // No version → resolves to '0.0.0' (the same fallback validation uses) →
+    // a genuine downgrade against 1.2.3 → refused before npm runs.
+    writeFiles(fixtureDir, {
+      'package.json': JSON.stringify({
+        name: 'local-addon',
+        type: 'module',
+        exports: { '.': './index.mjs' },
+        homegraph: { addon: true, api: 1 },
+      }),
+      'index.mjs': VALID_ENRICH,
+    });
+    await expect(installAddon(repo, fixtureDir, { enable: true })).rejects.toThrow(
+      /older than the installed/,
+    );
+    expect(readRegistry(repo).addons[0]!.version).toBe('1.2.3');
+  });
+
+  it('re-installing the same version is an idempotent no-op', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(repo, fixtureDir, { enable: true });
+    await installAddon(repo, fixtureDir, { enable: true });
+    expect(readRegistry(repo).addons).toEqual([
+      { name: 'local-addon', version: '1.2.3', enabled: true, source: 'local' },
+    ]);
+  });
+
+  it('updateAddon rejects --latest for local-path addons', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(repo, fixtureDir, { enable: true });
+    await expect(updateAddon(repo, 'local-addon', { latest: true })).rejects.toThrow(
+      /local path.*registry packages only/,
+    );
+  });
+
+  it('updateAddon returns from/to for a local addon re-link (no change)', async () => {
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(repo, fixtureDir, { enable: true });
+    const results = await updateAddon(repo, 'local-addon');
+    expect(results).toEqual([{ name: 'local-addon', from: '1.2.3', to: '1.2.3' }]);
   });
 });
 
@@ -840,5 +994,37 @@ describe('generateSpecs with addon set', () => {
     expect(result.specs.length).toBe(1);
     const userPrompt = (client.chat as ReturnType<typeof vi.fn>).mock.calls[0]![1] as string;
     expect(userPrompt).not.toContain('## Supplement');
+  });
+});
+
+// ===========================================================================
+// Semver (install version gate)
+// ===========================================================================
+
+describe('addon semver', () => {
+  it('compares core versions numerically', () => {
+    expect(compareSemver('1.2.3', '1.2.3')).toBe(0);
+    expect(compareSemver('1.2.3', '1.2.4')).toBeLessThan(0);
+    expect(compareSemver('2.0.0', '1.9.9')).toBeGreaterThan(0);
+    expect(compareSemver('1.10.0', '1.9.0')).toBeGreaterThan(0);
+  });
+
+  it('ignores a leading v and build metadata', () => {
+    expect(compareSemver('v1.2.3', '1.2.3')).toBe(0);
+    expect(compareSemver('1.2.3+build.5', '1.2.3')).toBe(0);
+  });
+
+  it('orders prereleases below their release', () => {
+    expect(compareSemver('1.0.0-alpha', '1.0.0')).toBeLessThan(0);
+    expect(compareSemver('1.0.0-alpha', '1.0.0-beta')).toBeLessThan(0);
+    // Numeric prerelease identifiers compare numerically.
+    expect(compareSemver('1.0.0-2', '1.0.0-10')).toBeLessThan(0);
+    // A shorter prerelease list sorts first.
+    expect(compareSemver('1.0.0-alpha', '1.0.0-alpha.1')).toBeLessThan(0);
+  });
+
+  it('treats unparseable versions as equal (conservative gate)', () => {
+    expect(compareSemver('garbage', '1.0.0')).toBe(0);
+    expect(compareSemver('1.0', '1.0.0')).toBe(0);
   });
 });
