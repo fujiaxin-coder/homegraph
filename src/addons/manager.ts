@@ -33,6 +33,7 @@ import { addonsRootDir, addonPkgDir } from './paths';
 import { readRegistry, upsertEntry, removeEntry } from './registry';
 import { validateAddonPackage } from './validate';
 import { compareSemver } from './semver';
+import { npmInvocation } from '../upgrade/index';
 import { AddonRegistryEntry } from './types';
 
 /** Result of a successful install. */
@@ -49,13 +50,35 @@ export interface InstallOptions {
   name?: string;
 }
 
-/** npm executable — `.cmd` on Windows. */
-function npmBin(): string {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
+/**
+ * Run npm with the given arguments.
+ *
+ * On Windows `npm.cmd` cannot be spawned directly — CreateProcess rejects
+ * `.cmd` files with EINVAL (since the CVE-2024-27980 hardening) — and
+ * routing through cmd.exe re-quotes the command line, breaking arguments
+ * that contain spaces (e.g. a repository path under a username with
+ * spaces). Instead run npm's CLI entry with node.exe, which passes the
+ * argument array through verbatim; falls back to the cmd.exe invocation
+ * used by the upgrade path when npm-cli.js is absent.
+ */
 function runNpm(args: string[]): string {
-  return execFileSync(npmBin(), args, {
+  if (process.platform === 'win32') {
+    const npmCli = path.join(
+      path.dirname(process.execPath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
+    const { cmd, args: cmdArgs } = fs.existsSync(npmCli)
+      ? { cmd: process.execPath, args: [npmCli, ...args] }
+      : npmInvocation(process.platform, args);
+    return execFileSync(cmd, cmdArgs, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
+  return execFileSync('npm', args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });

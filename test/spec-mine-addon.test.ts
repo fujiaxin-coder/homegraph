@@ -756,6 +756,20 @@ describe('addon manager', () => {
     ]);
   });
 
+  it('installs into a repository path containing spaces', async () => {
+    // npm args pass through verbatim (no shell re-quoting) — a repo path
+    // with spaces must survive install and list.
+    const spacedRepo = path.join(repo, 'my repo with spaces');
+    fs.mkdirSync(spacedRepo, { recursive: true });
+    writeFiles(fixtureDir, {
+      'package.json': validPkgJson('local-addon'),
+      'index.mjs': VALID_ENRICH,
+    });
+    await installAddon(spacedRepo, fixtureDir, { enable: true });
+    expect(readRegistry(spacedRepo).addons[0]!.version).toBe('1.2.3');
+    expect(listAddons(spacedRepo)[0]!.installed).toBe(true);
+  });
+
   it('updateAddon rejects --latest for local-path addons', async () => {
     writeFiles(fixtureDir, {
       'package.json': validPkgJson('local-addon'),
