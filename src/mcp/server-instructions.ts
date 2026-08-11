@@ -114,6 +114,8 @@ If explore/search returns **Skip HomeGraph**, treat as final — do not retry ho
 
 - **Staleness banner** — Read only the listed edited files.
 
+- **A file flagged "⚠ changed on disk after the last index sync" drifted from its index** (most common on projects queried via \`projectPath\`, which have no live watcher). HomeGraph never serves a possibly-mis-sliced body from such a file — it either shows the file's full CURRENT source (trust it as a Read) or omits the source with this flag. When the source was omitted, Read that specific file; line numbers referencing it elsewhere in the response may be shifted until that project's next sync. All unflagged files remain trustworthy.
+
 - **Not indexed** — built-in tools; user runs \`homegraph init\` — you do not.
 
 `;

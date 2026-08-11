@@ -835,6 +835,30 @@ export class HomeGraph {
           }
         }
 
+        // Re-open resolution edges this sync may have invalidated ELSEWHERE in
+        // the repo. Everything above re-resolves references in the changed
+        // files; this covers the opposite direction — references in files the
+        // sync never touched whose answer depended on a definition that just
+        // appeared or disappeared. Without it a synced index never converges
+        // to a full rebuild. The resurrected refs are pending rows, so the
+        // orphan sweep immediately below is what resolves them — batched,
+        // yielding, multi-pass, exactly as a full index resolves.
+        //
+        // `definitionDelta` is empty for a body-only edit, so the overwhelmingly
+        // common sync pays one branch. HOMEGRAPH_NO_REBIND=1 disables it.
+        if (result.definitionDelta && process.env.HOMEGRAPH_NO_REBIND !== '1') {
+          const tRebind = Date.now();
+          const rebound = this.orchestrator.resurrectStaleResolutionEdges(
+            result.definitionDelta,
+            result.changedFilePaths ?? []
+          );
+          if (process.env.HOMEGRAPH_SYNTH_TIMINGS) {
+            console.error(
+              `[phase-timing] sync-rebind: ${Date.now() - tRebind}ms (${result.definitionDelta.length} changed names, ${rebound} edges re-opened)`
+            );
+          }
+        }
+
         const orphanCount = this.queries.getUnresolvedReferencesCount();
         if (orphanCount > 0) {
           options.onProgress?.({
@@ -1151,6 +1175,7 @@ export class HomeGraph {
   getStats(): GraphStats {
     const stats = this.queries.getStats();
     stats.dbSizeBytes = this.db.getSize();
+    stats.walSizeBytes = this.db.getWalSizeBytes();
     return stats;
   }
 

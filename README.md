@@ -184,8 +184,10 @@ Agent 侧工具名前缀为 `homegraph_`。
 | `homegraph_node` | 读取单个符号或整个文件的源码（带行号）及调用关系；可替代 Read 读文件 |
 | `homegraph_callers` / `homegraph_callees` | 查看调用方 / 被调用方 |
 | `homegraph_impact` | 变更影响分析（重构前使用） |
+| `homegraph_diff_impact` | 传入 unified diff（或 hunks），返回与变更行相交的符号及调用/影响证据包（代码审查用） |
+| `homegraph_arkui_migrate` | 一次返回 ArkUI 组件迁移/状态语义快照（装饰器、状态字段、Provide/Consume 等） |
 | `homegraph_files` | 已索引的文件树（支持 glob 过滤、按语言分组） |
-| `homegraph_status` | 索引健康状态（调试用） |
+| `homegraph_status` | 索引健康状态（调试用；含 WAL 大小等） |
 | `homegraph_spec_match` | 将新需求描述与 Commit4Spec 知识图谱做全文匹配，返回相似历史Spec及关联提交与代码片段 |
 | `homegraph_spec_find` | 根据文件路径反向查找关联的Spec |
 | `homegraph_spec_trace` | 根据代码符号追溯回关联的Spec |

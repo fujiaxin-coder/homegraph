@@ -20,6 +20,7 @@ import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX } from './server
 import { HomeGraphPackageVersion } from './version';
 import { findNearestHomeGraphRoot } from '../directory';
 import { getUpdateNotice } from '../upgrade/update-check';
+import { ExploreSessionState } from './explore-session-state';
 
 /**
  * MCP Server Info — kept on the session because some clients log it. The
@@ -107,6 +108,12 @@ export class MCPSession {
   private rootsAttempted = false;
   private resolvePromise: Promise<void> | null = null;
   private explicitProjectPath: string | null;
+  /**
+   * Per-session explore history (CG-17). Lives here — not on ToolHandler —
+   * because the daemon shares one handler across every connected session; a
+   * reconnecting client starts clean.
+   */
+  private readonly exploreSession = new ExploreSessionState();
 
   constructor(
     private transport: JsonRpcTransport,
@@ -135,6 +142,15 @@ export class MCPSession {
   /** Underlying transport — exposed for daemon-side close hooks. */
   getTransport(): JsonRpcTransport {
     return this.transport;
+  }
+
+  /**
+   * This session's explore call history. Exposed so tests / diagnostics can
+   * inspect it; tool dispatch reaches it via the execute(sessionState) arg —
+   * never by reaching for another session's copy.
+   */
+  getExploreSessionState(): ExploreSessionState {
+    return this.exploreSession;
   }
 
   private async handleMessage(message: JsonRpcRequest | JsonRpcNotification): Promise<void> {
@@ -276,7 +292,7 @@ export class MCPSession {
     await this.retryInitIfNeeded();
 
     if (process.env.HOMEGRAPH_MCP_DEBUG) process.stderr.write(`[mcp-debug] toolsCall ${toolName} id=${String(request.id)} dispatch\n`);
-    const result = await this.engine.getToolHandler().execute(toolName, toolArgs);
+    const result = await this.engine.getToolHandler().execute(toolName, toolArgs, this.exploreSession);
     if (process.env.HOMEGRAPH_MCP_DEBUG) process.stderr.write(`[mcp-debug] toolsCall ${toolName} id=${String(request.id)} done\n`);
     this.transport.sendResult(request.id, result);
   }

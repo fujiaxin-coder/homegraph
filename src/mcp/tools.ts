@@ -15,7 +15,16 @@ import { findNearestHomeGraphRoot } from '../directory';
 // HomeGraph is pulled in only when a tool actually opens a project. require() is
 // sync + cached (CommonJS build).
 const loadHomeGraph = (): typeof import('../index').default =>
-  (require('../index') as typeof import('../index')).default;
+  loadHomeGraphForTests ?? (require('../index') as typeof import('../index')).default;
+// Test seam (same pattern as the watcher's `__setFsWatchForTests`): vitest's
+// module transform can't service the lazy `require('../index')` above, so
+// in-process tests that exercise a genuine cross-project open (an explicit
+// `projectPath` to a different project — issue #1474's repro shape) inject the
+// already-imported class here. Never set outside tests.
+let loadHomeGraphForTests: typeof import('../index').default | null = null;
+export function __setLoadHomeGraphForTests(cls: typeof import('../index').default | null): void {
+  loadHomeGraphForTests = cls;
+}
 import {
   detectWorktreeIndexMismatch,
   worktreeMismatchWarning,
@@ -34,10 +43,32 @@ import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractK
 import {
   existsSync,
   readFileSync,
+  statSync,
 } from 'fs';
+import { createHash } from 'crypto';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { isOhosApiFilePath, OHOS_API_FILE_PREFIX } from '../extraction/languages/arkts';
+import {
+  EXPLORE_EMISSION_KEY,
+  EXPLORE_SESSION_VIEW_ARG,
+  ExploreSessionState,
+  readExploreSessionView,
+  viewForProject,
+  type ExploreEmission,
+  type ExploreFileEmission,
+  type ExploreLineRange,
+} from './explore-session-state';
+import {
+  EXPLORE_DEDUP,
+  dedupeRange,
+  exploreDedupEnabled,
+  fileFingerprint,
+  formatBackReference,
+  mergeRanges,
+  servedRangesForFile,
+  symbolsInSpans,
+} from './explore-dedup';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import {
   buildMcpQueryCacheKey,
@@ -741,6 +772,12 @@ export interface ToolResult {
     text: string;
   }>;
   isError?: boolean;
+  /**
+   * Internal: what an explore call emitted (CG-17). {@link ToolHandler.execute}
+   * records it into the calling session's state and deletes it before the result
+   * reaches the wire — see {@link EXPLORE_EMISSION_KEY}.
+   */
+  _hgExploreEmission?: ExploreEmission;
 }
 
 /**
@@ -1041,7 +1078,7 @@ export const tools: ToolDefinition[] = [
     description:
       'ArkUI migrate / state-semantics snapshot in ONE call (components, state decorators + args, ' +
       'data-passage types, Provide/Consume/Storage key channels, @Observed classes). ' +
-      'PRIMARY for ArkUI V1↔V2 migration decisions — do NOT stitch with explore. ' +
+      'Required: `scope`. PRIMARY for ArkUI V1↔V2 migration decisions — do NOT stitch with explore. ' +
       'Scope: component name, relative .ets path, or directory prefix. Returns JSON (no source bodies).',
     inputSchema: {
       type: 'object',
@@ -1049,7 +1086,7 @@ export const tools: ToolDefinition[] = [
         scope: {
           type: 'string',
           description:
-            'Component name (e.g. "ParentPage"), relative file (e.g. "pages/Index.ets"), or directory prefix.',
+            'Required. Component name (e.g. "ParentPage"), relative file (e.g. "pages/Index.ets"), or directory prefix.',
         },
         projectPath: projectPathProperty,
       },
@@ -1705,6 +1742,45 @@ export class ToolHandler {
    * Cost when nothing is pending — the common case — is one boolean check.
    * No I/O, no parsing of markdown beyond a per-pending-file substring scan.
    */
+  private driftCache = new Map<string, { at: number; stale: boolean }>();
+  private static readonly DRIFT_TTL_MS = 2000;
+
+  /**
+   * On-disk drift check for a single indexed file (issue #1474). The code
+   * renderers slice CURRENT bytes at INDEXED line ranges; when the file
+   * changed after its last index sync those ranges can point at a DIFFERENT
+   * symbol's code. Freshness is verified here from data the index already
+   * stores: one stat() (size + mtime); content hashed only on mismatch.
+   */
+  private isFileStaleOnDisk(cg: HomeGraph, relPath: string, content?: string): boolean {
+    let root: string;
+    try {
+      root = cg.getProjectRoot();
+    } catch {
+      return false;
+    }
+    const key = `${root}\0${relPath}`;
+    const now = Date.now();
+    const hit = this.driftCache.get(key);
+    if (hit && now - hit.at < ToolHandler.DRIFT_TTL_MS) return hit.stale;
+    let stale = false;
+    try {
+      const rec = cg.getFile(relPath);
+      const absPath = rec ? validatePathWithinRoot(root, relPath) : null;
+      if (rec && absPath && existsSync(absPath)) {
+        const st = statSync(absPath);
+        if (st.size !== rec.size || Math.floor(st.mtimeMs) !== Math.floor(rec.modifiedAt)) {
+          const data = content ?? readFileSync(absPath, 'utf-8');
+          stale = createHash('sha256').update(data).digest('hex') !== rec.contentHash;
+        }
+      }
+    } catch {
+      stale = false;
+    }
+    this.driftCache.set(key, { at: now, stale });
+    return stale;
+  }
+
   private withStalenessNotice(result: ToolResult, projectPath?: string): ToolResult {
     if (result.isError) return result;
 
@@ -1807,9 +1883,16 @@ export class ToolHandler {
   }
 
   /**
-   * Execute a tool by name
+   * Execute a tool by name.
+   *
+   * `sessionState` is the calling MCP session's explore history (CG-17). Omit
+   * it (the CLI does) and explore behaves exactly as before, untracked.
    */
-  async execute(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+  async execute(
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionState?: ExploreSessionState,
+  ): Promise<ToolResult> {
     try {
       // Block the first tool call on the engine's post-open reconcile so we
       // never serve rows for files deleted/edited while no MCP server was
@@ -1866,7 +1949,10 @@ export class ToolHandler {
         }
       }
 
-      const cacheEnabled = isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
+      // Session-tracked explore must not hit the MCP query cache: a cache hit
+      // would re-serve the first call's full source and defeat CG-18 dedup.
+      const skipCacheForSession = toolName === 'homegraph_explore' && !!sessionState;
+      const cacheEnabled = !skipCacheForSession && isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
       let cacheKey: string | undefined;
       let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
       let cacheIndex: ReturnType<typeof getMcpQueryCacheIndex> | undefined;
@@ -1935,10 +2021,16 @@ export class ToolHandler {
         }
       }
 
+      // Explore also carries the session's own call history down (CG-17) and its
+      // emission record back up. Both travel as plain properties — on the args
+      // object down, on the ToolResult up — because either leg may cross a
+      // structured-clone boundary into a worker.
+      const dispatchArgs = this.withSessionView(toolName, args, sessionState);
       // prefers the query pool so sync SQLite/CPU cannot freeze the transport
       // (a frozen main loop prevents setTimeout deadlines from firing → empty
       // `-32001`). Fast-path surveys run inside the worker via executeReadTool.
-      const result = await this.runReadToolWithDeadline(toolName, args);
+      const raw = await this.runReadToolWithDeadline(toolName, dispatchArgs);
+      const result = this.takeExploreEmission(raw, sessionState);
       if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !result.isError) {
         cacheIndex.setEntry(cacheQueries, cacheKey, toolName, result);
       }
@@ -1964,6 +2056,57 @@ export class ToolHandler {
         'continue without homegraph for this task.'
       );
     }
+  }
+
+  /**
+   * Attach the caller's session view to an explore call's args (CG-17), on a
+   * COPY so the caller's object is never mutated. Nothing else sees it: a
+   * non-explore tool, or a caller with no session state, gets the args
+   * unchanged and pays nothing.
+   *
+   * A client that spells the internal key itself is stripped rather than
+   * trusted — the view decides what source a later call may withhold, so it has
+   * to come from the server's own record, never from the wire.
+   */
+  private withSessionView(
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionState: ExploreSessionState | undefined,
+  ): Record<string, unknown> {
+    if (!(EXPLORE_SESSION_VIEW_ARG in args) && (!sessionState || toolName !== 'homegraph_explore')) {
+      return args;
+    }
+    const copy = { ...args };
+    delete copy[EXPLORE_SESSION_VIEW_ARG];
+    if (sessionState && toolName === 'homegraph_explore') {
+      copy[EXPLORE_SESSION_VIEW_ARG] = sessionState.view();
+    }
+    return copy;
+  }
+
+  /**
+   * Record an explore call's emission into the caller's session state and strip
+   * it from the result (CG-17).
+   *
+   * Unconditional strip: the property is internal, so it comes off even when
+   * there is no session state to record it into (the CLI path) — that is what
+   * keeps the agent-facing response byte-identical. Recording is wrapped
+   * because a bookkeeping bug must never fail a tool call that already
+   * succeeded.
+   */
+  private takeExploreEmission(
+    result: ToolResult,
+    sessionState: ExploreSessionState | undefined,
+  ): ToolResult {
+    const emission = result?.[EXPLORE_EMISSION_KEY];
+    if (emission === undefined) return result;
+    delete result[EXPLORE_EMISSION_KEY];
+    if (sessionState) {
+      try {
+        sessionState.record(emission);
+      } catch { /* bookkeeping only — never fail a served call */ }
+    }
+    return result;
   }
 
   /**
@@ -2146,8 +2289,8 @@ export class ToolHandler {
     // for "Send" surfaces the hand-written keeper before .pb.go stubs
     // that share the name. Stable: only reorders generated vs. not.
     const ranked = [...results].sort((a, b) => {
-      const aGen = isGeneratedFile(a.node.filePath) ? 1 : 0;
-      const bGen = isGeneratedFile(b.node.filePath) ? 1 : 0;
+      const aGen = this.isGeneratedCandidate(cg, a.node.filePath) ? 1 : 0;
+      const bGen = this.isGeneratedCandidate(cg, b.node.filePath) ? 1 : 0;
       return aGen - bGen;
     });
 
@@ -6580,12 +6723,33 @@ export class ToolHandler {
       const testFiles = callerFiles.filter((f) => isTestFile(f));
       const nonTest = callerFiles.filter((f) => !isTestFile(f));
 
+      // Indirect test coverage via one hop of callers (tests that call a
+      // direct caller) when nothing calls the root from a test file.
+      let indirectTests: string[] = [];
+      if (testFiles.length === 0) {
+        const seenTest = new Set<string>();
+        for (const c of uniq.slice(0, 8)) {
+          let next: Array<{ node: Node }> = [];
+          try { next = cg.getCallers(c.id) as Array<{ node: Node }>; } catch { continue; }
+          for (const n of next) {
+            const fp = rel(n.node.filePath);
+            if (isTestFile(fp) && !seenTest.has(fp)) {
+              seenTest.add(fp);
+              indirectTests.push(fp);
+            }
+          }
+        }
+        indirectTests = indirectTests.slice(0, FILE_CAP);
+      }
+
       const shown = nonTest.slice(0, FILE_CAP).map((f) => `\`${f}\``).join(', ');
       const more = nonTest.length > FILE_CAP ? ` +${nonTest.length - FILE_CAP} more` : '';
       const where = nonTest.length > 0 ? ` in ${shown}${more}` : '';
       const tests = testFiles.length > 0
         ? `; tests: ${testFiles.slice(0, FILE_CAP).map((f) => `\`${f}\``).join(', ')}${testFiles.length > FILE_CAP ? ` +${testFiles.length - FILE_CAP}` : ''}`
-        : '; ⚠️ no covering tests found';
+        : indirectTests.length > 0
+          ? `; tests (via callers): ${indirectTests.map((f) => `\`${f}\``).join(', ')}`
+          : '; ⚠️ no covering tests found';
 
       entries.push(
         `- \`${root.name}\` (${rel(root.filePath)}:${root.startLine}) — ${uniq.length} caller${uniq.length === 1 ? '' : 's'}${where}${tests}`,
@@ -7095,9 +7259,10 @@ export class ToolHandler {
     // Test/spec/icon/i18n file detector — used both for the pre-sort hard
     // filter (tiny tier) and the comparator deprioritization (all tiers).
     const isLowValue = (p: string) => {
-      const lp = p.toLowerCase();
+      const lp = p.toLowerCase().replace(/\\/g, '/');
       return (
-        /\/(tests?|__tests?__|spec)\//.test(lp) ||
+        // Top-level test/ / spec/ as well as nested …/tests?/…
+        /(?:^|\/)(tests?|specs?|__tests?__|testdata|mocks?|fixtures?)\//.test(lp) ||
         /_test\.go$/.test(lp) ||
         /(?:^|\/)test_[^/]+\.py$/.test(lp) ||
         /_test\.py$/.test(lp) ||
@@ -7112,6 +7277,12 @@ export class ToolHandler {
         /\bi18n\b/.test(lp)
       );
     };
+
+    /** Hand-written ambient `.d.ts` — down-rank for behavior/flow questions (CG-28). */
+    const isAmbientDts = (p: string) => /\.d\.ts$/i.test(p.replace(/\\/g, '/'));
+
+    /** Path convention OR persisted content-banner flag. */
+    const isGeneratedCandidate = (fp: string): boolean => this.isGeneratedCandidate(cg, fp);
 
     // Hard-exclude test/spec files (ALL tiers, not just tiny). One slipped test
     // file dominates the per-file budget on small repos (cobra's `command_test.go`
@@ -7308,15 +7479,16 @@ export class ToolHandler {
       const bLow = isLowValue(bPath);
       if (aLow !== bLow) return aLow ? 1 : -1;
 
-      // Deprioritize generated source (.pb.go / .pulsar.go / _mocks.go / …) —
-      // the agent rarely needs to see the protobuf scaffold or gomock output
-      // when asking about the actual flow, and dumping their bodies inflates
-      // the response (the cosmos Q3 explore otherwise leads with
-      // `expected_keepers_mocks.go`, displacing the real `tally.go` content
-      // and forcing the agent to Read tally.go anyway).
-      const aGen = isGeneratedFile(a[0]);
-      const bGen = isGeneratedFile(b[0]);
+      // Deprioritize generated source (path suffixes OR content banner).
+      const aGen = isGeneratedCandidate(a[0]);
+      const bGen = isGeneratedCandidate(b[0]);
       if (aGen !== bGen) return aGen ? 1 : -1;
+
+      // Hand-written ambient `.d.ts` — demote unless the agent named a type
+      // defined there (behavior questions want implementations, not typings).
+      const aAmbient = isAmbientDts(a[0]) && !namedSeedFiles.has(a[0]) ? 1 : 0;
+      const bAmbient = isAmbientDts(b[0]) && !namedSeedFiles.has(b[0]) ? 1 : 0;
+      if (aAmbient !== bAmbient) return aAmbient - bAmbient;
 
       if (a[1].score !== b[1].score) return b[1].score - a[1].score;
       return b[1].nodes.length - a[1].nodes.length;
@@ -7610,6 +7782,9 @@ export class ToolHandler {
 
     lines.push('**Source Code**');
     lines.push('');
+    // Recorded so the drift pass below (#1474) can append a per-file exception
+    // to this guarantee after the render loop knows which files drifted.
+    const verbatimHeaderIdx = lines.length;
     lines.push(
       '> Line-numbered source — treat as already Read. Answer from Flow + Source below when you can; ' +
       'do not re-read/grep these files, and do not fan out `homegraph_node` / search for symbols already shown. ' +
@@ -7623,6 +7798,35 @@ export class ToolHandler {
     // (#1046) — it must reflect what we show, not the raw candidate gather.
     const renderedFilePaths: string[] = [];
     let anyFileTrimmed = false;
+    // Files that changed on disk after their last index sync (#1474).
+    const staleRendered: string[] = [];
+    const staleOmitted: string[] = [];
+
+    // What this session has already been served for THIS project (CG-17), and
+    // whether this call may act on it (CG-18). Dedup is off on the session's
+    // first call by construction — there is nothing to point back AT — and off
+    // entirely under `HOMEGRAPH_EXPLORE_DEDUP=0`.
+    const priorCalls = viewForProject(readExploreSessionView(args), projectRoot);
+    const dedupEnabled = exploreDedupEnabled() && (priorCalls?.calls.length ?? 0) > 0;
+    const emittedByFile = new Map<
+      string,
+      { ranges: ExploreLineRange[]; bytes: number; fingerprint?: string }
+    >();
+    const noteEmitted = (
+      fp: string,
+      ranges: ExploreLineRange[],
+      bytes: number,
+      fingerprint?: string,
+    ): void => {
+      const existing = emittedByFile.get(fp);
+      if (existing) {
+        existing.ranges.push(...ranges);
+        existing.bytes += bytes;
+        if (fingerprint) existing.fingerprint = fingerprint;
+      } else {
+        emittedByFile.set(fp, { ranges: [...ranges], bytes, fingerprint });
+      }
+    };
 
     const limitSingleFile = shouldLimitToQueryNamedFile(query, hasFlowPath, multiAnchor)
       || (interpretationQuery && queryFileBasenames.length === 1);
@@ -7714,6 +7918,61 @@ export class ToolHandler {
       const fileLines = fileContent.split('\n');
       const lang = group.nodes[0]?.language || '';
 
+      // Disk-drift gate (#1474): every render branch below except whole-file
+      // slices fileContent (CURRENT bytes) at INDEXED line ranges.
+      const fileStale = this.isFileStaleOnDisk(cg, filePath, fileContent);
+
+      // Cross-call dedup (CG-18). `served` is what THIS session already sent the
+      // agent for THIS file, and it is empty unless the file still hashes to the
+      // bytes those spans were sliced from — an edit between calls means the
+      // agent's copy is wrong, so nothing is withheld.
+      const fingerprint = fileFingerprint(fileContent);
+      const served = dedupEnabled ? servedRangesForFile(priorCalls, filePath, fingerprint) : [];
+      const withLineNumbers = exploreLineNumbersEnabled();
+      const renderSpan = (r: ExploreLineRange): string => {
+        const slice = fileLines.slice(r.start - 1, r.end).join('\n');
+        return withLineNumbers ? numberSourceLines(slice, r.start) : slice;
+      };
+      /**
+       * Emit one file's section — header, optional back-reference for held spans,
+       * and the fence for what is new. Fully-held files become pointers and do
+       * not consume a `maxFiles` slot (budget goes to unseen files).
+       */
+      const emitFileSection = (opts: {
+        header: string;
+        body: string;
+        ranges: ExploreLineRange[];
+        covered: ExploreLineRange[];
+      }): void => {
+        const folded = opts.covered.length > 0 && opts.body.length < EXPLORE_DEDUP.MIN_DELTA_CHARS;
+        const body = folded ? '' : opts.body;
+        const ranges = folded ? [] : opts.ranges;
+        lines.push(opts.header, '');
+        totalChars += opts.header.length + 2;
+        if (opts.covered.length > 0) {
+          const pointer = formatBackReference(
+            filePath,
+            opts.covered,
+            symbolsInSpans(group.nodes, opts.covered),
+            { partial: body.length > 0 },
+          );
+          lines.push(pointer, '');
+          totalChars += pointer.length + 2;
+        }
+        if (body.length > 0) {
+          lines.push('```' + lang, body, '```', '');
+          totalChars += body.length + lang.length + 11;
+          noteEmitted(filePath, [...ranges, ...opts.covered], body.length, fingerprint);
+          renderedFilePaths.push(filePath);
+          filesIncluded++;
+          return;
+        }
+        // Fully held — pointer only; still record spans at zero bytes.
+        noteEmitted(filePath, opts.covered, 0, fingerprint);
+        renderedFilePaths.push(filePath);
+        // Do not increment filesIncluded: slot goes to a file the agent has not seen.
+      };
+
       // Adaptive sizing (HOMEGRAPH_ADAPTIVE_EXPLORE, default on): collapse a file
       // to a per-symbol view when it's a redundant member of a polymorphic family.
       // Engages iff ALL hold:
@@ -7752,7 +8011,7 @@ export class ToolHandler {
       const onSpineGodFile = hasSpineNode
         && namedBodyChars > budget.maxCharsPerFile
         && group.nodes.some(n => CALLABLE_BODY.has(n.kind) && flow.uniqueNamedNodeIds.has(n.id) && !flow.pathNodeIds.has(n.id));
-      if (adaptiveExploreEnabled() && flow.pathNodeIds.size > 0
+      if (!fileStale && adaptiveExploreEnabled() && flow.pathNodeIds.size > 0
           && (onSpineGodFile || (!hasSpineNode && isPolymorphicSibling(group.nodes) && !spared))) {
         const syms = group.nodes
           .filter(n => n.kind !== 'import' && n.kind !== 'export' && n.startLine > 0)
@@ -7824,8 +8083,28 @@ export class ToolHandler {
           const tag = bodyIds.size > 0
             ? 'focused (the methods you named in full, the rest as signatures — homegraph_explore a signature by name for its body; do NOT Read)'
             : 'skeleton (signatures only — homegraph_explore a name for its full body; do NOT Read)';
-          lines.push(fileSectionHeader(filePath, `${names} · ${tag}`), '', '```' + lang, skel.join('\n'), '```', '');
-          totalChars += skel.join('\n').length + 120;
+          const skelHeader = fileSectionHeader(filePath, `${names} · ${tag}`);
+          // If this session already holds the whole file, replace the skeleton
+          // with a pointer rather than re-serving signatures/bodies.
+          const wholeRange: ExploreLineRange = { start: 1, end: Math.max(1, fileLines.length) };
+          const ddWhole = dedupeRange(wholeRange, served);
+          if (ddWhole.covered.length > 0 && ddWhole.emit.length === 0) {
+            emitFileSection({
+              header: skelHeader,
+              body: '',
+              ranges: [],
+              covered: ddWhole.covered,
+            });
+            continue;
+          }
+          const skelBody = skel.join('\n');
+          const bodyRanges: ExploreLineRange[] = [...bodyIds].map((id) => {
+            const n = group.nodes.find((x) => x.id === id);
+            return n ? { start: n.startLine, end: n.endLine || n.startLine } : null;
+          }).filter((r): r is ExploreLineRange => !!r);
+          lines.push(skelHeader, '', '```' + lang, skelBody, '```', '');
+          totalChars += skelBody.length + 120;
+          noteEmitted(filePath, bodyRanges.length > 0 ? bodyRanges : [wholeRange], skelBody.length, fingerprint);
           renderedFilePaths.push(filePath);
           filesIncluded++;
           continue;
@@ -7857,8 +8136,8 @@ export class ToolHandler {
         ? Math.min(Math.max(0, budget.maxOutputChars - totalChars - 200), Math.round(budget.maxCharsPerFile * 1.5))
         : budget.maxCharsPerFile * 3;
       if (fileLines.length <= WHOLE_FILE_MAX_LINES && fileContent.length <= WHOLE_FILE_MAX_CHARS) {
-        const body = fileContent.replace(/\n+$/, '');
-        let wholeSection = exploreLineNumbersEnabled() ? numberSourceLines(body, 1) : body;
+        const wholeRange: ExploreLineRange = { start: 1, end: Math.max(1, fileLines.length) };
+        const dd = dedupeRange(wholeRange, served);
         const uniqSymbols = [...new Set(
           group.nodes
             .filter(n => n.kind !== 'import' && n.kind !== 'export')
@@ -7866,19 +8145,43 @@ export class ToolHandler {
         )];
         const headerNames = uniqSymbols.slice(0, budget.maxSymbolsInFileHeader);
         const omitted = uniqSymbols.length - headerNames.length;
-        const wholeHeader = fileSectionHeader(filePath, omitted > 0 ? `${headerNames.join(', ')}, +${omitted} more` : headerNames.join(', '));
+        // A drifted file rendered WHOLE is still correct (current bytes) —
+        // only index-derived symbol list / line refs may be shifted (#1474).
+        const staleSuffix = fileStale ? ' · ⚠ changed since last index sync — source below is current; the symbol list may be outdated' : '';
+        const wholeHeader = fileSectionHeader(filePath, (omitted > 0 ? `${headerNames.join(', ')}, +${omitted} more` : headerNames.join(', ')) + staleSuffix);
 
-        if (!fileNecessary && totalChars + wholeSection.length + 200 > budget.maxOutputChars) {
+        const emitParts = dd.emit.length > 0
+          ? dd.emit.map((r) => ({ range: r, text: renderSpan(r) }))
+          : [];
+        const wholeSection = emitParts.map((p) => p.text).join('\n');
+        const emitRanges = emitParts.map((p) => p.range);
+
+        if (!fileNecessary && totalChars + Math.max(wholeSection.length, 80) + 200 > budget.maxOutputChars && dd.covered.length === 0) {
           // Don't slice a whole file mid-method: an incidental file that doesn't
           // fit is skipped; a necessary one (below) renders in full. Half a file
           // forces the Read this is meant to prevent.
           anyFileTrimmed = true;
           continue;
         }
-        lines.push(wholeHeader, '', '```' + lang, wholeSection, '```', '');
-        totalChars += wholeSection.length + 200;
-        renderedFilePaths.push(filePath);
-        filesIncluded++;
+        emitFileSection({
+          header: wholeHeader,
+          body: wholeSection,
+          ranges: emitRanges,
+          covered: dd.covered,
+        });
+        if (fileStale && wholeSection.length > 0) staleRendered.push(filePath);
+        continue;
+      }
+
+      // Drifted file too big for the whole-file window (#1474): omit rather
+      // than risk a mis-sliced cluster/skeleton render.
+      if (fileStale) {
+        staleOmitted.push(filePath);
+        lines.push(
+          fileSectionHeader(filePath, '⚠ changed on disk after the last index sync — source omitted (indexed line ranges no longer match, so a slice could show the wrong code). Read this file directly for current content; the change is picked up on that project\'s next index sync.'),
+          '',
+        );
+        totalChars += 260;
         continue;
       }
 
@@ -8032,7 +8335,6 @@ export class ToolHandler {
       // until the per-file char cap is hit. Truly enormous single clusters
       // get tail-trimmed with a marker.
       const contextPadding = 3;
-      const withLineNumbers = exploreLineNumbersEnabled();
       // Language-neutral separator (no `//` — not a comment in Python, Ruby,
       // etc.). With line numbers on, the line-number jump also signals the gap.
       const GAP_MARKER = '\n\n... (gap) ...\n\n';
@@ -8043,29 +8345,36 @@ export class ToolHandler {
       // the exact gap this closes. Bounded, so a god-method can't blow the budget yet
       // the spine's call still appears in context.
       const OVERSIZE_SPINE_LINES = 200;
+      const OVERSIZE_BODY_LINES = 160;
       const SPINE_WINDOW = 28; // lines each side of the next-hop call site
-      const buildSection = (c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number }): string => {
-        if (c.hasSpine && c.spineCallLine && (c.end - c.start + 1) > OVERSIZE_SPINE_LINES) {
+      const BODY_WINDOW = 40;
+      const buildSectionRange = (c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number }): ExploreLineRange[] => {
+        const span = c.end - c.start + 1;
+        if (c.hasSpine && c.spineCallLine && span > OVERSIZE_SPINE_LINES) {
           const call = c.spineCallLine;
           const winStart = Math.max(c.start, call - SPINE_WINDOW);
           const winEnd = Math.min(c.end, call + SPINE_WINDOW);
-          const parts: string[] = [];
-          // Signature head, only when it sits clearly above the window (else the
-          // window already covers the method opening).
+          const ranges: ExploreLineRange[] = [];
           const headEnd = Math.min(c.start + 4, winStart - 2);
-          if (headEnd >= c.start) {
-            const head = fileLines.slice(c.start - 1, headEnd).join('\n');
-            parts.push(withLineNumbers ? numberSourceLines(head, c.start) : head);
-          }
-          const win = fileLines.slice(winStart - 1, winEnd).join('\n');
-          parts.push(withLineNumbers ? numberSourceLines(win, winStart) : win);
-          return parts.join(GAP_MARKER);
+          if (headEnd >= c.start) ranges.push({ start: c.start, end: headEnd });
+          ranges.push({ start: winStart, end: winEnd });
+          return ranges;
         }
-        const startIdx = Math.max(0, c.start - 1 - contextPadding);
-        const endIdx = Math.min(fileLines.length, c.end + contextPadding);
-        const slice = fileLines.slice(startIdx, endIdx).join('\n');
-        // startIdx is 0-based, so the slice's first line is line startIdx + 1.
-        return withLineNumbers ? numberSourceLines(slice, startIdx + 1) : slice;
+        // Long non-spine functions get a bounded window, not a full dump.
+        if (!c.hasSpine && span > OVERSIZE_BODY_LINES) {
+          const headEnd = Math.min(c.end, c.start + BODY_WINDOW);
+          const midStart = Math.max(headEnd + 1, Math.floor((c.start + c.end) / 2) - Math.floor(BODY_WINDOW / 2));
+          const midEnd = Math.min(c.end, midStart + BODY_WINDOW);
+          const ranges: ExploreLineRange[] = [{ start: c.start, end: headEnd }];
+          if (midStart > headEnd) ranges.push({ start: midStart, end: midEnd });
+          return ranges;
+        }
+        const start = Math.max(1, c.start - contextPadding);
+        const end = Math.min(fileLines.length, c.end + contextPadding);
+        return [{ start, end }];
+      };
+      const buildSection = (c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number }): string => {
+        return buildSectionRange(c).map((r) => renderSpan(r)).join(GAP_MARKER);
       };
 
       // Rank clusters for inclusion under the per-file cap. Entry-point
@@ -8094,18 +8403,19 @@ export class ToolHandler {
           return a.span - b.span;
         });
 
-      // Per-file budget is the SMALLER of the per-file cap and what's left of the
-      // total output cap — so selection (which ranks by importance) keeps the
-      // high-importance clusters and drops peripheral ones, instead of the
-      // downstream source-order trim slicing off whatever comes last in the file.
-      // That source-order slice is what cut Django's `_fetch_all` (L2237, importance
-      // 9 — agent-named) when query.py was the last of four big files to be emitted.
-      const fileBudget = Math.min(budget.maxCharsPerFile, Math.max(0, budget.maxOutputChars - totalChars - 200));
+      // Per-file budget fairness: reserve a fair share of remaining envelope for
+      // files still waiting, so the first file cannot steal later files' budget.
+      // Still capped by maxCharsPerFile; necessary/spine files can exceed via
+      // SPINE_CEILING below.
+      const filesLeft = Math.max(1, Math.min(maxFiles - filesIncluded, filesToRender.length - filesIncluded));
+      const remainingEnvelope = Math.max(0, budget.maxOutputChars - totalChars - 200);
+      const fairShare = Math.floor(remainingEnvelope / filesLeft);
+      const fileBudget = Math.min(budget.maxCharsPerFile, Math.max(fairShare, Math.min(budget.maxCharsPerFile, remainingEnvelope)));
       // Spine ceiling: a flow-path cluster may exceed the per-file cap (the call
       // path is the answer), but bounded — at most ~2.5× the per-file cap and never
       // past what's left of the total output cap — so a pathological long in-file
       // spine can't run away or starve co-flow files entirely.
-      const SPINE_CEILING = Math.min(budget.maxCharsPerFile * 2.5, Math.max(0, budget.maxOutputChars - totalChars - 200));
+      const SPINE_CEILING = Math.min(budget.maxCharsPerFile * 2.5, remainingEnvelope);
       const chosenIndices = new Set<number>();
       let projectedChars = 0;
       for (const rc of rankedClusters) {
@@ -8186,16 +8496,29 @@ export class ToolHandler {
         continue;
       }
 
-      lines.push(fileHeader);
-      lines.push('');
-      lines.push('```' + lang);
-      lines.push(fileSection);
-      lines.push('```');
-      lines.push('');
+      // Apply session history to the chosen clusters' spans (CG-18).
+      const intendedRanges: ExploreLineRange[] = [];
+      for (let i = 0; i < clusters.length; i++) {
+        if (!chosenIndices.has(i)) continue;
+        intendedRanges.push(...buildSectionRange(clusters[i]!));
+      }
+      const coveredParts: ExploreLineRange[] = [];
+      const emitParts: Array<{ range: ExploreLineRange; text: string }> = [];
+      for (const range of intendedRanges) {
+        const split = dedupeRange(range, served);
+        coveredParts.push(...split.covered);
+        for (const r of split.emit) emitParts.push({ range: r, text: renderSpan(r) });
+      }
+      const dedupedBody = emitParts.map((p) => p.text).join(GAP_MARKER);
+      const dedupedRanges = emitParts.map((p) => p.range);
+      const covered = mergeRanges(coveredParts);
 
-      totalChars += fileSection.length + 200;
-      renderedFilePaths.push(filePath);
-      filesIncluded++;
+      emitFileSection({
+        header: fileHeader,
+        body: dedupedBody.length > 0 ? dedupedBody : (covered.length > 0 ? '' : fileSection),
+        ranges: dedupedRanges.length > 0 ? dedupedRanges : (covered.length > 0 ? [] : intendedRanges),
+        covered,
+      });
     }
 
     // The curated header count is computed from the files that SURVIVE the final
@@ -8203,6 +8526,20 @@ export class ToolHandler {
     // hard ceiling drops trailing sections — so leave a sentinel here and fill it
     // in once the output is final.
     lines[summaryLineIdx] = SUMMARY_SENTINEL;
+
+    // Drift epilogue (#1474). Everything actually rendered is still byte-accurate
+    // (drifted files ship whole or not at all), but omitted files need Reading and
+    // index-derived line references to drifted files may be shifted.
+    if (staleOmitted.length > 0) {
+      lines[verbatimHeaderIdx] += ' (Exception: files flagged "⚠ changed on disk" below drifted from the index after their last sync — their source is omitted rather than risk a mis-sliced block; Read those specific files.)';
+    }
+    const staleAll = [...new Set([...staleOmitted, ...staleRendered])];
+    if (staleAll.length > 0) {
+      lines.push(
+        '',
+        `> ⚠ Changed on disk after the last index sync: ${staleAll.join(', ')}. Line numbers referencing ${staleAll.length === 1 ? 'this file' : 'these files'} elsewhere in this response (flow steps, blast radius, symbol lists) may be shifted until that project's next sync re-indexes ${staleAll.length === 1 ? 'it' : 'them'}.`,
+      );
+    }
 
     // Add remaining files as references (from both relevant and peripheral files).
     // Small projects (per budget) skip this — the relevant story already fits
@@ -8268,16 +8605,50 @@ export class ToolHandler {
     const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
     let finalText: string;
     if (output.length > hardCeiling) {
-      // Cut at a FILE-SECTION boundary (the last ``**` `` file header before the
-      // ceiling) so we drop whole trailing file-sections rather than slicing
-      // through a method body — a half-rendered method just forces the Read this
-      // tool exists to prevent. Fall back to a line boundary only if no section
-      // header sits in the back half (degenerate single-giant-section case).
-      const cut = output.slice(0, hardCeiling);
-      const lastSection = cut.lastIndexOf('\n' + FILE_SECTION_PREFIX);
-      const boundary = lastSection > hardCeiling * 0.5 ? lastSection : cut.lastIndexOf('\n');
-      const safe = boundary > 0 ? cut.slice(0, boundary) : cut;
-      finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For uncovered files/symbols, run another homegraph_explore with their exact names — not grep/read/node for symbols already shown.)';
+      // Prefer dropping trailing notes ("Not shown above", completeness, budget)
+      // over dropping a whole file's source — notes are recoverable, source isn't.
+      let trimmed = output;
+      const noteMarkers = [
+        '\n**Not shown above — explore these names for their source**',
+        '\n---\n> **Complete source for ',
+        '\n> Some file sections were trimmed for size.',
+        '\n> **Usually one explore is enough**',
+      ];
+      for (const marker of noteMarkers) {
+        if (trimmed.length <= hardCeiling) break;
+        const at = trimmed.lastIndexOf(marker);
+        if (at > hardCeiling * 0.4) trimmed = trimmed.slice(0, at).replace(/\n+$/, '');
+      }
+      if (trimmed.length > hardCeiling) {
+        // Cut at a FILE-SECTION boundary so we drop whole trailing file-sections
+        // rather than slicing through a method body. Prefer dropping sections for
+        // files that are NOT agent-named / spine-necessary when possible.
+        const cut = trimmed.slice(0, hardCeiling);
+        let boundary = -1;
+        let searchFrom = cut.length;
+        while (searchFrom > hardCeiling * 0.5) {
+          const at = cut.lastIndexOf('\n' + FILE_SECTION_PREFIX, searchFrom - 1);
+          if (at < 0) break;
+          // Extract path between **` and `**
+          const after = cut.slice(at + 1 + FILE_SECTION_PREFIX.length);
+          const endTick = after.indexOf('`');
+          const fp = endTick > 0 ? after.slice(0, endTick) : '';
+          const necessary = fp && (namedSeedFiles.has(fp) || entryFiles.has(fp) || centralFiles.has(fp));
+          if (!necessary) {
+            boundary = at;
+            break;
+          }
+          searchFrom = at;
+        }
+        if (boundary < 0) {
+          const lastSection = cut.lastIndexOf('\n' + FILE_SECTION_PREFIX);
+          boundary = lastSection > hardCeiling * 0.5 ? lastSection : cut.lastIndexOf('\n');
+        }
+        const safe = boundary > 0 ? cut.slice(0, boundary) : cut;
+        finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For uncovered files/symbols, run another homegraph_explore with their exact names — not grep/read/node for symbols already shown.)';
+      } else {
+        finalText = trimmed;
+      }
     } else {
       finalText = output;
     }
@@ -8309,7 +8680,40 @@ export class ToolHandler {
       : `Found ${subgraph.nodes.size} symbol${subgraph.nodes.size === 1 ? '' : 's'} across ${fileGroups.size} file${fileGroups.size === 1 ? '' : 's'}.`;
     finalText = finalText.replace(SUMMARY_SENTINEL, summaryLine);
 
-    return this.textResult(finalText);
+    // Session record (CG-17): only the files that SURVIVED the hard ceiling —
+    // a section the truncation dropped was never delivered, and recording it
+    // would let a later call withhold source the agent has never seen.
+    const emittedFiles: ExploreFileEmission[] = [];
+    let sourceBytes = 0;
+    for (const fp of survivors) {
+      const emitted = emittedByFile.get(fp);
+      if (!emitted || emitted.ranges.length === 0) continue;
+      emittedFiles.push({
+        path: fp,
+        ranges: emitted.ranges,
+        bytes: emitted.bytes,
+        fingerprint: emitted.fingerprint,
+      });
+      sourceBytes += emitted.bytes;
+    }
+    return this.exploreResult(finalText, {
+      projectRoot,
+      query,
+      files: emittedFiles,
+      sourceBytes,
+      responseBytes: finalText.length,
+    });
+  }
+
+  /**
+   * An explore response plus the record of what it emitted (CG-17). The record
+   * rides the result only as far as {@link execute}, which files it into the
+   * calling session's state and deletes it — see {@link EXPLORE_EMISSION_KEY}.
+   */
+  private exploreResult(text: string, emission: ExploreEmission): ToolResult {
+    const result = this.textResult(text);
+    result[EXPLORE_EMISSION_KEY] = emission;
+    return result;
   }
 
   /**
@@ -8591,6 +8995,11 @@ export class ToolHandler {
 
   /** Render one symbol: details + (optional) body/outline + its caller/callee trail. */
   private async renderNodeSection(cg: HomeGraph, node: Node, includeCode: boolean): Promise<string> {
+    // Disk-drift gate (issue #1474): body is CURRENT bytes sliced at INDEXED
+    // line ranges. Never emit a slice from a drifted file.
+    if (this.isFileStaleOnDisk(cg, node.filePath)) {
+      return this.renderStaleNodeSection(cg, node, includeCode);
+    }
     let code: string | null = null;
     let outline: string | null = null;
     if (includeCode) {
@@ -8606,6 +9015,59 @@ export class ToolHandler {
       }
     }
     return this.formatNodeDetails(node, code, outline) + this.formatTrail(cg, node);
+  }
+
+  // Whole-file fallback caps for a drifted file (#1474).
+  private static readonly STALE_WHOLE_FILE_MAX_LINES = 300;
+  private static readonly STALE_WHOLE_FILE_MAX_CHARS = 12000;
+
+  /**
+   * homegraph_node render for a symbol whose file changed on disk after the
+   * last index sync (issue #1474). Indexed line ranges are untrustworthy, so
+   * no slice is emitted: small files get full CURRENT source; large ones get
+   * an explicit notice.
+   */
+  private renderStaleNodeSection(cg: HomeGraph, node: Node, includeCode: boolean): string {
+    const lines: string[] = [
+      `**${node.name}** (${node.kind})`,
+      '',
+      `**Location:** ${node.filePath}${node.startLine ? `:${node.startLine}` : ''} — ⚠ as of the last index sync; the file has changed on disk since, so this line may be shifted`,
+    ];
+    if (node.signature) {
+      lines.push(...formatNodeSignatureBlock(node.signature));
+    }
+    lines.push('');
+    let embedded = false;
+    if (includeCode) {
+      try {
+        const absPath = validatePathWithinRoot(cg.getProjectRoot(), node.filePath);
+        if (absPath && existsSync(absPath) && !isConfigLeafNode(node)) {
+          const content = readFileSync(absPath, 'utf-8');
+          const body = content.replace(/\n+$/, '');
+          if (
+            body.length <= ToolHandler.STALE_WHOLE_FILE_MAX_CHARS &&
+            body.split('\n').length <= ToolHandler.STALE_WHOLE_FILE_MAX_LINES
+          ) {
+            lines.push(
+              `> ⚠ \`${node.filePath}\` changed on disk after it was last indexed, so the indexed line range for this symbol may no longer match. Showing the file's full CURRENT source instead (Read-parity — treat it as already Read):`,
+              '',
+              '```' + (node.language || ''),
+              numberSourceLines(body, 1),
+              '```',
+            );
+            embedded = true;
+          }
+        }
+      } catch {
+        /* fall through to the notice */
+      }
+    }
+    if (!embedded) {
+      lines.push(
+        `> ⚠ \`${node.filePath}\` changed on disk after it was last indexed — the indexed line range for this symbol no longer reliably matches, so its body is omitted rather than risk showing a different symbol's code. For current content, call homegraph_node with \`file: "${node.filePath}"\` (no symbol; \`offset\`/\`limit\` narrow it like Read), or Read the file. The change is picked up automatically on that project's next index sync.`,
+      );
+    }
+    return lines.join('\n') + this.formatTrail(cg, node);
   }
 
   /**
@@ -8697,6 +9159,9 @@ export class ToolHandler {
       `**Total nodes:** ${stats.nodeCount}`,
       `**Total edges:** ${stats.edgeCount}`,
       `**Database size:** ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`,
+      ...(stats.walSizeBytes > 0
+        ? [`**WAL size:** ${(stats.walSizeBytes / 1024 / 1024).toFixed(2)} MB`]
+        : []),
       `**Graph sources:** ${cg.getGraphSources()}`,
     );
 
@@ -9437,6 +9902,18 @@ export class ToolHandler {
   }
 
   /**
+   * Generated-file demotion signal: path convention OR persisted content banner.
+   */
+  private isGeneratedCandidate(cg: HomeGraph, filePath: string): boolean {
+    if (isGeneratedFile(filePath)) return true;
+    try {
+      return cg.getFile(filePath)?.generated === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Find ALL definitions matching a name, ranked, so homegraph_node can return
    * every overload instead of guessing one (the wrong guess → a Read). Keepers
    * rank before generated stubs (.pb.go etc.); stable within a group preserves
@@ -9456,7 +9933,11 @@ export class ToolHandler {
     if (!isQualified) {
       const exact = cg.getNodesByName(symbol);
       if (exact.length > 0) {
-        return [...exact].sort((a, b) => (isGeneratedFile(a.filePath) ? 1 : 0) - (isGeneratedFile(b.filePath) ? 1 : 0));
+        return [...exact].sort(
+          (a, b) =>
+            (this.isGeneratedCandidate(cg, a.filePath) ? 1 : 0) -
+            (this.isGeneratedCandidate(cg, b.filePath) ? 1 : 0),
+        );
       }
       // No exact match — use the single top fuzzy result (e.g. a file basename).
       const fuzzy = cg.searchNodes(symbol, { limit: 10 });
@@ -9484,10 +9965,11 @@ export class ToolHandler {
       return isQualified ? [] : results[0] ? [results[0].node] : [];
     }
 
-    // Down-rank generated files (.pb.go, .pulsar.go, _grpc.pb.go, …) so a flow
-    // query prefers the keeper implementation over the protobuf-generated stub.
     return [...exactMatches]
-      .sort((a, b) => (isGeneratedFile(a.node.filePath) ? 1 : 0) - (isGeneratedFile(b.node.filePath) ? 1 : 0))
+      .sort((a, b) =>
+        (this.isGeneratedCandidate(cg, a.node.filePath) ? 1 : 0) -
+        (this.isGeneratedCandidate(cg, b.node.filePath) ? 1 : 0),
+      )
       .map((r) => r.node);
   }
 
@@ -9542,8 +10024,8 @@ export class ToolHandler {
     // /impact aggregation aligned (a query against "Send" returns the
     // hand-written implementations before the protobuf scaffold).
     const ranked = [...pool].sort((a, b) => {
-      const aGen = isGeneratedFile(a.filePath) ? 1 : 0;
-      const bGen = isGeneratedFile(b.filePath) ? 1 : 0;
+      const aGen = this.isGeneratedCandidate(cg, a.filePath) ? 1 : 0;
+      const bGen = this.isGeneratedCandidate(cg, b.filePath) ? 1 : 0;
       return aGen - bGen;
     });
 

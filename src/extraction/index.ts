@@ -32,6 +32,7 @@ import { logDebug, logWarn } from '../errors';
 import { validatePathWithinRoot, normalizePath } from '../utils';
 import ignore, { Ignore } from 'ignore';
 import { buildDefaultIgnore, defaultsOnlyIgnore, readGitignorePatterns } from './default-ignore';
+import { detectGeneratedFile } from './generated-detection';
 
 export { buildDefaultIgnore } from './default-ignore';
 import { detectFrameworks } from '../resolution/frameworks';
@@ -122,6 +123,20 @@ export interface SyncResult {
   nodesUpdated: number;
   durationMs: number;
   changedFilePaths?: string[];
+  /**
+   * Symbol names whose set of definitions this sync CHANGED — names the synced
+   * files gained or lost, as the symmetric difference of their `file\0name`
+   * definition pairs before and after the store phase (per file, so a name
+   * moving between two changed files does not cancel itself out).
+   * Resolution picks among all same-named definitions project-wide,
+   * so these are exactly the names whose already-resolved edges — in files this
+   * sync never touched — may now bind elsewhere and must be re-resolved for the
+   * index to stay convergent with a full rebuild.
+   *
+   * A body-only edit leaves this empty, which is the common case and costs
+   * nothing downstream.
+   */
+  definitionDelta?: string[];
 }
 
 /**
@@ -2152,6 +2167,7 @@ export class ExtractionOrchestrator {
           indexedAt: Date.now(),
           nodeCount: result.nodes.length,
           errors: result.errors.length > 0 ? result.errors : undefined,
+          generated: detectGeneratedFile(filePath, content),
         },
       });
       if (crossFileIncomingEdges.length > 0) {
@@ -2190,6 +2206,7 @@ export class ExtractionOrchestrator {
       indexedAt: Date.now(),
       nodeCount: result.nodes.length,
       errors: result.errors.length > 0 ? result.errors : undefined,
+      generated: detectGeneratedFile(filePath, content),
     };
     this.queries.upsertFile(fileRecord);
   }
@@ -2211,6 +2228,7 @@ export class ExtractionOrchestrator {
       indexedAt: Date.now(),
       nodeCount,
       errors: resultErrors.length > 0 ? resultErrors : undefined,
+      generated: detectGeneratedFile(filePath, content),
     };
   }
 
@@ -2257,6 +2275,59 @@ export class ExtractionOrchestrator {
   }
 
   /**
+   * Re-open resolution edges whose target name's definition set this sync
+   * changed, when those edges live in files the sync did NOT re-extract.
+   *
+   * Resolution binds a reference to one of the same-named definitions
+   * PROJECT-WIDE. Adding or removing a definition therefore changes the answer
+   * for references in untouched files — but those references resolved once and
+   * nothing existed to revisit them with — the index kept an answer that was
+   * correct against an older graph.
+   *
+   * This deletes each affected edge and re-inserts it as the reference that
+   * created it (the refName/refKind stamp), status='pending', for the sync's
+   * resolution sweep to bind against the post-sync graph — the same input a
+   * full rebuild resolves from, which is what makes the two converge.
+   *
+   * Deliberately conservative in three ways, because a wrong deletion is a
+   * permanent edge loss while a missed rebind is only residual drift:
+   * - an edge with no refName stamp (synthesized, or built by an engine older
+   *   than the stamp) is left ALONE rather than reconstructed from the target's
+   *   plain name, same rule as `resurrectRefFromDroppedEdge`;
+   * - edges whose source is in a file this sync already re-extracted are
+   *   skipped — their references were re-resolved from scratch moments ago;
+   * - very common names are skipped by the per-name ceiling in
+   *   `getResolutionEdgesByTargetName`.
+   *
+   * Returns the number of references resurrected.
+   */
+  resurrectStaleResolutionEdges(definitionDelta: string[], changedFilePaths: string[]): number {
+    if (definitionDelta.length === 0) return 0;
+    const alreadyFresh = new Set(changedFilePaths);
+    const candidates = this.queries.getResolutionEdgesByTargetName(definitionDelta);
+
+    const edgeIds: number[] = [];
+    const refs: UnresolvedReference[] = [];
+    for (const e of candidates) {
+      if (alreadyFresh.has(e.sourceFilePath)) continue;
+      const ref = resurrectRefFromDroppedEdge(e);
+      if (!ref) continue; // no stamp — never delete what we cannot restore
+      edgeIds.push(e.edgeId);
+      refs.push(ref);
+    }
+    if (refs.length === 0) return 0;
+
+    // Delete first. The sweep re-inserts whichever edge resolution now picks,
+    // and `insertEdges` is INSERT OR IGNORE against idx_edges_identity — so a
+    // rebind to the same target is a clean no-op, but leaving the old row in
+    // place for a rebind ELSEWHERE would keep both, turning drift into
+    // duplication.
+    this.queries.deleteEdgesByIds(edgeIds);
+    this.queries.insertUnresolvedRefsBatch(refs);
+    return refs.length;
+  }
+
+  /**
    * Sync the index with the current file state.
    *
    * Change detection is filesystem-based, never git: a (size, mtime) stat
@@ -2276,6 +2347,10 @@ export class ExtractionOrchestrator {
     let filesRemoved = 0;
     let nodesUpdated = 0;
     const changedFilePaths: string[] = [];
+    // `file\0name` definition pairs for the files this sync touches, sampled
+    // BEFORE their nodes are replaced/deleted. Compared against the post-store
+    // pairs below to derive `definitionDelta`.
+    const pairsBefore = new Set<string>();
 
     onProgress?.({
       phase: 'scanning',
@@ -2313,6 +2388,9 @@ export class ExtractionOrchestrator {
         if (tracked.path.startsWith('@')) {
           continue;
         }
+        // Every name this file defined is about to stop existing here, which
+        // narrows the candidate set for that name repo-wide.
+        for (const pair of this.queries.getNodeNamePairsByFiles([tracked.path])) pairsBefore.add(pair);
         const incoming = this.queries.getCrossFileIncomingEdgesWithTarget(tracked.path);
         if (incoming.length > 0) {
           const resurrected = incoming
@@ -2382,6 +2460,14 @@ export class ExtractionOrchestrator {
         changedFilePaths.push(filePath);
         filesModified++;
       }
+    }
+
+    // Sampled here — after the add/modify classification, before any file is
+    // re-extracted — because `storeExtractionResult` deletes a file's nodes
+    // before inserting the new ones, so this is the last point the pre-edit
+    // definition set is readable.
+    if (filesToIndex.length > 0) {
+      for (const pair of this.queries.getNodeNamePairsByFiles(filesToIndex)) pairsBefore.add(pair);
     }
 
     // Load only grammars needed for changed files
@@ -2463,6 +2549,24 @@ export class ExtractionOrchestrator {
       }
     }
 
+    // Names whose definition set this sync changed: a `file\0name` pair present
+    // before but not after (removed/renamed away) or after but not before
+    // (added). A pair on both sides is untouched as far as resolution's
+    // candidate set is concerned — only its node id moved, which
+    // reattachCrossFileEdges already follows — so an edit that only changes
+    // bodies yields an empty delta and no downstream rebind work.
+    //
+    // Compared per FILE, not as one name set over the whole batch: a commit
+    // that adds `collect` to a new file while an unrelated changed file already
+    // defined `collect` must still flag the name, and a bare name set cancels
+    // exactly that case out.
+    const pairsAfter = this.queries.getNodeNamePairsByFiles(filesToIndex);
+    const deltaNames = new Set<string>();
+    const nameOf = (pair: string) => pair.slice(pair.indexOf('\0') + 1);
+    for (const pair of pairsBefore) if (!pairsAfter.has(pair)) deltaNames.add(nameOf(pair));
+    for (const pair of pairsAfter) if (!pairsBefore.has(pair)) deltaNames.add(nameOf(pair));
+    const definitionDelta = [...deltaNames];
+
     return {
       filesChecked,
       filesAdded,
@@ -2471,6 +2575,7 @@ export class ExtractionOrchestrator {
       nodesUpdated,
       durationMs: Date.now() - startTime,
       changedFilePaths: changedFilePaths.length > 0 ? changedFilePaths : undefined,
+      definitionDelta: definitionDelta.length > 0 ? definitionDelta : undefined,
     };
   }
 

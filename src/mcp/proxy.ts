@@ -30,6 +30,7 @@ import { HomeGraphPackageVersion } from './version';
 import { SERVER_INFO, PROTOCOL_VERSION, initializeInstructions } from './session';
 import { SERVER_INSTRUCTIONS } from './server-instructions';
 import { getStaticTools } from './tools';
+import { ExploreSessionState } from './explore-session-state';
 import { resolveToolDeadlineMs } from './query-pool';
 import type { MCPEngine } from './engine';
 
@@ -226,6 +227,9 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
   // new session starts), these would otherwise hang forever; we re-serve them
   // in-process so the host always gets a reply.
   const inflight = new Map<unknown, string>();
+  // Only the daemon-unavailable fallback below uses it; when the daemon is up,
+  // the tracking happens on the daemon's own MCPSession.
+  const exploreSession = new ExploreSessionState();
   // tools/call forwarded to the daemon that hit the proxy-side deadline.
   // Late daemon replies for these ids are dropped so the client isn't confused
   // by a second response after it already got Partial (or timed out itself).
@@ -307,7 +311,7 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
       try {
         await ensureEngine();
         const params = (msg.params || {}) as { name: string; arguments?: Record<string, unknown> };
-        const result = await engine!.getToolHandler().execute(params.name, params.arguments || {});
+        const result = await engine!.getToolHandler().execute(params.name, params.arguments || {}, exploreSession);
         writeClient({ jsonrpc: '2.0', id, result });
       } catch (err) {
         writeClient({ jsonrpc: '2.0', id, error: { code: -32603, message: err instanceof Error ? err.message : String(err) } });

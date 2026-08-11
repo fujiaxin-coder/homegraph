@@ -1,22 +1,12 @@
 name: Release
 
-# Manually triggered ("Run workflow"). On trigger it:
-#   1. reads the version from package.json,
-#   2. promotes `## [Unreleased]` content into `## [<version>]` in
-#      CHANGELOG.md (and commits + pushes that change back to main), so
-#      the published release notes are never sparse just because the
-#      maintainer didn't pre-stage the [<version>] block by hand,
-#   3. installs deps, builds dist/, and runs the test suite as a gate,
-#   4. creates the GitHub Release (tag v<version>) with notes from CHANGELOG.md,
-#   5. publishes the `homegraph` npm package (single package, dist/ + README).
+# Manually triggered ("Run workflow"). Two jobs (visible as separate stages):
+#   1. publish-homegraph — promote CHANGELOG, build/test, GitHub Release, npm publish homegraph
+#   2. publish-ohos-api-dbs — after (1) succeeds, clone fujiaxin-coder/deveco-sdk and publish
+#      one homegraph-ohos-api-db-<sdkVer>@<homegraphVer> package per SDK tree (continue on
+#      per-version failures; re-runs skip versions already on npm).
 #
-# This is the "traditional single-package" publish path: the package is pure
-# JS + WASM (no native compilation), so one Ubuntu runner builds it once and
-# `npm publish` ships it. Users run it on their own Node (engines: >=18).
-#
-# Before triggering: bump package.json. CHANGELOG.md entries can live under
-# `## [Unreleased]` — step 2 takes care of moving them. Set the NPM_TOKEN
-# secret (and RELEASE_PAT for the auto-promote push back to main).
+# Before triggering: bump package.json. Set NPM_TOKEN and RELEASE_PAT secrets.
 on:
   workflow_dispatch: {}
 
@@ -24,18 +14,15 @@ permissions:
   contents: write   # create the GitHub Release + tag, push the CHANGELOG promote
 
 jobs:
-  release:
+  publish-homegraph:
+    name: Publish homegraph
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
-          # Default checkout is detached at a SHA; we need an actual branch
-          # so the CHANGELOG-promote commit knows where to push.
           ref: ${{ github.ref }}
-          # Authenticate as the maintainer (admin), not as github-actions[bot],
-          # so the auto-promote and lock-sync pushes below go through under a
-          # "require PR approval for main" ruleset. Set the RELEASE_PAT secret
-          # with: contents:write on this repo, no other scopes.
           token: ${{ secrets.RELEASE_PAT }}
       - uses: actions/setup-node@v6
         with:
@@ -43,11 +30,6 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Sync package-lock.json if version drifted
-        # When the maintainer bumps the version on package.json only — for
-        # example via a GitHub web-UI edit — `npm ci` would refuse to run.
-        # This step rewrites just the lock-file's version fields to match
-        # package.json, then auto-commits and pushes the result so on-disk
-        # truth on `main` stays consistent. Idempotent.
         run: |
           set -euo pipefail
           PKG_V=$(node -p "require('./package.json').version")
@@ -75,8 +57,6 @@ jobs:
       - run: npm run build
 
       - name: Test suite gate
-        # The suite is green on Linux CI (Windows-only cases are gated with
-        # it.runIf and skip themselves here). Failing this blocks the release.
         run: npm test
 
       - name: Resolve version
@@ -84,9 +64,6 @@ jobs:
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Promote [Unreleased] → [<version>] in CHANGELOG.md
-        # Idempotent: a no-op if [Unreleased] is empty OR if the previous
-        # run already moved everything. Auto-commit + push the change back
-        # so the version block on main is the source of truth going forward.
         run: |
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
@@ -117,14 +94,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v${{ steps.ver.outputs.version }}"
-          # Idempotent: create the release once; a re-run just refreshes notes.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file notes.md
           else
             gh release create "$TAG" --title "$TAG" --notes-file notes.md
           fi
 
-      - name: Publish to npm
+      - name: Publish homegraph to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -135,7 +111,7 @@ jobs:
             npm publish --access public
           fi
 
-      - name: Verify the package is on the registry
+      - name: Verify homegraph is on the registry
         run: |
           V="${{ steps.ver.outputs.version }}"
           ok=
@@ -145,3 +121,68 @@ jobs:
           done
           [ -n "$ok" ] || { echo "::error::homegraph@$V never appeared on the registry"; exit 1; }
           echo "verified homegraph@$V"
+
+  publish-ohos-api-dbs:
+    name: Publish OHOS API db packages
+    needs: publish-homegraph
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homegraph
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Clone DevEco SDK trees
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/fujiaxin-coder/deveco-sdk.git "$RUNNER_TEMP/deveco-sdk"
+          ls -1 "$RUNNER_TEMP/deveco-sdk"/commandline-tools-* || {
+            echo "::error::no commandline-tools-* dirs in deveco-sdk"
+            exit 1
+          }
+
+      - name: Build and publish homegraph-ohos-api-db-* packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.publish-homegraph.outputs.version }}"
+          SDK_ROOT="$RUNNER_TEMP/deveco-sdk"
+          failed=0
+          ok=0
+
+          shopt -s nullglob
+          for dir in "$SDK_ROOT"/commandline-tools-*/; do
+            name=$(basename "$dir")
+            echo "::group::${name}"
+            set +e
+            node scripts/ohos-sdk-publish.mjs "$dir" --pkg-version "$V" --skip-if-published
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              ok=$((ok + 1))
+              echo "ok: $name"
+            else
+              failed=$((failed + 1))
+              echo "::error::failed: $name (exit $rc) — continuing with remaining versions"
+            fi
+            echo "::endgroup::"
+          done
+
+          echo "summary: ok_or_skipped=$ok failed=$failed (homegraph@$V already published)"
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed SDK db package(s) failed — re-run this job to retry; already-published versions are skipped"
+            exit 1
+          fi
+          if [ "$ok" -eq 0 ]; then
+            echo "::error::no commandline-tools-* packages processed"
+            exit 1
+          fi

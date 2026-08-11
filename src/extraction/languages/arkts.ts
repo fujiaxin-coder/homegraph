@@ -75,6 +75,7 @@ import { loadExcludePatterns } from '../../project-config';
 import { bindExtractionContext, getExtractionProjectRoot, getExtractionQueries, reportArkTSBatchProgress, resetExtractionContext, setArktsBatchRunning } from '../context';
 import type { IndexProgress, IndexResult } from '../index';
 import { buildDefaultIgnore } from '../default-ignore';
+import { detectGeneratedFile } from '../generated-detection';
 import { EXTRACTION_VERSION } from '../extraction-version';
 import { HomeGraphPackageVersion } from '../../mcp/version';
 import { runWithoutLivenessWatchdog } from '../../mcp/liveness-watchdog';
@@ -675,6 +676,7 @@ function persistFileResult(
     indexedAt: Date.now(),
     nodeCount: result.nodes.length,
     errors: result.errors.length > 0 ? result.errors : undefined,
+    generated: detectGeneratedFile(filePath, content),
   };
   queries.upsertFile(fileRecord);
 }
