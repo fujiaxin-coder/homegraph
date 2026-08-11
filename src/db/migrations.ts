@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 /**
  * Migration definition
@@ -132,6 +132,23 @@ const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_unresolved_status ON unresolved_refs(status);
         CREATE INDEX IF NOT EXISTS idx_unresolved_failed_tail ON unresolved_refs(name_tail) WHERE status = 'failed';
       `);
+    },
+  },
+  {
+    version: 9,
+    description:
+      'Add files.generated — index-time content-header generated-file detection for ranking (#1500)',
+    up: (db) => {
+      // DDL only — no backfill: the flag derives from content the migration
+      // cannot see. Rows stay 0 until a re-index; readers union with the
+      // path-only check so an un-migrated index keeps pre-#1500 behavior.
+      const cols = db.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'generated')) {
+        db.exec('ALTER TABLE files ADD COLUMN generated INTEGER NOT NULL DEFAULT 0');
+      }
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_files_generated ON files(path) WHERE generated = 1'
+      );
     },
   },
 ];

@@ -100,6 +100,7 @@ interface FileRow {
   indexed_at: number;
   node_count: number;
   errors: string | null;
+  generated?: number | null;
 }
 
 interface UnresolvedRefRow {
@@ -182,6 +183,7 @@ function rowToFileRecord(row: FileRow): FileRecord {
     indexedAt: row.indexed_at,
     nodeCount: row.node_count,
     errors: row.errors ? safeJsonParse(row.errors, undefined) : undefined,
+    generated: row.generated === 1,
   };
 }
 
@@ -1058,7 +1060,12 @@ export class QueryBuilder {
     const main: Node[] = [];
     if (this.includeProjectNodes) {
       if (!this.stmts.getNodesByName) {
-        this.stmts.getNodesByName = this.db.prepare('SELECT * FROM nodes WHERE name = ?');
+        // Content-derived order (not insertion/rowid order): sync appends nodes
+        // as files change, so without ORDER BY the same tree can resolve
+        // differently than a full rebuild that writes in scan order.
+        this.stmts.getNodesByName = this.db.prepare(
+          'SELECT * FROM nodes WHERE name = ? ORDER BY file_path, start_line'
+        );
       }
       const rows = this.stmts.getNodesByName.all(name) as NodeRow[];
       main.push(...rows.map(rowToNode));
@@ -1066,7 +1073,7 @@ export class QueryBuilder {
     if (!this.hasOhosApiAttached()) return main;
 
     const apiRows = this.db
-      .prepare('SELECT * FROM ohos_api.nodes WHERE name = ?')
+      .prepare('SELECT * FROM ohos_api.nodes WHERE name = ? ORDER BY file_path, start_line')
       .all(name) as NodeRow[];
     const seen = new Set(main.map((n) => n.id));
     const api = apiRows.map((r) => this.mapOhosApiNodeRow(r)).filter((n) => !seen.has(n.id));
@@ -1935,8 +1942,8 @@ export class QueryBuilder {
   upsertFile(file: FileRecord): void {
     if (!this.stmts.upsertFile) {
       this.stmts.upsertFile = this.db.prepare(`
-        INSERT INTO files (path, content_hash, language, size, modified_at, indexed_at, node_count, errors)
-        VALUES (@path, @contentHash, @language, @size, @modifiedAt, @indexedAt, @nodeCount, @errors)
+        INSERT INTO files (path, content_hash, language, size, modified_at, indexed_at, node_count, errors, generated)
+        VALUES (@path, @contentHash, @language, @size, @modifiedAt, @indexedAt, @nodeCount, @errors, @generated)
         ON CONFLICT(path) DO UPDATE SET
           content_hash = @contentHash,
           language = @language,
@@ -1944,7 +1951,8 @@ export class QueryBuilder {
           modified_at = @modifiedAt,
           indexed_at = @indexedAt,
           node_count = @nodeCount,
-          errors = @errors
+          errors = @errors,
+          generated = @generated
       `);
     }
 
@@ -1957,6 +1965,7 @@ export class QueryBuilder {
       indexedAt: file.indexedAt,
       nodeCount: file.nodeCount,
       errors: file.errors ? JSON.stringify(file.errors) : null,
+      generated: file.generated ? 1 : 0,
     });
   }
 
@@ -2349,6 +2358,113 @@ export class QueryBuilder {
     return [...names];
   }
 
+  /**
+   * Resolution edges targeting any of the given node names — candidates for the
+   * sync rebind pass when a definition set changes. Includes source file/language
+   * so a dropped edge can be resurrected as its original unresolved ref.
+   *
+   * Names matching more than `perNameCeiling` edges are skipped entirely, same
+   * rationale and same default as {@link getRetryableFailedReferences}: at that
+   * population the name is generic (`get`, `clear`, …); one definition changing
+   * won't flip most of them, and rebinding an arbitrary subset is both wasted
+   * work and incoherent coverage.
+   */
+  getResolutionEdgesByTargetName(
+    names: string[],
+    perNameCeiling: number = 500
+  ): Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }> {
+    if (names.length === 0) return [];
+
+    // Pass 1: per-name edge counts, chunked under the SQLite parameter limit.
+    const keep: string[] = [];
+    for (let i = 0; i < names.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = names.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const counts = this.db
+        .prepare(
+          `SELECT tgt.name AS name, COUNT(*) AS count
+             FROM edges e
+             JOIN nodes tgt ON tgt.id = e.target
+            WHERE tgt.name IN (${placeholders})
+              AND (e.provenance IS NULL OR e.provenance != 'heuristic')
+            GROUP BY tgt.name`
+        )
+        .all(...chunk) as Array<{ name: string; count: number }>;
+      for (const row of counts) {
+        if (row.count <= perNameCeiling) keep.push(row.name);
+      }
+    }
+    if (keep.length === 0) return [];
+
+    // Pass 2: load the surviving edges with the source file context a
+    // resurrection needs.
+    const out: Array<Edge & { edgeId: number; sourceFilePath: string; sourceLanguage: Language }> = [];
+    for (let i = 0; i < keep.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = keep.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
+             FROM edges e
+             JOIN nodes tgt ON tgt.id = e.target
+             JOIN nodes src ON src.id = e.source
+            WHERE tgt.name IN (${placeholders})
+              AND (e.provenance IS NULL OR e.provenance != 'heuristic')`
+        )
+        .all(...chunk) as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
+      for (const row of rows) {
+        out.push({
+          ...rowToEdge(row),
+          edgeId: row.id,
+          sourceFilePath: row.source_file_path,
+          sourceLanguage: row.source_language,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Delete edges by primary key — the rebind pass's half of a re-resolution. */
+  deleteEdgesByIds(edgeIds: number[]): number {
+    if (edgeIds.length === 0) return 0;
+    let changed = 0;
+    this.db.transaction(() => {
+      for (let i = 0; i < edgeIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+        const chunk = edgeIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+        const placeholders = chunk.map(() => '?').join(',');
+        changed += this.db.prepare(`DELETE FROM edges WHERE id IN (${placeholders})`).run(...chunk).changes;
+      }
+    })();
+    return changed;
+  }
+
+  /**
+   * Distinct `file\0name` pairs defined by the given files — the shape sync's
+   * definition delta needs.
+   *
+   * Deliberately NOT `getNodeNamesByFiles`: a bare name set is taken over the
+   * WHOLE changed batch, so a name that moves between two files in one commit
+   * (or exists in one changed file and is newly added to another) appears on
+   * both sides and cancels out of the symmetric difference — even though a
+   * definition genuinely appeared or vanished and every reference to that name
+   * repo-wide may now bind elsewhere. Keying by file makes each definition its
+   * own fact, so the move is seen as one removal plus one addition.
+   */
+  getNodeNamePairsByFiles(filePaths: string[]): Set<string> {
+    const pairs = new Set<string>();
+    if (filePaths.length === 0) return pairs;
+    for (let i = 0; i < filePaths.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+      const chunk = filePaths.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(`SELECT DISTINCT file_path, name FROM nodes WHERE file_path IN (${placeholders})`)
+        .all(...chunk) as Array<{ file_path: string; name: string }>;
+      // NUL-joined: a path or a symbol name can contain a space, never a NUL.
+      for (const row of rows) pairs.add(`${row.file_path}\0${row.name}`);
+    }
+    return pairs;
+  }
+
 
   /**
    * Get unresolved references scoped to specific file paths.
@@ -2487,6 +2603,7 @@ export class QueryBuilder {
       edgesByKind,
       filesByLanguage,
       dbSizeBytes: 0, // Set by caller using DatabaseConnection.getSize()
+      walSizeBytes: 0, // Set by caller using DatabaseConnection.getWalSizeBytes()
       lastUpdated: Date.now(),
     };
   }

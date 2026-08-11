@@ -64,7 +64,10 @@ CREATE TABLE IF NOT EXISTS files (
     modified_at INTEGER NOT NULL,
     indexed_at INTEGER NOT NULL,
     node_count INTEGER DEFAULT 0,
-    errors TEXT -- JSON array
+    errors TEXT, -- JSON array
+    -- Index-time generated-file flag (path convention OR content banner).
+    -- Readers union this with the path-only check so un-backfilled rows stay safe.
+    generated INTEGER NOT NULL DEFAULT 0
 );
 
 -- Unresolved References: References that need resolution after full indexing.
@@ -176,6 +179,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity
 -- File indexes
 CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
 CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
+-- Partial: generated set is a small minority of any repo.
+CREATE INDEX IF NOT EXISTS idx_files_generated ON files(path) WHERE generated = 1;
 
 -- Unresolved refs indexes
 CREATE INDEX IF NOT EXISTS idx_unresolved_from_node ON unresolved_refs(from_node_id);

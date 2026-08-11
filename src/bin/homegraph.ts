@@ -811,6 +811,7 @@ program
           nodeCount: stats.nodeCount,
           edgeCount: stats.edgeCount,
           dbSizeBytes: stats.dbSizeBytes,
+          walSizeBytes: stats.walSizeBytes,
           backend,
           journalMode,
           nodesByKind: stats.nodesByKind,
@@ -854,6 +855,19 @@ program
       console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
       console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
       console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
+      // Surface the WAL sidecar (#1431): a WAL that dwarfs the DB at rest is
+      // the killed-session leak — invisible before this line, it only showed
+      // up as a mysteriously full disk. open() above already kicked off the
+      // automatic heal for the oversized case.
+      if (stats.walSizeBytes > 0) {
+        const { WAL_HEAL_THRESHOLD_BYTES } = await import('../db/index');
+        const oversized = stats.walSizeBytes > Math.max(WAL_HEAL_THRESHOLD_BYTES, stats.dbSizeBytes);
+        const walLabel = `${(stats.walSizeBytes / 1024 / 1024).toFixed(2)} MB`;
+        console.log(`  WAL Size:  ${oversized ? chalk.yellow(walLabel) : walLabel}`);
+        if (oversized) {
+          warn('The write-ahead log is larger than the database — killed sessions left it behind. It is reclaimed automatically on open; if it persists across runs, another live HomeGraph process is holding it.');
+        }
+      }
       // Prefer node:sqlite → better-sqlite3; wasm is last-resort (no WAL).
       const backendLabel =
         backend === 'node-sqlite' ? chalk.green('node-sqlite')

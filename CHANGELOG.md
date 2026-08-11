@@ -9,8 +9,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-08-11
+
 ### New Features
 
+- Ported selected post-1.5.0 CodeGraph fixes (through upstream `c6aaa20`): incremental **sync rebind** so long-lived indexes stop drifting from a fresh rebuild (`HOMEGRAPH_NO_REBIND=1` to opt out); **explore session dedup** so a follow-up `homegraph_explore` points at source already returned instead of re-sending it (`HOMEGRAPH_EXPLORE_DEDUP=0` to opt out); **stale-slice guards** so node/explore never serve a wrong body when a file changed on disk after the last sync; **WAL self-heal** on open when a killed session left an oversized write-ahead log (`homegraph status` reports WAL size); and explore **ranking/budget fairness** (generated-file banners, top-level `test/`/`spec/` demotion, ambient `.d.ts` down-rank, fair per-file budgets, long-function windows, note-first truncation).
 - ArkTS ↔ C/C++ NAPI bridging recognizes more registration styles (camelCase `napi_property_descriptor` rows, `napi_define_class` / `napi_define_sendable_class`, `DECLARE_NAPI_*` macros, `napi_create_function`, and `.c` `NAPI_MODULE` modules), not only photos-style `Class_method` names, so `homegraph_explore` can follow calls through `lib*.so` into native wrappers (and a conservative same-file `NapiFoo` → `Foo` hop when safe). ArkTS extraction also emits call refs for camelCase methods on `lib*.so` imports (e.g. `multimodalinput.getTidByName`), not only `Class_method` names.
 - `homegraph_arkui_migrate` returns a one-shot ArkUI migrate / state-semantics snapshot (component decorators, state fields + decorator args, data-passage types, Provide/Consume/Storage key channels, `@Observed` classes) for a component name or `.ets` path — so agents need not stitch those facts with explore.
 - MCP can limit which graphs answer queries via `--sources both|project|sdk|none` on `homegraph serve mcp` (or `HOMEGRAPH_SOURCES`; CLI wins). Default remains **both** (project index + OHOS SDK API db when bound). Use `project` / `sdk` for eval arms; `none` leaves tools registered but returns guidance. Different sources use separate daemon sockets so arms do not share state. `homegraph status` / `homegraph_status` report the active mode.
