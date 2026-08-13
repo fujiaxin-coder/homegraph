@@ -1,5 +1,7 @@
 # HomeGraph Language Verification Guide
 
+> Formerly `docs/SEARCH_QUALITY_LOOP.md` (renamed for clarity). Index: [docs/README.md](../README.md).
+
 You are verifying that HomeGraph fully supports a specific programming language. The user will give you a path to a real-world, popular open-source codebase cloned locally. Your job is to run a battery of realistic prompts against it using HomeGraph's API and verify the results are good enough to say that language is **covered and supported**.
 
 A language is NOT verified until an LLM can reliably use HomeGraph's MCP tools to navigate that codebase — finding the right symbols, understanding call chains, exploring subsystems, and getting useful context for real tasks.

@@ -126,7 +126,7 @@
 | `src/**`、`test/**`（除上表须改写/删除的 install/bundle 相关测试外）、`scripts/agent-eval/**`、`scripts/add-lang/**`、`scripts/prepare-release.mjs`、`scripts/extract-release-notes.mjs` | 构建、测试、评测或 Release CI 直接使用 |
 | `scripts/exp_boundary_eval/**`、`scripts/ohos-sdk-publish.mjs`、`scripts/mirror-to-github.js`、`scripts/local-install.sh`、`scripts/index-peak-mem.ps1` | 本 fork 评测 / OHOS / 镜像 / 本地安装工具；有文档或明确用途 |
 | **遥测整条链路：** `telemetry-worker/`、`TELEMETRY.md`、`docs/design/telemetry.md`、`src/telemetry/**` | **产品已确认保留**（2026-08-06）。客户端仍在 CLI/installer/MCP 路径中；Worker 为可审计 ingest 源码 |
-| `docs/benchmarks/**`、`docs/design/**`、`docs/grammars/**`、`docs/SEARCH_QUALITY_LOOP.md`、`docs/local-dev-guide.md`、`docs/homegraph-principles.md` | 被 `AGENTS.md` / 设计 playbook / 语言补丁说明引用；属工程文档而非死资产 |
+| `docs/benchmarks/**`、`docs/design/**`、`docs/grammars/**`、语言验证指南（现 `docs/guides/language-verification.md`，原 `docs/SEARCH_QUALITY_LOOP.md`）、`docs/local-dev-guide.md`、`docs/homegraph-principles.md` | 被 `AGENTS.md` / 设计 playbook / 语言补丁说明引用；属工程文档而非死资产 |
 | `LICENSE`、`CHANGELOG.md`、`AGENTS.md`、`DEVELOPMENT.md`、`CLAUDE.md`（指向 AGENTS 的薄包装，见 0002） | 合规、发布说明或 Agent 向导 |
 
 ### A.3 产品确认结论（原待确认项）

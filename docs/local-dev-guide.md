@@ -2,6 +2,8 @@
 
 从源码构建 HomeGraph，用 **CLI** 或 **Cursor MCP** 索引、查询工程；文末附 Harmony 工程（`.ets` + C++）跨语言验证示例。
 
+协作 / Spec / commit → [DEVELOPMENT.md](../DEVELOPMENT.md) · 发包 → [RELEASE.md](./RELEASE.md) · 文档目录 → [README.md](./README.md)
+
 ---
 
 ## 1. 构建
@@ -12,7 +14,7 @@ npm ci          # 首次或 lock 变更
 npm run build   # → dist/（含 WASM、schema）
 ```
 
-要求 Node **20.x – 24.x**。
+要求 Node **≥18**（推荐 **22.5+**，与 `package.json` `engines` 一致）。
 
 后续命令用变量指向本地构建（路径按实际修改）：
 
@@ -228,5 +230,8 @@ $CG install --target cursor --location global -y
 
 ## 相关
 
+- [文档索引](README.md)
+- [发包与发行版](RELEASE.md)
 - [HomeGraph 原理与实现](homegraph-principles.md)
+- [语言验证指南](guides/language-verification.md)
 - [CLI 参考（发布版）](https://homegraph.dev/homegraph/reference/cli/)

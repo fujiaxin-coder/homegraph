@@ -1,5 +1,10 @@
 # Getting agents to actually use homegraph (not Read) — design notes & handoff
 
+> **Archive (historical).** Most items below are resolved or superseded by sufficiency / coverage work
+> (see Spec [0008](../../specs/0008-explore-locator-sufficiency.md) and [AGENTS.md](../../../AGENTS.md)
+> retrieval section). Kept as session handoff archaeology.
+> Docs hub: [docs/README.md](../../README.md).
+
 > Working doc for a fresh session. Two problems to crack:
 > **(P1)** agents still reach for `Read`/`grep` during implementation instead of homegraph;
 > **(P2)** on startup the homegraph MCP server can be `pending` when the agent's first turn fires, so the agent runs with *no* homegraph at all.

@@ -1,5 +1,8 @@
 # Main-thread stall budget — extraction & resolution follow-up
 
+> **Archive (historical).** Shipped follow-up notes. Kept for attribution / incident context.
+> Active agent doctrine: [AGENTS.md](../../../AGENTS.md). Docs hub: [docs/README.md](../../README.md).
+
 **Status: IMPLEMENTED** (same branch as the #1212 tail fix — attribution runs
 promoted "suspects" to proven culprits fast enough to justify shipping
 together). What landed, per suspect:
