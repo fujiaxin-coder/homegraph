@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- Docs hub at `docs/README.md` plus a short `docs/RELEASE.md` for publishing [`homegraph`](https://www.npmjs.com/package/homegraph) (Actions), GitCode releases, and mirror checks — without duplicating DEVELOPMENT SDD.
 - Explore better matches common survey shapes (data-source, Event→handler, multi-Type deps, resource/preview, NAPI) with honest **Partial** vs **ANSWER NOW**, so agents get anchors without fake-complete dumps that trigger Grep storms.
 - Startup MCP instructions are a shorter locator playbook: how to write `query`, when to stop after explore, and when to Skip — without long low-salience essays.
 - Repeated or near-duplicate `homegraph_explore` bags are guarded so agents do not spin on the same keyword paraphrase.
@@ -18,6 +19,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixes
 
 - Multi-term locator bags (e.g. `item` + `service`) are no longer misrouted into light-mechanism just because `service` is a generic noun, so corroboration / full explore ranking can still surface the matching backend file.
+- Renamed the language-verification guide (was `SEARCH_QUALITY_LOOP.md`) and archived settled design notes under `docs/design/archive/` so the docs tree is easier to navigate.
 
 ### New Features
 

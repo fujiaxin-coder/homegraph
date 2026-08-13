@@ -294,7 +294,7 @@ TypeScript / JavaScript、Python、Go、Rust、Java、C#、PHP、Ruby、C / C++�
 
 ## 从源码构建
 
-适用于开发或二次修改。协作约定（代码拉取、Commit、PR 清单）见 [DEVELOPMENT.md](./DEVELOPMENT.md)。
+适用于开发或二次修改。协作约定（Spec、Commit、PR）见 [DEVELOPMENT.md](./DEVELOPMENT.md)；文档目录见 [docs/README.md](./docs/README.md)；发包见 [docs/RELEASE.md](./docs/RELEASE.md)；本地 CLI/MCP 见 [docs/local-dev-guide.md](./docs/local-dev-guide.md)。
 
 ```bash
 git clone <your-repo-url>

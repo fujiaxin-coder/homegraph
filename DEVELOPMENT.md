@@ -1,7 +1,7 @@
 # 开发工作流
 
 本文约定 HomeGraph 仓库的日常协作流程：**SDD（Spec-Driven Development）**、代码拉取、Commit 规范、PR 检查清单。  
-本地构建与 CLI/MCP 用法见 [docs/local-dev-guide.md](./docs/local-dev-guide.md)；Agent 向架构约束见 [AGENTS.md](./AGENTS.md)。
+本地构建与 CLI/MCP 用法见 [docs/local-dev-guide.md](./docs/local-dev-guide.md)；**发包 / 发行版**见 [docs/RELEASE.md](./docs/RELEASE.md)；文档目录见 [docs/README.md](./docs/README.md)；Agent 向架构约束见 [AGENTS.md](./AGENTS.md)。
 
 ---
 
