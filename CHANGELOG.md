@@ -9,7 +9,15 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.5.3] - 2026-08-11
+### New Features
+
+- Explore better matches common survey shapes (data-source, Event→handler, multi-Type deps, resource/preview, NAPI) with honest **Partial** vs **ANSWER NOW**, so agents get anchors without fake-complete dumps that trigger Grep storms.
+- Startup MCP instructions are a shorter locator playbook: how to write `query`, when to stop after explore, and when to Skip — without long low-salience essays.
+- Repeated or near-duplicate `homegraph_explore` bags are guarded so agents do not spin on the same keyword paraphrase.
+
+### Fixes
+
+- Multi-term locator bags (e.g. `item` + `service`) are no longer misrouted into light-mechanism just because `service` is a generic noun, so corroboration / full explore ranking can still surface the matching backend file.
 
 ### New Features
 

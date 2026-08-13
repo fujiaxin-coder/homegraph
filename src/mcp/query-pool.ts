@@ -35,6 +35,7 @@ import { Worker } from 'worker_threads';
 import * as path from 'path';
 import * as os from 'os';
 import type { ToolResult } from './tools';
+import { formatPartialExploreGuidance } from './explore-repeat-guard';
 
 /** Compiled sibling — `query-worker.js` lives next to this file in `dist/mcp/`. */
 const WORKER_FILE = path.join(__dirname, 'query-worker.js');
@@ -55,15 +56,14 @@ export interface PoolWorker {
 
 /**
  * Default soft backstop — must stay **well below** typical MCP client hard
- * timeouts (~60s). Eval / agent configs sometimes set the env to 60000, which
- * races the client and yields empty `-32001`; we clamp to
- * {@link MAX_BUSY_TIMEOUT_MS} regardless. Prefer returning busy/partial early
- * so the agent can retry once instead of waiting out the client hard cut.
+ * timeouts (~60s). Large monorepo explores often need >15s; leave headroom
+ * under client cuts. Env `CODEGRAPH_QUERY_BUSY_TIMEOUT_MS` is clamped to
+ * {@link MAX_BUSY_TIMEOUT_MS} so a mistaken `60000` cannot race the client.
  */
-const DEFAULT_BUSY_TIMEOUT_MS = 15_000;
+const DEFAULT_BUSY_TIMEOUT_MS = 25_000;
 
-/** Hard ceiling — leave headroom under ~30–60s client timeouts (flush / scheduling). */
-const MAX_BUSY_TIMEOUT_MS = 20_000;
+/** Hard ceiling — leave headroom under ~60s client timeouts. */
+const MAX_BUSY_TIMEOUT_MS = 45_000;
 
 /**
  * Default concurrent workers when env is unset. Keep at 1: a second connection
@@ -161,7 +161,11 @@ export function resolveToolDeadlineMs(): number {
 }
 
 /** Success-shaped overload guidance (NEVER isError — see the abandonment rule). */
-function busyGuidance(waitedMs: number, reason: 'timeout' | 'admission' = 'timeout'): ToolResult {
+function busyGuidance(
+  waitedMs: number,
+  reason: 'timeout' | 'admission' = 'timeout',
+  query?: string,
+): ToolResult {
   const secs = Math.max(1, Math.round(waitedMs / 1000));
   const why = reason === 'admission'
     ? 'too many concurrent HomeGraph queries are already in flight'
@@ -169,11 +173,7 @@ function busyGuidance(waitedMs: number, reason: 'timeout' | 'admission' = 'timeo
   return {
     content: [{
       type: 'text',
-      text:
-        `⚠️ **Partial result** — HomeGraph is busy (${why}). This is NOT an error. ` +
-        `Retry ONE \`homegraph_explore\` with the concrete symbol/file names from the question — ` +
-        `do not fire search+explore or node+callers+callees in parallel, and do not fall back to grep/read ` +
-        `for symbols you already named (that duplicates tokens). A single retry usually returns full source.`,
+      text: formatPartialExploreGuidance({ seconds: secs, query, why: `HomeGraph is busy (${why})` }),
     }],
   };
 }
@@ -343,7 +343,11 @@ export class QueryPool {
       this.settle(job, partial);
       return;
     }
-    this.settle(job, busyGuidance(Date.now() - job.enqueuedAt, reason));
+    this.settle(job, busyGuidance(
+      Date.now() - job.enqueuedAt,
+      reason,
+      typeof job.args?.query === 'string' ? job.args.query : undefined,
+    ));
   }
 
   /** Run a read tool on the pool. Always resolves (never rejects). */

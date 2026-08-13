@@ -112,12 +112,12 @@ describe('explore-routing anti-regression guards', () => {
     expect(q.shouldTryLightMechanismExplore(qy)).toBe(false);
   });
 
-  it('xml howto seeds convertxml (not bare xml-only)', () => {
+  it('xml howto stays light without inventing project util Types', () => {
     const qy = '项目中是如何实现xml解析功能的';
     expect(q.shouldTryLightMechanismExplore(qy)).toBe(true);
-    const seeds = q.extractMechanismEntrySeeds(qy);
-    expect(seeds.map((s) => s.toLowerCase())).toEqual(
-      expect.arrayContaining(['convertxml', 'xmlparseutil']),
-    );
+    const seeds = q.extractMechanismEntrySeeds(qy).map((s) => s.toLowerCase());
+    expect(seeds).not.toContain('convertxml');
+    expect(seeds).not.toContain('xmlparseutil');
+    expect(seeds.some((s) => /xml/i.test(s))).toBe(true);
   });
 });

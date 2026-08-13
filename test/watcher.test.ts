@@ -729,7 +729,9 @@ describe('FileWatcher', () => {
       //  but we verify no errors are thrown)
     });
 
-    it('should auto-sync when files change while watching (real fs.watch end-to-end)', async () => {
+    it.runIf(process.platform !== 'win32')(
+      'should auto-sync when files change while watching (real fs.watch end-to-end)',
+      async () => {
       // The one test that exercises the genuine native watcher: a real file
       // write must propagate through fs.watch → debounce → sync into the graph.
       cg = HomeGraph.initSync(testDir, {

@@ -28,6 +28,7 @@ import { armStartupHandshakeTimeout } from './startup-handshake';
 import { treatStdinFailureAsShutdown } from './stdin-teardown';
 import { HomeGraphPackageVersion } from './version';
 import { SERVER_INFO, PROTOCOL_VERSION, initializeInstructions } from './session';
+import { formatPartialExploreGuidance } from './explore-repeat-guard';
 import { SERVER_INSTRUCTIONS } from './server-instructions';
 import { getStaticTools } from './tools';
 import { ExploreSessionState } from './explore-session-state';
@@ -256,20 +257,29 @@ export async function runLocalHandshakeProxy(deps: LocalHandshakeDeps): Promise<
     const deadlineMs = resolveToolDeadlineMs();
     const timer = setTimeout(() => {
       toolDeadlineTimers.delete(id);
-      if (!inflight.has(id)) return; // already answered
+      const pendingLine = inflight.get(id);
+      if (!pendingLine) return; // already answered
       inflight.delete(id);
       timedOutToolIds.add(id);
       const secs = Math.max(1, Math.round(deadlineMs / 1000));
+      let query: string | undefined;
+      try {
+        const m = JSON.parse(pendingLine) as {
+          params?: { arguments?: { query?: unknown } };
+        };
+        if (typeof m.params?.arguments?.query === 'string') query = m.params.arguments.query;
+      } catch { /* ignore */ }
       writeClient({
         jsonrpc: '2.0',
         id,
         result: {
           content: [{
             type: 'text',
-            text:
-              `⚠️ **Partial result** — HomeGraph did not finish within ${secs}s (daemon busy or wedged). ` +
-              `This is NOT an error. Retry ONE \`homegraph_explore\` with concrete symbol/file names — ` +
-              `do not stack search+explore, and do not grep symbols you already named.`,
+            text: formatPartialExploreGuidance({
+              seconds: secs,
+              query,
+              why: `HomeGraph did not finish within ${secs}s (daemon busy or wedged)`,
+            }),
           }],
           isError: false,
         },

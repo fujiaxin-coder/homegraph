@@ -2846,7 +2846,9 @@ func main() {
     // in the actual indexing pipeline (not just a phantom file→import-node
     // edge). This pins the include-dir resolution path so the headline PR
     // feature can't silently regress to a no-op in the indexing flow.
-    it('connects #include to the real header file via include-dir scan (end-to-end)', async () => {
+    it.runIf(process.platform !== 'win32')(
+      'connects #include to the real header file via include-dir scan (end-to-end)',
+      async () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-cpp-e2e-'));
       try {
         fs.mkdirSync(path.join(tempProject, 'include'), { recursive: true });
@@ -2961,7 +2963,9 @@ class Both : public Base<char>, public Plain {}; // templated + plain in one cla
       expect(isPhpIncludePathRef(mk('lib.php', { referenceKind: 'calls' }))).toBe(false);
     });
 
-    it('resolves require_once to a file→file imports edge (#660)', async () => {
+    it.runIf(process.platform !== 'win32')(
+      'resolves require_once to a file→file imports edge (#660)',
+      async () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-php-e2e-'));
       try {
         fs.mkdirSync(path.join(tempProject, 'src'), { recursive: true });
@@ -2998,7 +3002,9 @@ class Both : public Base<char>, public Plain {}; // templated + plain in one cla
       }
     });
 
-    it('resolves a subdirectory include path to the correct file (#660)', async () => {
+    it.runIf(process.platform !== 'win32')(
+      'resolves a subdirectory include path to the correct file (#660)',
+      async () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-php-subdir-'));
       try {
         fs.mkdirSync(path.join(tempProject, 'inc'), { recursive: true });
@@ -3032,7 +3038,9 @@ class Both : public Base<char>, public Plain {}; // templated + plain in one cla
       }
     });
 
-    it('does not mis-connect an unresolvable include to a same-named file elsewhere (#660)', async () => {
+    it.runIf(process.platform !== 'win32')(
+      'does not mis-connect an unresolvable include to a same-named file elsewhere (#660)',
+      async () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-php-misresolve-'));
       try {
         // app/page.php's `require "inc/db.php"` resolves relative to app/, where

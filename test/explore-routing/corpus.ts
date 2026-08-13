@@ -61,6 +61,18 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     expect: 'defer',
     pins: { preferExplore: false },
   },
+  {
+    id: 'vcs-history',
+    shape: 'git / commit history',
+    query: '看一下最近一次提交改了什么',
+    expect: 'defer',
+  },
+  {
+    id: 'media-assets',
+    shape: 'media / binary asset inventory',
+    query: '列出工程里所有 png 图片资源',
+    expect: 'defer',
+  },
 
   // --- light mechanism ---
   {
@@ -70,7 +82,7 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     expect: 'light',
     // Session tok↑ when explore is ~5k+ and agent still Greps; keep payload lean.
     maxChars: 5_200,
-    mustContain: [/convertxml/i, /ANSWER NOW/i, /Mechanism explore complete/i],
+    mustContain: [/convertxml/i, /Partial locator|ANSWER NOW/i, /Locator partial|Mechanism explore complete|Source Code/i],
   },
   {
     id: 'mech-notification',
@@ -78,7 +90,7 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     query: '项目中是如何实现通知订阅管理的，涉及的多线程或多进程是怎样的？',
     expect: 'light',
     maxChars: 7_500,
-    mustContain: [/ANSWER NOW/i, /Mechanism explore complete|NotificationManager|Source Code/i],
+    mustContain: [/Partial locator|ANSWER NOW/i, /NotificationManager|NotificationSubscribe|Source Code|Locator partial/i],
   },
   {
     id: 'mech-theme-install-steps',
@@ -86,7 +98,7 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     query: '用户下载一个完整主题包后，解析和安装的步骤中会走到哪些代码？',
     expect: 'light',
     maxChars: 7_500,
-    mustContain: [/ThemePack|ThemePackage|SkinInstaller|ANSWER NOW/i],
+    mustContain: [/ThemePack|ThemePackage|SkinInstaller/i, /Partial locator|ANSWER NOW/i],
   },
   {
     id: 'mech-native-gl-thread',
@@ -94,7 +106,7 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     query: 'libeffectrender.so 链接了 GLESv3 和 EGL，OpenGL上下文在哪个线程创建？与XComponent的UI线程是否相同？',
     expect: 'light',
     maxChars: 8_000,
-    mustContain: [/CMake|EGLCore|PluginRender|ANSWER NOW/i],
+    mustContain: [/CMake|EGLCore|PluginRender/i, /Partial locator|ANSWER NOW/i],
   },
 
   // --- inventory ---
@@ -213,6 +225,15 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     expect: 'inventory',
     pins: { dataSource: true, preferExplore: true },
     maxChars: 4_000,
+  },
+  {
+    id: 'inv-event-dispatch-datashare',
+    shape: 'Event types → Manager dispatch',
+    query:
+      'SysUIDataShareEvent 定义的数据共享事件类型有哪些，各被 DataShareMgr 分发给哪些 Manager 处理？',
+    expect: 'inventory',
+    pins: { preferExplore: true },
+    maxChars: 6_000,
   },
   {
     id: 'inv-data-source-account',

@@ -44,9 +44,14 @@ import {
   extractCallerSurveySymbols,
   queryAsCrossModuleFlowSurvey,
   queryAsDataSourceSurvey,
+  queryAsDataSourceDistinguishAsk,
+  queryAsEventDispatchSurvey,
+  queryAsMultiTypeDependencySurvey,
   queryAsInterpretationSurvey,
   queryAsTestOnlyInterpretation,
   extractMechanismEntrySeeds,
+  mechanismDomainPathTokens,
+  isDomainRoleSymbol,
   shouldTryLightMechanismExplore,
   shouldUseCompactExploreBudget,
   shouldFocusOnQueryNamedDefs,
@@ -166,8 +171,10 @@ describe('Type-listed method callers / native GL thread', () => {
     expect(queryAsLocalSymbolDetail(q)).toBe(false);
     expect(shouldBuildMemberSurvey(q)).toBe(false);
     expect(extractMechanismEntrySeeds(q)).toEqual(
-      expect.arrayContaining(['EGLCore', 'PluginRender']),
+      expect.arrayContaining(['CMakeLists']),
     );
+    // Named Draw/Render/EGL owners come from the query — do not invent project Types.
+    expect(extractMechanismEntrySeeds(q)).not.toContain('PluginRender');
   });
 });
 
@@ -193,6 +200,17 @@ describe('extractDependencySymbolsFromQuery', () => {
     expect(extractDependencySymbolsFromQuery('where is statfs API endpoint used')).toContain('statfs');
     const casual = extractDependencySymbolsFromQuery('how to get system language');
     expect(casual).not.toContain('statfs');
+  });
+
+  it('drops kit-deps NL leftovers (import/dependencies) so they cannot become inventory focus', () => {
+    const deps = extractDependencySymbolsFromQuery(
+      'ServiceCollaborationKit import usage dependencies',
+    );
+    expect(deps).not.toContain('import');
+    expect(deps).not.toContain('imports');
+    expect(deps).not.toContain('dependencies');
+    expect(deps).not.toContain('dependency');
+    expect(deps).not.toContain('usage');
   });
 });
 
@@ -334,8 +352,10 @@ describe('shouldOmitSourceBodies', () => {
 });
 
 describe('queryShouldDeferToBuiltinTools', () => {
-  it('defers shape-only: SDK catalogs, topic file-lists, concept compares', () => {
+  it('defers the explicit blacklist including kit feature catalogs', () => {
+    // Feature/API catalogs need SDK docs — not a fake import inventory.
     expect(queryShouldDeferToBuiltinTools('@kit.SomeKit的foo模块有哪些功能')).toBe('sdk-catalog');
+    expect(queryShouldDeferToBuiltinTools('@kit.ArkTS util module API functions')).toBe('sdk-catalog');
     expect(queryShouldDeferToBuiltinTools('与缓存策略相关的文件有哪些')).toBe('file-listing');
     expect(
       queryShouldDeferToBuiltinTools('项目中有使用共享缓存吗？它与普通缓存有什么不同？'),
@@ -343,6 +363,10 @@ describe('queryShouldDeferToBuiltinTools', () => {
     expect(
       queryShouldDeferToBuiltinTools("检索所有 .width('100%') 和 .height('100%') 同时出现的组件"),
     ).toBeNull();
+    expect(queryShouldDeferToBuiltinTools('请只查阅官方文档回答，不要看代码')).toBe('external-manual');
+    expect(queryShouldDeferToBuiltinTools('从零创建一个空的鸿蒙工程')).toBe('greenfield');
+    expect(queryShouldDeferToBuiltinTools('用 git blame 看谁改过登录页')).toBe('vcs-history');
+    expect(queryShouldDeferToBuiltinTools('列出工程里所有 png 图片资源')).toBe('media-assets');
   });
 
   it('does not defer structural / in-repo usage questions', () => {
@@ -361,8 +385,20 @@ describe('queryShouldDeferToBuiltinTools', () => {
     ).toBeNull();
   });
 
-  it('defers pure outcome questions without hover/Type anchors', () => {
-    expect(queryShouldDeferToBuiltinTools('用户拖拽时会发生什么')).toBe('concept-or-existence');
+  it('does not defer code-change / pre-edit orientation tasks', () => {
+    expect(
+      queryShouldDeferToBuiltinTools('请在现有工程里新增一个收藏路线按钮并实现切换逻辑'),
+    ).toBeNull();
+    expect(
+      queryShouldDeferToBuiltinTools('Fix the crash when opening the exhibition detail page'),
+    ).toBeNull();
+    expect(
+      queryShouldDeferToBuiltinTools('Refactor AuthService login flow to use token refresh'),
+    ).toBeNull();
+  });
+
+  it('does not defer vague outcome questions (default serve; not on skip blacklist)', () => {
+    expect(queryShouldDeferToBuiltinTools('用户拖拽时会发生什么')).toBeNull();
   });
 
   it('inventories hover handlers instead of soft-skipping', () => {
@@ -455,7 +491,23 @@ describe('queryShouldDeferToBuiltinTools', () => {
     ).toBe(true);
     expect(
       queryAsNamedControlStateSyncSurvey(
-        'HotspotToggle state is consistent across control center, settings, and status bar — which module guarantees it?',
+        'WifiToggle state is consistent across control center, settings, and status bar — which module guarantees it?',
+      ),
+    ).toBe(true);
+    // Agent EN rewrite: "state consistency" (consistency ≠ consistent substring).
+    expect(
+      queryAsNamedControlStateSyncSurvey(
+        'WifiToggle state consistency control center system settings status bar which module',
+      ),
+    ).toBe(true);
+    expect(
+      shouldTryFastInventoryExplore(
+        'WifiToggle state consistency control center system settings status bar which module',
+      ),
+    ).toBe(true);
+    expect(
+      queryAsNativeRenderThreadSurvey(
+        'SubThreadDraw sub-thread rendering frame synchronization with UI thread to prevent tearing',
       ),
     ).toBe(true);
     expect(
@@ -502,7 +554,7 @@ describe('queryShouldDeferToBuiltinTools', () => {
   it('defers literal copy hunts without code anchors', () => {
     expect(
       queryShouldDeferToBuiltinTools('全搜一下哪些布局里绑了中文 text 常量，点击会打开编辑页是什么逻辑'),
-    ).toBe('concept-or-existence');
+    ).toBe('literal-hunt');
   });
 
   it('routes step/download-parse flows to mechanism, not domain file inventory', () => {
@@ -583,6 +635,10 @@ describe('mechanism domain anchors', () => {
     expect(extractDependencySymbolsFromQuery('xml parse 解析 XML parsing')).not.toContain('parsing');
     // Named Type takes compact / inventory — not the domain bag.
     expect(queryAsDomainMechanismBag('ThemeHome UI components')).toBe(false);
+    // Multi-term locator bags (`item service`) are corroboration/full explore —
+    // `service` is noun noise, not an action verb for the domain-mechanism bag.
+    expect(queryAsDomainMechanismBag('item service')).toBe(false);
+    expect(shouldTryLightMechanismExplore('item service')).toBe(false);
   });
 });
 
@@ -612,6 +668,21 @@ describe('kit module capability survey', () => {
     );
     expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS的util模块有哪些功能')).toEqual(
       expect.arrayContaining(['util']),
+    );
+  });
+
+  it('drops NL leftovers (module/functions) from kit submodule focus', () => {
+    expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS util module API functions')).toEqual(
+      expect.arrayContaining(['util']),
+    );
+    expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS util module API functions')).not.toContain(
+      'module',
+    );
+    expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS util module API functions')).not.toContain(
+      'functions',
+    );
+    expect(extractKitSubmoduleNamesFromQuery('@kit.ArkTS util module API functions')).not.toContain(
+      'API',
     );
   });
 
@@ -807,15 +878,49 @@ describe('P0 explore shapes', () => {
   });
 
   it('detects data-source and caller surveys', () => {
-    expect(queryAsDataSourceSurvey('BadgeManager角标数据来源于哪个系统服务')).toBe(true);
+    expect(queryAsDataSourceSurvey('CacheManager角标数据来源于哪个系统服务')).toBe(true);
+    // Agent EN rewrite of the same intent — must still route to data-source inventory.
+    expect(queryAsDataSourceSurvey('CacheManager badge source system service')).toBe(true);
+    expect(shouldTryFastInventoryExplore('CacheManager badge source system service')).toBe(true);
+    expect(
+      extractDependencySymbolsFromQuery('CacheManager badge source system service'),
+    ).not.toEqual(expect.arrayContaining(['service', 'source', 'system']));
+    expect(queryAsDataSourceSurvey('SessionManager 状态变化 状态来源 state change source')).toBe(true);
+    expect(queryAsDataSourceDistinguishAsk('SessionManager 内部对于状态变化的“状态来源”是如何统一或区分的？')).toBe(true);
+    // Agent rewrite drops 「如何统一或区分」but keeps 状态来源 / status|state source.
+    expect(
+      queryAsDataSourceDistinguishAsk('SessionManager 状态变化 状态来源 account state change source'),
+    ).toBe(true);
+    expect(
+      queryAsDataSourceDistinguishAsk('SessionManager which system service provides account status'),
+    ).toBe(false);
     expect(extractCallerSurveySymbols('项目中哪里调用了SortWidgets')).toContain('SortWidgets');
     expect(shouldBuildCallerInventory('项目中哪里调用了SortWidgets')).toBe(true);
   });
 
+  it('detects multi-Type dependency inventory (not light dump)', () => {
+    const q =
+      'PackManager PackInstaller PackParser PackService PackController 之间的依赖关系';
+    expect(queryAsMultiTypeDependencySurvey(q)).toBe(true);
+    expect(shouldTryFastInventoryExplore(q)).toBe(true);
+    expect(shouldTryLightMechanismExplore(q)).toBe(false);
+  });
+
+  it('detects event→Manager dispatch inventory', () => {
+    const q =
+      'OrderEvent 定义的事件类型有哪些，各被 OrderMgr 分发给哪些 Manager 处理？';
+    expect(queryAsEventDispatchSurvey(q)).toBe(true);
+    expect(shouldTryFastInventoryExplore(q)).toBe(true);
+    expect(shouldTryLightMechanismExplore(q)).toBe(false);
+    expect(queryAsLocalSymbolDetail(q)).toBe(false);
+  });
+
   it('fast inventory for surveys not cross-module flows', () => {
-    expect(shouldTryFastInventoryExplore('与用户首选项相关的文件有哪些')).toBe(true);
+    // Topic→file-list is on the Skip blacklist (defer), not inventory.
+    expect(queryShouldDeferToBuiltinTools('与用户首选项相关的文件有哪些')).toBe('file-listing');
+    expect(shouldTryFastInventoryExplore('与用户首选项相关的文件有哪些')).toBe(false);
     expect(shouldTryFastInventoryExplore('项目中哪里调用了SortWidgets')).toBe(true);
-    expect(shouldTryFastInventoryExplore('BadgeManager角标数据来源于哪个系统服务')).toBe(true);
+    expect(shouldTryFastInventoryExplore('CacheManager角标数据来源于哪个系统服务')).toBe(true);
     expect(
       shouldTryFastInventoryExplore('壁纸从 WallpaperApplyPage 到 ScreenLockWallpaperManager 落盘'),
     ).toBe(false);
@@ -945,10 +1050,38 @@ describe('P0 explore shapes', () => {
     expect(extractMechanismEntrySeeds('NotificationManager如何订阅通知')).toContain(
       'NotificationManager',
     );
-    // XML howto deliberately seeds convertxml / XmlParseUtil (not bare `xml` flood).
-    expect(extractMechanismEntrySeeds('如何实现XML解析功能')).toEqual(
-      expect.arrayContaining(['convertxml', 'XmlParseUtil']),
+    expect(
+      extractMechanismEntrySeeds('项目中是如何实现通知订阅管理的，涉及的多线程或多进程是怎样的？'),
+    ).not.toContain('NotificationSubscribeManager');
+    expect(mechanismDomainPathTokens('通知订阅管理 notification subscribe')).toEqual(
+      expect.arrayContaining(['notification', 'subscribe']),
     );
+    expect(
+      mechanismDomainPathTokens('用户下载一个完整主题包后，解析和安装的步骤中会走到哪些代码？'),
+    ).toEqual(expect.arrayContaining(['theme', 'themeservice', 'themepack']));
+    expect(
+      mechanismDomainPathTokens('用户下载一个完整主题包后，解析和安装的步骤中会走到哪些代码？'),
+    ).not.toContain('install');
+    // Do not invent project Type names the query never mentioned.
+    expect(
+      extractMechanismEntrySeeds('用户下载一个完整主题包后，解析和安装的步骤中会走到哪些代码？'),
+    ).not.toContain('ThemePackParser');
+    expect(
+      isDomainRoleSymbol(
+        'NotificationSubscribeManager',
+        'feature/notification/notificationcomponent/src/main/ets/manager/NotificationSubscribeManager.ets',
+        ['notification', 'subscribe'],
+      ),
+    ).toBe(true);
+    expect(
+      isDomainRoleSymbol(
+        'DataRestoreController',
+        'product/phonebase/src/main/ets/SceneBoard/controllers/DataRestoreController.ets',
+        ['notification'],
+      ),
+    ).toBe(false);
+    // XML howto: domain bag only — do not invent project util Type names.
+    expect(extractMechanismEntrySeeds('如何实现XML解析功能')).not.toContain('XmlParseUtil');
     expect(extractMechanismEntrySeeds('备份与恢复是如何实现的')).not.toContain('BackupManager');
     expect(shouldTryLightMechanismExplore('项目中是如何实现xml解析功能的')).toBe(true);
     expect(shouldTryLightMechanismExplore('与用户首选项相关的文件有哪些')).toBe(false);
