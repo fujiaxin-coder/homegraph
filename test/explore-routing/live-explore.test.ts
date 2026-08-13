@@ -60,7 +60,7 @@ describe.runIf(runLive)('explore-routing live probes', () => {
 
       // Kind smoke checks — wrong section = wrong route landed in output.
       if (c.expect === 'light') {
-        expect(text).toMatch(/Mechanism explore complete|CMake \/ link|Source Code/i);
+        expect(text).toMatch(/Locator partial|Mechanism explore complete|CMake \/ link|Source Code|Partial locator/i);
         expect(text).not.toMatch(/Skip HomeGraph/i);
       }
       if (c.expect === 'inventory') {

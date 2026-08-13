@@ -97,19 +97,30 @@ export function extractKitModuleNamesFromQuery(query: string): string[] {
  *  Covers `util模块`, `util 模块`, and `@kit.Foo的bar` / `@kit.Foo bar` (export focus).
  */
 export function extractKitSubmoduleNamesFromQuery(query: string): string[] {
+  // NL leftovers in agent rewrites ("util module API functions") — not exports.
+  const SUBMODULE_NOISE = new Set([
+    'module', 'modules', 'function', 'functions', 'feature', 'features',
+    'api', 'apis', 'capability', 'capabilities', 'export', 'exports',
+  ]);
   const names = new Set<string>();
+  const add = (raw: string | undefined) => {
+    if (!raw || raw.length < 2) return;
+    const s = raw.toLowerCase();
+    if (STOP_WORDS.has(s) || GENERIC_VERB_ANCHOR_NOISE.has(s) || SUBMODULE_NOISE.has(s)) return;
+    names.add(raw);
+  };
   for (const m of query.matchAll(/([a-z][a-z0-9_]{1,24})模块/gi)) {
-    if (m[1] && m[1].length >= 2) names.add(m[1]);
+    add(m[1]);
   }
   for (const m of query.matchAll(/\b([a-z][a-z0-9_]*)\s+模块\b/gi)) {
-    if (m[1] && m[1].length >= 2) names.add(m[1]);
+    add(m[1]);
   }
   // `@kit.ArkTS的taskpool` / `@kit.ArkTS的 foo` — named export, not a catalog.
   for (const m of query.matchAll(/@kit\.[A-Za-z][A-Za-z0-9]*的\s*([a-z][a-zA-Z0-9_]{2,24})\b/gi)) {
-    if (m[1]) names.add(m[1]);
+    add(m[1]);
   }
   for (const m of query.matchAll(/@kit\.[A-Za-z][A-Za-z0-9]*[\s.]+([a-z][a-zA-Z0-9_]{2,24})\b/gi)) {
-    if (m[1] && !STOP_WORDS.has(m[1].toLowerCase())) names.add(m[1]);
+    add(m[1]);
   }
   return [...names];
 }
@@ -122,6 +133,10 @@ export function queryAsKitModuleCapabilitySurvey(query: string): boolean {
   if (extractKitModuleNamesFromQuery(query).length === 0) return false;
   const capability =
     /有哪些功能|有什么功能|哪些功能|模块功能|功能有哪些|what\s+(?:are\s+the\s+)?features|module\s+features|kit\s+features/i.test(
+      query,
+    )
+    // Agent rewrites: "@kit.ArkTS util module API functions"
+    || /(?:module\s+)?API\s+functions?|API\s+(?:list|catalog|surface)|what\s+(?:APIs?|functions?)\s+(?:does|are)/i.test(
       query,
     );
   if (!capability) return false;
@@ -209,37 +224,101 @@ export function queryAsNamedComponentAction(query: string): boolean {
 }
 
 /**
- * Out-of-repo SDK catalog (kept for survey omit logic — not as a refuse list).
+ * Out-of-repo SDK catalog phrasing (kit + "what features/APIs").
+ * Routed to Skip HomeGraph — graph has usages, not official feature lists.
  */
 export function queryAsOutOfRepoSdkCatalog(query: string): boolean {
   if (queryAsKitModuleCapabilitySurvey(query)) return true;
   const catalog =
     /有哪些(?:功能|API|接口|方法|能力)|提供(?:哪些|什么)|模块有哪些|what\s+(?:are\s+the\s+)?(?:apis?|features|methods)|(?:api|feature)\s+(?:list|catalog)|official\s+(?:api|sdk)\s+docs|module\s+features|kit\s+features/i.test(
       query,
-    );
+    )
+    || /(?:module\s+)?API\s+functions?|API\s+(?:list|catalog|surface)/i.test(query);
   if (!catalog) return false;
   return /@kit\.|\b[A-Z][A-Za-z0-9]*Kit\b/i.test(query);
 }
 
 /**
- * Query shapes where HomeGraph usually loses to Grep/Glob/SDK docs.
- * Shape-driven only — no product nouns, no eval-corpus fingerprints.
- * Short-circuits explore/search with success-shaped "do not retry" guidance.
+ * Query shapes where HomeGraph is *definitely* the wrong tool.
+ *
+ * Default is **do not skip** (agent already chose explore/search — serve it).
+ * Blacklist only — absence from this list means run. Do not add allowlists.
+ *
+ * Kit **feature/API catalogs** ("what APIs does util have") are skipped — the
+ * graph has import/usage sites, not official capability lists. In-repo kit
+ * *usage* questions stay on explore.
+ * Shape-driven only — no product nouns.
  */
 export type HomeGraphDeferKind =
-  | 'sdk-catalog'
   | 'file-listing'
-  | 'concept-or-existence';
+  | 'literal-hunt'
+  | 'concept-or-existence'
+  | 'external-manual'
+  | 'sdk-catalog'
+  | 'greenfield'
+  | 'vcs-history'
+  | 'media-assets';
+
+/**
+ * Agent is about to change an existing codebase (feature / fix / refactor).
+ * Used for explore *routing* (prefer explore / light mechanism), not Skip.
+ */
+export function queryAsCodeChangeOrientation(query: string): boolean {
+  const q = query.trim();
+  if (!q) return false;
+  return (
+    /(?:请)?(?:直接)?(?:在|给|为).{0,40}(?:工程|项目|代码|模块|页面|组件).{0,40}(?:新增|添加|增加|修改|改造|实现|修复|重构)/i.test(q)
+    || /(?:新增|添加|增加|修改|改造|实现|修复|重构|接入|改一下|帮我改).{0,40}(?:功能|逻辑|页面|组件|入口|按钮|接口|模块)/i.test(q)
+    || /\b(?:implement|add|introduce|wire|integrate|extend|refactor|fix|modify|update|change)\b.{0,60}\b(?:feature|page|component|module|handler|api|bug|crash|flow)\b/i.test(q)
+    || /\b(?:fix|repair|debug)\b.{0,40}\b(?:crash|bug|error|issue|regression)\b/i.test(q)
+    || /定位并修复|修复.*崩溃|修复.*闪退|find\s+(?:and\s+)?fix/i.test(q)
+  );
+}
+
+/** Explicit "answer from official docs / website only" — no repo graph needed. */
+export function queryAsExternalManualOnly(query: string): boolean {
+  return (
+    /(?:请)?(?:只|仅)?(?:查阅|查看|打开|去看|参考)(?:一下)?(?:官方|官网)(?:文档|手册|网站)/i.test(query)
+    || /developer\.huawei\.com|华为开发者(?:联盟|官网)/i.test(query)
+    || /according\s+to\s+(?:the\s+)?official\s+(?:sdk\s+)?docs?(?:\s+only)?/i.test(query)
+    || /(?:read|see|check)\s+(?:the\s+)?official\s+(?:documentation|docs|website)\s+only/i.test(query)
+    || /不要看代码.*(?:文档|官网)|(?:文档|官网).*(?:不要|别)看代码/i.test(query)
+  );
+}
+
+/** Scaffold / empty project from scratch — nothing useful in an existing index. */
+export function queryAsGreenfieldScaffold(query: string): boolean {
+  return (
+    /从零(?:开始)?(?:创建|新建|搭建)|创建(?:一个)?空的(?:工程|项目|应用)|新建(?:一个)?空白(?:工程|项目)/i.test(query)
+    || /create\s+(?:a\s+)?(?:new\s+)?(?:empty\s+)?(?:harmonyos\s+|arkts\s+)?(?:project|app)\s+from\s+scratch/i.test(query)
+    || /scaffold\s+(?:a\s+)?(?:brand\s+)?new\s+(?:empty\s+)?project/i.test(query)
+  );
+}
+
+/** Git / VCS history — not in the symbol graph. */
+export function queryAsVcsHistoryOnly(query: string): boolean {
+  return (
+    /\bgit\s+(?:log|blame|diff|show|bisect|history)\b/i.test(query)
+    || /(?:提交历史|commit\s+history|git\s+blame|谁改过|上次提交|最近一次提交|哪次\s*commit)/i.test(query)
+    || /(?:查看|看一下|列出).{0,12}(?:git\s+)?(?:log|blame|diff)/i.test(query)
+  );
+}
+
+/** Media / binary asset inventory by extension — Glob, not the symbol graph. */
+export function queryAsMediaAssetInventory(query: string): boolean {
+  const listing =
+    /(?:所有|全部|列出|找(?:出|到)?|盘点|有哪些|which|list|find|inventory)\b/i.test(query)
+    || /资源文件|图片资源|音频资源|媒体资源|media\s+assets?/i.test(query);
+  if (!listing) return false;
+  return (
+    /\.(?:png|jpe?g|gif|svg|webp|bmp|ico|mp4|mp3|wav|aac|flac|ttf|otf|woff2?)\b/i.test(query)
+    || /(?:png|jpe?g|gif|svg|webp|图片|图标|音频|视频|字体)\s*(?:文件|资源|assets?)/i.test(query)
+  );
+}
 
 export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKind | null {
   const q = query.trim();
   if (!q) return null;
-
-  // Pre-existing catalog classifiers (@kit / *Kit + "what features/APIs").
-  // Checked before named-member heuristics — `@kit.X` can look like Type.member.
-  if (queryAsOutOfRepoSdkCatalog(q) || queryAsKitModuleCapabilitySurvey(q)) {
-    return 'sdk-catalog';
-  }
 
   const hasType = extractTypeNamesFromQuery(q).length > 0;
   const hasFile = extractFileBasenamesFromQuery(q).length > 0;
@@ -248,72 +327,39 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
   const hasCaps = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/.test(q);
   const hasField = extractFieldLikeSymbolsFromQuery(q).length > 0;
   const hasPath = extractPathSegmentsFromQuery(q).length > 0;
+  const hasGraphAnchor = hasType || hasFile || hasMember || hasKit || hasCaps || hasField || hasPath;
 
-  // Literal / layout / "import text from graphics package" hunts → Grep.
-  // No PascalCase Type — light-mechanism must not claim these.
+  // 1) Explicit external-manual-only asks.
+  if (queryAsExternalManualOnly(q)) return 'external-manual';
+
+  // 1b) Kit/SDK feature catalogs ("what APIs does X have") — not in-repo usage.
+  if (queryAsOutOfRepoSdkCatalog(q)) return 'sdk-catalog';
+
+  // 2) VCS history (independent of anchors — graph has no commits).
+  if (queryAsVcsHistoryOnly(q)) return 'vcs-history';
+
+  // 3) Media/binary asset inventories → Glob.
+  if (queryAsMediaAssetInventory(q)) return 'media-assets';
+
+  // 4) Greenfield empty scaffold (no existing code to orient on).
+  if (!hasGraphAnchor && queryAsGreenfieldScaffold(q)) return 'greenfield';
+
+  // 5) Repo-wide literal / copy / layout-string hunts with no code anchors → Grep.
+  if (!hasGraphAnchor && queryLooksLikeLiteralOrCopyHunt(q)) return 'literal-hunt';
+
+  // 6) Topic → file list with no Type/file anchor → Glob/Grep.
   if (
     !hasType
     && !hasFile
-    && !hasMember
-    && !hasKit
-    && !hasCaps
-    && !hasField
-    && !hasPath
-    && queryLooksLikeLiteralOrCopyHunt(q)
-  ) {
-    return 'concept-or-existence';
-  }
-
-  // Structural / in-repo usage surveys must still run.
-  if (queryAsMechanismSurvey(q) || queryAsCrossModuleFlowSurvey(q)) return null;
-  if (shouldBuildKitModuleUsageSurvey(q) || shouldBuildApiUsageSurvey(q)) return null;
-  if (shouldBuildCallerInventory(q) || shouldTryLightMechanismExplore(q)) return null;
-  if (queryAsNamedComponentAction(q) || queryHasNamedMemberFocus(q)) return null;
-  if (queryAsInterpretationSurvey(q) || queryAsLocalSymbolDetail(q)) return null;
-  if (queryHasFocusedNamedAnchors(q)) return null;
-  if (
-    queryAsDeclarationSiteSurvey(q)
-    || queryAsConstantUsageSurvey(q)
-    || queryAsFieldUsageSurvey(q)
-    || queryAsModuleExportSurvey(q)
-    || queryAsModuleDependencySurvey(q)
-  ) {
-    return null;
-  }
-
-  // "Which files relate to <topic>?" with no Type/file anchor → Glob/Grep.
-  if (
-    /哪些文件|有哪些.*文件|相关的?\s*文件|涉及.*文件|which\s+files?|files?\s+(?:are\s+)?related/i.test(q)
-    && !hasType
-    && !hasFile
+    && /哪些文件|有哪些.*文件|相关的?\s*文件|涉及.*文件|which\s+files?|files?\s+(?:are\s+)?related/i.test(q)
   ) {
     return 'file-listing';
   }
 
-  // Existence / concept-compare with no graph anchor → Grep/docs.
+  // 7) Pure existence / concept-compare with zero graph anchors → Grep/docs.
   if (
-    /有使用|是否使用|有没有使用|使用了.*吗|是否存在|有没有完整|有什么不同|区别|difference|vs\.?|versus|对比|does\s+(?:this\s+)?(?:project|repo)\s+have|is\s+there\s+(?:a\s+)?complete/i.test(
-      q,
-    )
-    && !hasType
-    && !hasFile
-    && !hasMember
-    && !hasKit
-  ) {
-    return 'concept-or-existence';
-  }
-
-  // Hover / 悬停 without a named Type → inventory of hover handlers (not Skip).
-  if (shouldBuildHoverHandlerSurvey(q)) return null;
-
-  // Behavioral / interaction outcome with zero graph anchors → Grep (no symbol to seed).
-  // Do NOT include hover/悬停 here — those have a graph inventory path above.
-  if (
-    !hasType
-    && !hasFile
-    && !hasMember
-    && !hasKit
-    && /会有什么|会发生什么|什么反应|what\s+happens|what\s+(?:is|are)\s+the\s+(?:reaction|response)|when\s+(?:the\s+)?user\b/i.test(
+    !hasGraphAnchor
+    && /有使用|是否使用|有没有使用|使用了.*吗|是否存在|有没有完整|有什么不同|区别|difference|vs\.?|versus|对比|does\s+(?:this\s+)?(?:project|repo)\s+have|is\s+there\s+(?:a\s+)?complete/i.test(
       q,
     )
   ) {
@@ -327,18 +373,28 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
 export function homegraphDeferGuidance(kind: HomeGraphDeferKind, query: string): string {
   const q = query.trim().slice(0, 120);
   const reasons: Record<HomeGraphDeferKind, string> = {
-    'sdk-catalog':
-      'Official SDK / @kit feature catalogs are outside this repo index — use SDK docs.',
     'file-listing':
       'Topic → file lists need Grep/Glob (keyword paths), not the symbol graph.',
+    'literal-hunt':
+      'Repo-wide literal / copy / layout-string hunts with no Type/file/@kit anchor — use Grep.',
     'concept-or-existence':
-      'Concept compare / UI-behavior / existence checks without a named in-repo Type/file/@kit target — Grep (and docs) beat HomeGraph.',
+      'Pure existence/concept-compare with no named in-repo Type/file/@kit/@ohos anchor — Grep/docs.',
+    'external-manual':
+      'Question asks for official website/docs only — open the manual; HomeGraph indexes code/API graphs, not marketing pages.',
+    'sdk-catalog':
+      'Kit/SDK **feature or API catalogs** ("what does util export") need SDK docs — HomeGraph indexes in-repo imports/usages, not official capability lists. Rephrase as "which files import @kit.X / export Y" if you want usages.',
+    'greenfield':
+      'Scaffolding an empty project from scratch needs generators/docs, not an existing code graph.',
+    'vcs-history':
+      'Git/commit/blame/diff history is not in the symbol graph — use git / IDE history.',
+    'media-assets':
+      'Media/binary asset inventories (.png/.mp4/fonts/…) need Glob, not the symbol graph.',
   };
   return [
     'Skip HomeGraph for this question shape — do **not** retry any `homegraph_*` tool for it.',
     reasons[kind],
     `Query: "${q}${query.trim().length > 120 ? '…' : ''}"`,
-    'Next: Grep / Glob / Read / SDK docs. Call HomeGraph only for in-repo wiring, callers/callees, or named-symbol flows.',
+    'Next: Grep / Glob / Read / git / SDK docs / project generators as appropriate. Otherwise call `homegraph_explore` with the task or symbol names.',
   ].join('\n');
 }
 
@@ -348,7 +404,8 @@ export function homegraphDeferGuidance(kind: HomeGraphDeferKind, query: string):
 export function queryShouldPreferExploreOverSearch(query: string): boolean {
   const q = query.trim();
   if (!q) return false;
-  if (queryLooksLikeLiteralOrCopyHunt(query)) return false;
+  if (queryLooksLikeLiteralOrCopyHunt(query) && !queryAsCodeChangeOrientation(query)) return false;
+  if (queryAsCodeChangeOrientation(query)) return true;
   if (/^[A-Za-z_][\w]*$/.test(q)) return true;
   if (
     extractFileBasenamesFromQuery(query).length > 0
@@ -655,6 +712,18 @@ export const GENERIC_VERB_ANCHOR_NOISE = new Set([
   // Inventory / NL fillers agents leave in rewritten bags (not real symbols).
   'usage', 'usages', 'use', 'uses', 'using', 'api', 'apis', 'endpoint', 'endpoints',
   'project', 'codebase', 'repo', 'documentation', 'document', 'docs', '说明',
+  // Kit-deps rewrite leftovers: "ServiceCollaborationKit import usage dependencies"
+  // must NOT become import-inventory focus (matches every `import` line).
+  'import', 'imports', 'importing', 'dependency', 'dependencies', 'deps', 'dep',
+  'param', 'params', 'parameter', 'parameters', 'extra', 'other', 'require', 'requires',
+  'calling', 'call', 'calls', 'needed', 'install', 'installing',
+  // Kit catalog rewrites: "util module API functions"
+  'module', 'modules', 'function', 'functions', 'feature', 'features',
+  'capability', 'capabilities', 'export', 'exports',
+  // Data-source EN rewrites: "badge source system service" must NOT become
+  // import-inventory focus (matches every `*Service` / ServiceExtensionAbility).
+  'service', 'services', 'source', 'sources', 'system', 'systems',
+  'upstream', 'origin', 'origins',
   // Shared-lib / GL thread NL leftovers (not symbols).
   'context', 'opengl', 'gles', 'glesv3', 'egl',
 ]);
@@ -832,7 +901,7 @@ export function queryAsFieldUsageSurvey(query: string): boolean {
 
 /**
  * Native shared lib + GL/EGL thread questions (`libfoo.so` … OpenGL … 哪个线程).
- * Light-mechanism (CMake + EGLCore/PluginRender), not `.so` member survey.
+ * Light-mechanism (CMake + named Draw/Render/EGL owners), not `.so` member survey.
  */
 export function queryAsNativeRenderThreadSurvey(query: string): boolean {
   const hasLib =
@@ -840,7 +909,15 @@ export function queryAsNativeRenderThreadSurvey(query: string): boolean {
     || /\blib\w+\b/i.test(query);
   const hasGl = /\b(?:GLES(?:v3)?|EGL|OpenGL)\b/i.test(query);
   const hasThread = /线程|thread|UI\s*线程|主线程|JS\s*主?线程/i.test(query);
-  return (hasLib || hasGl) && hasThread;
+  if ((hasLib || hasGl) && hasThread) return true;
+  // Named Draw/Render/EGL owner + frame-sync / sub-thread (no project Type list).
+  if (
+    /\b(?:[A-Z][A-Za-z0-9]*(?:Draw|Render)|EGL(?:Core)?|EglCore)\b/.test(query)
+    && /帧同步|撕裂|tearing|frame\s*sync|synchron|mutex|sub-?thread|子线程/i.test(query)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /** Named `.d.ts` wrap — what calls / imports it in-repo. */
@@ -872,13 +949,19 @@ export function queryAsAssignedFlagImpactSurvey(query: string): boolean {
  * Named Toggle/control kept consistent across surfaces — which module guarantees it.
  */
 export function queryAsNamedControlStateSyncSurvey(query: string): boolean {
+  // Prefer Toggle/Switch anchors — bag-of-words rewrites often add Control/Center noise Types.
   const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
-  if (types.length < 1 || types.length > 2) return false;
+  const controlTypes = types.filter((t) => /Toggle|Switch|开关/i.test(t));
+  const anchors = controlTypes.length > 0 ? controlTypes : types;
+  if (anchors.length < 1 || anchors.length > 3) return false;
   return (
-    /状态一致|保持一致|三处|哪个模块保证|who\s+keeps|consistent\s+state|state\s+sync|guarantees?\s+it|which\s+module\s+guarantees/i.test(
+    /状态一致|保持一致|多处|多端|哪个模块保证|who\s+keeps|consistent\s+state|state\s+consistenc|state\s+sync|consistenc(?:y|ies)|guarantees?\s+it|which\s+module\s+guarantees|across\s+(?:surfaces|places)/i.test(
       query,
     )
-    || (/Toggle|Switch|开关/.test(query) && /一致|保证|模块|consistent|guarantees?/i.test(query))
+    || (
+      /Toggle|Switch|开关/i.test(query)
+      && /一致|保证|模块|consistenc|consistent|guarantees?/i.test(query)
+    )
   );
 }
 
@@ -1169,7 +1252,68 @@ export function queryAsCrossModuleFlowSurvey(query: string): boolean {
 
 /** Data-source / upstream-service intent (来源于哪个服务 / which service). */
 export function queryAsDataSourceSurvey(query: string): boolean {
-  return /来源于|数据来源|状态来源|来自哪个|哪个系统服务|来自什么服务|data\s+source|status\s+source|state\s+source|which\s+service|来源.*服务|如何统一或区分/i.test(
+  if (
+    /来源于|数据来源|状态来源|来自哪个|哪个系统服务|来自什么服务|data\s+source|status\s+source|state\s+source|which\s+service|来源.*服务|如何统一或区分/i.test(
+      query,
+    )
+  ) {
+    return true;
+  }
+  // Agent EN / bag-of-words rewrites of the same intent.
+  if (/\bsystem\s+service\b/i.test(query)) return true;
+  if (/\bupstream\s+(?:service|source|data)\b/i.test(query)) return true;
+  if (/\bsource\b.{0,48}\b(?:system\s+)?service\b/i.test(query)) return true;
+  if (/\b(?:data|status|state)\b.{0,48}\bsource\b/i.test(query)) return true;
+  return false;
+}
+
+/** "How are sources unified/distinguished" — inventory alone is Partial, not ANSWER NOW. */
+export function queryAsDataSourceDistinguishAsk(query: string): boolean {
+  if (
+    /如何统一或区分|统一或区分|区分.*来源|来源.*区分|unify|distinguish|how\s+(?:are|is).{0,40}(?:unified|distinguished)/i.test(
+      query,
+    )
+  ) {
+    return true;
+  }
+  // Rewrites may drop 「如何统一或区分」but keep 状态来源 / status|state source.
+  if (/哪个系统服务|which\s+system\s+service|来源于哪个|来自哪个系统/i.test(query)) {
+    return false;
+  }
+  if (/\bsystem\s+service\b/i.test(query) && !/状态来源|status\s*source|state.{0,24}source/i.test(query)) {
+    return false;
+  }
+  return /状态来源|status\s*source|state\s+change\s+source|state.{0,24}source/i.test(query);
+}
+
+/**
+ * ≥3 named Types + dependency/relationship ask — inventory edges, not a fat
+ * multi-body compact that hits the soft deadline.
+ */
+export function queryAsMultiTypeDependencySurvey(query: string): boolean {
+  const types = extractTypeNamesFromQuery(query).filter(
+    (t) =>
+      t.length >= 8
+      || /(?:Manager|Installer|Parser|Service|Controller|Handler|Provider|Store)$/i.test(t),
+  );
+  if (types.length < 3) return false;
+  return /依赖|关系|互相|之间|调用关系|dependenc|relationship|how\s+(?:do|are).{0,40}relate|related/i.test(
+    query,
+  );
+}
+
+/**
+ * Event-type → handler/Manager dispatch inventory
+ * (`FooEvent` types / which Managers handle them).
+ */
+export function queryAsEventDispatchSurvey(query: string): boolean {
+  const types = extractTypeNamesFromQuery(query);
+  const hasEventType = types.some((t) => /Event$/i.test(t));
+  const hasEventCue =
+    hasEventType
+    || /\b[A-Z][A-Za-z0-9]*Event\b|事件类型|事件枚举/i.test(query);
+  if (!hasEventCue) return false;
+  return /分发|分发给|哪些\s*Manager|handlers?|dispatch|routed?\s+to|handled\s+by|处理/i.test(
     query,
   );
 }
@@ -1219,7 +1363,7 @@ export function extractLocalDetailAnchors(query: string): string[] {
     return score(b) - score(a) || a.localeCompare(b);
   });
   // Drop framework decorator names when a concrete UI Type is also present
-  // (`@CustomDialog` + WallpaperApplyDialog → keep only the Apply* types).
+  // (`@CustomDialog` + `FooDialog` → keep only the concrete UI types).
   const hasConcreteUi = ranked.some(
     (n) => queryLooksLikeUiComponentType(n) && !isFrameworkUiDecoratorName(n),
   );
@@ -1263,6 +1407,7 @@ export function queryAsLocalSymbolDetail(query: string): boolean {
   if (queryNeedsCoNamedUseBridge(query)) return true;
   if (shouldBuildCallerInventory(query)) return false;
   if (queryAsDataSourceSurvey(query)) return false;
+  if (queryAsEventDispatchSurvey(query)) return false;
 
   // Named UI control + event: compact body + callees (not import inventory).
   if (queryAsNamedComponentAction(query)) return true;
@@ -1391,31 +1536,13 @@ export function extractMechanismEntrySeeds(query: string): string[] {
       seeds.add(term);
     }
   }
-  // Shared-lib + GLES/EGL thread — seed the usual native GL owners (not `.so` / Context).
+  // Shared-lib + GLES/EGL thread — seed Draw/Render/EGL owners named in the query.
   if (queryAsNativeRenderThreadSurvey(query)) {
-    seeds.add('EGLCore');
-    seeds.add('PluginRender');
+    for (const t of extractTypeNamesFromQuery(query)) seeds.add(t);
+    for (const m of query.matchAll(/\b([A-Z][A-Za-z0-9]*(?:Draw|Render|Core))\b/g)) {
+      if (m[1]) seeds.add(m[1]);
+    }
     if (/\bCMakeLists\b|\.so\b|链接|link/i.test(query)) seeds.add('CMakeLists');
-  }
-  // Theme pack download→parse→install — agents often omit PascalCase names.
-  if (/主题|theme\s*pack|theme\s*package/i.test(query) && /安装|解析|下载|install|parse|download/i.test(query)) {
-    for (const s of [
-      'ThemePackParser', 'ThemePackageInstaller', 'SkinInstaller', 'IconsInstaller', 'FontInstaller',
-    ]) {
-      seeds.add(s);
-    }
-  }
-  // Notification subscribe/manage howto — same pattern (CJK domain, no Type named).
-  if (/通知|notification/i.test(query) && /订阅|subscribe|管理|manage|多线程|multithread/i.test(query)) {
-    for (const s of ['NotificationManager', 'NotificationSubscriber', 'AnsManager', 'SubscribeCallback']) {
-      seeds.add(s);
-    }
-  }
-  // XML parse howto — seed the real API, not bare `xml` (which floods every Xml* path).
-  if (/\bxml\b|xml解析|解析xml/i.test(query) && /解析|parse|convert|实现/i.test(query)) {
-    for (const s of ['convertxml', 'XmlParseUtil', 'ConvertXML', 'fastConvertToJSObject']) {
-      seeds.add(s);
-    }
   }
 
   return [...seeds].filter((s) => s.length >= 3).slice(0, 12);
@@ -1450,8 +1577,27 @@ export function queryAsDomainMechanismBag(query: string): boolean {
   );
   if (distinct.length === 0) return false;
 
+  // Only *verb* leftovers count as the action half. Noun noise in
+  // GENERIC_VERB_ANCHOR_NOISE (`service` / `source` / `system` / `api` / …)
+  // must not turn a multi-term locator bag (`item service`) into light-mechanism.
+  const MECHANISM_BAG_NOUN_NOISE = new Set([
+    'service', 'services', 'source', 'sources', 'system', 'systems',
+    'upstream', 'origin', 'origins',
+    'usage', 'usages', 'use', 'uses', 'using',
+    'api', 'apis', 'endpoint', 'endpoints',
+    'module', 'modules', 'function', 'functions', 'feature', 'features',
+    'capability', 'capabilities', 'export', 'exports',
+    'dependency', 'dependencies', 'deps', 'dep',
+    'param', 'params', 'parameter', 'parameters',
+    'project', 'codebase', 'repo', 'documentation', 'document', 'docs',
+    'context', 'opengl', 'gles', 'glesv3', 'egl',
+    'extra', 'other', 'require', 'requires', 'needed',
+  ]);
   const hasActionVerb =
-    domain.some((t) => GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()))
+    domain.some((t) => {
+      const l = t.toLowerCase();
+      return GENERIC_VERB_ANCHOR_NOISE.has(l) && !MECHANISM_BAG_NOUN_NOISE.has(l);
+    })
     || /\b(?:parse|implement|manage|handle|process|subscribe|convert|encode|decode)(?:s|d|ing)?\b/i.test(
       query,
     );
@@ -1461,16 +1607,32 @@ export function queryAsDomainMechanismBag(query: string): boolean {
 }
 
 export function shouldTryLightMechanismExplore(query: string): boolean {
+  if (queryShouldDeferToBuiltinTools(query)) return false;
   if (queryAsCrossModuleFlowSurvey(query)) return false;
   if (queryAsInterpretationSurvey(query)) return false;
-  // Literal / copy hunts → Grep (never light dump).
-  if (queryLooksLikeLiteralOrCopyHunt(query)) return false;
+  // Literal / copy hunts → Grep (never light dump), unless this is an edit/fix task.
+  if (queryLooksLikeLiteralOrCopyHunt(query) && !queryAsCodeChangeOrientation(query)) return false;
+  // Pre-edit orientation: task keywords → light mechanism seeds (domain / Type / file).
+  if (queryAsCodeChangeOrientation(query)) {
+    if (
+      extractDomainSearchTerms(query).length >= 1
+      || extractTypeNamesFromQuery(query).length > 0
+      || extractFileBasenamesFromQuery(query).length > 0
+      || extractMemberAccessFromQuery(query).length > 0
+    ) {
+      return true;
+    }
+  }
   // System-setting howto → lean capability inventory, not every `language` import.
   if (queryAsInRepoSystemCapabilityHowto(query)) return false;
   // Return-value consumers → callers of the member, not a seed+flow dump.
   if (queryAsReturnValueConsumerSurvey(query)) return false;
   // Manager data/status source → inventory, not light-mechanism.
   if (queryAsDataSourceSurvey(query)) return false;
+  // Event type → Manager dispatch inventory.
+  if (queryAsEventDispatchSurvey(query)) return false;
+  // ≥3 Types + dependency relationship → lean inventory (not light/compact dump).
+  if (queryAsMultiTypeDependencySurvey(query)) return false;
   // Named UI control + event → compact (body + callees + usage sites), not light-mechanism.
   if (queryAsNamedComponentAction(query)) return false;
   if (queryAsAssignedFlagImpactSurvey(query) || queryAsNamedControlStateSyncSurvey(query)) {
@@ -1517,6 +1679,7 @@ export function shouldTryLightMechanismExplore(query: string): boolean {
  * Skip expensive subgraph gathering — inventory sections alone answer the query.
  */
 export function shouldTryFastInventoryExplore(query: string): boolean {
+  if (queryShouldDeferToBuiltinTools(query)) return false;
   if (queryAsCrossModuleFlowSurvey(query)) return false;
   if (shouldTryLightMechanismExplore(query)) return false;
   if (queryAsInterpretationSurvey(query)) return false;
@@ -1537,6 +1700,8 @@ export function shouldTryFastInventoryExplore(query: string): boolean {
     || shouldBuildDomainFileSurvey(query)
     || shouldBuildConfigSection(query)
     || queryAsDataSourceSurvey(query)
+    || queryAsEventDispatchSurvey(query)
+    || queryAsMultiTypeDependencySurvey(query)
     || shouldBuildHoverHandlerSurvey(query)
     || queryAsModuleExportSurvey(query)
     || queryAsModuleDependencySurvey(query)
@@ -1687,7 +1852,52 @@ export function shouldBuildDomainFileSurvey(query: string): boolean {
 
 /** Callable/class names that commonly anchor implementation flows. */
 export const IMPLEMENTATION_ENTRY_NAME_RE =
-  /Manager|Service|Handler|Extension|Parser|Helper|Controller|Provider|Worker|Backup|Restore|Subscription|Monitor|Coordinator|Delegate|Adapter|Factory|Processor/i;
+  /Manager|Service|Handler|Extension|Parser|Helper|Controller|Provider|Worker|Backup|Restore|Subscription|Monitor|Coordinator|Delegate|Adapter|Factory|Processor|Subscriber|Listener/i;
+
+/**
+ * ASCII path/name stems for mechanism affinity.
+ * Expands a few CJK domain nouns so `通知订阅` can match `/notification/` paths
+ * without a product-specific file blacklist.
+ */
+export function mechanismDomainPathTokens(query: string): string[] {
+  const out = new Set<string>();
+  for (const t of extractDomainSearchTerms(query)) {
+    if (/^[\x00-\x7F]+$/.test(t) && t.length >= 4 && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase())) {
+      out.add(t.toLowerCase());
+    }
+  }
+  if (/通知/.test(query)) out.add('notification');
+  if (/订阅/.test(query)) {
+    out.add('subscribe');
+    out.add('subscriber');
+  }
+  if (/壁纸|wallpaper/i.test(query)) out.add('wallpaper');
+  if (/主题|theme/i.test(query)) {
+    out.add('theme');
+    // Prefer themeservice / themepack paths over appinstall "download/install" Managers.
+    out.add('themeservice');
+    out.add('themepack');
+  }
+  if (/备份|backup/i.test(query)) out.add('backup');
+  if (/恢复|restore/i.test(query)) out.add('restore');
+  if (/锁屏|screenlock|keyguard/i.test(query)) {
+    out.add('screenlock');
+    out.add('keyguard');
+  }
+  return [...out].slice(0, 12);
+}
+
+/** Class/file looks like a domain Manager/Service under matching path or name. */
+export function isDomainRoleSymbol(name: string, filePath: string, domainTokens: string[]): boolean {
+  if (!IMPLEMENTATION_ENTRY_NAME_RE.test(name)) return false;
+  if (domainTokens.length === 0) return /Manager|Subscriber|Listener$/i.test(name);
+  const blob = `${name}\n${filePath}`.toLowerCase().replace(/\\/g, '/');
+  return domainTokens.some((t) => {
+    const tl = t.toLowerCase();
+    if (tl.length < 4) return false;
+    return blob.includes(tl) || blob.includes(`/${tl}/`);
+  });
+}
 
 export function isImplementationEntrySymbol(name: string, domainTerms: string[]): boolean {
   if (!IMPLEMENTATION_ENTRY_NAME_RE.test(name)) return false;
@@ -2063,6 +2273,8 @@ export function isTestFile(filePath: string): boolean {
     lower.includes('/__tests__/') || lower.includes('/spec/') ||
     lower.includes('/specs/') || lower.includes('/testlib/') ||
     lower.includes('/testing/') ||
+    // HarmonyOS / OpenHarmony instrumented test trees
+    lower.includes('/ohostest/') ||
     lower.startsWith('test/') || lower.startsWith('tests/') ||
     lower.startsWith('spec/') || lower.startsWith('specs/') ||
     // CamelCase test source-set dirs (Kotlin Multiplatform / Gradle / Xcode):
