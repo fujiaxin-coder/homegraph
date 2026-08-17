@@ -20,6 +20,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- ArkTS indexing no longer `realpathSync`s every ArkAnalyzer path on the hot path: the project root is canonicalized once per batch, then relative paths are string-stripped (with a cached realpath fallback when prefixes disagree) — restoring Storing speed on large Harmony repos while keeping macOS `/var`↔`/private/var` and symlink-root correctness.
 - Multi-term locator bags (e.g. `item` + `service`) are no longer misrouted into light-mechanism just because `service` is a generic noun, so corroboration / full explore ranking can still surface the matching backend file.
 - Renamed the language-verification guide (was `SEARCH_QUALITY_LOOP.md`) and archived settled design notes under `docs/design/archive/` so the docs tree is easier to navigate.
 
