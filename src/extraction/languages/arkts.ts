@@ -1425,21 +1425,6 @@ interface ModelWithModifiers {
   getDecorators?: () => Iterable<{ getKind: () => string; getContent?: () => string }>;
 }
 
-/**
- * Project-relative path for an ArkAnalyzer absolute file path.
- *
- * ArkAnalyzer returns realpath'd absolutes (macOS: `/private/var/...`), while
- * HomeGraph's `rootDir` from `mkdtemp` / callers is often the unresolved form
- * (`/var/...`). Without canonicalizing both sides, `path.relative` escapes the
- * project (`../../../../private/var/.../file.ets`) and every file is skipped
- * by the `scanned` set → empty batch / "no indexed files".
- */
-function normalizeRelPath(rootDir: string, absolutePath: string): string {
-  const root = realpathExisting(rootDir);
-  const abs = realpathExisting(absolutePath);
-  return path.relative(root, abs).replace(/\\/g, '/');
-}
-
 /** `realpathSync` when the path (or its dirname) exists; otherwise `path.resolve`. */
 function realpathExisting(p: string): string {
   try {
@@ -1453,6 +1438,65 @@ function realpathExisting(p: string): string {
   }
 }
 
+function toPosixPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/**
+ * If `absolutePath` is under `canonicalRoot`, return the project-relative posix
+ * path; otherwise null. Windows compares case-insensitively.
+ */
+function tryStripRootPrefix(canonicalRoot: string, absolutePath: string): string | null {
+  const root = toPosixPath(canonicalRoot);
+  const abs = toPosixPath(absolutePath);
+  const rootCmp = process.platform === 'win32' ? root.toLowerCase() : root;
+  const absCmp = process.platform === 'win32' ? abs.toLowerCase() : abs;
+  if (absCmp === rootCmp) return '';
+  const prefix = rootCmp.endsWith('/') ? rootCmp : `${rootCmp}/`;
+  if (!absCmp.startsWith(prefix)) return null;
+  const sliceFrom = root.endsWith('/') ? root.length : root.length + 1;
+  return abs.slice(sliceFrom);
+}
+
+export interface ArkRelPathNormalizer {
+  /** realpath'd project root used for all joins in this batch. */
+  readonly rootDir: string;
+  normalize(absolutePath: string): string;
+}
+
+/**
+ * Project-relative paths for ArkAnalyzer absolutes.
+ *
+ * ArkAnalyzer often returns realpath'd absolutes (macOS: `/private/var/...`),
+ * while HomeGraph's `rootDir` from `mkdtemp` / callers may be unresolved
+ * (`/var/...`). We realpath the root **once**, then strip by prefix on the hot
+ * path; only prefix misses pay a per-path `realpath` (cached for the batch).
+ */
+export function createArkRelPathNormalizer(rootDir: string): ArkRelPathNormalizer {
+  const canonicalRoot = realpathExisting(rootDir);
+  const cache = new Map<string, string>();
+
+  const normalizeOnce = (absolutePath: string): string => {
+    const fast = tryStripRootPrefix(canonicalRoot, absolutePath);
+    if (fast !== null) return fast;
+    const abs = realpathExisting(absolutePath);
+    const after = tryStripRootPrefix(canonicalRoot, abs);
+    if (after !== null) return after;
+    return toPosixPath(path.relative(canonicalRoot, abs));
+  };
+
+  return {
+    rootDir: canonicalRoot,
+    normalize(absolutePath: string): string {
+      const hit = cache.get(absolutePath);
+      if (hit !== undefined) return hit;
+      const rel = normalizeOnce(absolutePath);
+      cache.set(absolutePath, rel);
+      return rel;
+    },
+  };
+}
+
 /** Map ArkAnalyzer synthetic files (e.g. @dummyFile) to our virtual indexed path. */
 function resolveArkanalyzerVirtualPath(arkFile: ArkFile): string | null {
   const base = path.basename(arkFile.getFilePath()).replace(/\\/g, '/');
@@ -1460,10 +1504,6 @@ function resolveArkanalyzerVirtualPath(arkFile: ArkFile): string | null {
     return ARKANALYZER_DUMMY_FILE;
   }
   return null;
-}
-
-function relPathForArkFile(rootDir: string, arkFile: ArkFile): string {
-  return resolveArkanalyzerVirtualPath(arkFile) ?? normalizeRelPath(rootDir, arkFile.getFilePath());
 }
 
 function buildQualifiedName(parts: string[]): string {
@@ -2544,6 +2584,7 @@ function indexViewTreeForClass(
 
 class ArkTSAdapter {
   private readonly rootDir: string;
+  private readonly pathNorm: ArkRelPathNormalizer;
   private readonly scanned: Set<string>;
   private scene: Scene | null = null;
   private readonly methodToId = new Map<ArkMethod, string>();
@@ -2581,8 +2622,18 @@ class ArkTSAdapter {
   private readonly soImportBindingsByFile = new Map<string, Set<string>>();
 
   constructor(rootDir: string, scannedFiles: Iterable<string>) {
-    this.rootDir = rootDir;
+    this.pathNorm = createArkRelPathNormalizer(rootDir);
+    this.rootDir = this.pathNorm.rootDir;
     this.scanned = new Set(scannedFiles);
+  }
+
+  /** ArkAnalyzer absolute → project-relative (shared batch cache). */
+  normalizeRelPath(absolutePath: string): string {
+    return this.pathNorm.normalize(absolutePath);
+  }
+
+  private relPathForArkFile(arkFile: ArkFile): string {
+    return resolveArkanalyzerVirtualPath(arkFile) ?? this.normalizeRelPath(arkFile.getFilePath());
   }
 
   build(scene: Scene): ArkTSBatchIndex {
@@ -2606,7 +2657,7 @@ class ArkTSAdapter {
     this.scene = scene;
     const files = [...module.getFilesMap().values()];
     const moduleFiles = new Set(
-      files.map((f) => normalizeRelPath(this.rootDir, f.getFilePath())).filter(Boolean)
+      files.map((f) => this.normalizeRelPath(f.getFilePath())).filter(Boolean)
     );
     for (const arkFile of files) {
       this.indexScannedFile(arkFile);
@@ -2642,7 +2693,7 @@ class ArkTSAdapter {
         continue;
       }
       for (const arkFile of filesMap.values()) {
-        const rel = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+        const rel = this.normalizeRelPath(arkFile.getFilePath());
         if (!rel || excludeFiles.has(rel) || this.fileResults.has(rel)) continue;
         if (!this.scanned.has(rel) || !isArkAnalyzerSourcePath(rel)) continue;
         this.indexScannedFile(arkFile);
@@ -2670,7 +2721,7 @@ class ArkTSAdapter {
   /** Re-attach live Ark* objects to already-indexed HomeGraph node ids (sig maps). */
   private bindLiveMapsFromFiles(files: Iterable<ArkFile>): void {
     for (const arkFile of files) {
-      const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+      const relativePath = this.normalizeRelPath(arkFile.getFilePath());
       if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) continue;
 
       this.bindLiveClass(arkFile.getDefaultClass());
@@ -2847,7 +2898,7 @@ class ArkTSAdapter {
       }
 
       const callerFile =
-        (callerArk ? relPathForArkFile(this.rootDir, callerArk.getDeclaringArkFile()) : null) ??
+        (callerArk ? this.relPathForArkFile(callerArk.getDeclaringArkFile()) : null) ??
         (callerSig ? this.relPathFromMethodSignature(callerSig) : null) ??
         '';
 
@@ -2856,7 +2907,7 @@ class ArkTSAdapter {
       }
 
       const calleeFile =
-        (calleeArk ? relPathForArkFile(this.rootDir, calleeArk.getDeclaringArkFile()) : null) ??
+        (calleeArk ? this.relPathForArkFile(calleeArk.getDeclaringArkFile()) : null) ??
         (calleeSig ? this.relPathFromMethodSignature(calleeSig) : null);
 
       const callerId =
@@ -2903,7 +2954,7 @@ class ArkTSAdapter {
    */
   private stitchModuleCfgCallsAndRefs(files: ArkFile[], _moduleFiles: Set<string>): void {
     for (const arkFile of files) {
-      const callerFile = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+      const callerFile = this.normalizeRelPath(arkFile.getFilePath());
       const visitClass = (cls: ArkClass) => {
         for (const method of cls.getMethods(true)) {
           if (
@@ -3082,7 +3133,7 @@ class ArkTSAdapter {
     try {
       const fileName = sig.getDeclaringClassSignature().getDeclaringFileSignature().getFileName();
       if (!fileName || fileName === '%unk' || fileName.includes('%unk')) return null;
-      return normalizeRelPath(this.rootDir, fileName);
+      return this.normalizeRelPath(fileName);
     } catch {
       return null;
     }
@@ -3131,7 +3182,7 @@ class ArkTSAdapter {
   }
 
   private indexScannedFile(arkFile: ArkFile): void {
-    const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+    const relativePath = this.normalizeRelPath(arkFile.getFilePath());
     if (!this.scanned.has(relativePath)) return;
     if (!isArkAnalyzerSourcePath(relativePath)) return;
     this.indexFile(arkFile);
@@ -3139,7 +3190,7 @@ class ArkTSAdapter {
 
   private indexViewTreesFromFiles(files: Iterable<ArkFile>): void {
     for (const arkFile of files) {
-      const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+      const relativePath = this.normalizeRelPath(arkFile.getFilePath());
       if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) continue;
       const result = this.fileResults.get(relativePath);
       if (!result) continue;
@@ -3265,7 +3316,7 @@ class ArkTSAdapter {
   }
 
   private indexFile(arkFile: ArkFile): void {
-    const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+    const relativePath = this.normalizeRelPath(arkFile.getFilePath());
     const language: Language = 'arkts';
     let lineCount = 1;
     try {
@@ -3774,10 +3825,7 @@ class ArkTSAdapter {
     // prefer ids from the importer's file before treating the name as ambiguous.
     if (importer) {
       try {
-        const importerPath = normalizeRelPath(
-          this.rootDir,
-          importer.getDeclaringArkFile().getFilePath()
-        );
+        const importerPath = this.normalizeRelPath(importer.getDeclaringArkFile().getFilePath());
         const sameFile = candidates.filter((id) => this.classIdFilePath.get(id) === importerPath);
         if (sameFile.length > 0) candidates = sameFile;
       } catch {
@@ -3911,7 +3959,7 @@ class ArkTSAdapter {
     if (!displayName) return null;
 
     const arkFile = method.getDeclaringArkFile();
-    const relativePath = normalizeRelPath(this.rootDir, arkFile.getFilePath());
+    const relativePath = this.normalizeRelPath(arkFile.getFilePath());
     if (!this.scanned.has(relativePath) || !isArkAnalyzerSourcePath(relativePath)) return null;
 
     let lineCount = 1;
@@ -4124,7 +4172,7 @@ class ArkTSAdapter {
       if (exportInfo) {
         const targetFile = exportInfo.getDeclaringArkFile();
         if (targetFile) {
-          const targetRel = normalizeRelPath(this.rootDir, targetFile.getFilePath());
+          const targetRel = this.normalizeRelPath(targetFile.getFilePath());
           const targetFileId = `file:${targetRel}`;
           if (this.nodeIds.has(targetFileId)) {
             result.edges.push(
@@ -4286,7 +4334,7 @@ function buildArkTSIndexByModuleInner(
 
     scene.analyseByModule((module, scn) => {
       const moduleFileRels = [...module.getFilesMap().values()]
-        .map((f) => normalizeRelPath(rootDir, f.getFilePath()))
+        .map((f) => adapter.normalizeRelPath(f.getFilePath()))
         .filter((p) => p && isArkAnalyzerSourcePath(p))
         .map(normIndexPath);
 
