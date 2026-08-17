@@ -6,6 +6,7 @@
 | --- | --- |
 | Spec、commit、PR、拉代码 | 仓库根 [DEVELOPMENT.md](../DEVELOPMENT.md) |
 | 本地 build / CLI / Cursor MCP | [local-dev-guide.md](./local-dev-guide.md) |
+| A/B 测评怎么做（外部仓 + 仓内入口） | [how-to-evaluate.md](./how-to-evaluate.md) |
 | npm 发包、GitHub Release、GitCode 发行版、镜像 | [RELEASE.md](./RELEASE.md) |
 | Agent 架构与检索原则（给 AI） | 仓库根 [AGENTS.md](../AGENTS.md) |
 | 原理：节点/边/提取/消解 | [homegraph-principles.md](./homegraph-principles.md) |
