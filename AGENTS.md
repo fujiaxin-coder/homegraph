@@ -118,14 +118,14 @@ Two functions in `src/mcp/tools.ts` scale explore with indexed file count. This 
 
 | Repo | files | explore calls | chars/call | per-file |
 |---|---|---|---|---|
-| express (small) | 147 | 1 | 18K | 3800 |
-| excalidraw/django (medium) | 643–3043 | 2 | 28K | 6500 |
-| vscode (large) | 10446 | 3 | 35K | 7000 |
-| ~20k / ~40k | — | 4 / 5 | 38K | 7000 |
+| express (small) | 147 | 1 | ~12K | ~2.8K |
+| excalidraw/django (medium) | 643–3043 | 2 | ~12K | ~3K |
+| vscode (large) | 10446 | 3 | ~12K | ~3K |
+| ~20k / ~40k | — | 4 / 5 | ~12K | ~3K |
 
 - `getExploreBudget(fileCount)` → **call** budget: `<500→1, <5000→2, <15000→3, <25000→4, ≥25000→5` (max 5).
-- `getExploreOutputBudget(fileCount)` → **per-call** output (chars / files / per-file). **Invariant: a larger tier must never get a smaller `maxCharsPerFile` than a smaller tier.** (Regression that motivated this doc: the `<5000` tier's 2500 was *below* the `<500` tier's 3800, so on a god-file repo — excalidraw's 415 KB `App.tsx` — one explore returned <1% of the file and forced a Read.)
-- Explore output must **never tell the agent to "use Read"** — steer to another `homegraph_explore` and "treat returned source as already Read."
+- `getExploreOutputBudget(fileCount)` → **per-call** output. Default is **universal mid-lean**: Anchors (`file:line`) + ≤2 spine digests (~12K), Relationships off. Set `HOMEGRAPH_EXPLORE_FULL_SOURCE=1` for the prior body-heavy shape. **Invariant: a larger tier must never get a smaller `maxCharsPerFile` than a smaller tier.** Session fuse: ≤2 counted explores; Partial follow-ups must name Next anchor; after Partial ≤1 `homegraph_node` (callers/callees refused); soft-close when Manager inventory + digest suffice.
+- Explore is a **coarse locator** — digests = already Read for those symbols; ONE narrow Grep OK for residual unindexed wiring. Never tell the agent to "use Read" for the same symbols.
 
 ### Dynamic-dispatch coverage — the flow must EXIST in the graph end-to-end
 

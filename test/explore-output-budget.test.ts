@@ -21,8 +21,8 @@ describe('tightenExploreBudgetForQuery', () => {
       'How is notification subscription management implemented with multithreading?',
       { hasFlowPath: true },
     );
-    expect(tightened.maxOutputChars).toBeLessThanOrEqual(12000);
-    expect(tightened.maxOutputChars).toBeLessThan(base.maxOutputChars);
+    expect(tightened.maxOutputChars).toBeLessThanOrEqual(11000);
+    expect(tightened.maxOutputChars).toBeLessThanOrEqual(base.maxOutputChars);
     expect(tightened.includeBudgetNote).toBe(false);
   });
 
@@ -41,7 +41,7 @@ describe('getExploreOutputBudget', () => {
     const small = getExploreOutputBudget(100);
     const huge = getExploreOutputBudget(30000);
     expect(small.maxOutputChars).toBeLessThan(huge.maxOutputChars);
-    expect(small.defaultMaxFiles).toBeLessThan(huge.defaultMaxFiles);
+    expect(small.defaultMaxFiles).toBeLessThanOrEqual(huge.defaultMaxFiles);
     expect(small.maxCharsPerFile).toBeLessThan(huge.maxCharsPerFile);
   });
 
@@ -50,19 +50,17 @@ describe('getExploreOutputBudget', () => {
     expect(small.maxOutputChars).toBeLessThanOrEqual(20000);
   });
 
-  it('caps medium-large projects at the inline tool-result ceiling (~24k) so the result is never externalized', () => {
-    // A bigger single response gets externalized by the host to a file the agent
-    // Reads back (a 35k vscode explore did exactly that in the n=4 A/B) — adding a
-    // read AND cache-write cost. So large repos get MORE CALLS (getExploreBudget),
-    // not a fatter single response; the output cap stays under the inline limit.
+  it('caps medium-large projects at the mid-lean locator ceiling (~12k) by default', () => {
+    // Universal mid-lean: anchors + spine digests. HOMEGRAPH_EXPLORE_FULL_SOURCE=1
+    // restores the prior fatter body dump.
     const large = getExploreOutputBudget(10000);
-    expect(large.maxOutputChars).toBeLessThanOrEqual(25000);
-    expect(large.maxOutputChars).toBeGreaterThanOrEqual(20000);
+    expect(large.maxOutputChars).toBeLessThanOrEqual(12000);
+    expect(large.maxOutputChars).toBeGreaterThanOrEqual(10000);
+    expect(large.includeRelationships).toBe(false);
+    expect(large.defaultMaxFiles).toBeLessThanOrEqual(2);
   });
 
   it('uses tier breakpoints matching getExploreBudget so call-count and output-budget agree on a project', () => {
-    // Very-tiny tier (<150 files) gets a tighter cap than small (150-499) —
-    // paired with tool gating to handle the MCP-overhead-dominates regime.
     const tier0a = getExploreOutputBudget(50);
     const tier0b = getExploreOutputBudget(149);
     expect(tier0a.maxOutputChars).toBe(tier0b.maxOutputChars);
@@ -70,7 +68,6 @@ describe('getExploreOutputBudget', () => {
     const tier1a = getExploreOutputBudget(150);
     const tier1b = getExploreOutputBudget(499);
     expect(tier1a.maxOutputChars).toBe(tier1b.maxOutputChars);
-    // The <500 explore-call budget covers both very-tiny and small.
     expect(getExploreBudget(50)).toBe(getExploreBudget(499));
 
     const tier2a = getExploreOutputBudget(500);
@@ -82,13 +79,11 @@ describe('getExploreOutputBudget', () => {
     const tier3b = getExploreOutputBudget(14999);
     expect(tier3a.maxOutputChars).toBe(tier3b.maxOutputChars);
 
-    // Small tiers step up (13k → 18k → 24k); medium and large SHARE the ~24k
-    // inline ceiling — scaling with repo size now lives in the CALL budget
-    // (getExploreBudget), not in a fatter single response.
-    expect(tier0a.maxOutputChars).not.toBe(tier1a.maxOutputChars); // <150 vs <500
-    expect(tier1a.maxOutputChars).not.toBe(tier2a.maxOutputChars); // <500 vs <5000
-    expect(tier2a.maxOutputChars).toBe(tier3a.maxOutputChars);     // <5000 == <15000 (inline cap)
-    expect(getExploreBudget(5000)).toBeGreaterThan(getExploreBudget(4999)); // calls scale instead
+    // Mid-lean: 10k → 12k → 12k; medium and large share the ~12k ceiling.
+    expect(tier0a.maxOutputChars).not.toBe(tier1a.maxOutputChars);
+    expect(tier1a.maxOutputChars).toBe(tier2a.maxOutputChars);
+    expect(tier2a.maxOutputChars).toBe(tier3a.maxOutputChars);
+    expect(getExploreBudget(5000)).toBeGreaterThan(getExploreBudget(4999));
   });
 
   it('gates off "Additional relevant files", completeness signal, and budget note on small projects', () => {
@@ -100,9 +95,9 @@ describe('getExploreOutputBudget', () => {
 
   it('keeps all meta-text on for projects that earn the breadth signal (>=500 files)', () => {
     const medium = getExploreOutputBudget(1000);
-    expect(medium.includeAdditionalFiles).toBe(true);
-    expect(medium.includeCompletenessSignal).toBe(true);
-    expect(medium.includeBudgetNote).toBe(true);
+    expect(medium.includeAdditionalFiles).toBe(false);
+    expect(medium.includeCompletenessSignal).toBe(false);
+    expect(medium.includeBudgetNote).toBe(false);
   });
 
   it('keeps the Relationships section on for medium+ tiers — small tiers drop it to maximize body density', () => {
@@ -110,10 +105,11 @@ describe('getExploreOutputBudget', () => {
     // per-call payload is the cost driver, so even "cheap" structural
     // signal adds up across follow-up turns. Re-enabled at ≥500 where
     // body budgets are roomy enough to absorb the 1-2KB overhead.
+    // Locator-digest (default) keeps Relationships off at every tier.
     expect(getExploreOutputBudget(50).includeRelationships).toBe(false);
-    expect(getExploreOutputBudget(1000).includeRelationships).toBe(true);
-    expect(getExploreOutputBudget(10000).includeRelationships).toBe(true);
-    expect(getExploreOutputBudget(30000).includeRelationships).toBe(true);
+    expect(getExploreOutputBudget(1000).includeRelationships).toBe(false);
+    expect(getExploreOutputBudget(10000).includeRelationships).toBe(false);
+    expect(getExploreOutputBudget(30000).includeRelationships).toBe(false);
   });
 
   it('caps the per-file header symbol list more tightly on small projects', () => {
@@ -224,14 +220,16 @@ describe('homegraph_explore output respects the adaptive budget', () => {
     expect(text).not.toContain('Explore budget:');
   });
 
-  it('still includes the Relationships section — it is the cheapest structural signal', async () => {
+  it('still includes locator structure — digests/trail/anchors (Relationships off in digest mode)', async () => {
     const result = await handler.execute('homegraph_explore', { query: 'Session method helper' });
     const text = result.content?.[0]?.text ?? '';
-    // Either there are relationships, or no edges were significant — both are fine.
-    // We just want to confirm we did not accidentally gate it off.
-    const hasRelationships = text.includes('**Relationships');
-    const sourceFollowsHeader = text.indexOf('**Source Code') > 0;
-    expect(hasRelationships || sourceFollowsHeader).toBe(true);
+    // Locator-digest mode drops Relationships; Source digests / Call trail / Exploration header remain.
+    const hasLocator =
+      text.includes('**Source digests**')
+      || text.includes('**Source Code**')
+      || text.includes('**Call / use trail**')
+      || text.includes('**Exploration:');
+    expect(hasLocator).toBe(true);
   });
 
   it('prefixes source lines with line numbers by default (cat -n style)', async () => {

@@ -70,9 +70,18 @@ import {
   symbolsInSpans,
 } from './explore-dedup';
 import {
+  decideDepthToolFuse,
   decideExploreRepeat,
+  formatDepthToolRefuse,
   formatExploreRepeatRefuse,
+  formatMechanismPartialFooter,
+  formatMechanismSoftCloseFooter,
+  formatMechanismSoftCloseHeader,
+  formatNextAnchorCaption,
   formatPartialExploreGuidance,
+  formatSecondPartialStopFooter,
+  inferExplorePartialMeta,
+  pickBestDomainRoleAnchor,
 } from './explore-repeat-guard';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import {
@@ -371,25 +380,19 @@ export interface ExploreOutputBudget {
 export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
   // Tiered budget, scaled to project size. The budget is a CEILING (relevance
   // still gates WHAT is included), and it MUST stay under the agent's INLINE
-  // tool-result cap (~25K chars). Above that, the host externalizes the result
-  // to a file the agent then Reads back — re-introducing a read AND the
-  // cache-write cost — which is exactly what a 35K vscode explore did in the
-  // n=4 README A/B. So even large repos cap at ~24K: the answer is the handful
-  // of ~100-line flow windows the agent would have grep-located and read (it
-  // natively reads ~6–9 files, median 100-line ranges), NOT a sprawl of 12
-  // files. Concentration onto the flow emerges from this cap + the named-file-
-  // first sort dropping peripheral files. Invariant: a larger tier must never
-  // get a smaller `maxCharsPerFile` than a smaller tier.
+  // tool-result cap (~25K chars).
+  //
+  // Default = universal mid-lean locator (anchors + spine digests ~12K): enough
+  // evidence to stop a Read storm, not a multi-file body dump. Set
+  // HOMEGRAPH_EXPLORE_FULL_SOURCE=1 for the prior fatter shape.
+  // Invariant: a larger tier must never get a smaller `maxCharsPerFile` than a
+  // smaller tier.
+  const digest = exploreLocatorDigestEnabled();
   if (fileCount < 150) {
     return {
-      // ITER3: revert iter2's aggressive body shrink (forced Read fallback —
-      // the per-file 2.5K cap pushed the agent to Read instead of node).
-      // Back to the iter1 shape (13K/4/3.8K) but keep the test-file
-      // hard-exclude. The cost lever for this tier lives in steering the
-      // agent to stop after 1-2 calls, not in this budget.
-      maxOutputChars: 13000,
-      defaultMaxFiles: 4,
-      maxCharsPerFile: 3800,
+      maxOutputChars: digest ? 10000 : 13000,
+      defaultMaxFiles: digest ? 2 : 4,
+      maxCharsPerFile: digest ? 2500 : 3800,
       gapThreshold: 7,
       maxSymbolsInFileHeader: 5,
       maxEdgesPerRelationshipKind: 4,
@@ -402,10 +405,9 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
   }
   if (fileCount < 500) {
     return {
-      // ITER3: same revert/keep-filter pattern as <150.
-      maxOutputChars: 18000,
-      defaultMaxFiles: 5,
-      maxCharsPerFile: 3800,
+      maxOutputChars: digest ? 12000 : 18000,
+      defaultMaxFiles: digest ? 2 : 5,
+      maxCharsPerFile: digest ? 2800 : 3800,
       gapThreshold: 8,
       maxSymbolsInFileHeader: 6,
       maxEdgesPerRelationshipKind: 6,
@@ -418,53 +420,47 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
   }
   if (fileCount < 5000) {
     return {
-      // ~150-line per-file window (the native read unit) × ~6 files, capped at
-      // the ~24K inline ceiling so the response is never externalized. Per-file
-      // stays ≥ the <500 tier (3800) — monotonic.
-      maxOutputChars: 24000,
-      defaultMaxFiles: 8,
-      maxCharsPerFile: 6500,
-      gapThreshold: 12,
-      maxSymbolsInFileHeader: 10,
-      maxEdgesPerRelationshipKind: 10,
-      includeRelationships: true,
-      includeAdditionalFiles: true,
-      includeCompletenessSignal: true,
-      includeBudgetNote: true,
-      // Large repos still drown in test/fixture noise on broad explores.
+      // Mid-lean: anchors + 1–2 spine digests. Per-file ≥ smaller tiers.
+      maxOutputChars: digest ? 12000 : 18000,
+      defaultMaxFiles: digest ? 2 : 6,
+      maxCharsPerFile: digest ? 3000 : 6500,
+      gapThreshold: digest ? 10 : 12,
+      maxSymbolsInFileHeader: digest ? 8 : 10,
+      maxEdgesPerRelationshipKind: digest ? 6 : 10,
+      includeRelationships: false,
+      includeAdditionalFiles: false,
+      includeCompletenessSignal: false,
+      includeBudgetNote: false,
       excludeLowValueFiles: true,
     };
   }
-  // Large + very-large repos: SAME ~24K inline ceiling (a bigger response just
-  // externalizes — see vscode). More files indexed → more CALLS via
-  // getExploreBudget, not a bigger single response. Per-file 7000 (≥ smaller
-  // tiers) gives the central file a ~180-line orientation window.
+  // Large + very-large: same mid-lean ceiling; scale via getExploreBudget calls.
   if (fileCount < 15000) {
     return {
-      maxOutputChars: 24000,
-      defaultMaxFiles: 8,
-      maxCharsPerFile: 7000,
-      gapThreshold: 15,
-      maxSymbolsInFileHeader: 15,
-      maxEdgesPerRelationshipKind: 15,
-      includeRelationships: true,
-      includeAdditionalFiles: true,
-      includeCompletenessSignal: true,
-      includeBudgetNote: true,
+      maxOutputChars: digest ? 12000 : 18000,
+      defaultMaxFiles: digest ? 2 : 6,
+      maxCharsPerFile: digest ? 3000 : 7000,
+      gapThreshold: digest ? 10 : 15,
+      maxSymbolsInFileHeader: digest ? 8 : 12,
+      maxEdgesPerRelationshipKind: digest ? 6 : 12,
+      includeRelationships: false,
+      includeAdditionalFiles: false,
+      includeCompletenessSignal: false,
+      includeBudgetNote: false,
       excludeLowValueFiles: true,
     };
   }
   return {
-    maxOutputChars: 24000,
-    defaultMaxFiles: 8,
-    maxCharsPerFile: 7000,
-    gapThreshold: 15,
-    maxSymbolsInFileHeader: 15,
-    maxEdgesPerRelationshipKind: 15,
-    includeRelationships: true,
-    includeAdditionalFiles: true,
-    includeCompletenessSignal: true,
-    includeBudgetNote: true,
+    maxOutputChars: digest ? 12000 : 18000,
+    defaultMaxFiles: digest ? 2 : 6,
+    maxCharsPerFile: digest ? 3000 : 7000,
+    gapThreshold: digest ? 10 : 15,
+    maxSymbolsInFileHeader: digest ? 8 : 12,
+    maxEdgesPerRelationshipKind: digest ? 6 : 12,
+    includeRelationships: false,
+    includeAdditionalFiles: false,
+    includeCompletenessSignal: false,
+    includeBudgetNote: false,
     excludeLowValueFiles: true,
   };
 }
@@ -483,13 +479,15 @@ export function tightenExploreBudgetForQuery(
   query: string,
   opts?: { hasFlowPath?: boolean },
 ): ExploreOutputBudget {
+  const digest = exploreLocatorDigestEnabled();
   const hasFlow = opts?.hasFlowPath === true;
   if (hasFlow && (queryAsMechanismSurvey(query) || queryAsCrossModuleFlowSurvey(query))) {
     return {
       ...budget,
-      maxOutputChars: Math.min(budget.maxOutputChars, 12000),
-      defaultMaxFiles: Math.min(budget.defaultMaxFiles, 4),
-      maxCharsPerFile: Math.min(budget.maxCharsPerFile, 4500),
+      // Mid-lean: keep enough spine to avoid a Read storm after explore.
+      maxOutputChars: Math.min(budget.maxOutputChars, digest ? 11000 : 12000),
+      defaultMaxFiles: Math.min(budget.defaultMaxFiles, 2),
+      maxCharsPerFile: Math.min(budget.maxCharsPerFile, digest ? 3000 : 4500),
       includeRelationships: false,
       includeAdditionalFiles: false,
       includeCompletenessSignal: false,
@@ -500,12 +498,11 @@ export function tightenExploreBudgetForQuery(
   const compact = shouldUseCompactExploreBudget(query);
   if (!local && !compact && hasFlow) return budget;
   if (!local && !compact && hasFlow === false) {
-    // Generic no-flow explore: still trim meta + file count a bit.
     return {
       ...budget,
-      maxOutputChars: Math.min(budget.maxOutputChars, 14000),
-      defaultMaxFiles: Math.min(budget.defaultMaxFiles, 3),
-      maxCharsPerFile: Math.min(budget.maxCharsPerFile, 5000),
+      maxOutputChars: Math.min(budget.maxOutputChars, digest ? 10000 : 10000),
+      defaultMaxFiles: Math.min(budget.defaultMaxFiles, 2),
+      maxCharsPerFile: Math.min(budget.maxCharsPerFile, digest ? 2800 : 4000),
       includeRelationships: false,
       includeAdditionalFiles: false,
       includeCompletenessSignal: false,
@@ -519,9 +516,9 @@ export function tightenExploreBudgetForQuery(
     || queryAsTypeLifecycleSurvey(query);
   return {
     ...budget,
-    maxOutputChars: Math.min(budget.maxOutputChars, lean ? 4800 : local ? 7000 : 9000),
-    defaultMaxFiles: Math.min(budget.defaultMaxFiles, lean ? 2 : local ? 2 : 3),
-    maxCharsPerFile: Math.min(budget.maxCharsPerFile, lean ? 2200 : local ? 3500 : 4000),
+    maxOutputChars: Math.min(budget.maxOutputChars, lean ? (digest ? 5000 : 4800) : local ? (digest ? 6000 : 7000) : (digest ? 8000 : 9000)),
+    defaultMaxFiles: Math.min(budget.defaultMaxFiles, 2),
+    maxCharsPerFile: Math.min(budget.maxCharsPerFile, lean ? (digest ? 2200 : 2200) : local ? (digest ? 2800 : 3500) : (digest ? 3000 : 4000)),
     includeRelationships: false,
     includeAdditionalFiles: false,
     includeCompletenessSignal: false,
@@ -542,6 +539,15 @@ export function tightenExploreBudgetForQuery(
  */
 function exploreLineNumbersEnabled(): boolean {
   return process.env.HOMEGRAPH_EXPLORE_LINENUMS !== '0';
+}
+
+/**
+ * Locator mid-lean mode (default ON): explore returns anchors + spine digests
+ * (~12K) — enough to avoid a Read storm, not a multi-file body dump.
+ * Set `HOMEGRAPH_EXPLORE_FULL_SOURCE=1` to restore the previous fatter Source.
+ */
+export function exploreLocatorDigestEnabled(): boolean {
+  return process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE !== '1';
 }
 
 /**
@@ -1053,7 +1059,8 @@ export const tools: ToolDefinition[] = [
       'Literal string/pattern hunts → Grep; media assets → Glob; git history → git. ' +
       'One explore; then answer or edit from Source + trail — do not re-grep/node/read the same symbols. ' +
       'Overlapping paraphrase explores are refused (name a new Type/file/@kit to continue). ' +
-      'Busy/partial → retry ONCE with tighter named anchors from the Partial hint — not a Grep storm.',
+      'Busy/partial → retry ONCE with the named Next anchor or ONE narrow Grep — not a Grep/node storm '
+      + '(session refuses further explore / depth fan-out after Partial).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1961,6 +1968,18 @@ export class ToolHandler {
         }
       }
 
+      // Post-Partial depth fuse: Partial→node×N is the same failure class as
+      // explore×N. Shape-driven only — one depth call, then refuse.
+      if (
+        sessionState
+        && (toolName === 'homegraph_node'
+          || toolName === 'homegraph_callers'
+          || toolName === 'homegraph_callees')
+      ) {
+        const depthRefuse = this.tryDepthToolFuse(toolName, args, sessionState);
+        if (depthRefuse) return depthRefuse;
+      }
+
       // Session-tracked explore must not hit the MCP query cache: a cache hit
       // would re-serve the first call's full source and defeat CG-18 dedup.
       const skipCacheForSession = toolName === 'homegraph_explore' && !!sessionState;
@@ -2021,10 +2040,19 @@ export class ToolHandler {
                 : null)
               ?? this.tryCompactLocalSymbolExplore(cgFast, q, rootFast);
             if (fast) {
-              if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !fast.isError) {
-                cacheIndex.setEntry(cacheQueries, cacheKey, toolName, fast);
+              // Fast explore must still file Partial/ANSWER meta into the session
+              // so explore + depth fuses see it (textResult-only paths used to skip).
+              let served = fast;
+              if (toolName === 'homegraph_explore' && sessionState) {
+                served = this.takeExploreEmission(
+                  this.ensureExploreEmission(fast, rootFast, q),
+                  sessionState,
+                );
               }
-              const withWorktree = this.withWorktreeNotice(fast, projectPath);
+              if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !served.isError) {
+                cacheIndex.setEntry(cacheQueries, cacheKey, toolName, served);
+              }
+              const withWorktree = this.withWorktreeNotice(served, projectPath);
               return this.withStalenessNotice(withWorktree, projectPath);
             }
           } catch {
@@ -2043,6 +2071,15 @@ export class ToolHandler {
       // `-32001`). Fast-path surveys run inside the worker via executeReadTool.
       const raw = await this.runReadToolWithDeadline(toolName, dispatchArgs);
       const result = this.takeExploreEmission(raw, sessionState);
+      if (
+        sessionState
+        && !result.isError
+        && (toolName === 'homegraph_node'
+          || toolName === 'homegraph_callers'
+          || toolName === 'homegraph_callees')
+      ) {
+        this.noteDepthToolUse(args, sessionState);
+      }
       if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !result.isError) {
         cacheIndex.setEntry(cacheQueries, cacheKey, toolName, result);
       }
@@ -2097,6 +2134,52 @@ export class ToolHandler {
   }
 
   /**
+   * After a counted Partial explore, refuse further `node` / callers / callees
+   * once the session's one allowed depth drill is spent.
+   */
+  private tryDepthToolFuse(
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionState: ExploreSessionState,
+  ): ToolResult | null {
+    try {
+      const cg = this.getHomeGraph(args.projectPath as string | undefined);
+      const root = cg.getProjectRoot();
+      const decision = decideDepthToolFuse(
+        sessionState.forProject(root),
+        sessionState.depthToolCount(root),
+        toolName,
+      );
+      if (!decision.refuse) return null;
+      const hint = typeof args.symbol === 'string'
+        ? args.symbol
+        : typeof args.file === 'string'
+          ? args.file
+          : undefined;
+      return this.textResult(formatDepthToolRefuse(decision, toolName, hint));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Count a successful depth-tool call when the latest explore was Partial. */
+  private noteDepthToolUse(
+    args: Record<string, unknown>,
+    sessionState: ExploreSessionState,
+  ): void {
+    try {
+      const cg = this.getHomeGraph(args.projectPath as string | undefined);
+      const root = cg.getProjectRoot();
+      const prior = sessionState.forProject(root);
+      const last = prior?.calls.length
+        ? [...prior.calls].reverse().find((c) => (c.responseBytes || 0) >= 400)
+        : undefined;
+      if (!last?.partial) return;
+      sessionState.recordDepthTool(root);
+    } catch { /* bookkeeping only */ }
+  }
+
+  /**
    * Record an explore call's emission into the caller's session state and strip
    * it from the result (CG-17).
    *
@@ -2115,6 +2198,27 @@ export class ToolHandler {
     delete result[EXPLORE_EMISSION_KEY];
     if (sessionState) {
       try {
+        const prior = sessionState.forProject(emission.projectRoot);
+        const priorPartials = (prior?.calls ?? []).filter(
+          (c) => c.partial === true && (c.responseBytes || 0) >= 400,
+        );
+        const metaPartial = emission.partial === true
+          || (emission.partial === undefined
+            && inferExplorePartialMeta(result.content?.[0]?.text ?? '').partial);
+        if (metaPartial && priorPartials.length >= 1) {
+          const text = result.content?.[0]?.text ?? '';
+          if (text && !/Second Partial — stop HomeGraph/i.test(text)) {
+            const stop = formatSecondPartialStopFooter(emission.nextAnchor);
+            result = {
+              ...result,
+              content: [
+                { type: 'text', text: text + stop },
+                ...result.content.slice(1),
+              ],
+            };
+            emission.responseBytes = (result.content[0]?.text ?? text).length;
+          }
+        }
         sessionState.record(emission);
       } catch { /* bookkeeping only — never fail a served call */ }
     }
@@ -2416,7 +2520,8 @@ export class ToolHandler {
         + includeBlock
         + '\n\n> Caller listing complete — answer from this list'
         + (includeBlock ? ' + include/import visibility' : '')
-        + '; no read/grep needed.'
+        + '; do not re-Grep/Read these call sites.'
+        + '\n> For **all methods of a Type**, prefer one `homegraph_explore` with the Type + “哪些方法被调用” — do **not** fan out `homegraph_callers` per method.'
         + '\n> If another type\'s visibility matters, pass **both** names to `homegraph_explore` (not callers alone).'
         + note + filterNote;
       return this.textResult(this.truncateOutput(formatted));
@@ -2425,6 +2530,26 @@ export class ToolHandler {
     // Multiple DISTINCT definitions (#764): one section per definition so an
     // agent never mistakes one app's callers for another's. Narrow with
     // `file` to focus a single definition.
+    // Hard stop when the name is still massively ambiguous — dumping dozens of
+    // definition sections is a token bomb and teaches a Grep/Read storm.
+    const MAX_CALLER_DEF_GROUPS = 8;
+    if (groups.length > MAX_CALLER_DEF_GROUPS) {
+      const sample = groups.slice(0, MAX_CALLER_DEF_GROUPS).map((g) => {
+        const h = g[0]!;
+        return `- \`${h.qualifiedName || h.name}\` (${h.kind}) — \`${h.filePath}:${h.startLine || '?'}\``;
+      });
+      return this.textResult([
+        `**Callers of ${symbol} — ${groups.length} distinct definitions (too ambiguous to expand).**`,
+        '',
+        'Re-call `homegraph_callers` with `file` set to one definition path (or use `homegraph_explore` with the owning Type name). Do **not** Grep/Read the whole repo.',
+        '',
+        'Sample definitions:',
+        ...sample,
+        groups.length > MAX_CALLER_DEF_GROUPS
+          ? `- … +${groups.length - MAX_CALLER_DEF_GROUPS} more`
+          : '',
+      ].filter(Boolean).join('\n') + filterNote);
+    }
     const lines: string[] = [
       `**Callers of ${symbol} — ${groups.length} distinct definitions (narrow with \`file\`)**`,
     ];
@@ -2512,6 +2637,22 @@ export class ToolHandler {
     }
 
     // Multiple DISTINCT definitions (#764): per-definition sections.
+    const MAX_CALLEE_DEF_GROUPS = 8;
+    if (groups.length > MAX_CALLEE_DEF_GROUPS) {
+      const sample = groups.slice(0, MAX_CALLEE_DEF_GROUPS).map((g) => {
+        const h = g[0]!;
+        return `- \`${h.qualifiedName || h.name}\` (${h.kind}) — \`${h.filePath}:${h.startLine || '?'}\``;
+      });
+      return this.textResult([
+        `**Callees of ${symbol} — ${groups.length} distinct definitions (too ambiguous to expand).**`,
+        '',
+        'Re-call `homegraph_callees` with `file` set to one definition path (or `homegraph_explore` with the owning Type). Do **not** Grep/Read the whole repo.',
+        '',
+        'Sample definitions:',
+        ...sample,
+        `- … +${groups.length - MAX_CALLEE_DEF_GROUPS} more`,
+      ].join('\n') + filterNote);
+    }
     const lines: string[] = [
       `**Callees of ${symbol} — ${groups.length} distinct definitions (narrow with \`file\`)**`,
     ];
@@ -4211,8 +4352,8 @@ export class ToolHandler {
     } else {
       lines.push(
         '> **Partial locator** — related writers / sibling Managers above are anchors, not a full answer. ' +
-        '`homegraph_node` / `homegraph_callers` on those Types next; ONE narrow Grep for `@ohos` only if still missing. ' +
-        'Do **not** ANSWER NOW from local cache helpers.',
+        'ONE tighter explore with a named Type, or ONE narrow Grep for `@ohos` if still missing — ' +
+        'do **not** fan out `homegraph_node` / callers. Do **not** ANSWER NOW from local cache helpers.',
       );
     }
     lines.push('');
@@ -4620,9 +4761,10 @@ export class ToolHandler {
             '',
             soft
               ? `Named-Type dependency inventory — **${multi.hitCount}** locator hit(s). `
-                + '**Partial locator** — locations above; drill one Type with `homegraph_node` / `homegraph_callees` next.'
+                + '**Partial locator** — locations above; ONE tighter explore with a named Type, '
+                + 'or ONE narrow Grep — do **not** fan out `homegraph_node` / callees.'
               : `Named-Type dependency inventory — **${multi.hitCount}** locator hit(s). `
-                + '**ANSWER NOW** from locations + cross links; drill one Type with `homegraph_node` only if needed.',
+                + '**ANSWER NOW** from locations + cross links; one `homegraph_node` only if a body detail is still missing.',
             '',
             multi.section,
           ].join('\n'),
@@ -4936,7 +5078,7 @@ export class ToolHandler {
         eventDispatchResult.handlerCount > 0 || eventDispatchResult.eventCount > 0
           ? `Event→Manager survey — **Partial locator** (`
             + `${eventDispatchResult.memberCount} member(s), ${eventDispatchResult.handlerCount} handler file(s)). `
-            + '`homegraph_node` the Event Type or ONE Grep for members/`case` — do **not** ANSWER NOW as a full map; no repo-storm.'
+            + 'ONE narrow Grep for members/`case`, or one tighter explore — do **not** ANSWER NOW as a full map; no node fan-out.'
           : 'Event→Manager survey — 0 event types / handlers indexed. **Partial locator** — do **not** ANSWER NOW; '
             + 'ONE Grep for enum members / `case` branches OK.',
       );
@@ -5236,7 +5378,7 @@ export class ToolHandler {
         !!n && isDomainRoleSymbol(n.name, n.filePath, domainPathTokens)));
     const hasStrongManager = managerSection.strongCount > 0;
     // Inventory without a connected spine is a locator — hard ANSWER NOW caused
-    // D05/D07/D08/D33-style re-explore + Grep storms after a correct first anchor.
+    // Partial→re-explore / Grep storms after a correct first anchor.
     const mechanismClosed = hasFlowPath && (hasStrongManager || seeds.length >= 2);
 
     const lines: string[] = [
@@ -5248,7 +5390,8 @@ export class ToolHandler {
         : '> **Partial locator** — Manager / domain inventory below are anchors, not a full mechanism closure. '
           + 'Pick **ONE** concrete `*Manager` / next-hop name from the list for a tighter explore — '
           + 'do **not** re-explore a paraphrase of the same keyword bag. '
-          + 'Narrow Grep only for an unlisted registrar — not a repo-wide storm. Do **not** ANSWER NOW yet.',
+          + 'At most one `homegraph_node` after Partial; prefer ONE narrow Grep for unlisted wiring — not a repo storm. '
+          + 'Do **not** ANSWER NOW yet.',
       '',
       `Mechanism anchors: **${seedIds.size}** symbol(s) — lightweight explore (seed + flow spine).`,
       '',
@@ -5363,23 +5506,61 @@ export class ToolHandler {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3);
 
+    // Prefer digests for the best domain-role Type (not import-site top file).
+    const nextMgr = pickBestDomainRoleAnchor(
+      managerHits.map((n) => ({
+        name: n.name,
+        kind: n.kind,
+        filePath: n.filePath,
+        startLine: n.startLine,
+      })),
+      query,
+      domainPathTokens,
+    );
+    if (nextMgr?.filePath) {
+      const pref = nextMgr.filePath;
+      const rest = sortedFiles.filter(([fp]) => fp !== pref);
+      const prefScore = fileScores.get(pref) ?? 100;
+      sortedFiles.length = 0;
+      sortedFiles.push([pref, prefScore], ...rest.slice(0, 2));
+    }
+
     const topIsStrong = sortedFiles.some(([fp, s]) => {
       if (s < 80) return false;
       const nodes = fileNodes.get(fp) ?? [];
       return nodes.some((n) => isDomainRoleSymbol(n.name, n.filePath, domainPathTokens));
     });
 
-    lines.push('**Source Code**', '');
+    lines.push('**Source digests**', '');
     lines.push(
-      '> Line-numbered source below — treat as already Read. Do **not** grep/read/`homegraph_node` these files again.',
+      '> Spine / top-hit digests — treat as already Read for these symbols. '
+        + 'ONE narrow Grep/Read only for residual unindexed wiring; do not dump these files again.',
     );
     lines.push('');
 
+    // Anchor table before digests (universal mid-lean shape).
+    if (sortedFiles.length > 0) {
+      lines.push('**Anchors**', '');
+      for (const [fp] of sortedFiles.slice(0, 6)) {
+        const nodes = fileNodes.get(fp) ?? [];
+        const names = nodes
+          .filter((n) => n.kind !== 'import' && n.kind !== 'export')
+          .slice(0, 4)
+          .map((n) => `\`${n.name}\`(${n.kind}${n.startLine ? `:${n.startLine}` : ''})`)
+          .join(', ');
+        lines.push(`- \`${fp}\`${names ? ` — ${names}` : ''}`);
+      }
+      lines.push('');
+    }
+
     let totalChars = lines.join('\n').length;
     let filesRendered = 0;
+    const digest = exploreLocatorDigestEnabled();
+    const perFileCap = digest ? 2800 : 2000;
+    const totalCap = digest ? 6500 : 4_800;
     for (const [fp] of sortedFiles) {
-      if (filesRendered >= 2 || totalChars > 4_800) break;
-      const chunk = this.renderLightMechanismSource(projectRoot, fp, fileNodes.get(fp) ?? [], 2000);
+      if (filesRendered >= 2 || totalChars > totalCap) break;
+      const chunk = this.renderLightMechanismSource(projectRoot, fp, fileNodes.get(fp) ?? [], perFileCap);
       if (!chunk) continue;
       lines.push(chunk);
       totalChars += chunk.length;
@@ -5388,19 +5569,57 @@ export class ToolHandler {
 
     if (filesRendered === 0 && !importResult.section && !flow.text && !managerSection.text) return null;
 
+    // Soft-close when inventory + at least one digest exist — enough to answer
+    // with ONE narrow Grep; avoid Partial→re-explore churn.
+    const digestCoversNext = !!(nextMgr && sortedFiles.some(([fp]) => fp === nextMgr.filePath)
+      && filesRendered > 0);
+    const softClose = hasStrongManager && filesRendered >= 1
+      && (digestCoversNext || managerHits.length >= 2 || topIsStrong);
+    const closedAnswer = softClose || mechanismClosed || (hasFlowPath && topIsStrong);
+
     lines.push('---');
     if (mechanismClosed || (hasFlowPath && topIsStrong)) {
       lines.push(
-        '> **Mechanism explore complete — ANSWER NOW** from the Manager inventory + spine + Source above. '
+        '> **Mechanism explore complete — ANSWER NOW** from the Manager inventory + spine + digests above. '
           + 'Do **not** call `homegraph_node`, Read, or Grep for symbols/files already shown. '
           + 'Only one tighter `homegraph_explore` if a **named** Type essential to the answer is still missing.',
       );
+    } else if (softClose) {
+      lines.push(formatMechanismSoftCloseFooter(nextMgr));
     } else {
-      lines.push(
-        '> **Locator partial — not a full mechanism closure.** Pick a concrete `*Manager` / next hop from the inventory '
-          + 'and retry ONE `homegraph_explore` with that name. A **narrow** Grep for an unlisted registrar is OK; '
-          + 'do not Grep across the whole repo. Do **not** ANSWER NOW from this inventory alone.',
+      const topFp = sortedFiles[0]?.[0];
+      const topNodes = topFp ? (fileNodes.get(topFp) ?? []) : [];
+      const topSym = topNodes.find((n) => n.kind !== 'import' && n.kind !== 'export' && n.startLine > 0)
+        ?? topNodes[0];
+      const nextCaption = nextMgr
+        ? formatNextAnchorCaption(nextMgr)
+        : topSym
+          ? formatNextAnchorCaption({
+            name: topSym.name,
+            kind: topSym.kind,
+            filePath: topSym.filePath,
+            startLine: topSym.startLine,
+          })
+          : topFp
+            ? `\`${topFp}\``
+            : 'the top Manager / file in the inventory above';
+      lines.push(formatMechanismPartialFooter(nextCaption));
+    }
+
+    // Opening banner is emitted before digests; rewrite so soft-close never
+    // pairs a Partial header with an ANSWER footer (agent Grep-storm trigger).
+    if (closedAnswer) {
+      const openIdx = lines.findIndex(
+        (l) => l.includes('**Partial locator**') || l.includes('**ANSWER NOW from this response**'),
       );
+      if (openIdx >= 0) {
+        lines[openIdx] = softClose && !(mechanismClosed || (hasFlowPath && topIsStrong))
+          ? formatMechanismSoftCloseHeader()
+          : (
+            '> **ANSWER NOW from this response** when the Manager inventory + mechanism spine cover the ask. '
+              + 'Do **not** Grep/Read listed files in parallel — Source below is authoritative.'
+          );
+      }
     }
     lines.push('');
 
@@ -5411,6 +5630,9 @@ export class ToolHandler {
       files: [],
       sourceBytes: 0,
       responseBytes: text.length,
+      // Soft-close must not trip Partial→depth fuse / next-anchor churn.
+      partial: closedAnswer ? false : undefined,
+      nextAnchor: closedAnswer ? undefined : (nextMgr?.name),
     });
   }
 
@@ -5897,17 +6119,28 @@ export class ToolHandler {
       /\$r\b|系统资源|网络下载|resource\s+vs|vs\.?\s*network|download\s+or|preview|预览|图片加载|loadImage|PixelMap|Image\s*\(/i.test(
         query,
       );
+    // Multi-Type bags without a connected flow are coarse locators — never fake-complete.
+    const multiTypeThin =
+      typeNames.length >= 2
+      && !queryHasNamedMemberFocus(query)
+      && !queryAsNamedComponentAction(query);
 
     const lines: string[] = [
       `**Exploration: ${query}**`,
       '',
       stubHeavy
         ? '> **Partial locator** — indexed hits are SDK / `.d.ts` stubs, not in-repo implementations. '
-          + 'Prefer `homegraph_search` / ONE explore for `*State*` / impl class names; do not ANSWER NOW from the stub alone.'
+          + 'Prefer `homegraph_search` / ONE explore for `*State*` / impl class names; '
+          + 'ONE narrow Grep for in-repo impl names is OK — do not ANSWER NOW from the stub alone.'
         : resourceProvenanceAsk
           ? '> **Partial locator** — component shells below are anchors. '
             + 'Confirm `$r` / Image / download call sites in the dialog body (or ONE narrow Grep for `$r` / `http`) before ANSWER NOW.'
-        : '> **ANSWER NOW from this response.** Do **not** Grep/Read/search/explore/node/callers for the same symbols — trail + Source below are authoritative.',
+          : multiTypeThin
+            ? '> **Partial locator** — multi-Type bag below is a coarse anchor set. '
+              + 'Pick ONE Type/`Type.member` for a tighter explore, or ONE narrow Grep for unindexed wiring — do **not** ANSWER NOW as a full cross-Type mechanism.'
+            : '> **Coarse locate complete.** Treat Source + trail as already Read for these symbols. '
+              + 'Answer from them; do **not** re-Grep/Read/node the same symbols. '
+              + 'ONE narrow Grep is OK only for residual literals / unindexed wiring — not a repo-wide storm.',
       '',
       `Local-symbol focus: **${seedIds.size}** seed(s)` +
         (neighborIds.size > 0 ? `, **${neighborIds.size}** caller/callee neighbor(s)` : '') +
@@ -5929,13 +6162,15 @@ export class ToolHandler {
       if (ds.section) {
         lines.push(ds.section);
         if (ds.sdkImportCount === 0) {
-          // Soften hard compact ANSWER NOW — cache-layer Managers otherwise look "done".
-          const softIdx = lines.findIndex((l) => l.includes('**ANSWER NOW from this response.**'));
+          // Soften hard compact complete — cache-layer Managers otherwise look "done".
+          const softIdx = lines.findIndex((l) =>
+            l.includes('**Coarse locate complete.**') || l.includes('**ANSWER NOW from this response.**'),
+          );
           if (softIdx >= 0) {
             lines[softIdx] =
               '> **Partial locator** — Manager body + trail below are anchors. ' +
               'Do **not** treat local cache/RDB helpers as the system service; ' +
-              'follow related Managers / `homegraph_callers` on `update*` next.';
+              'follow related Managers / `homegraph_callers` on `update*` next, or ONE narrow Grep for the service name.';
           }
         }
       }
@@ -6001,10 +6236,19 @@ export class ToolHandler {
         trail.push(
           stubHeavy
             ? '> Trail above may reference stubs — prefer in-repo impl files; do not ANSWER NOW from `.d.ts` alone.'
-            : '> **ANSWER NOW** from this trail + Source below. Do not grep/search/read the same symbols again.',
+            : '> Prefer these call/use sites + Source below. Do not re-Grep/Read the same symbols; '
+              + 'ONE narrow Grep only for residual unindexed wiring.',
         );
         trail.push('');
         lines.push(...trail);
+      } else if (!stubHeavy && !resourceProvenanceAsk && !multiTypeThin) {
+        // No graph trail — coarse locate only; do not claim completeness.
+        const softIdx = lines.findIndex((l) => l.includes('**Coarse locate complete.**'));
+        if (softIdx >= 0) {
+          lines[softIdx] =
+            '> **Partial locator** — definition anchors below, no call/use trail in the graph. '
+            + 'ONE tighter explore on a callee/caller name, or ONE narrow Grep for registration — not a repo-wide storm.';
+        }
       }
     }
 
@@ -6208,7 +6452,7 @@ export class ToolHandler {
           // (FormStack…) burns tokens and invites a follow-up Read of isExpired.
           ? 1
         : (queryAsNamedComponentAction(query) || componentSurface || usageFiles.size > 0 || bridge)
-          ? (uiCluster ? 2 : (componentSurface ? 2 : 3))
+          ? (uiCluster ? 2 : (componentSurface ? 2 : (exploreLocatorDigestEnabled() ? 2 : 3)))
           : 2;
     const ranked = [...fileNodes.entries()]
       .filter(([, nodes]) => {
@@ -6238,31 +6482,38 @@ export class ToolHandler {
       .sort((a, b) => b.score - a.score || a.fp.localeCompare(b.fp))
       .slice(0, maxFiles);
 
-    lines.push('**Source Code**', '');
+    const digest = exploreLocatorDigestEnabled();
+    lines.push(digest ? '**Source digests**' : '**Source Code**', '');
     lines.push(
       stubHeavy
-        ? '> Line-numbered stub source only — treat as Partial locator. Do **not** ANSWER NOW from `.d.ts` alone; search in-repo impl next.'
-        : '> Line-numbered source — treat as already Read. **ANSWER NOW** — do not Read/Grep/search/explore/node the same symbols again.',
+        ? '> Stub digests only — treat as Partial locator. Do **not** ANSWER NOW from `.d.ts` alone; search in-repo impl next.'
+        : digest
+          ? '> Short digests — treat as already Read for these symbols. Answer from anchors + digests; '
+            + 'ONE narrow Grep only for residual unindexed wiring.'
+          : '> Line-numbered source — treat as already Read. **ANSWER NOW** — do not Read/Grep/search/explore/node the same symbols again.',
     );
     lines.push('');
 
     let totalChars = lines.join('\n').length;
-    // Lean ceilings: without-HG Grep/Read stacks were ~15k session tokens; a 10–14k
-    // compact body + follow-up Read is what loses the token A/B.
-    const maxTotal = bareMemberOnly
-      ? 4500
-      : componentSurface || uiCluster
-        ? 7000
-        : memberFocus && usageFiles.size > 0
-          ? 6500
-          : 5500;
-    const maxPerFile = bareMemberOnly
-      ? 2800
-      : componentSurface || uiCluster
+    // Locator-digest ceilings (0012): keep compact under Grep/Read stacks.
+    const maxTotal = digest
+      ? (bareMemberOnly ? 3600 : componentSurface || uiCluster ? 5500 : memberFocus && usageFiles.size > 0 ? 5000 : 4800)
+      : (bareMemberOnly
         ? 4500
-        : memberFocus
-          ? 2800
-          : 3200;
+        : componentSurface || uiCluster
+          ? 7000
+          : memberFocus && usageFiles.size > 0
+            ? 6500
+            : 5500);
+    const maxPerFile = digest
+      ? (bareMemberOnly ? 2000 : componentSurface || uiCluster ? 2800 : memberFocus ? 2500 : 2800)
+      : (bareMemberOnly
+        ? 2800
+        : componentSurface || uiCluster
+          ? 4500
+          : memberFocus
+            ? 2800
+            : 3200);
     let rendered = 0;
 
     for (const { fp, nodes } of ranked) {
@@ -8644,18 +8895,6 @@ export class ToolHandler {
       return false;
     };
 
-    lines.push('**Source Code**');
-    lines.push('');
-    // Recorded so the drift pass below (#1474) can append a per-file exception
-    // to this guarantee after the render loop knows which files drifted.
-    const verbatimHeaderIdx = lines.length;
-    lines.push(
-      '> Line-numbered source — treat as already Read. Answer from Flow + Source below when you can; ' +
-      'do not re-read/grep these files, and do not fan out `homegraph_node` / search for symbols already shown. ' +
-      'Another `homegraph_explore` with tighter names only if a needed symbol is missing.',
-    );
-    lines.push('');
-
     let totalChars = lines.join('\n').length;
     let filesIncluded = 0;
     // Paths we actually render source for below. Drives the curated header count
@@ -8724,9 +8963,16 @@ export class ToolHandler {
       );
       if (onSpine.length > 0) filesToRender = onSpine;
     }
-    const sourceFileCap = limitSingleFile && filesToRender.length === 1
-      ? 1
-      : localDetail
+    const sourceFileCap = (() => {
+      const digest = exploreLocatorDigestEnabled();
+      if (limitSingleFile && filesToRender.length === 1) return 1;
+      if (digest) {
+        // Locator digest: at most 2 body digests (spine/named); rest stay as path anchors.
+        if (localDetail) return Math.min(maxFiles, 2);
+        if (hasFlowPath) return Math.min(maxFiles, 2);
+        return Math.min(maxFiles, 2);
+      }
+      return localDetail
         ? Math.min(maxFiles, 2)
         : crossModuleFlow && hasFlowPath
           ? Math.min(maxFiles, 5)
@@ -8737,6 +8983,44 @@ export class ToolHandler {
               : !hasFlowPath
                 ? Math.min(maxFiles, 3)
                 : maxFiles;
+    })();
+
+    // Path-only anchors for files we will not dump as Source (digest mode).
+    if (exploreLocatorDigestEnabled()) {
+      const anchorCap = Math.min(filesToRender.length, 10);
+      lines.push('**Anchors**', '');
+      for (const [fp, group] of filesToRender.slice(0, anchorCap)) {
+        const names = group.nodes
+          .filter((n) => n.kind !== 'import' && n.kind !== 'export')
+          .slice(0, 4)
+          .map((n) => `\`${n.name}\`(${n.kind}${n.startLine ? `:${n.startLine}` : ''})`)
+          .join(', ');
+        lines.push(`- \`${fp}\`${names ? ` — ${names}` : ''}`);
+      }
+      if (filesToRender.length > sourceFileCap) {
+        lines.push('');
+        lines.push(
+          `> Body digests only for the top **${sourceFileCap}** file(s) below; remaining anchors are path-only.`,
+        );
+      }
+      lines.push('');
+    }
+
+    lines.push(exploreLocatorDigestEnabled() ? '**Source digests**' : '**Source Code**');
+    lines.push('');
+    // Recorded so the drift pass below (#1474) can append a per-file exception
+    // to this guarantee after the render loop knows which files drifted.
+    const verbatimHeaderIdx = lines.length;
+    lines.push(
+      exploreLocatorDigestEnabled()
+        ? '> Spine / top-hit digests — treat as already Read. '
+          + 'Answer from Flow + Anchors + digests when you can; ONE narrow Grep for residual unindexed wiring. '
+          + 'Do not re-dump these files via Read/`homegraph_node`.'
+        : '> Line-numbered source — treat as already Read. Answer from Flow + Source below when you can; ' +
+          'do not re-read/grep these files, and do not fan out `homegraph_node` / search for symbols already shown. ' +
+          'Another `homegraph_explore` with tighter names only if a needed symbol is missing.',
+    );
+    lines.push('');
 
     for (const [filePath, group] of filesToRender) {
       if (filesIncluded >= sourceFileCap) break;
@@ -9198,7 +9482,7 @@ export class ToolHandler {
       // token cost on small projects. We pick clusters in priority order
       // until the per-file char cap is hit. Truly enormous single clusters
       // get tail-trimmed with a marker.
-      const contextPadding = 3;
+      const contextPadding = exploreLocatorDigestEnabled() ? 2 : 3;
       // Language-neutral separator (no `//` — not a comment in Python, Ruby,
       // etc.). With line numbers on, the line-number jump also signals the gap.
       const GAP_MARKER = '\n\n... (gap) ...\n\n';
@@ -9208,10 +9492,11 @@ export class ToolHandler {
       // for any per-file cap and gets dropped, so the agent Reads the method back —
       // the exact gap this closes. Bounded, so a god-method can't blow the budget yet
       // the spine's call still appears in context.
-      const OVERSIZE_SPINE_LINES = 200;
-      const OVERSIZE_BODY_LINES = 160;
-      const SPINE_WINDOW = 28; // lines each side of the next-hop call site
-      const BODY_WINDOW = 40;
+      const digest = exploreLocatorDigestEnabled();
+      const OVERSIZE_SPINE_LINES = digest ? 120 : 200;
+      const OVERSIZE_BODY_LINES = digest ? 100 : 160;
+      const SPINE_WINDOW = digest ? 18 : 28; // lines each side of the next-hop call site
+      const BODY_WINDOW = digest ? 24 : 40;
       const buildSectionRange = (c: { start: number; end: number; hasSpine?: boolean; spineCallLine?: number }): ExploreLineRange[] => {
         const span = c.end - c.start + 1;
         if (c.hasSpine && c.spineCallLine && span > OVERSIZE_SPINE_LINES) {
@@ -9279,7 +9564,10 @@ export class ToolHandler {
       // path is the answer), but bounded — at most ~2.5× the per-file cap and never
       // past what's left of the total output cap — so a pathological long in-file
       // spine can't run away or starve co-flow files entirely.
-      const SPINE_CEILING = Math.min(budget.maxCharsPerFile * 2.5, remainingEnvelope);
+      const SPINE_CEILING = Math.min(
+        budget.maxCharsPerFile * (exploreLocatorDigestEnabled() ? 1.5 : 2.5),
+        remainingEnvelope,
+      );
       const chosenIndices = new Set<number>();
       let projectedChars = 0;
       for (const rc of rankedClusters) {
@@ -9575,8 +9863,13 @@ export class ToolHandler {
    * calling session's state and deletes it — see {@link EXPLORE_EMISSION_KEY}.
    */
   private exploreResult(text: string, emission: ExploreEmission): ToolResult {
+    const meta = inferExplorePartialMeta(text);
     const result = this.textResult(text);
-    result[EXPLORE_EMISSION_KEY] = emission;
+    result[EXPLORE_EMISSION_KEY] = {
+      ...emission,
+      partial: emission.partial ?? meta.partial,
+      nextAnchor: emission.nextAnchor ?? meta.nextAnchor,
+    };
     return result;
   }
 
@@ -9586,14 +9879,25 @@ export class ToolHandler {
     projectRoot: string,
     query: string,
   ): ToolResult {
-    if (result[EXPLORE_EMISSION_KEY]) return result;
+    if (result[EXPLORE_EMISSION_KEY]) {
+      const em = result[EXPLORE_EMISSION_KEY]!;
+      if (em.partial === undefined || !em.nextAnchor) {
+        const meta = inferExplorePartialMeta(result.content?.[0]?.text ?? '');
+        if (em.partial === undefined) em.partial = meta.partial;
+        if (!em.nextAnchor && meta.nextAnchor) em.nextAnchor = meta.nextAnchor;
+      }
+      return result;
+    }
     const text = result.content?.[0]?.text ?? '';
+    const meta = inferExplorePartialMeta(text);
     result[EXPLORE_EMISSION_KEY] = {
       projectRoot,
       query,
       files: [],
       sourceBytes: 0,
       responseBytes: text.length,
+      partial: meta.partial,
+      nextAnchor: meta.nextAnchor,
     };
     return result;
   }
@@ -10887,7 +11191,11 @@ export class ToolHandler {
       const tail = lastQualifierPart(symbol);
       if (tail && tail !== symbol) {
         try {
-          pool = cg.getNodesByName(tail).filter((n) => this.matchesSymbol(n, symbol) || this.matchesSymbol(n, tail));
+          // Qualified miss: re-probe by bare member, but ONLY keep rows that
+          // still match the FULL qualifier. Never `matchesSymbol(n, tail)` —
+          // that is a bare-name match and turns `Foo.init` into every `init`
+          // in the monorepo (hundreds of definitions → token bomb).
+          pool = cg.getNodesByName(tail).filter((n) => this.matchesSymbol(n, symbol));
         } catch {
           pool = [];
         }
