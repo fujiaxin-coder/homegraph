@@ -683,6 +683,162 @@ async function arkuiEmitterEdges(ctx: ResolutionContext, onYield: MaybeYield): P
   return edges;
 }
 
+/** Cap for commonEvent event-key fan-out (same rationale as emitter). */
+const ARKUI_COMMON_EVENT_FANOUT_CAP = 8;
+
+/**
+ * HarmonyOS `commonEventManager.publish` ↔ `createSubscriber`/`subscribe` when
+ * both name the same literal event string. Without this, notification / screen /
+ * package flows die at the publish call (no static edge to the subscriber).
+ *
+ * Precision: literal event strings only; fan-out capped; `.ets` only.
+ */
+async function arkuiCommonEventEdges(ctx: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
+  let scanned = 0;
+  interface Site { nodeId: string; file: string; line: number }
+  const publishes = new Map<string, Site[]>();
+  const subscribers = new Map<string, Site[]>();
+
+  const push = (map: Map<string, Site[]>, key: string, site: Site) => {
+    (map.get(key) ?? map.set(key, []).get(key)!).push(site);
+  };
+
+  for (const file of ctx.getAllFiles()) {
+    if ((++scanned & 15) === 0) await onYield();
+    if (!file.endsWith('.ets')) continue;
+    const content = ctx.readFile(file);
+    if (!content || !/commonEventManager|CommonEvent/i.test(content)) continue;
+    const safe = stripCommentsForRegex(content, 'typescript');
+    if (!/commonEventManager\s*\./.test(safe) && !/\bpublish\s*\(/.test(safe)) continue;
+    const nodes = ctx.getNodesInFile(file)
+      .filter((n) => n.kind === 'method' || n.kind === 'function');
+
+    const enclAt = (index: number): Site | null => {
+      const line = safe.slice(0, index).split('\n').length;
+      const encl = nodes
+        .filter((n) => n.startLine <= line && n.endLine >= line)
+        .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+      return encl ? { nodeId: encl.id, file, line } : null;
+    };
+
+    // publish({ event: 'usual.event.X' }) or publish('usual.event.X', …)
+    const pubRe = /\b(?:commonEventManager\s*\.\s*)?publish\s*\(\s*(?:\{[^}]{0,200}?\bevent\s*:\s*['"]([^'"]+)['"]|['"]([^'"]+)['"])/g;
+    let m: RegExpExecArray | null;
+    while ((m = pubRe.exec(safe))) {
+      const event = (m[1] || m[2] || '').trim();
+      if (!event || event.length < 4) continue;
+      const site = enclAt(m.index);
+      if (site) push(publishes, event, site);
+    }
+
+    // createSubscriber({ events: ['usual.event.X', ...] }) — subscriber side
+    const createRe = /\bcreateSubscriber\s*\(\s*\{[^}]{0,400}?\bevents\s*:\s*\[([^\]]{0,400})\]/g;
+    while ((m = createRe.exec(safe))) {
+      const list = m[1] || '';
+      const site = enclAt(m.index);
+      if (!site) continue;
+      for (const em of list.matchAll(/['"]([^'"]+)['"]/g)) {
+        const event = em[1]!.trim();
+        if (event.length >= 4) push(subscribers, event, site);
+      }
+    }
+
+    // Also: subscribe(…) in a method that earlier referenced events: ['…'] in same method body
+    // (createSubscriber often inlined). Covered by createSubscriber scan above when both in one file.
+  }
+
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  for (const [event, pubs] of publishes) {
+    const subs = subscribers.get(event);
+    if (!subs) continue;
+    if (pubs.length > ARKUI_COMMON_EVENT_FANOUT_CAP || subs.length > ARKUI_COMMON_EVENT_FANOUT_CAP) continue;
+    for (const p of pubs) for (const s of subs) {
+      if (p.nodeId === s.nodeId) continue;
+      const dedupe = `${p.nodeId}>${s.nodeId}>ce:${event}`;
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      edges.push({
+        source: p.nodeId,
+        target: s.nodeId,
+        kind: 'calls',
+        line: p.line,
+        provenance: 'heuristic',
+        metadata: {
+          synthesizedBy: 'arkui-common-event',
+          event,
+          registeredAt: `${s.file}:${s.line}`,
+        },
+      });
+    }
+  }
+  return edges;
+}
+
+/**
+ * `@kit.ArkTS` / `@ohos.taskpool`: `taskpool.execute(new taskpool.Task(fn, …))`
+ * or `taskpool.execute(fn, …)` — static call is only `execute`, so the worker
+ * function never appears on the caller's trail. Bridge execute-site → named `fn`
+ * when the name resolves uniquely (or same-file).
+ */
+async function arkuiTaskpoolEdges(ctx: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  let scanned = 0;
+  const execRe =
+    /\btaskpool\s*\.\s*execute\s*\(\s*(?:new\s+(?:taskpool\.)?Task\s*\(\s*)?([A-Za-z_$][\w]*)/g;
+
+  for (const file of ctx.getAllFiles()) {
+    if ((++scanned & 15) === 0) await onYield();
+    if (!/\.(?:ets|ts)$/.test(file)) continue;
+    const content = ctx.readFile(file);
+    if (!content || !content.includes('taskpool')) continue;
+    const safe = stripCommentsForRegex(content, 'typescript');
+    if (!/\btaskpool\s*\.\s*execute\s*\(/.test(safe)) continue;
+    const nodes = ctx.getNodesInFile(file)
+      .filter((n) => n.kind === 'method' || n.kind === 'function');
+
+    execRe.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = execRe.exec(safe))) {
+      const fnName = m[1]!;
+      if (!fnName || fnName === 'Task' || fnName === 'taskpool') continue;
+      const line = safe.slice(0, m.index).split('\n').length;
+      const encl = nodes
+        .filter((n) => n.startLine <= line && n.endLine >= line)
+        .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+      if (!encl) continue;
+
+      let targets = ctx.getNodesByName(fnName)
+        .filter((n) => (n.kind === 'function' || n.kind === 'method') && !isGeneratedFile(n.filePath));
+      if (targets.length === 0) continue;
+      const sameFile = targets.filter((n) => n.filePath === file);
+      if (sameFile.length > 0) targets = sameFile;
+      if (targets.length > 3) continue; // ambiguous name — don't guess
+
+      for (const t of targets) {
+        if (t.id === encl.id) continue;
+        const dedupe = `${encl.id}>${t.id}>taskpool`;
+        if (seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        edges.push({
+          source: encl.id,
+          target: t.id,
+          kind: 'calls',
+          line,
+          provenance: 'heuristic',
+          metadata: {
+            synthesizedBy: 'arkui-taskpool',
+            via: fnName,
+            registeredAt: `${file}:${line}`,
+          },
+        });
+      }
+    }
+  }
+  return edges;
+}
+
 /** `router.pushUrl({ url: 'pages/Detail' })` / replaceUrl — literal urls only. */
 const ARKUI_ROUTER_RE = /\brouter\s*\.\s*(?:pushUrl|replaceUrl)\s*\(\s*\{[^)]{0,200}?\burl\s*:\s*['"]([\w\-./]+)['"]/g;
 
@@ -3644,6 +3800,8 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'flutterEdges', gate: (has) => has('dart'), run: (q, c, y) => flutterBuildEdges(q, c, y) },
   { name: 'arkuiStateEdges', gate: (has) => has('arkts'), run: (q, c, y) => arkuiStateBuildEdges(q, c, y) },
   { name: 'arkuiEmitter', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiEmitterEdges(c, y) },
+  { name: 'arkuiCommonEvent', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiCommonEventEdges(c, y) },
+  { name: 'arkuiTaskpool', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiTaskpoolEdges(c, y) },
   { name: 'arkuiRoutes', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiRouterEdges(c, y) },
   { name: 'arktsStartupEdges', gate: (has) => has('arkts'), run: async (q, c) => arktsEntryEdges(q, c) },
   { name: 'cppEdges', gate: (has) => has('cpp'), run: (q, _c, y) => cppOverrideEdges(q, y) },

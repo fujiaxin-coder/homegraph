@@ -92,6 +92,16 @@ export interface ExploreEmission {
   sourceBytes: number;
   /** Total chars of the response the agent received. */
   responseBytes: number;
+  /**
+   * True when the response was an honest Partial / coarse locator (not a
+   * closed ANSWER NOW). Used by the repeat guard to fuse failures.
+   */
+  partial?: boolean;
+  /**
+   * Concrete next Type / file the Partial named — follow-up explore must
+   * include this string (case-insensitive) or be refused as paraphrase churn.
+   */
+  nextAnchor?: string;
 }
 
 /** A recorded call: an emission plus where it fell in the session. */
@@ -212,6 +222,12 @@ interface MutableProjectState {
 export class ExploreSessionState {
   /** Insertion-ordered; a touched project is re-inserted, so the head is the LRU. */
   private readonly projects = new Map<string, MutableProjectState>();
+  /**
+   * Depth-tool calls (`node` / callers / callees) spent after the latest Partial
+   * explore, keyed like {@link exploreProjectKey}. Reset when a new explore is
+   * recorded; cleared when that explore is not Partial.
+   */
+  private readonly depthAfterPartial = new Map<string, number>();
 
   /**
    * File an emission. Returns the record as stored (with its session call
@@ -232,12 +248,34 @@ export class ExploreSessionState {
       files: this.boundFiles(emission.files),
       sourceBytes: Math.max(0, emission.sourceBytes || 0),
       responseBytes: Math.max(0, emission.responseBytes || 0),
+      partial: emission.partial === true,
+      nextAnchor: typeof emission.nextAnchor === 'string' && emission.nextAnchor.trim()
+        ? emission.nextAnchor.trim().slice(0, 120)
+        : undefined,
     };
     state.calls.push(record);
     if (state.calls.length > EXPLORE_SESSION_LIMITS.MAX_CALLS_RETAINED) {
       state.calls.splice(0, state.calls.length - EXPLORE_SESSION_LIMITS.MAX_CALLS_RETAINED);
     }
+    // Fresh explore → reset depth fuse window (Partial gets one drill; closed clears).
+    if (record.partial) this.depthAfterPartial.set(key, 0);
+    else this.depthAfterPartial.delete(key);
     return record;
+  }
+
+  /** Count a depth-tool call after Partial; returns the new count. */
+  recordDepthTool(projectRoot: string): number {
+    if (!projectRoot) return 0;
+    const key = exploreProjectKey(projectRoot);
+    const next = (this.depthAfterPartial.get(key) ?? 0) + 1;
+    this.depthAfterPartial.set(key, next);
+    return next;
+  }
+
+  /** Depth tools already spent after the latest Partial for this project. */
+  depthToolCount(projectRoot: string): number {
+    if (!projectRoot) return 0;
+    return this.depthAfterPartial.get(exploreProjectKey(projectRoot)) ?? 0;
   }
 
   /** Full state for one project, or `null` if it was never queried this session. */
@@ -278,6 +316,7 @@ export class ExploreSessionState {
   /** Drop everything. Used by tests; a real session just goes away instead. */
   clear(): void {
     this.projects.clear();
+    this.depthAfterPartial.clear();
   }
 
   /**

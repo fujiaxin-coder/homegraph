@@ -234,8 +234,25 @@ export function queryAsOutOfRepoSdkCatalog(query: string): boolean {
       query,
     )
     || /(?:module\s+)?API\s+functions?|API\s+(?:list|catalog|surface)/i.test(query);
-  if (!catalog) return false;
-  return /@kit\.|\b[A-Z][A-Za-z0-9]*Kit\b/i.test(query);
+  if (catalog && /@kit\.|\b[A-Z][A-Za-z0-9]*Kit\b/i.test(query)) return true;
+
+  // Pure SDK "which callback must I implement" with no in-repo file anchor.
+  // OHAudio-style SDK tokens may parse as Types — still catalog if no .ets/.ts file.
+  const hasFile = extractFileBasenamesFromQuery(query).length > 0;
+  const types = extractTypeNamesFromQuery(query);
+  const onlySdkishTypes = types.length > 0
+    && types.every((t) => /^(?:OH|Napi|NAPI)/.test(t) || /(?:Kit|API)$/.test(t));
+  if (
+    !hasFile
+    && (types.length === 0 || onlySdkishTypes)
+    && /(?:C\s+API|NAPI|\bOH[A-Z][A-Za-z]+\b)/i.test(query)
+    && /需要实现哪个回调|实现哪个回调|哪个回调函数|which\s+callback\s+(?:must|should|to)\s+implement|callback\s+(?:to|must)\s+(?:implement|provide)/i.test(
+      query,
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -344,8 +361,9 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
   // 4) Greenfield empty scaffold (no existing code to orient on).
   if (!hasGraphAnchor && queryAsGreenfieldScaffold(q)) return 'greenfield';
 
-  // 5) Repo-wide literal / copy / layout-string hunts with no code anchors → Grep.
-  if (!hasGraphAnchor && queryLooksLikeLiteralOrCopyHunt(q)) return 'literal-hunt';
+  // 5) Repo-wide literal / copy / layout-string hunts → Grep.
+  // Layout chains (`.width('100%')`) can look like member access — still Skip.
+  if (queryLooksLikeLiteralOrCopyHunt(q)) return 'literal-hunt';
 
   // 6) Topic → file list with no Type/file anchor → Glob/Grep.
   if (
@@ -1041,6 +1059,18 @@ export function queryAsModuleDependencySurvey(query: string): boolean {
  * Shape-only: no PascalCase Type / file / member / kit anchors.
  */
 export function queryLooksLikeLiteralOrCopyHunt(query: string): boolean {
+  // Layout/style literal chains first — `.width('100%')` looks like member access
+  // to extractors but is Grep territory.
+  if (
+    /检索所有\s*\.\w+\(\s*['"][^'"]+['"]\s*\)/i.test(query)
+    || /\.\w+\(\s*['"][^'"]{1,40}['"]\s*\).{0,80}\.\w+\(\s*['"][^'"]{1,40}['"]\s*\)/i.test(query)
+  ) {
+    if (extractTypeNamesFromQuery(query).length === 0
+      && extractFileBasenamesFromQuery(query).length === 0
+      && extractKitModuleNamesFromQuery(query).length === 0) {
+      return true;
+    }
+  }
   if (extractTypeNamesFromQuery(query).length > 0) return false;
   if (extractFileBasenamesFromQuery(query).length > 0) return false;
   if (extractMemberAccessFromQuery(query).length > 0) return false;
@@ -1107,6 +1137,10 @@ export function extractApiUsageTokens(query: string): string[] {
   for (const f of extractFieldLikeSymbolsFromQuery(query)) tokens.add(f);
   for (const m of query.matchAll(/\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g)) {
     if (m[1] && m[1].length >= 6) tokens.add(m[1]);
+  }
+  // "statfs这个API端点" / "使用了statfs这个API" — Chinese demonstrative after the symbol.
+  for (const m of query.matchAll(/\b([A-Za-z_][\w]{2,})\s*这个\s*(?:API|接口|端点|方法)/gi)) {
+    if (m[1] && !GENERIC_VERB_ANCHOR_NOISE.has(m[1].toLowerCase())) tokens.add(m[1]);
   }
   // When a PascalCase SDK/module token is present (Telephony, DrawContext), drop
   // short lowercase bag noise agents add (`call`/`radio`/`usage`) — those flood
@@ -1809,7 +1843,16 @@ export function extractDomainSearchTerms(query: string): string[] {
 
 /** How/implementation/mechanism intent — needs entry symbols + flow, not flat file list. */
 export function queryAsMechanismSurvey(query: string): boolean {
-  return /如何(?:实现|获取|做|处理|管理)|怎样(?:实现|获取|做)|怎么(?:实现|获取|做)|是如何|是怎么|how\s+(?:is|does|are|to\s+(?:get|implement|work))|机制|流程|架构|多线程|多进程|multithread|multi-thread|会走到哪些|步骤中会|解析和安装|下载完|下载后/i.test(
+  // Cross-Type drive / state-machine interaction — must not collapse into compact
+  // hard-ANSWER-NOW on abstract base names (Machine+Engine, Session FG/BG, …).
+  const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+  if (
+    types.length >= 2
+    && /驱动|触发|状态机|状态变化|重新计算|foreground|background|layout|布局/i.test(query)
+  ) {
+    return true;
+  }
+  return /如何(?:实现|获取|做|处理|管理|驱动|触发)|怎样(?:实现|获取|做|驱动|触发)|怎么(?:实现|获取|做|驱动|触发)|是如何|是怎么|how\s+(?:is|does|are|to\s+(?:get|implement|work|drive|trigger))|机制|状态机|流程|架构|多线程|多进程|multithread|multi-thread|会走到哪些|步骤中会|解析和安装|下载完|下载后|状态变化如何|如何驱动|如何触发/i.test(
     query,
   );
 }

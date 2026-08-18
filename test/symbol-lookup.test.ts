@@ -229,3 +229,57 @@ describe.skipIf(!HAS_SQLITE)('matchesSymbol — dotted lookups (regression for #
     expect((text.match(/\*\*Location:\*\*/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe.skipIf(!HAS_SQLITE)('findAllSymbols — qualified miss must not expand to every bare member', () => {
+  let projectRoot: string;
+  let cg: any;
+  let handler: any;
+  let findAllSymbols: (cg: any, s: string) => { nodes: any[]; note: string };
+
+  beforeEach(async () => {
+    projectRoot = tmpRoot();
+    const src = path.join(projectRoot, 'src');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(
+      path.join(src, 'a.ts'),
+      `export class Alpha {\n  init(): void {}\n}\n`,
+    );
+    fs.writeFileSync(
+      path.join(src, 'b.ts'),
+      `export class Beta {\n  init(): void {}\n}\n`,
+    );
+    fs.writeFileSync(
+      path.join(src, 'c.ts'),
+      `export class Gamma {\n  init(): void {}\n}\n`,
+    );
+
+    const HomeGraph = (await import('../src/index')).default;
+    const { ToolHandler } = await import('../src/mcp/tools');
+    cg = HomeGraph.initSync(projectRoot, {
+      config: { include: ['src/**/*.ts'], exclude: [] },
+    });
+    await cg.indexAll();
+    handler = new ToolHandler(cg);
+    findAllSymbols = (handler as any).findAllSymbols.bind(handler);
+  });
+
+  afterEach(() => {
+    handler?.closeAll();
+    cg?.destroy();
+    rmTree(projectRoot);
+  });
+
+  it('MissingType.init does not return every init in the repo', () => {
+    const all = findAllSymbols(cg, 'MissingType.init');
+    expect(all.nodes.length).toBe(0);
+  });
+
+  it('Alpha.init stays on Alpha only', () => {
+    const all = findAllSymbols(cg, 'Alpha.init');
+    expect(all.nodes.length).toBeGreaterThan(0);
+    for (const n of all.nodes) {
+      expect(n.name).toBe('init');
+      expect(n.qualifiedName).toMatch(/Alpha/);
+    }
+  });
+});

@@ -10,7 +10,7 @@
 
 export const SERVER_INSTRUCTIONS = `# HomeGraph — structural locator for THIS repo
 
-Local symbol graph (defs / calls / imports / files). Use it to **stop blind Grep**, get \`file:line\` anchors + source, then answer. Not general Q&A, not SDK docs.
+Local symbol graph (defs / calls / imports / files). Use it to **coarse-locate** in-repo symbols (\`file:line\` + short source), then answer. Not general Q&A, not SDK docs.
 
 ## Call first (do not Grep/Glob/Read first)
 
@@ -26,17 +26,17 @@ ArkUI V1↔V2 / state-decorator migration on a named component → \`homegraph_a
 
 - Put **concrete anchors** in the bag: \`FooManager\`, \`BarEvent\`, \`Type.member\`, \`feature/foo\`, \`@kit.X\`.
 - Map Chinese entities to English symbol stems when you can (\`设置\`→\`Setting\`, \`新建\`→\`New\`) — search/explore cluster \`Entity\` / \`EntityManager\` / \`EntityViewModel\`.
-- Keep **intent words** with the Type (\`来源\` / \`分发\` / \`依赖\` / \`NAPI\`) — bare Type alone may drop survey routing.
+- Keep **intent words** with the Type (\`来源\` / \`分发\` / \`依赖\` / \`NAPI\` / \`驱动\`) — bare Type alone may drop survey routing.
 - Multi-app monorepo: pass \`projectPath\` to the app root; ignore sibling-app paths as noise.
 
 ## After one explore
 
-- Returned line-numbered source = **already Read** — do not re-Grep/Read/node the same symbols.
-- **ANSWER NOW** → answer/edit; do not verify with a Grep storm.
-- **Partial locator** → **ONE** tighter follow-up with a **Manager / file / member** from the list — never re-explore a paraphrase of the same bag (server may refuse overlaps). Then ONE narrow Grep only for residual literals / unindexed wiring.
-- Busy/deadline → retry **once** tighter; then answer.
+- Returned line-numbered source = **already Read** for those symbols — do not re-Grep/Read/node the **same** symbols.
+- **Coarse locate / ANSWER NOW** → answer/edit from anchors; do not verify with a Grep storm.
+- **Partial locator** → **ONE** tighter follow-up with the named **Next anchor** only — never a paraphrase or a different Type (server refuses). After Partial: **no** \`homegraph_callers\`/\`callees\`; at most **one** \`homegraph_node\`. A **second** Partial → stop HomeGraph; ONE narrow Grep then answer — never a repo-wide glob/Read storm.
+- Busy/deadline → retry **once** tighter; then answer from anchors (narrow Grep OK for residuals).
 
-Prefer smallest tool when the name is known: callers/callees/node ≪ explore ≪ search.
+Prefer smallest tool when the name is known: callers/callees/node ≪ explore ≪ search. Prefer **one** Type-wide inventory explore over fanning \`homegraph_callers\` per method. Session fuse: **≤2** \`homegraph_explore\` per project; after Partial follow-ups must name the **Next anchor**; **≤1** \`homegraph_node\` after Partial — further calls are refused.
 
 ## Do not call HomeGraph
 
@@ -66,5 +66,5 @@ Pass \`projectPath\` to a folder that has \`.homegraph/\`.
 
 **Skip:** topic file-lists, concept compares, literal hunts, git history, media. No index → Read/Grep/Glob; user runs \`homegraph init\`.
 
-**Query habit:** Chinese OK; add English Type/\`@kit\` tokens when known. Partial → one tighter follow-up with a concrete name from the list — not a Grep storm.
+**Query habit:** Chinese OK; add English Type/\`@kit\` tokens when known. Explore = coarse locate. Partial → one tighter follow-up with a concrete name from the list. ONE narrow Grep OK for residual unindexed wiring — not a Grep storm.
 `;

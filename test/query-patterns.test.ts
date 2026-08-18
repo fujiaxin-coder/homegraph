@@ -362,7 +362,7 @@ describe('queryShouldDeferToBuiltinTools', () => {
     ).toBe('concept-or-existence');
     expect(
       queryShouldDeferToBuiltinTools("检索所有 .width('100%') 和 .height('100%') 同时出现的组件"),
-    ).toBeNull();
+    ).toBe('literal-hunt');
     expect(queryShouldDeferToBuiltinTools('请只查阅官方文档回答，不要看代码')).toBe('external-manual');
     expect(queryShouldDeferToBuiltinTools('从零创建一个空的鸿蒙工程')).toBe('greenfield');
     expect(queryShouldDeferToBuiltinTools('用 git blame 看谁改过登录页')).toBe('vcs-history');
@@ -372,6 +372,7 @@ describe('queryShouldDeferToBuiltinTools', () => {
   it('does not defer structural / in-repo usage questions', () => {
     expect(queryShouldDeferToBuiltinTools('项目中是如何实现xml解析功能的')).toBeNull();
     expect(queryShouldDeferToBuiltinTools('哪些代码依赖@kit.ArkTS的taskpool')).toBeNull();
+    expect(queryShouldDeferToBuiltinTools('项目中哪里使用了statfs这个API端点')).toBeNull();
     expect(
       queryShouldDeferToBuiltinTools(
         'OpenFolderDragHandler.test.ets里getSummary() 返回 Summary，这个对象起什么作用？',
@@ -383,6 +384,14 @@ describe('queryShouldDeferToBuiltinTools', () => {
         'WallpaperApplyPage WallpaperApplyDialog preview image load',
       ),
     ).toBeNull();
+  });
+
+  it('defers pure SDK C-API callback catalogs without in-repo anchors', () => {
+    expect(
+      queryShouldDeferToBuiltinTools(
+        '在 OHAudio C API 中，音频渲染器需要实现哪个回调函数来向系统提供音频数据？',
+      ),
+    ).toBe('sdk-catalog');
   });
 
   it('does not defer code-change / pre-edit orientation tasks', () => {
@@ -855,6 +864,13 @@ describe('mechanism survey', () => {
     expect(queryAsMechanismSurvey('项目中是如何实现备份与恢复的')).toBe(true);
     expect(queryAsMechanismSurvey('如何获取系统语言')).toBe(true);
     expect(queryAsMechanismSurvey('与用户首选项相关的文件有哪些')).toBe(false);
+  });
+
+  it('detects cross-Type drive / state-change questions (not compact hard-ANSWER)', () => {
+    expect(queryAsMechanismSurvey('Machine 的状态变化如何驱动 Engine 重新计算布局？')).toBe(true);
+    expect(queryAsMechanismSurvey('如何驱动 Engine 重新布局')).toBe(true);
+    expect(queryAsMechanismSurvey('FooBar 状态机 foreground background 转换')).toBe(true);
+    expect(queryHasFocusedNamedAnchors('Machine 的状态变化如何驱动 Engine 重新计算布局？')).toBe(false);
   });
 
   it('matches implementation entry symbol names', () => {
