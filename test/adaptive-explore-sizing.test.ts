@@ -64,7 +64,14 @@ describe('adaptive homegraph_explore sizing — sibling skeletonization', () => 
   const QUERY =
     'dispatch proceed handleLogging LoggingInterceptor BridgeInterceptor CacheInterceptor RetryInterceptor ResponseFormatter';
 
+  let prevFullSource: string | undefined;
+
   beforeAll(async () => {
+    // Skeletonization is a Source-render path. Default mid-lean (0012) only dumps
+    // ≤2 spine digests, so off-spine siblings are path Anchors — no `**file**`
+    // section. These tests opt into the fatter Source shape they were written for.
+    prevFullSource = process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE;
+    process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE = '1';
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-adaptive-explore-'));
     const srcDir = path.join(testDir, 'src');
     fs.mkdirSync(srcDir);
@@ -250,6 +257,8 @@ export class YamlCodec extends Codec {
   });
 
   afterAll(() => {
+    if (prevFullSource === undefined) delete process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE;
+    else process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE = prevFullSource;
     if (cg) cg.destroy();
     if (testDir && fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
@@ -278,6 +287,20 @@ export class YamlCodec extends Codec {
     // rather than silently flipping the skeletonization downstream.
     expect(implementers(interceptor!.id)).toBeGreaterThanOrEqual(3);
     expect(implementers(formatter!.id)).toBeLessThan(3);
+  });
+
+  it('mid-lean default: off-spine siblings stay path Anchors, not Source sections', async () => {
+    const prev = process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE;
+    delete process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE;
+    try {
+      const result = await handler.execute('homegraph_explore', { query: QUERY, maxFiles: 12 });
+      const text = result.content?.[0]?.text ?? '';
+      expect(sectionFor(text, 'bridge-interceptor.ts')).toBe('');
+      expect(text).toMatch(/bridge-interceptor\.ts/);
+    } finally {
+      if (prev === undefined) delete process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE;
+      else process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE = prev;
+    }
   });
 
   it('skeletonizes off-spine polymorphic siblings (bodies elided, signatures kept)', async () => {

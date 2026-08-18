@@ -73,6 +73,7 @@
 - 默认：**Anchors**（`file:line` + 少量符号）+ ≤2 spine/top-hit **digest**（digest = 已 Read）。
 - 更大档位的 `maxCharsPerFile` **不得小于** 更小档位（单调性）。
 - 文案：digest 所示符号不要再 Read/Grep；残差未入图接线 → **ONE 窄 Grep**。
+- **与 adaptive skeletonization 的关系：** `HOMEGRAPH_ADAPTIVE_EXPLORE`（默认开）只作用于**已渲染的 Source 节**（off-spine 多态兄弟签成 skeleton）。mid-lean 默认不渲染那些文件的 body，它们只出现在 Anchors。骨架化回归测须设 `HOMEGRAPH_EXPLORE_FULL_SOURCE=1`。
 
 ### 3.2 Partial vs Coarse locate / ANSWER
 
@@ -116,6 +117,7 @@
 - [x] commonEvent / taskpool 合成边有测（`test/arkui-common-event-taskpool.test.ts`）；Skip 布局链 / 纯 C-API 回调目录有路由测。
 - [x] `server-instructions` 含粗定位、窄 Grep 合法、fuse / Partial Next 习惯。
 - [x] CHANGELOG `[Unreleased]` 用户向说明；无评测题号当产品种子。
+- [x] Adaptive skeletonization 测在 `HOMEGRAPH_EXPLORE_FULL_SOURCE=1` 下跑；默认 mid-lean 不把 off-spine 兄弟打成 Source 节（`test/adaptive-explore-sizing.test.ts`）。
 
 ---
 
