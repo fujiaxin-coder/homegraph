@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Run build + unit tests across Node majors for engines compatibility.
-# Default matrix: 18 19 20 21 22 23 24 25 (see docs/specs/0003-support-node-18.md §5.1).
+# Default matrix: 22 23 24 25 (engines >=22; see package.json).
 #
 # Requires nvm (https://github.com/nvm-sh/nvm).
 #
 # Usage:
 #   ./scripts/test-node-matrix.sh
-#   ./scripts/test-node-matrix.sh 18 22 25          # subset
-#   NODE_MATRIX="18 20 22" ./scripts/test-node-matrix.sh
+#   ./scripts/test-node-matrix.sh 22 25             # subset
+#   NODE_MATRIX="22 24" ./scripts/test-node-matrix.sh
 #   FAIL_FAST=1 ./scripts/test-node-matrix.sh      # stop on first failure
 #   SKIP_INSTALL=1 ./scripts/test-node-matrix.sh   # reuse node_modules (not recommended across majors)
 #
 # Env:
-#   NODE_MATRIX   Space-separated majors (default: 18 19 20 21 22 23 24 25)
+#   NODE_MATRIX   Space-separated majors (default: 22 23 24 25)
 #   FAIL_FAST     If 1, exit on first failed major (default: 0 — run all, summarize)
 #   SKIP_INSTALL  If 1, skip `rm -rf node_modules && npm ci` per major
 #   NVM_DIR       nvm install path (default: ~/.nvm)
@@ -22,7 +22,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-DEFAULT_MATRIX=(18 19 20 21 22 23 24 25)
+DEFAULT_MATRIX=(22 23 24 25)
 FAIL_FAST="${FAIL_FAST:-0}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 

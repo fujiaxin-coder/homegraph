@@ -86,10 +86,10 @@ npm ci
 npm run build
 ```
 
-Node 要求：`>=18`（与 `package.json` `engines` 一致；推荐 22.5+）。多 major 兼容性自测：
+Node 要求：`>=22`（与 `package.json` `engines` 一致；推荐 22.5+）。多 major 兼容性自测：
 
 ```bash
-npm run test:node-matrix          # 默认 18 19 20 21 22 23 24 25（需本机 nvm）
+npm run test:node-matrix          # 默认 22 23 24 25（需本机 nvm）
 ./scripts/test-node-matrix.sh 22 25   # 子集
 ```
 

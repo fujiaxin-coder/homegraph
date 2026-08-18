@@ -16,7 +16,7 @@
  * *warns* on install (unless the user set `engine-strict`), so the CLI bootstrap
  * also hard-blocks here to actually enforce the floor.
  */
-export const MIN_NODE_MAJOR = 18;
+export const MIN_NODE_MAJOR = 22;
 
 /**
  * Build the bordered banner shown when HomeGraph detects a Node.js major below

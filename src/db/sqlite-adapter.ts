@@ -7,11 +7,10 @@
  *   2. `better-sqlite3` — native addon (optionalDependency)
  *   3. `node-sqlite3-wasm` — last-resort fallback (no WAL; slower / lock-prone)
  *
- * Library hosts on Node 18–22.4 land on (2) or (3). Node ≥22.5 prefers (1) when
+ * Library hosts on Node 22.0–22.4 land on (2) or (3). Node ≥22.5 prefers (1) when
  * FTS5 is present and skips the native build. Override with
  * `HOMEGRAPH_SQLITE_BACKEND=node-sqlite|native|wasm`.
- * optionalDependency `better-sqlite3` is pinned to 11.x so Node 18 can still load native
- * when the addon builds; otherwise wasm remains the last resort.
+ * optionalDependency `better-sqlite3` is 12.x (Node 22+); wasm remains the last resort.
  */
 
 export interface SqliteStatement {

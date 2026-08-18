@@ -160,7 +160,7 @@ describe('buildRelaunchArgv', () => {
 
 /**
  * Live Zone-OOM repro. Gated to Node ≥24: the same harness completes cleanly
- * on Node 18/22 (no turboshaft Zone abort), and crashes deterministically on
+ * on Node 22 (no turboshaft Zone abort), and crashes deterministically on
  * 24/25 without `--liftoff-only`. Vitest forks already inject liftoff, so we
  * spawn a *fresh* node with an explicit argv — never rely on the parent.
  */

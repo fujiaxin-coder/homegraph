@@ -14,7 +14,7 @@ npm ci          # 首次或 lock 变更
 npm run build   # → dist/（含 WASM、schema）
 ```
 
-要求 Node **≥18**（推荐 **22.5+**，与 `package.json` `engines` 一致）。
+要求 Node **≥22**（推荐 **22.5+**，与 `package.json` `engines` 一致）。
 
 后续命令用变量指向本地构建（路径按实际修改）：
 

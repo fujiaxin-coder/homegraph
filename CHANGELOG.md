@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Require Node.js **22+** (`engines: >=22`). Node 18–21 are no longer supported; the CLI hard-exits below major 22. Dependencies that were pinned for Node 18 are restored: `commander@^14`, `@clack/prompts@^1.7`, optional `better-sqlite3@^12`. Use `npm run test:node-matrix` (nvm) to exercise majors 22–25 locally.
+
 ### New Features
 
 - Docs hub at `docs/README.md` plus a short `docs/RELEASE.md` for publishing [`homegraph`](https://www.npmjs.com/package/homegraph) (Actions), GitCode releases, and mirror checks — without duplicating DEVELOPMENT SDD.

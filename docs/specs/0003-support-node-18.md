@@ -4,9 +4,11 @@
 | --- | --- |
 | 编号 | 0003 |
 | 类型 | 变更 |
-| 状态 | 已完成 |
+| 状态 | 已完成（现行下限已改为 Node `>=22`） |
 | 日期 | 2026-08-06 |
 | 范围 | Node 运行时版本上下限门禁、WASM Zone OOM 缓解在 Node 25+ 上的有效性、依赖兼容、`scripts/test-node-matrix.sh`（18–25）、文档/测试对齐 |
+
+> **现行声明（2026-08）：** Node 下限已改为 `engines: >=22`；为 Node 18 降级的 `commander` / `@clack/prompts` / `better-sqlite3` 已恢复。下文是 18+ 阶段的需求与验收记录，不再作为现行 engines 声明。
 
 ---
 

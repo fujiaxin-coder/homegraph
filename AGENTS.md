@@ -31,7 +31,7 @@ npx vitest run test/extraction.test.ts -t "TypeScript"
 
 `copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
 
-Node engines: `>=18.0.0`. There is a hard exit below 18 (see `src/bin/node-version-check.ts`). Node ≥22 WASM Zone OOM is mitigated with `--liftoff-only` relaunch (`src/extraction/wasm-runtime-flags.ts`), including Node 25+.
+Node engines: `>=22`. There is a hard exit below 22 (see `src/bin/node-version-check.ts`). Node ≥22 WASM Zone OOM is mitigated with `--liftoff-only` relaunch (`src/extraction/wasm-runtime-flags.ts`), including Node 25+.
 
 ## Architecture
 
