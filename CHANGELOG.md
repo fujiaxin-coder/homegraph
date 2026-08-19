@@ -23,6 +23,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- Experimental focused explore routing adds read-only `homegraph_usages`, `homegraph_modules`, and `homegraph_native` tools. High-confidence calls through `homegraph_explore` delegate to the same bounded survey family; constant-only symbol bags can use a budgeted text sweep for non-call references.
+
 - Docs hub at `docs/README.md` plus a short `docs/RELEASE.md` for publishing [`homegraph`](https://www.npmjs.com/package/homegraph) (Actions), GitCode releases, and mirror checks — without duplicating DEVELOPMENT SDD.
 - Explore better matches common survey shapes (data-source, Event→handler, multi-Type deps, resource/preview, NAPI) with honest **Partial** vs **ANSWER NOW**, so agents get anchors without fake-complete dumps that trigger Grep storms.
 - Startup MCP instructions are a shorter locator playbook: how to write `query`, when to stop after explore, and when to Skip — without long low-salience essays.
