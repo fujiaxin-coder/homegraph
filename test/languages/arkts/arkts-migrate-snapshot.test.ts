@@ -265,4 +265,122 @@ describe('arkui migrate-snapshot assembly', () => {
     expect(snap.observedClasses[0]!.properties[0]?.hasTrace).toBe(true);
     expect(snap.observedClasses[0]!.referencedBy).toContain(profileState.id);
   });
+
+  it('collectObserved skips full-graph class/struct scans (spec 0013)', () => {
+    const parent = node({
+      id: 'comp:Host',
+      kind: 'component',
+      name: 'Host',
+      filePath: 'Host.ets',
+      decorators: ['Component'],
+    });
+    const parentStruct = node({
+      id: 'struct:Host',
+      kind: 'struct',
+      name: 'Host',
+      filePath: 'Host.ets',
+      decorators: ['Component'],
+    });
+    const localObserved = node({
+      id: 'class:LocalModel',
+      kind: 'class',
+      name: 'LocalModel',
+      filePath: 'Host.ets',
+      decorators: ['Observed'],
+    });
+    const remoteObserved = node({
+      id: 'class:RemoteModel',
+      kind: 'class',
+      name: 'RemoteModel',
+      filePath: 'Remote.ets',
+      decorators: ['Observed'],
+    });
+    const unrelatedObserved = node({
+      id: 'class:Unrelated',
+      kind: 'class',
+      name: 'Unrelated',
+      filePath: 'Other.ets',
+      decorators: ['Observed'],
+    });
+    const profileState = node({
+      id: 'field:Host.remote',
+      kind: 'property',
+      name: 'remote',
+      filePath: 'Host.ets',
+      decorators: ['State'],
+      signature: 'RemoteModel',
+      qualifiedName: 'Host.remote',
+    });
+    // Noise: many Observed classes that must never be loaded via getNodesByKind
+    const noise: Node[] = Array.from({ length: 200 }, (_, i) =>
+      node({
+        id: `class:Noise${i}`,
+        kind: 'class',
+        name: `Noise${i}`,
+        filePath: `noise/Noise${i}.ets`,
+        decorators: ['Observed'],
+      })
+    );
+
+    const nodes = [
+      parent,
+      parentStruct,
+      localObserved,
+      remoteObserved,
+      unrelatedObserved,
+      profileState,
+      ...noise,
+    ];
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const edges: Edge[] = [
+      { source: parentStruct.id, target: profileState.id, kind: 'contains' },
+      {
+        source: profileState.id,
+        target: remoteObserved.id,
+        kind: 'references',
+        metadata: { synthesizedBy: 'arkui-migrate', via: 'observed-ref' },
+      },
+      // storage-api must not count as observed-ref
+      {
+        source: profileState.id,
+        target: unrelatedObserved.id,
+        kind: 'references',
+        metadata: {
+          synthesizedBy: 'arkui-migrate',
+          via: 'storage-api',
+          channel: 'AppStorage',
+          key: 'x',
+        },
+      },
+    ];
+
+    let kindClassCalls = 0;
+    let kindStructCalls = 0;
+    const graph: MigrateSnapshotGraph = {
+      getNodesByKind: (kind) => {
+        if (kind === 'class') kindClassCalls += 1;
+        if (kind === 'struct') kindStructCalls += 1;
+        return nodes.filter((n) => n.kind === kind);
+      },
+      getNodesByName: (name) => nodes.filter((n) => n.name === name),
+      getNodesInFile: (fp) => nodes.filter((n) => n.filePath === fp),
+      getOutgoingEdges: (id) => edges.filter((e) => e.source === id),
+      getIncomingEdges: (id) => edges.filter((e) => e.target === id),
+      getNode: (id) => byId.get(id) ?? null,
+    };
+
+    const snap = buildArkUIMigrateSnapshot(graph, 'Host');
+    expect(kindClassCalls).toBe(0);
+    // resolveScope may still touch struct for directory fallbacks; component-name
+    // resolution uses getNodesByName only — struct kind must stay 0 here.
+    expect(kindStructCalls).toBe(0);
+
+    const names = snap.observedClasses.map((o) => o.name).sort();
+    expect(names).toEqual(['LocalModel', 'RemoteModel']);
+    const remote = snap.observedClasses.find((o) => o.name === 'RemoteModel')!;
+    expect(remote.referencedBy).toEqual([profileState.id]);
+    const local = snap.observedClasses.find((o) => o.name === 'LocalModel')!;
+    expect(local.referencedBy).toEqual([]);
+    expect(snap.observedClasses.some((o) => o.name === 'Unrelated')).toBe(false);
+  });
 });
