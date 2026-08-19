@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- `homegraph_arkui_migrate` treats bare `@Provide` / `@Consume` (and V2 Provider/Consumer) as keyed by the **variable name** when no `('key')` arg is present, so implicit ProvideConsume channels are no longer dropped from `keyChannels`.
 
 ## [1.5.4] - 2026-08-19
 

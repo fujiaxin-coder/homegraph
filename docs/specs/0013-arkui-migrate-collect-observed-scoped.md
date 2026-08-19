@@ -5,7 +5,7 @@
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 编号  | 0013                                                                                                                                              |
 | 类型  | 变更 / 性能                                                                                                                                           |
-| 状态  | 实现完成（待 PR 合入）                                                                                                                                     |
+| 状态  | 已完成（随 1.5.4 合入）                                                                                                                                     |
 | 日期  | 2026-08-19                                                                                                                                        |
 | 范围  | `src/arkui/migrate-snapshot.ts` 的 `collectObserved`；相关单测；CHANGELOG                                                                                |
 | 关联  | [0007](./0007-arkui-migrate-snapshot.md)（`observedClasses` 语义）；索引期 `observed-ref` 边见 `src/extraction/languages/arkts.ts` `indexObservedClassRefs` |
@@ -97,4 +97,4 @@ scope files ──getNodesInFile + Observed filter──► 同文件 Observed�
 
 ## 5. 状态
 
-**实现完成（待 PR 合入）** — `collectObserved` 反向 `observed-ref` + scope 文件；测试：`arkts-migrate-snapshot.test.ts` 新增 spec 0013 用例。
+**已完成**（随 1.5.4 合入）— `collectObserved` 反向 `observed-ref` + scope 文件；测试：`arkts-migrate-snapshot.test.ts` 新增 spec 0013 用例。
