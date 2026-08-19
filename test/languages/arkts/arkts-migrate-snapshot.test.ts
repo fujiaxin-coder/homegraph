@@ -10,6 +10,7 @@ import {
   encodeDecoratorEntries,
   parseDecoratorArgFromContent,
   scanStorageApiKeys,
+  resolveKeyChannelKey,
 } from '../../../src/arkui/migrate-semantics';
 import {
   buildArkUIMigrateSnapshot,
@@ -65,6 +66,15 @@ describe('arkui migrate-semantics helpers', () => {
       'AppStorage:theme',
       'LocalStorage:count',
     ]);
+  });
+
+  it('resolves Provide/Consume key with name fallback (spec 0014)', () => {
+    expect(resolveKeyChannelKey('Consume', undefined, 'persistentId')).toBe('persistentId');
+    expect(resolveKeyChannelKey('Provide', '', 'mDateTime')).toBe('mDateTime');
+    expect(resolveKeyChannelKey('Provider', undefined, 'shared')).toBe('shared');
+    expect(resolveKeyChannelKey('Provide', 'theme', 'ignored')).toBe('theme');
+    expect(resolveKeyChannelKey('StorageLink', undefined, 'count')).toBeUndefined();
+    expect(resolveKeyChannelKey('StorageLink', 'count', 'count')).toBe('count');
   });
 });
 
@@ -382,5 +392,74 @@ describe('arkui migrate-snapshot assembly', () => {
     const local = snap.observedClasses.find((o) => o.name === 'LocalModel')!;
     expect(local.referencedBy).toEqual([]);
     expect(snap.observedClasses.some((o) => o.name === 'Unrelated')).toBe(false);
+  });
+
+  it('includes implicit Provide/Consume variable name as keyChannel (spec 0014)', () => {
+    const card = node({
+      id: 'comp:Card',
+      kind: 'component',
+      name: 'Card',
+      filePath: 'Card.ets',
+      decorators: ['Component'],
+    });
+    const cardStruct = node({
+      id: 'struct:Card',
+      kind: 'struct',
+      name: 'Card',
+      filePath: 'Card.ets',
+      decorators: ['Component'],
+    });
+    const consumeField = node({
+      id: 'field:Card.persistentId',
+      kind: 'property',
+      name: 'persistentId',
+      filePath: 'Card.ets',
+      decorators: ['Consume'],
+      signature: 'number',
+      qualifiedName: 'Card.persistentId',
+    });
+    const provideExplicit = node({
+      id: 'field:Card.theme',
+      kind: 'property',
+      name: 'theme',
+      filePath: 'Card.ets',
+      decorators: ['Provide', 'Provide@theme'],
+      signature: 'string',
+      qualifiedName: 'Card.theme',
+    });
+    const storageNoArg = node({
+      id: 'field:Card.count',
+      kind: 'property',
+      name: 'count',
+      filePath: 'Card.ets',
+      decorators: ['StorageLink'],
+      signature: 'number',
+      qualifiedName: 'Card.count',
+    });
+
+    const nodes = [card, cardStruct, consumeField, provideExplicit, storageNoArg];
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const edges: Edge[] = [
+      { source: cardStruct.id, target: consumeField.id, kind: 'contains' },
+      { source: cardStruct.id, target: provideExplicit.id, kind: 'contains' },
+      { source: cardStruct.id, target: storageNoArg.id, kind: 'contains' },
+    ];
+    const graph: MigrateSnapshotGraph = {
+      getNodesByKind: (kind) => nodes.filter((n) => n.kind === kind),
+      getNodesByName: (name) => nodes.filter((n) => n.name === name),
+      getNodesInFile: (fp) => nodes.filter((n) => n.filePath === fp),
+      getOutgoingEdges: (id) => edges.filter((e) => e.source === id),
+      getIncomingEdges: (id) => edges.filter((e) => e.target === id),
+      getNode: (id) => byId.get(id) ?? null,
+    };
+
+    const snap = buildArkUIMigrateSnapshot(graph, 'Card');
+    const persistent = snap.components[0]!.stateVars.find((s) => s.name === 'persistentId');
+    expect(persistent?.decorator).toBe('Consume');
+    expect(persistent?.decoratorArg).toBe('persistentId');
+
+    const keys = snap.keyChannels.map((k) => `${k.channel}:${k.key}`).sort();
+    expect(keys).toEqual(['ProvideConsume:persistentId', 'ProvideConsume:theme']);
+    expect(snap.keyChannels.some((k) => k.key === 'count')).toBe(false);
   });
 });

@@ -135,6 +135,33 @@ export function channelOfKeyDecorator(decorator: string): AppChannel {
   return 'ProvideConsume';
 }
 
+/** Decorators whose key defaults to the field name when no literal arg is given. */
+export const IMPLICIT_NAME_KEY_DECORATORS = new Set([
+  'Provide',
+  'Consume',
+  'Provider',
+  'Consumer',
+]);
+
+/**
+ * Resolve the storage / ProvideConsume key for a state var (spec 0014).
+ * Explicit decorator arg wins; Provide/Consume(/V2) fall back to the variable name.
+ * Storage* decorators never fall back — missing arg means no channel.
+ */
+export function resolveKeyChannelKey(
+  decorator: string,
+  decoratorArg: string | undefined,
+  fieldName: string
+): string | undefined {
+  const arg = decoratorArg?.trim();
+  if (arg) return arg;
+  if (IMPLICIT_NAME_KEY_DECORATORS.has(decorator)) {
+    const name = fieldName.trim();
+    return name || undefined;
+  }
+  return undefined;
+}
+
 export function channelOfStorageApiClass(cls: string): AppChannel | null {
   switch (cls) {
     case 'AppStorage':

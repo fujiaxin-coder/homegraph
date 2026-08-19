@@ -12,6 +12,7 @@ import {
   channelOfKeyDecorator,
   decodeDecorators,
   mainStateDecorator,
+  resolveKeyChannelKey,
   type AppChannel,
   type PassageType,
   type ValueTypeKind,
@@ -154,7 +155,8 @@ function collectStateVarsForComponent(
         const arg = argByKind.get(kind);
         return arg ? { kind, arg } : { kind };
       });
-    const decoratorArg = argByKind.get(main);
+    const parsedArg = argByKind.get(main);
+    const decoratorArg = resolveKeyChannelKey(main, parsedArg, field.name) ?? parsedArg;
     out.push({
       id: field.id,
       name: field.name,
@@ -234,17 +236,21 @@ function collectDataPassages(
 
 function collectKeyChannels(
   graph: MigrateSnapshotGraph,
-  stateVars: Array<{ id: string; decorator: string; decoratorArg?: string }>,
+  stateVars: Array<{ id: string; name: string; decorator: string; decoratorArg?: string }>,
   componentIds: Set<string>
 ): ArkUIMigrateSnapshot['keyChannels'] {
   const groups = new Map<string, { key: string; channel: AppChannel | string; participants: Set<string> }>();
 
   for (const sv of stateVars) {
-    if (!KEY_CHANNEL_DECORATORS.has(sv.decorator) || !sv.decoratorArg) continue;
+    if (!KEY_CHANNEL_DECORATORS.has(sv.decorator)) continue;
+    // stateVars already carry implicit Provide/Consume name as decoratorArg (spec 0014);
+    // resolve again so callers that pass raw fields stay correct.
+    const key = resolveKeyChannelKey(sv.decorator, sv.decoratorArg, sv.name);
+    if (!key) continue;
     const channel = channelOfKeyDecorator(sv.decorator);
-    const gkey = `${channel}:${sv.decoratorArg}`;
+    const gkey = `${channel}:${key}`;
     const g = groups.get(gkey) ?? {
-      key: sv.decoratorArg,
+      key,
       channel,
       participants: new Set<string>(),
     };
@@ -458,6 +464,7 @@ export function buildArkUIMigrateSnapshot(
   const stateVarsFlat = componentViews.flatMap((c) =>
     c.stateVars.map((sv) => ({
       id: sv.id,
+      name: sv.name,
       decorator: sv.decorator,
       decoratorArg: sv.decoratorArg,
     }))
