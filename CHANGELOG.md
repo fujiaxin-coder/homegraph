@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.5.4] - 2026-08-19
+
 ### Breaking Changes
 
 - Require Node.js **22+** (`engines: >=22`). Node 18–21 are no longer supported; the CLI hard-exits below major 22. Dependencies that were pinned for Node 18 are restored: `commander@^14`, `@clack/prompts@^1.7`, optional `better-sqlite3@^12`. Use `npm run test:node-matrix` (nvm) to exercise majors 22–25 locally.
@@ -145,6 +148,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Incremental sync now picks up cross-file relationships that only become resolvable after an edit — for example, when a file gains an export that another, unchanged file was already importing or calling. Previously the reference in the unchanged file was never revisited, so callers, impact, and flow results silently omitted the new edge (while status reported a clean index) until a full re-index. References that can't be resolved yet are now remembered and automatically retried whenever a change introduces a symbol that could satisfy them — this also covers a class gaining a new method that other files already call. Thanks @loadcosmos for the report with a minimal reproduction. (#1240)
 - The reverse case is fixed too: when an edit removes or moves a symbol (or deletes its file), callers in unchanged files now re-resolve during the same sync — rebinding to the symbol's new home when it moved, or waiting to reconnect automatically when it comes back — instead of silently losing their relationship until a full re-index. (#1240)
 
+[1.5.4]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.4
 [1.5.3]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.3
 [1.5.2]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.2
 [1.5.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.1
