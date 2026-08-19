@@ -275,54 +275,80 @@ function collectKeyChannels(
   }));
 }
 
+function isObservedClassOrStruct(n: Node): boolean {
+  if (n.kind !== 'class' && n.kind !== 'struct') return false;
+  const { kinds } = decodeDecorators(n.decorators);
+  return kinds.some((k) => OBSERVATION_DECORATORS.has(k));
+}
+
+function isObservedRefEdge(e: Edge): boolean {
+  return e.kind === 'references' && e.metadata?.via === 'observed-ref';
+}
+
+function observedClassProperties(
+  graph: MigrateSnapshotGraph,
+  clsId: string
+): ArkUIMigrateSnapshot['observedClasses'][0]['properties'] {
+  const properties: ArkUIMigrateSnapshot['observedClasses'][0]['properties'] = [];
+  for (const e of graph.getOutgoingEdges(clsId)) {
+    if (e.kind !== 'contains') continue;
+    const field = graph.getNode(e.target);
+    if (!field || (field.kind !== 'property' && field.kind !== 'field')) continue;
+    const { kinds: fk } = decodeDecorators(field.decorators);
+    const traceDecorator = fk.find((k) => TRACE_DECORATORS.has(k));
+    properties.push({
+      name: field.name,
+      type: field.signature,
+      hasTrace: !!traceDecorator,
+      ...(traceDecorator ? { traceDecorator } : {}),
+    });
+  }
+  return properties;
+}
+
+/**
+ * Collect @Observed/@ObservedV2 classes for a migrate scope without scanning
+ * the whole graph (spec 0013): reverse from stateVar observed-ref edges, plus
+ * Observed types that live in scoped component files.
+ */
 function collectObserved(
   graph: MigrateSnapshotGraph,
   scopeNodes: Node[],
   stateVarIds: Set<string>
 ): ArkUIMigrateSnapshot['observedClasses'] {
   const fileSet = new Set(scopeNodes.map((n) => normalizePath(n.filePath)));
-  const candidates = [
-    ...graph.getNodesByKind('class'),
-    ...graph.getNodesByKind('struct'),
-  ].filter((n) => {
-    const { kinds } = decodeDecorators(n.decorators);
-    return kinds.some((k) => OBSERVATION_DECORATORS.has(k));
-  });
+  const referencedByMap = new Map<string, Set<string>>();
+  const classes = new Map<string, Node>();
+
+  for (const stateVarId of stateVarIds) {
+    for (const e of graph.getOutgoingEdges(stateVarId)) {
+      if (!isObservedRefEdge(e)) continue;
+      const cls = graph.getNode(e.target);
+      if (!cls || !isObservedClassOrStruct(cls)) continue;
+      classes.set(cls.id, cls);
+      const refs = referencedByMap.get(cls.id) ?? new Set<string>();
+      refs.add(stateVarId);
+      referencedByMap.set(cls.id, refs);
+    }
+  }
+
+  for (const filePath of fileSet) {
+    for (const n of graph.getNodesInFile(filePath)) {
+      if (!isObservedClassOrStruct(n)) continue;
+      classes.set(n.id, n);
+    }
+  }
 
   const out: ArkUIMigrateSnapshot['observedClasses'] = [];
-  for (const cls of candidates) {
-    // Include if in scoped files OR referenced by a scoped state var
-    const refs = graph
-      .getIncomingEdges(cls.id)
-      .filter((e) => e.metadata?.via === 'observed-ref' || e.metadata?.synthesizedBy === 'arkui-migrate');
-    const referencedBy = refs.map((e) => e.source).filter((id) => stateVarIds.has(id));
-    const inScopeFile = fileSet.has(normalizePath(cls.filePath));
-    if (!inScopeFile && referencedBy.length === 0) continue;
-
+  for (const cls of classes.values()) {
     const { kinds } = decodeDecorators(cls.decorators);
     const observationDecorator = kinds.includes('ObservedV2') ? 'ObservedV2' : 'Observed';
-
-    const properties: ArkUIMigrateSnapshot['observedClasses'][0]['properties'] = [];
-    for (const e of graph.getOutgoingEdges(cls.id)) {
-      if (e.kind !== 'contains') continue;
-      const field = graph.getNode(e.target);
-      if (!field || (field.kind !== 'property' && field.kind !== 'field')) continue;
-      const { kinds: fk } = decodeDecorators(field.decorators);
-      const traceDecorator = fk.find((k) => TRACE_DECORATORS.has(k));
-      properties.push({
-        name: field.name,
-        type: field.signature,
-        hasTrace: !!traceDecorator,
-        ...(traceDecorator ? { traceDecorator } : {}),
-      });
-    }
-
     out.push({
       id: cls.id,
       name: cls.name,
       observationDecorator,
-      properties,
-      referencedBy,
+      properties: observedClassProperties(graph, cls.id),
+      referencedBy: [...(referencedByMap.get(cls.id) ?? [])],
     });
   }
   return out;
