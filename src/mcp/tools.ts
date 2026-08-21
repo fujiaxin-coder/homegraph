@@ -7,7 +7,7 @@
 import type HomeGraph from '../index';
 import type { QueryPool } from './query-pool';
 import { resolveToolDeadlineMs } from './query-pool';
-import { isOverRssBudget, rssBudgetPartialResult, shouldSkipCatchUpSync } from './memory-budget';
+import { shouldSkipCatchUpSync } from './memory-budget';
 import { findNearestHomeGraphRoot } from '../directory';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
@@ -2128,11 +2128,6 @@ export class ToolHandler {
         this.catchUpGate = null;
         await this.awaitCatchUpGate(gate);
       }
-      // Hard process RSS ceiling — any tool/path that already pushed us over must
-      // stop with success-shaped Partial (never OOM / multi-GB growth).
-      if (isOverRssBudget()) {
-        return rssBudgetPartialResult(toolName);
-      }
       // Honor the optional tool allowlist (HOMEGRAPH_MCP_TOOLS): a trimmed
       // surface rejects ablated tools defensively even if a client cached them.
       if (!this.isToolAllowed(toolName)) {
@@ -2692,7 +2687,6 @@ export class ToolHandler {
       const callers: Node[] = [];
       const labels = new Map<string, string>();
       for (const node of defNodes) {
-        if (isOverRssBudget()) break;
         for (const c of cg.getCallers(node.id)) {
           if (!seen.has(c.node.id)) {
             seen.add(c.node.id);

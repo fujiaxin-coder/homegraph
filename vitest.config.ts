@@ -30,14 +30,6 @@ export default defineConfig({
      */
     env: {
       HOMEGRAPH_ALLOW_UNSAFE_NODE: '1',
-      /**
-       * Vitest loads the full HomeGraph + tree-sitter grammar set into one
-       * long-lived process. The production MCP RSS ceiling (1024MB) is for
-       * daemons serving a single project — trip it mid-suite and every later
-       * tool call returns a success-shaped Partial, masking real assertions.
-       * Raise the ceiling for the test process only.
-       */
-      HOMEGRAPH_MAX_RSS_MB: '4096',
     },
     coverage: {
       provider: 'v8',
