@@ -16,7 +16,7 @@ import { findNearestHomeGraphRoot } from '../directory';
 import { watchDisabledReason } from '../sync';
 import { ToolHandler } from './tools';
 import { QueryPool, resolvePoolSize } from './query-pool';
-import { isOverRssBudget, shouldSkipCatchUpSync } from './memory-budget';
+import { shouldSkipCatchUpSync } from './memory-budget';
 import { getDatabasePath } from '../db';
 import { resolveGraphSources, graphSourceFlags } from '../graph-sources';
 
@@ -315,20 +315,13 @@ export class MCPEngine {
     }
     if (shouldSkipCatchUpSync(dbPath)) {
       process.stderr.write(
-        '[HomeGraph MCP] Skipping catch-up sync (large index / memory budget / HOMEGRAPH_SKIP_CATCHUP_SYNC). ' +
+        '[HomeGraph MCP] Skipping catch-up sync (large index / HOMEGRAPH_SKIP_CATCHUP_SYNC). ' +
           'Run `homegraph sync` if the graph may be stale.\n',
       );
       return;
     }
     const p = cg
-      .sync({
-        onProgress: () => {
-          // Mid-flight abort — re-parse on a large dirty tree is the multi-GB path.
-          if (isOverRssBudget()) {
-            throw new Error('HOMEGRAPH_RSS_BUDGET');
-          }
-        },
-      })
+      .sync()
       .then((result) => {
         const changed = result.filesAdded + result.filesModified + result.filesRemoved;
         if (changed > 0) {
@@ -337,13 +330,6 @@ export class MCPEngine {
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('HOMEGRAPH_RSS_BUDGET')) {
-          process.stderr.write(
-            '[HomeGraph MCP] Catch-up sync aborted — process memory budget reached. ' +
-              'Serving the open index; run `homegraph sync` separately if needed.\n',
-          );
-          return;
-        }
         process.stderr.write(`[HomeGraph MCP] Catch-up sync failed: ${msg}\n`);
       });
     this.toolHandler.setCatchUpGate(p);

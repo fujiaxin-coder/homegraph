@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- MCP no longer refuses tools or aborts catch-up based on process RSS (`HOMEGRAPH_MAX_RSS_MB`). That soft ceiling compared Windows Working Set to macOS resident size and falsely Partial'd queries on large indexes; growth controls remain SQLite `mmap_size=0`, small page cache, and default query-pool size 1. Large on-disk indexes and `HOMEGRAPH_SKIP_CATCHUP_SYNC` still skip catch-up.
 - `homegraph_arkui_migrate` treats bare `@Provide` / `@Consume` (and V2 Provider/Consumer) as keyed by the **variable name** when no `('key')` arg is present, so implicit ProvideConsume channels are no longer dropped from `keyChannels`.
 
 ## [1.5.4] - 2026-08-19
