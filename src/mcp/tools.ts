@@ -1405,6 +1405,92 @@ export function queryAsBareSymbolInventory(query: string): boolean {
  * Supports cross-project queries via the projectPath parameter.
  * Other projects are opened on-demand and cached for performance.
  */
+const ANSWER_NOW_TOKEN = /\bANSWER NOW\b/gi;
+
+/** Whether one ANSWER NOW occurrence is postponed/negated rather than a stop directive. */
+function isNegatedAnswerNowAt(text: string, index: number): boolean {
+  const prefix = text
+    .slice(Math.max(0, index - 96), index)
+    .replace(/[*_`]/g, '')
+    .replace(/\s+/g, ' ');
+  return /(?:\b(?:do|should|must|can)\s+not|\bcannot|\bnever|\bbefore|\buntil|\bnot)\s+(?:\S+\s+){0,3}$/i
+    .test(prefix);
+}
+
+/** True only for a positive instruction to stop and answer, not "do not/before ANSWER NOW". */
+export function hasPositiveAnswerNowDirective(text: string): boolean {
+  const answerNow = new RegExp(ANSWER_NOW_TOKEN.source, ANSWER_NOW_TOKEN.flags);
+  for (let match = answerNow.exec(text); match; match = answerNow.exec(text)) {
+    if (!isNegatedAnswerNowAt(text, match.index)) return true;
+  }
+  return false;
+}
+
+function stripPositiveAnswerNowFromLine(line: string): { text: string; changed: boolean } {
+  let changed = false;
+  let out = line.replace(
+    /\*\*[^*\n]*\bANSWER NOW\b[^*\n]*\*\*/gi,
+    (span: string, offset: number, source: string) => {
+      const tokenOffset = span.search(/\bANSWER NOW\b/i);
+      if (tokenOffset < 0 || isNegatedAnswerNowAt(source, offset + tokenOffset)) return span;
+      changed = true;
+      return '';
+    },
+  );
+  out = out.replace(ANSWER_NOW_TOKEN, (token: string, offset: number, source: string) => {
+    if (isNegatedAnswerNowAt(source, offset)) return token;
+    changed = true;
+    return '';
+  });
+  if (!changed) return { text: line, changed: false };
+
+  // A positive close often carries a matching search prohibition. Once the
+  // whole response is Partial, that prohibition is contradictory too.
+  out = out
+    .replace(
+      /\s*(?:[,;—-]\s*)?(?:and\s+)?do\s+\*{0,2}not\*{0,2}\s+(?:(?:re-)?(?:Read|Grep|Glob)|`?homegraph_(?:search|explore|node|callers|callees)`?)[^.;\n]*/gi,
+      '',
+    )
+    .replace(/\s*(?:[,;—-]\s*)?no\s+(?:glob|grep|read|search|explore)(?:\s*\/\s*(?:glob|grep|read|search|explore))*\s+needed\b[^.;\n]*/gi, '')
+    .replace(/\(\s*[,;—-]*\s*\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.;,])/g, '$1')
+    .replace(/^(>\s*)[\s.;,—-]+/, '$1')
+    .trimEnd();
+  return { text: out, changed: true };
+}
+
+/**
+ * Drop stop-searching directives from an output that also declares itself partial.
+ *
+ * Section builders each append their own footer and cannot see their siblings, so
+ * one output can carry both `**Partial locator**` ("these are anchors, keep
+ * looking") and `**ANSWER NOW**` ("stop, do not Grep"). Measured on a 54-question
+ * run: 21 such outputs across 17 of 48 questions. Whichever the agent obeys, the
+ * other was wrong — it either answers from an inventory the tool just called
+ * incomplete, or it keeps searching against an explicit prohibition.
+ *
+ * Partial wins: an under-informed agent that keeps looking recovers, while one
+ * that stops on a partial answer cannot. Negated mentions (`do **not** ANSWER
+ * NOW`) are the correct pairing and are preserved.
+ */
+export function reconcilePartialAnswerNow(text: string): string {
+  if (!/\*\*Partial locator\*\*/i.test(text)) return text;
+  let changed = false;
+  const out = text
+    .split('\n')
+    .map((line) => {
+      if (!/ANSWER NOW/i.test(line)) return line;
+      const stripped = stripPositiveAnswerNowFromLine(line);
+      if (stripped.changed) changed = true;
+      return stripped.text;
+    })
+    .filter((line) => line.trim() !== '>')
+    .join('\n');
+  if (!changed) return text;
+  return `${out}\n\n> This survey is a **Partial locator**: the sections above are anchors, not a closed answer. Continue with the narrower lookup named above, or a text search, before answering.`;
+}
+
 export class ToolHandler {
   // Cache of opened HomeGraph instances for cross-project queries
   private projectCache: Map<string, HomeGraph> = new Map();
@@ -11952,7 +12038,9 @@ export class ToolHandler {
 
   private textResult(text: string): ToolResult {
     return {
-      content: [{ type: 'text', text }],
+      // Single choke point for every tool's text, so no section builder can ship
+      // a stop-searching directive on an output that declares itself partial.
+      content: [{ type: 'text', text: reconcilePartialAnswerNow(text) }],
     };
   }
 
