@@ -642,6 +642,11 @@ describe('mechanism domain anchors', () => {
     expect(extractDependencySymbolsFromQuery('xml parse 解析 XML parsing')).toContain('xml');
     expect(extractDependencySymbolsFromQuery('xml parse 解析 XML parsing')).not.toContain('parse');
     expect(extractDependencySymbolsFromQuery('xml parse 解析 XML parsing')).not.toContain('parsing');
+    // Agent EN rewrite often uses the noun `parser` — treat like parse noise.
+    expect(extractDependencySymbolsFromQuery('XML parsing 解析 xml parser')).toContain('xml');
+    expect(extractDependencySymbolsFromQuery('XML parsing 解析 xml parser')).not.toContain('parser');
+    expect(mechanismDomainPathTokens('XML parsing 解析 xml parser')).toContain('xml');
+    expect(mechanismDomainPathTokens('XML parsing 解析 xml parser')).not.toContain('parser');
     // Named Type takes compact / inventory — not the domain bag.
     expect(queryAsDomainMechanismBag('ThemeHome UI components')).toBe(false);
     // Multi-term locator bags (`item service`) are corroboration/full explore —
@@ -980,6 +985,8 @@ describe('P0 explore shapes', () => {
     expect(queryHasNamedMemberFocus(grid)).toBe(false);
     expect(shouldTryFastInventoryExplore(grid)).toBe(true);
     expect(shouldTryLightMechanismExplore(grid)).toBe(false);
+    // Agent rewrite of external-callers asks must still hit caller inventory.
+    expect(queryAsCallerOrMethodSurvey('Configuration class definition methods')).toBe(true);
   });
 
   it('upstream/downstream local-detail uses compact', () => {
@@ -1045,6 +1052,17 @@ describe('P0 explore shapes', () => {
         'commonconstants 被多层引用，是否存在循环依赖？构建系统如何检测？',
       ),
     ).toBe(true);
+    // Module/cycle survey must not defer as concept-or-existence.
+    expect(
+      queryShouldDeferToBuiltinTools(
+        'fooconstants 谁依赖它，是否存在循环依赖，对系统有何影响？',
+      ),
+    ).toBeNull();
+    expect(
+      queryShouldDeferToBuiltinTools(
+        'commonconstants 被多层引用，是否存在循环依赖？构建系统如何检测？',
+      ),
+    ).toBeNull();
     expect(
       queryAsConstantUsageSurvey(
         'audio.AudioVolumeType.RINGTONE 在项目中哪些函数或方法中被依赖或调用？',
