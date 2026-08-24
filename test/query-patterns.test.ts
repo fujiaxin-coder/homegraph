@@ -69,6 +69,8 @@ import {
   queryAsModuleExportSurvey,
   queryAsModuleDependencySurvey,
   queryAsTypeLifecycleSurvey,
+  queryAsContainerCompositionSurvey,
+  queryAsMemberUiConsequenceSurvey,
   extractFieldLikeSymbolsFromQuery,
   queryAsInRepoSystemCapabilityHowto,
   queryAsReturnValueConsumerSurvey,
@@ -77,6 +79,7 @@ import {
   queryAsDtsWrapSurvey,
   queryAsAssignedFlagImpactSurvey,
   queryAsNamedControlStateSyncSurvey,
+  queryAsksKitInstallDeps,
 } from '../src/search/query-utils';
 
 describe('extractFileBasenamesFromQuery', () => {
@@ -560,6 +563,17 @@ describe('queryShouldDeferToBuiltinTools', () => {
     ).toBe(true);
   });
 
+  it('routes container composition + member UI consequence shapes', () => {
+    const containerQ =
+      '哪些页面共享 CommonScbScreen 作为容器，各自如何向 SCBGeneralScreenViewModel 注入差异化配置？';
+    expect(queryAsContainerCompositionSurvey(containerQ)).toBe(true);
+    expect(shouldTryFastInventoryExplore(containerQ)).toBe(true);
+    const uiQ = 'LauncherCardInfo.isExpired 返回 true 时，小艺建议卡片在 UI 上如何标记？';
+    expect(queryAsMemberUiConsequenceSurvey(uiQ)).toBe(true);
+    expect(queryAsLocalSymbolDetail(uiQ)).toBe(true);
+    expect(shouldTryFastInventoryExplore(uiQ)).toBe(false);
+  });
+
   it('defers literal copy hunts without code anchors', () => {
     expect(
       queryShouldDeferToBuiltinTools('全搜一下哪些布局里绑了中文 text 常量，点击会打开编辑页是什么逻辑'),
@@ -964,8 +978,16 @@ describe('P0 explore shapes', () => {
     const kit =
       '调用 ServiceCollaborationKit 需要额外安装哪些依赖？项目里怎么引用的？';
     expect(shouldBuildKitModuleUsageSurvey(kit)).toBe(true);
+    expect(queryAsksKitInstallDeps(kit)).toBe(true);
     expect(shouldTryLightMechanismExplore(kit)).toBe(false);
     expect(shouldTryFastInventoryExplore(kit)).toBe(true);
+
+    // Agent EN rewrite of 「其他参数和依赖」must still force kit+oh-package survey,
+    // not a bare import-site dependency list.
+    const kitEn = 'ServiceCollaborationKit import usage parameters dependencies';
+    expect(queryAsksKitInstallDeps(kitEn)).toBe(true);
+    expect(shouldBuildKitModuleUsageSurvey(kitEn)).toBe(true);
+    expect(shouldTryFastInventoryExplore(kitEn)).toBe(true);
 
     const place = 'CanPlace、Place 是怎么和 BinaryGrid 交互的？';
     expect(queryHasNamedMemberFocus(place)).toBe(true);

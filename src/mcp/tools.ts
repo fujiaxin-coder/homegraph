@@ -38,7 +38,7 @@ import {
   graphSourceFlags,
   graphSourcesDisabledGuidance,
 } from '../graph-sources';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, queryAsContainerCompositionSurvey, queryAsMemberUiConsequenceSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
 
 import {
   existsSync,
@@ -4740,6 +4740,10 @@ export class ToolHandler {
     const enumMembers: Array<{ name: string; file: string; line: number }> = [];
     const seenMember = new Set<string>();
 
+    /** Exported `*Event` classes from a named Event module file (not enum members). */
+    const eventClasses: Array<{ name: string; file: string; line: number }> = [];
+    const seenEventClass = new Set<string>();
+
     const considerEventFile = (fp: string, preferredName: string) => {
       eventFiles.add(fp);
       if (/Event$/i.test(preferredName)) eventNames.add(preferredName);
@@ -4752,12 +4756,23 @@ export class ToolHandler {
             seenMember.add(key);
             enumMembers.push({ name: sib.name, file: rel(sib.filePath), line: sib.startLine || 1 });
           }
-          // Only add sibling Types that are themselves *Event (avoid file-wide enum spam).
+          // Barrel / module files often export many `*Event` classes (not enums).
           if (
             (sib.kind === 'enum' || sib.kind === 'class' || sib.kind === 'type_alias' || sib.kind === 'interface')
             && /Event$/i.test(sib.name)
           ) {
             eventNames.add(sib.name);
+            if (sib.kind === 'class' || sib.kind === 'enum' || sib.kind === 'type_alias') {
+              const ck = `${sib.name}:${rel(sib.filePath)}`;
+              if (!seenEventClass.has(ck)) {
+                seenEventClass.add(ck);
+                eventClasses.push({
+                  name: sib.name,
+                  file: rel(sib.filePath),
+                  line: sib.startLine || 1,
+                });
+              }
+            }
           }
         }
       } catch { /* */ }
@@ -4829,14 +4844,39 @@ export class ToolHandler {
       lines.push('');
     }
 
+    // Named `*Event` module files often export many Event classes (not enums).
+    // Listing them is the answer to "有哪些事件类型" — don't force Grep for members.
+    if (eventClasses.length > 0) {
+      lines.push('### Event type classes (exported from Event module)');
+      const rankedClasses = [...eventClasses].sort((a, b) => a.name.localeCompare(b.name));
+      for (const c of rankedClasses.slice(0, 40)) {
+        lines.push(`- \`${c.name}\` — \`${c.file}:${c.line}\``);
+      }
+      if (rankedClasses.length > 40) {
+        lines.push(`- … and ${rankedClasses.length - 40} more Event class(es)`);
+      }
+      lines.push('');
+    }
+
     lines.push('### Event Type anchors');
-    const sortedEvents = [...eventNames].sort((a, b) => a.localeCompare(b));
+    // Prefer concrete Event classes over the barrel file stem when both exist.
+    const anchorEvents = (
+      eventClasses.length > 0
+        ? eventClasses.map((c) => c.name)
+        : [...eventNames]
+    ).filter((n, i, arr) => arr.indexOf(n) === i)
+      .sort((a, b) => a.localeCompare(b));
+    const sortedEvents = anchorEvents;
     for (const ev of sortedEvents.slice(0, 12)) {
       let loc = '';
       try {
         const n = cg.getNodesByName(ev).find((x) => !isTestFile(x.filePath));
         if (n) loc = ` — \`${rel(n.filePath)}:${n.startLine}\``;
       } catch { /* */ }
+      if (!loc) {
+        const fromClass = eventClasses.find((c) => c.name === ev);
+        if (fromClass) loc = ` — \`${fromClass.file}:${fromClass.line}\``;
+      }
       if (!loc) {
         for (const fp of eventFiles) {
           const base = rel(fp).split('/').pop() || '';
@@ -4853,7 +4893,7 @@ export class ToolHandler {
 
     // Search handlers by primary Event names (+ a few members), not every noisy sibling.
     const searchKeys = [
-      ...sortedEvents.slice(0, 6),
+      ...sortedEvents.slice(0, 12),
       ...enumMembers.slice(0, 12).map((m) => m.name),
     ];
     type Hit = { file: string; line: number; snippet: string; score: number; events: Set<string> };
@@ -4902,12 +4942,15 @@ export class ToolHandler {
     const ranked = [...hits.values()].sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
     lines.push('### Manager / handler files referencing these events');
     const memberCount = enumMembers.length;
-    // Complete only when we have enum members (the usual "有哪些类型") + ≥1 handler,
-    // or a small tight Type set with strong handlers — never a huge Type dump alone.
+    const eventClassCount = eventClasses.length;
+    // Complete when: enum members + handlers, OR a tight Event Type set, OR a
+    // named Event-module barrel that exported ≥3 Event classes + ≥1 handler
+    // (class-list IS the "有哪些事件类型" answer — do not Grep-storm for enums).
     const complete =
       ranked.length > 0
       && (
         (memberCount > 0 && memberCount <= 48)
+        || (eventClassCount >= 3 && eventClassCount <= 64)
         || (sortedEvents.length > 0 && sortedEvents.length <= 4 && ranked.length >= 1 && ranked[0]!.score >= 5)
       );
 
@@ -4931,8 +4974,11 @@ export class ToolHandler {
       lines.push('');
       if (complete) {
         lines.push(
-          '> Event→Manager inventory — **ANSWER NOW** from enum members + handler files above; '
-            + 'ONE narrow Grep only if a specific `case` branch is still missing.',
+          eventClassCount > 0
+            ? '> Event→Manager inventory — **ANSWER NOW** from Event type classes + handler files above; '
+              + 'ONE narrow Grep only if a specific Manager→event branch is still missing.'
+            : '> Event→Manager inventory — **ANSWER NOW** from enum members + handler files above; '
+              + 'ONE narrow Grep only if a specific `case` branch is still missing.',
         );
       } else {
         lines.push(
@@ -4944,10 +4990,10 @@ export class ToolHandler {
     lines.push('');
     return {
       section: lines.join('\n'),
-      hitCount: ranked.length + memberCount,
-      eventCount: Math.max(sortedEvents.length, memberCount > 0 ? 1 : 0),
+      hitCount: ranked.length + memberCount + eventClassCount,
+      eventCount: Math.max(sortedEvents.length, eventClassCount, memberCount > 0 ? 1 : 0),
       handlerCount: ranked.length,
-      memberCount,
+      memberCount: memberCount + eventClassCount,
       complete,
     };
   }
@@ -5046,22 +5092,64 @@ export class ToolHandler {
     lines.push('### Cross links (imports / callers)');
     if (edges.length === 0) {
       lines.push('- No import/caller edges indexed between these Types yet.');
+    } else {
+      const uniq = [...new Set(edges)].slice(0, 40);
+      lines.push(...uniq);
+    }
+    lines.push('');
+
+    // Text-scan `extends Base` when graph edges are missing — shared bases are
+    // the usual answer to "这几个 Installer/Parser 的依赖关系".
+    const extendsHits: string[] = [];
+    const baseNames = new Set<string>();
+    let projectRoot = '';
+    try { projectRoot = cg.getProjectRoot(); } catch { /* */ }
+    for (const a of locs) {
+      let content = '';
+      try {
+        const full = pathIsAbsolute(a.file) ? a.file : (projectRoot ? pathJoin(projectRoot, a.file) : '');
+        if (full && existsSync(full)) content = readFileSync(full, 'utf-8');
+      } catch { /* */ }
+      if (!content) continue;
+      const m = content.match(
+        new RegExp(
+          `(?:export\\s+)?(?:abstract\\s+)?class\\s+${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+extends\\s+([A-Za-z_][A-Za-z0-9_]*)`,
+        ),
+      );
+      if (!m?.[1]) continue;
+      const base = m[1]!;
+      baseNames.add(base);
+      extendsHits.push(`- \`${a.name}\` extends \`${base}\``);
+    }
+    if (extendsHits.length > 0) {
+      lines.push('### Inheritance (source `extends`)');
+      lines.push(...[...new Set(extendsHits)].slice(0, 20));
+      if (baseNames.size > 0) {
+        lines.push('');
+        lines.push(
+          `Shared / parent Type(s): ${[...baseNames].slice(0, 8).map((b) => `\`${b}\``).join(', ')}.`,
+        );
+      }
       lines.push('');
+    }
+
+    const hasGraph = edges.length > 0;
+    const hasExtends = extendsHits.length > 0;
+    if (!hasGraph && !hasExtends) {
       lines.push(
         '> **Partial locator** — Type files above are anchors. '
           + '`homegraph_node` / `homegraph_callees` one Type at a time; do **not** ANSWER NOW as a full graph.',
       );
     } else {
-      const uniq = [...new Set(edges)].slice(0, 40);
-      lines.push(...uniq);
-      lines.push('');
       lines.push(
-        '> Multi-Type dependency inventory — **ANSWER NOW** from locations + edges above; '
-          + 'only `homegraph_node` one Type if a body detail is still missing.',
+        '> Multi-Type dependency inventory — **ANSWER NOW** from locations'
+          + (hasExtends ? ' + `extends` bases' : '')
+          + (hasGraph ? ' + import/caller edges' : '')
+          + ' above; only `homegraph_node` one Type if a body detail is still missing.',
       );
     }
     lines.push('');
-    return { section: lines.join('\n'), hitCount: locs.length + edges.length };
+    return { section: lines.join('\n'), hitCount: locs.length + edges.length + extendsHits.length };
   }
 
   /**
@@ -5491,6 +5579,11 @@ export class ToolHandler {
       : { section: '', hitCount: 0 };
     if (hoverResult.section) lines.push(hoverResult.section);
 
+    const containerResult = queryAsContainerCompositionSurvey(query)
+      ? this.buildContainerCompositionSection(cg, query, projectRoot)
+      : { section: '', hitCount: 0, complete: false };
+    if (containerResult.section) lines.push(containerResult.section);
+
     const importInventoryFilter = hasImportInventoryFilter(query);
     const multiAnchor = queryNamesMultipleExploreAnchors(query);
     // Type / caller surveys: skip expensive named-symbol flow synthesize —
@@ -5544,7 +5637,7 @@ export class ToolHandler {
       || callerSection || memberSection || configSection
       || systemCapResult.section || declarationResult.section || moduleDepResult.section
       || moduleExportResult.section || dtsWrapResult.section || controlSyncResult.section
-      || eventDispatchResult.section;
+      || eventDispatchResult.section || containerResult.section;
     if (!hasAnySection) return null;
 
     // Data-source / API usage inventories are complete without source dumps —
@@ -5647,6 +5740,13 @@ export class ToolHandler {
             + 'ONE narrow Grep for members/`case`, or one tighter explore — do **not** ANSWER NOW as a full map; no node fan-out.'
           : 'Event→Manager survey — 0 event types / handlers indexed. **Partial locator** — do **not** ANSWER NOW; '
             + 'ONE Grep for enum members / `case` branches OK.',
+      );
+    }
+    if (containerResult.section && queryAsContainerCompositionSurvey(query)) {
+      return finishCompact(
+        containerResult.complete
+          ? `Container composition survey — **${containerResult.hitCount}** page/site(s). **ANSWER NOW** from injection snippets above; do not Grep \`LocalStorageLink\` again.`
+          : `Container composition survey — **${containerResult.hitCount}** site(s). **Partial locator** — Read the top page file for full build() wiring.`,
       );
     }
     if (apiUsageResult.fileCount > 0 && !dataSourceResult.section) {
@@ -6151,9 +6251,22 @@ export class ToolHandler {
     const importEvidenceClose = distinctiveEarly.length > 0
       && importResult.siteCount >= 3
       && filesRendered >= 1;
-    const softClose = (hasStrongManager && filesRendered >= 1
+    const xmlStem = distinctiveEarly.some((t) => t.toLowerCase() === 'xml');
+    const bodyText = lines.join('\n');
+    const xmlMechanismClose = xmlStem
+      && filesRendered >= 1
+      && /convertxml|ConvertXML|fastConvertToJSObject/i.test(bodyText);
+    // Don't soft-close onto an antithetical Primary (Delete* while ask is install/parse).
+    const nextContradictsPipeline = !!(
+      nextMgr
+      && /(?:解析|安装|激活|下载|parse|install|activate|download)/i.test(query)
+      && (/^(?:Delete|Remove|Uninstall|Clear|Cancel)/i.test(nextMgr.name)
+        || /Delete|Uninstall|RemoveOnline|CancelRestore/i.test(nextMgr.name))
+    );
+    const softClose = !nextContradictsPipeline && ((hasStrongManager && filesRendered >= 1
       && (digestCoversNext || managerHits.length >= 2 || topIsStrong))
-      || importEvidenceClose;
+      || importEvidenceClose
+      || xmlMechanismClose);
     const closedAnswer = softClose || mechanismClosed || (hasFlowPath && topIsStrong);
 
     lines.push('---');
@@ -6472,6 +6585,7 @@ export class ToolHandler {
     const typeNameSet = new Set(typeNames.map((t) => t.toLowerCase()));
     const bridge = queryNeedsCoNamedUseBridge(query);
     const memberFocus = queryHasNamedMemberFocus(query);
+    const uiConsequence = queryAsMemberUiConsequenceSurvey(query);
     const uiCluster = queryAsFocusedUiCluster(query);
     const typeLifecycle = queryAsTypeLifecycleSurvey(query);
     const componentSurface = queryAsComponentSurfaceSurvey(query)
@@ -6728,30 +6842,43 @@ export class ToolHandler {
       && !queryHasNamedMemberFocus(query)
       && !queryAsNamedComponentAction(query);
 
+    let lifecycleStubComplete = false;
+    let lifecycleStubSection = '';
+    if (typeLifecycle && stubHeavy) {
+      const stubPaths = [...fileNodes.keys()].filter(isStubPath);
+      const lifecycleResult = this.buildSdkStubLifecycleSection(projectRoot, stubPaths, query);
+      lifecycleStubSection = lifecycleResult.section;
+      lifecycleStubComplete = lifecycleResult.complete;
+    }
+
     const lines: string[] = [
       `**Exploration: ${query}**`,
       '',
-      stubHeavy
-        ? '> **Partial locator** — indexed hits are SDK / `.d.ts` stubs, not in-repo implementations. '
-          + 'Prefer `homegraph_search` / ONE explore for `*State*` / impl class names; '
-          + 'ONE narrow Grep for in-repo impl names is OK — do not ANSWER NOW from the stub alone.'
-        : resourceProvenanceAsk
-          ? '> **Coarse locate — check Source digests for `$r` / Image / download.** '
-            + 'Treat visible bodies as already Read. ONE narrow Grep for `$r`/`http` only if digests lack load origin — '
-            + 'do **not** re-explore or fan out Read on the same Page/Dialog.'
-          : multiTypeThin
-            ? '> **Partial locator** — multi-Type bag below is a coarse anchor set. '
-              + 'Pick ONE Type/`Type.member` for a tighter explore, or ONE narrow Grep for unindexed wiring — do **not** ANSWER NOW as a full cross-Type mechanism.'
-            : '> **Coarse locate complete.** Treat Source + trail as already Read for these symbols. '
-              + 'Answer from them; do **not** re-Grep/Read/node the same symbols. '
-              + 'ONE narrow Grep is OK only for residual literals / unindexed wiring — not a repo-wide storm.',
+      lifecycleStubComplete
+        ? '> **Coarse locate complete — SDK lifecycle inventory below.** **ANSWER NOW** from state enum + callbacks; '
+          + 'do not Grep in-repo or re-explore the same stub names.'
+        : stubHeavy
+          ? '> **Partial locator** — indexed hits are SDK / `.d.ts` stubs, not in-repo implementations. '
+            + 'Prefer `homegraph_search` / ONE explore for `*State*` / impl class names; '
+            + 'ONE narrow Grep for in-repo impl names is OK — do not ANSWER NOW from the stub alone.'
+          : resourceProvenanceAsk
+            ? '> **Coarse locate — check Source digests for `$r` / Image / download.** '
+              + 'Treat visible bodies as already Read. ONE narrow Grep for `$r`/`http` only if digests lack load origin — '
+              + 'do **not** re-explore or fan out Read on the same Page/Dialog.'
+            : multiTypeThin
+              ? '> **Partial locator** — multi-Type bag below is a coarse anchor set. '
+                + 'Pick ONE Type/`Type.member` for a tighter explore, or ONE narrow Grep for unindexed wiring — do **not** ANSWER NOW as a full cross-Type mechanism.'
+              : '> **Coarse locate complete.** Treat Source + trail as already Read for these symbols. '
+                + 'Answer from them; do **not** re-Grep/Read/node the same symbols. '
+                + 'ONE narrow Grep is OK only for residual literals / unindexed wiring — not a repo-wide storm.',
       '',
       `Local-symbol focus: **${seedIds.size}** seed(s)` +
         (neighborIds.size > 0 ? `, **${neighborIds.size}** caller/callee neighbor(s)` : '') +
         ' — compact explore (definition + edge trail, no related-file dump).',
       '',
     ];
-    if (stubHeavy && implAsk) {
+    if (lifecycleStubSection) lines.push(lifecycleStubSection);
+    if (stubHeavy && implAsk && !lifecycleStubComplete) {
       lines.push(
         '> Stub-only compact — state/callback answers usually live in project `.ets` / `.ts` under the feature, not `@ohos.*.d.ts`.',
         '',
@@ -6991,7 +7118,10 @@ export class ToolHandler {
         lines.push('');
         lines.push(
           memberFocus
-            ? '> These lines are the in-repo **call/filter sites** for the named member. **ANSWER NOW** from them + Source — do not Grep/`homegraph_callers` the same member.'
+            ? uiConsequence
+              ? '> UI-consequence ask: call/filter sites above show **how true/expired values affect UI** '
+                + '(often exclusion from render stacks). **ANSWER NOW** from them + Source — do not Read/Grep the same member.'
+              : '> These lines are the in-repo **call/filter sites** for the named member. **ANSWER NOW** from them + Source — do not Grep/`homegraph_callers` the same member.'
             : '> These lines are the in-repo use sites. Answer from them + Source; do not grep the same names again.',
         );
         lines.push('');
@@ -7099,7 +7229,7 @@ export class ToolHandler {
     const digest = exploreLocatorDigestEnabled();
     lines.push(digest ? '**Source digests**' : '**Source Code**', '');
     lines.push(
-      stubHeavy
+      stubHeavy && !lifecycleStubComplete
         ? '> Stub digests only — treat as Partial locator. Do **not** ANSWER NOW from `.d.ts` alone; search in-repo impl next.'
         : digest
           ? '> Short digests — treat as already Read for these symbols. Answer from anchors + digests; '
@@ -7296,6 +7426,177 @@ export class ToolHandler {
     );
     lines.push('');
     return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * When a lifecycle Type only exists as SDK `.d.ts`, extract state enums +
+   * callback registrations from the stub so agents stop grep-storming in-repo.
+   */
+  private buildSdkStubLifecycleSection(
+    projectRoot: string,
+    stubFilePaths: string[],
+    _query: string,
+  ): { section: string; complete: boolean } {
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const enums: string[] = [];
+    const callbacks: string[] = [];
+
+    for (const fp of stubFilePaths.slice(0, 4)) {
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      if (!abs || !existsSync(abs)) continue;
+      let content = '';
+      try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+      const fileLines = content.split('\n');
+
+      for (let i = 0; i < fileLines.length; i++) {
+        const line = fileLines[i] ?? '';
+        if (/^\s*enum\s+\w*State\w*\s*\{/.test(line)) {
+          const members: string[] = [];
+          for (let j = i + 1; j < Math.min(fileLines.length, i + 48); j++) {
+            const l = fileLines[j] ?? '';
+            if (/^\s*\}/.test(l)) break;
+            const m = l.match(/^\s*(\w+)\s*[,=]/);
+            if (m?.[1]) members.push(m[1]);
+          }
+          if (members.length > 0) {
+            enums.push(`\`${line.trim().slice(0, 72)}\` → ${members.slice(0, 14).join(', ')}`);
+          }
+        }
+        if (
+          /on\s*\(\s*type\s*:\s*['"][\w]+['"]/.test(line)
+          || /Register the callback|Register.*Callback|move scene session|foreground|background|sessionStateChange/i.test(
+            line,
+          )
+        ) {
+          callbacks.push(`- \`${rel(fp)}:${i + 1}\`  \`${line.trim().slice(0, 110)}\``);
+        }
+      }
+    }
+
+    if (enums.length === 0 && callbacks.length < 3) {
+      return { section: '', complete: false };
+    }
+
+    const lines = [
+      '**SDK lifecycle surface (indexed stub)**',
+      '',
+      '> Lifecycle Type is stub-only — state enum + callbacks below are authoritative. **ANSWER NOW**; '
+        + 'do not Grep in-repo for the same SDK API names.',
+      '',
+    ];
+    if (enums.length > 0) {
+      lines.push('**State enum(s)**', '');
+      for (const e of enums.slice(0, 4)) lines.push(`- ${e}`);
+      lines.push('');
+    }
+    if (callbacks.length > 0) {
+      lines.push('**Callbacks / transitions**', '');
+      lines.push(...callbacks.slice(0, 22));
+      if (callbacks.length > 22) lines.push(`- … and ${callbacks.length - 22} more`);
+      lines.push('');
+    }
+    const complete = enums.length > 0 && callbacks.length >= 3;
+    return { section: lines.join('\n'), complete: complete || callbacks.length >= 6 };
+  }
+
+  /**
+   * Pages sharing a container component + how they inject differentiated
+   * ViewModel / LocalStorage state into the shared shell.
+   */
+  private buildContainerCompositionSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number; complete: boolean } {
+    const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+    const containerName =
+      types.find((t) => /(?:Screen|Page|View|Container)$/i.test(t))
+      ?? types.find((t) => /Screen/i.test(t))
+      ?? types[0];
+    const viewModelName = types.find((t) => /ViewModel$/i.test(t));
+    if (!containerName) return { section: '', hitCount: 0, complete: false };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const hits: Array<{ file: string; snippet: string; score: number }> = [];
+    const seen = new Set<string>();
+
+    const ingestFile = (fp: string, content: string, baseScore: number): void => {
+      if (seen.has(fp) || isTestFile(fp)) return;
+      if (!content.includes(containerName)) return;
+      const useRe = new RegExp(`${containerName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[({]`);
+      if (!useRe.test(content) && !content.includes(`import { ${containerName}`)) return;
+      const fileLines = content.split('\n');
+      const snippets: string[] = [];
+      for (let i = 0; i < fileLines.length; i++) {
+        const line = fileLines[i] ?? '';
+        if (
+          line.includes(containerName)
+          || /@LocalStorageLink|LocalStorageProp|screenSession/i.test(line)
+          || (viewModelName && line.includes(viewModelName))
+          || /new\s+\w+ViewModel/i.test(line)
+        ) {
+          snippets.push(`L${i + 1}: ${line.trim().slice(0, 100)}`);
+          if (snippets.length >= 4) break;
+        }
+      }
+      if (snippets.length === 0) return;
+      seen.add(fp);
+      let score = baseScore;
+      if (/@LocalStorageLink/i.test(content)) score += 30;
+      if (/CommonScbView|EntryView|DevView/i.test(fp)) score += 20;
+      if (viewModelName && content.includes(viewModelName)) score += 15;
+      hits.push({ file: fp, snippet: snippets.join(' / '), score });
+    };
+
+    let results: SearchResult[] = [];
+    try {
+      results = cg.searchNodes(containerName, { kinds: ['import', 'component', 'class', 'struct'], limit: 36 });
+    } catch { /* */ }
+    for (const r of results) {
+      if (isOhosApiFilePath(r.node.filePath)) continue;
+      const fp = rel(r.node.filePath);
+      if (!/\.(ets|tsx|jsx|vue|svelte)$/i.test(fp)) continue;
+      const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+      if (!abs) continue;
+      let content = '';
+      try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+      ingestFile(fp, content, 12);
+    }
+
+    if (hits.length < 4) {
+      try {
+        for (const f of cg.getFiles()) {
+          if (hits.length >= 14) break;
+          const fp = rel(f.path);
+          if (!/\.ets$/i.test(fp)) continue;
+          const abs = validatePathWithinRoot(projectRoot, f.path);
+          if (!abs) continue;
+          let content = '';
+          try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+          ingestFile(fp, content, 8);
+        }
+      } catch { /* optional */ }
+    }
+
+    hits.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+    if (hits.length === 0) return { section: '', hitCount: 0, complete: false };
+
+    const lines = [
+      '**Container composition / ViewModel injection survey**',
+      '',
+      `> Pages using \`${containerName}\`${viewModelName ? ` with \`${viewModelName}\`` : ''}. `
+        + '**ANSWER NOW** from injection snippets — do not fan out Read/callers per page.',
+      '',
+    ];
+    for (const h of hits.slice(0, 10)) {
+      lines.push(`- \`${h.file}\` — ${h.snippet.slice(0, 220)}`);
+    }
+    if (hits.length > 10) lines.push(`- … and ${hits.length - 10} more`);
+    lines.push('');
+    const complete =
+      hits.length >= 2
+      && hits.some((h) => /@LocalStorageLink|screenSession|ViewModel/i.test(h.snippet));
+    return { section: lines.join('\n'), hitCount: Math.min(hits.length, 10), complete };
   }
 
   /**
@@ -7536,8 +7837,8 @@ export class ToolHandler {
       }
     }
 
-    // "需要额外安装哪些依赖" — surface oh-package.json5 lines naming the kit.
-    if (/额外安装|还需.*依赖|需要.*依赖|install(?:ing)?\s+(?:extra\s+)?deps?|which\s+deps?/i.test(query)) {
+    // Install/deps asks (incl. agent EN "parameters dependencies") — oh-package lines.
+    if (queryAsksKitInstallDeps(query)) {
       const depLines: string[] = [];
       try {
         for (const f of cg.getFiles()) {
