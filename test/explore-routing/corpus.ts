@@ -85,12 +85,21 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     mustContain: [/convertxml/i, /Partial locator|ANSWER NOW/i, /Locator partial|Mechanism explore complete|Source Code/i],
   },
   {
+    id: 'mech-xml-parse-en-bag',
+    shape: 'agent EN rewrite bag (xml + parser noun) must stay on convertxml',
+    query: 'XML parsing 解析 xml parser',
+    expect: 'light',
+    maxChars: 8_000,
+    mustContain: [/convertxml/i, /XmlParseUtil|OneHandModeDialogConfig|ConvertXML|DataRestore|backup\//i, /Coarse locate|ANSWER NOW|Mechanism explore complete/i],
+    mustNotMatch: [/ParserControllerManager/i, /^\s*>\s*\*\*Partial locator\*\*/m],
+  },
+  {
     id: 'mech-notification',
     shape: 'domain how-implemented (notification)',
     query: '项目中是如何实现通知订阅管理的，涉及的多线程或多进程是怎样的？',
     expect: 'light',
     maxChars: 7_500,
-    mustContain: [/Partial locator|ANSWER NOW/i, /NotificationManager|NotificationSubscribe|Source Code|Locator partial/i],
+    mustContain: [/Partial locator|ANSWER NOW|Coarse locate/i, /NotificationManager|NotificationSubscribe|Source Code|Locator partial/i],
   },
   {
     id: 'mech-theme-install-steps',
@@ -155,6 +164,14 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     shape: 'leaf *common circular deps',
     query:
       'staticcommon/launchercommon、screenlockcommon、systemuicommon、controlcentercommon 这四个模块之间是否存在相互依赖？如果存在，是否形成了循环依赖？',
+    expect: 'inventory',
+    pins: { preferExplore: true },
+    maxChars: 4_000,
+  },
+  {
+    id: 'inv-module-cycles-leaf-constants',
+    shape: 'single *constants leaf + cycle ask (not concept-skip)',
+    query: 'fooconstants 谁依赖它，是否存在循环依赖，对系统有何影响？',
     expect: 'inventory',
     pins: { preferExplore: true },
     maxChars: 4_000,

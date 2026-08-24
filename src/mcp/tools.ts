@@ -5337,15 +5337,19 @@ export class ToolHandler {
         for (const id of seedIds) {
           const n = cg.getNode(id);
           if (!n) continue;
-          // Always keep domain Manager/Service hits — they are the locator answer.
-          if (isDomainRoleSymbol(n.name, n.filePath, domainPathTokens)) {
-            keep.add(id);
-            continue;
-          }
           const line = n.kind === 'import' ? resolveImportLineFromNode(n, projectRoot) : '';
           const blob = `${n.name}\n${n.filePath}\n${n.signature || ''}\n${line}`.toLowerCase();
-          if (distinctive.some((t) => blob.includes(t.toLowerCase()))) keep.add(id);
-          if (domainPathTokens.some((t) => blob.includes(t))) keep.add(id);
+          const hitsDistinctive = distinctive.some((t) => blob.includes(t.toLowerCase()));
+          const hitsPathTok = domainPathTokens.some((t) => blob.includes(t));
+          // Domain Manager/Service hits must still match the distinctive stem
+          // (e.g. `xml`) — otherwise agent EN bags (`xml parser`) keep every
+          // `*Parser*Manager` that only matched the verb noun.
+          if (isDomainRoleSymbol(n.name, n.filePath, domainPathTokens)) {
+            if (hitsDistinctive || hitsPathTok) keep.add(id);
+            continue;
+          }
+          if (hitsDistinctive) keep.add(id);
+          if (hitsPathTok) keep.add(id);
         }
         if (keep.size > 0) {
           for (const id of [...seedIds]) {
@@ -5406,13 +5410,16 @@ export class ToolHandler {
         : distinctiveDeps.length > 0
           ? distinctiveDeps
           : extractDomainSearchTerms(query)
-              .filter((t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()) && t.length >= 4)
+              .filter((t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()) && t.length >= 3)
     ).slice(0, 4).join(' ');
     const importResult = importQuery
       ? this.buildImportSitesSection(cg, importQuery, projectRoot)
       : { section: '', siteCount: 0, compactListing: false };
     if (importResult.section) {
-      const trimmed = this.trimLightImportSection(importResult.section, 5);
+      // Wider + path-diversified when a distinctive stem exists (e.g. xml→convertxml
+      // usages span backup/ + util/ — first-N-only hid judge keypoints).
+      const importBullets = distinctiveEarly.length > 0 ? 8 : 5;
+      const trimmed = this.trimLightImportSection(importResult.section, importBullets);
       if (trimmed) lines.push(trimmed);
     }
     if (flow.text) {
@@ -5449,7 +5456,7 @@ export class ToolHandler {
     }
 
     const distinctiveForScore = extractDomainSearchTerms(query).filter(
-      (t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()) && t.length >= 4,
+      (t) => /^[\x00-\x7F]+$/.test(t) && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase()) && t.length >= 3,
     );
     const apiSeeds = extractMechanismEntrySeeds(query)
       .map((s) => s.toLowerCase())
@@ -5565,10 +5572,16 @@ export class ToolHandler {
 
     // Soft-close when inventory + at least one digest exist — enough to answer
     // with ONE narrow Grep; avoid Partial→re-explore churn.
+    // Also close when distinctive-stem import evidence + digests exist but no
+    // *Manager* survived filtering (xml/convertxml how-implemented bags).
     const digestCoversNext = !!(nextMgr && sortedFiles.some(([fp]) => fp === nextMgr.filePath)
       && filesRendered > 0);
-    const softClose = hasStrongManager && filesRendered >= 1
-      && (digestCoversNext || managerHits.length >= 2 || topIsStrong);
+    const importEvidenceClose = distinctiveEarly.length > 0
+      && importResult.siteCount >= 3
+      && filesRendered >= 1;
+    const softClose = (hasStrongManager && filesRendered >= 1
+      && (digestCoversNext || managerHits.length >= 2 || topIsStrong))
+      || importEvidenceClose;
     const closedAnswer = softClose || mechanismClosed || (hasFlowPath && topIsStrong);
 
     lines.push('---');
@@ -5762,7 +5775,31 @@ export class ToolHandler {
         header.push(line);
       }
     }
-    const chosen = [...prod, ...test].slice(0, maxBullets);
+    // Round-robin across top path prefixes so one product/ folder cannot hide
+    // other convertxml / kit usage sites (backup vs util vs launchercommon).
+    const diversify = (items: string[], max: number): string[] => {
+      const buckets = new Map<string, string[]>();
+      for (const line of items) {
+        const pathMatch = line.match(/^- `([^`]+)`/);
+        const fp = (pathMatch?.[1]?.split(':')[0] ?? '').replace(/\\/g, '/');
+        const parts = fp.split('/').filter(Boolean);
+        const key = parts.length >= 3 ? `${parts[0]}/${parts[1]}/${parts[2]}` : (parts.length >= 2 ? `${parts[0]}/${parts[1]}` : (parts[0] || fp || '_'));
+        const list = buckets.get(key) ?? [];
+        list.push(line);
+        buckets.set(key, list);
+      }
+      const keys = [...buckets.keys()];
+      const out: string[] = [];
+      let i = 0;
+      while (out.length < max && keys.some((k) => (buckets.get(k)?.length ?? 0) > 0)) {
+        const k = keys[i % keys.length]!;
+        const list = buckets.get(k);
+        if (list && list.length > 0) out.push(list.shift()!);
+        i++;
+      }
+      return out;
+    };
+    const chosen = diversify([...prod, ...test], maxBullets);
     const out = [...header, ...chosen];
     if (prod.length + test.length > maxBullets) {
       out.push(
@@ -6127,8 +6164,9 @@ export class ToolHandler {
           + 'Prefer `homegraph_search` / ONE explore for `*State*` / impl class names; '
           + 'ONE narrow Grep for in-repo impl names is OK — do not ANSWER NOW from the stub alone.'
         : resourceProvenanceAsk
-          ? '> **Partial locator** — component shells below are anchors. '
-            + 'Confirm `$r` / Image / download call sites in the dialog body (or ONE narrow Grep for `$r` / `http`) before ANSWER NOW.'
+          ? '> **Coarse locate — check Source digests for `$r` / Image / download.** '
+            + 'Treat visible bodies as already Read. ONE narrow Grep for `$r`/`http` only if digests lack load origin — '
+            + 'do **not** re-explore or fan out Read on the same Page/Dialog.'
           : multiTypeThin
             ? '> **Partial locator** — multi-Type bag below is a coarse anchor set. '
               + 'Pick ONE Type/`Type.member` for a tighter explore, or ONE narrow Grep for unindexed wiring — do **not** ANSWER NOW as a full cross-Type mechanism.'
@@ -6235,7 +6273,17 @@ export class ToolHandler {
         );
         trail.push('');
         lines.push(...trail);
-      } else if (!stubHeavy && !resourceProvenanceAsk && !multiTypeThin) {
+      } else if (
+        !stubHeavy
+        && !resourceProvenanceAsk
+        && !multiTypeThin
+        // UI Page/Dialog surfaces + member text-usage already answer without a
+        // graph trail — flipping to Partial caused ThemeHome/isExpired fan-out
+        // (163355 flat-but-worse-cost / score drops).
+        && !componentSurface
+        && !uiCluster
+        && !memberFocus
+      ) {
         // No graph trail — coarse locate only; do not claim completeness.
         const softIdx = lines.findIndex((l) => l.includes('**Coarse locate complete.**'));
         if (softIdx >= 0) {
@@ -6654,6 +6702,20 @@ export class ToolHandler {
     }
 
     if (rendered === 0) return null;
+
+    // If provenance digests already show $r / download / PixelMap, kill any leftover
+    // Partial banner so the agent stops (163355 D17 Partial→Read fan-out).
+    if (resourceProvenanceAsk) {
+      const body = lines.join('\n');
+      if (/\$r\b|PixelMap|copyFile|http[s]?:|download|getPreview|previewPixelMap/i.test(body)) {
+        const softIdx = lines.findIndex((l) => l.includes('**Partial locator**'));
+        if (softIdx >= 0) {
+          lines[softIdx] =
+            '> **Coarse locate complete.** Source digests already show load origin (`$r` / download / PixelMap). '
+            + '**ANSWER NOW** — do not Read/Grep the same Page/Dialog again.';
+        }
+      }
+    }
 
     lines.push('---');
     lines.push(

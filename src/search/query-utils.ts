@@ -375,8 +375,12 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
   }
 
   // 7) Pure existence / concept-compare with zero graph anchors → Grep/docs.
+  // Module/cycle surveys already recognized by queryAsModuleDependencySurvey
+  // (e.g. `*constants` / `*common` leaf tokens + 循环依赖) must not fall through
+  // to concept-skip when extractTypeNames/path anchors are empty.
   if (
     !hasGraphAnchor
+    && !queryAsModuleDependencySurvey(q)
     && /有使用|是否使用|有没有使用|使用了.*吗|是否存在|有没有完整|有什么不同|区别|difference|vs\.?|versus|对比|does\s+(?:this\s+)?(?:project|repo)\s+have|is\s+there\s+(?:a\s+)?complete/i.test(
       q,
     )
@@ -721,7 +725,7 @@ export const STOP_WORDS = new Set([
  * they match every `parse`/`load` method and drown the distinctive token (xml).
  */
 export const GENERIC_VERB_ANCHOR_NOISE = new Set([
-  'parse', 'parsing', 'load', 'save', 'read', 'write', 'update', 'delete', 'create',
+  'parse', 'parsing', 'parser', 'parsers', 'load', 'save', 'read', 'write', 'update', 'delete', 'create',
   'init', 'handle', 'process', 'run', 'start', 'stop', 'open', 'close', 'convert',
   'get', 'set', 'add', 'remove', 'list', 'show', 'find',
   // Lifetime / allocator verbs — agents ask "where new/delete" and these must not
@@ -1168,13 +1172,23 @@ export function shouldBuildApiUsageSurvey(query: string): boolean {
 
 /** Caller / method survey intent — not every PascalCase token. */
 export function queryAsCallerOrMethodSurvey(query: string): boolean {
-  return (
+  if (
     /哪里调用|何处调用|谁调用|调用了|被调用|callers?\s+of|who\s+calls|called\s+by|哪些.*调用|外部.*调用|\bexternal\b/i.test(query)
     || /哪些方法|which\s+methods|methods?\s+(?:are\s+)?called|which\s+files?.{0,20}(?:call|invoke)/i.test(query)
     // Agents often write "Type … methods … callers" / bare "callers" without "of".
     || /\bcallers?\b/i.test(query)
     || /methods?.{0,40}\bcall/i.test(query)
-  );
+  ) {
+    return true;
+  }
+  // Agent EN rewrites of "Type 有哪些方法被外部调用" often become
+  // "Type class definition methods" and lose 调用 — still route to caller inventory
+  // when a named Type + plural methods bag is present. Singular "method" is too
+  // broad ("Session method helper" is a symbol bag, not a caller survey).
+  if (extractTypeNamesFromQuery(query).length > 0 && /\bmethods\b/i.test(query)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -1905,7 +1919,9 @@ export const IMPLEMENTATION_ENTRY_NAME_RE =
 export function mechanismDomainPathTokens(query: string): string[] {
   const out = new Set<string>();
   for (const t of extractDomainSearchTerms(query)) {
-    if (/^[\x00-\x7F]+$/.test(t) && t.length >= 4 && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase())) {
+    // ≥3 so short distinctive stems (`xml`) survive agent EN rewrites; verb
+    // noise (`parse`/`parser`) stays out via GENERIC_VERB_ANCHOR_NOISE.
+    if (/^[\x00-\x7F]+$/.test(t) && t.length >= 3 && !GENERIC_VERB_ANCHOR_NOISE.has(t.toLowerCase())) {
       out.add(t.toLowerCase());
     }
   }
