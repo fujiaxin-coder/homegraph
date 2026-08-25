@@ -2572,6 +2572,16 @@ export class ToolHandler {
     // getProjectRoot) must fall through to FTS search rather than error.
     try {
       const projectRoot = cg.getProjectRoot();
+      // Bare PascalCase type search — agents almost always fan out callers next;
+      // route to caller inventory instead of FTS → node×N.
+      if (queryIsTypeNameFocus(query)) {
+        const types = extractTypeNamesFromQuery(query);
+        if (types.length === 1) {
+          const callerQ = `${types[0]} 哪些方法被外部调用`;
+          const callerRedirect = this.tryFastInventoryExplore(cg, callerQ, projectRoot);
+          if (callerRedirect) return callerRedirect;
+        }
+      }
       if (queryShouldPreferExploreOverSearch(query)) {
         const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
           ?? this.tryLightMechanismExplore(cg, query, projectRoot)
@@ -4835,6 +4845,8 @@ export class ToolHandler {
       '',
     ];
 
+    const rankedClasses = [...eventClasses].sort((a, b) => a.name.localeCompare(b.name));
+
     if (enumMembers.length > 0) {
       lines.push('### Event enum members (indexed)');
       for (const m of enumMembers.slice(0, 40)) {
@@ -4848,7 +4860,6 @@ export class ToolHandler {
     // Listing them is the answer to "有哪些事件类型" — don't force Grep for members.
     if (eventClasses.length > 0) {
       lines.push('### Event type classes (exported from Event module)');
-      const rankedClasses = [...eventClasses].sort((a, b) => a.name.localeCompare(b.name));
       for (const c of rankedClasses.slice(0, 40)) {
         lines.push(`- \`${c.name}\` — \`${c.file}:${c.line}\``);
       }
@@ -4940,18 +4951,99 @@ export class ToolHandler {
     }
 
     const ranked = [...hits.values()].sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+
+    // Event consumer registrations — `.on(Event` / produceOn wiring (dispatch map).
+    type ConsumerHit = { file: string; line: number; snippet: string; event: string; score: number };
+    const consumerHits: ConsumerHit[] = [];
+    const consumerSeen = new Set<string>();
+    const eventNamesForConsumers = rankedClasses.length > 0
+      ? rankedClasses.map((c) => c.name)
+      : sortedEvents;
+    const addConsumer = (file: string, line: number, snippet: string, event: string, score: number) => {
+      const key = `${file}:${line}:${event}`;
+      if (consumerSeen.has(key)) return;
+      consumerSeen.add(key);
+      consumerHits.push({ file, line, snippet: snippet.slice(0, 120), event, score });
+    };
+    for (const ev of eventNamesForConsumers.slice(0, 24)) {
+      let results: SearchResult[] = [];
+      try { results = cg.searchNodes(ev, { limit: 36 }); } catch { continue; }
+      const esc = ev.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const onRe = new RegExp(
+        `(?:InnerEventUtil|evtBus|eventMgr|EventMgr|focusMode\\w*EventMgr)\\.on\\s*\\(\\s*${esc}|\\.on\\s*\\(\\s*${esc}`,
+      );
+      const seenFiles = new Set<string>();
+      for (const r of results) {
+        const fp = rel(r.node.filePath);
+        if (isTestFile(fp) || eventFiles.has(r.node.filePath)) continue;
+        if (seenFiles.has(fp)) continue;
+        seenFiles.add(fp);
+        const abs = pathIsAbsolute(r.node.filePath)
+          ? r.node.filePath
+          : pathJoin(projectRoot, r.node.filePath);
+        let content = '';
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          if (!onRe.test(line) && !line.includes(`produceOn(${ev}`) && !line.includes(`produceOn(${ev},`)) {
+            continue;
+          }
+          let score = 4;
+          if (/Controller|Manager|Handler|Vm$/i.test(fp)) score += 6;
+          if (/\.on\s*\(/.test(line)) score += 4;
+          if (/produceOn/.test(line)) score += 3;
+          addConsumer(fp, i + 1, line.trim(), ev, score);
+        }
+      }
+    }
+    // DataShareManager produceOn registrations (producer side of dispatch).
+    let mgrNodes: Node[] = [];
+    try {
+      mgrNodes = cg.getNodesByName('DataShareManager').filter((n) => !isTestFile(n.filePath));
+    } catch { mgrNodes = []; }
+    for (const n of mgrNodes.slice(0, 2)) {
+      const fp = rel(n.filePath);
+      const abs = pathIsAbsolute(n.filePath) ? n.filePath : pathJoin(projectRoot, n.filePath);
+      try {
+        const fileLines = readFileSync(abs, 'utf-8').split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          if (!/produceOn\s*\(/.test(line)) continue;
+          const evM = line.match(/produceOn\s*\(\s*([A-Za-z_][\w]*Event)/);
+          const evName = evM?.[1] ?? 'produceOn';
+          addConsumer(fp, i + 1, line.trim(), evName, 5);
+          if (consumerHits.length >= 10) break;
+        }
+      } catch { /* optional */ }
+    }
+    consumerHits.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+
+    if (consumerHits.length > 0) {
+      lines.push('### Event consumer registrations (`.on` / `produceOn`)');
+      for (const h of consumerHits.slice(0, 16)) {
+        lines.push(`- \`${h.file}:${h.line}\` ← \`${h.event}\`  \`${h.snippet}\``);
+      }
+      if (consumerHits.length > 16) {
+        lines.push(`- … and ${consumerHits.length - 16} more consumer site(s)`);
+      }
+      lines.push('');
+    }
+
     lines.push('### Manager / handler files referencing these events');
     const memberCount = enumMembers.length;
     const eventClassCount = eventClasses.length;
-    // Complete when: enum members + handlers, OR a tight Event Type set, OR a
-    // named Event-module barrel that exported ≥3 Event classes + ≥1 handler
-    // (class-list IS the "有哪些事件类型" answer — do not Grep-storm for enums).
+    const dispatchAsk = /分发|分发给|DataShareMgr|dispatch|routed?\s+to/i.test(query);
+    // Complete when: enum members + handlers, OR Event classes + consumer wiring
+    // for dispatch asks, OR a tight Event Type set.
     const complete =
       ranked.length > 0
       && (
-        (memberCount > 0 && memberCount <= 48)
-        || (eventClassCount >= 3 && eventClassCount <= 64)
+        (memberCount > 0 && memberCount <= 48 && ranked.length >= 1)
+        || (eventClassCount >= 3 && eventClassCount <= 64
+          && (dispatchAsk ? consumerHits.length >= 2 : ranked.length >= 1))
         || (sortedEvents.length > 0 && sortedEvents.length <= 4 && ranked.length >= 1 && ranked[0]!.score >= 5)
+        || (dispatchAsk && consumerHits.length >= 3)
       );
 
     if (ranked.length === 0) {
@@ -4975,10 +5067,16 @@ export class ToolHandler {
       if (complete) {
         lines.push(
           eventClassCount > 0
-            ? '> Event→Manager inventory — **ANSWER NOW** from Event type classes + handler files above; '
+            ? '> Event→Manager inventory — **ANSWER NOW** from Event type classes + consumer `.on` / handler files above; '
               + 'ONE narrow Grep only if a specific Manager→event branch is still missing.'
             : '> Event→Manager inventory — **ANSWER NOW** from enum members + handler files above; '
               + 'ONE narrow Grep only if a specific `case` branch is still missing.',
+        );
+      } else if (eventClassCount >= 3 && dispatchAsk && consumerHits.length === 0) {
+        lines.push(
+          '> **Partial locator** — Event type list above is complete, but consumer `.on` / dispatch wiring '
+            + 'was not indexed. ONE Grep for `.on(EventName` or `produceOn` in `*Manager*` files — '
+            + 'do **not** repo-storm; do **not** ANSWER NOW as a full dispatch map.',
         );
       } else {
         lines.push(
@@ -6145,6 +6243,10 @@ export class ToolHandler {
         if (t.length >= 4 && fpLc.includes(`/${t}/`)) score += 60;
         if (t.length >= 4 && fpLc.includes(t)) score += 20;
       }
+      if (queryAsNativeRenderThreadSurvey(query)) {
+        if (/plugin_manager|egl_core|nativerender|xcomponent|render_service/i.test(fpLc)) score += 90;
+        if (/\.cpp$|\.h$|cmake/i.test(fpLc)) score += 25;
+      }
       for (const n of nodes) {
         const line = n.kind === 'import' ? resolveImportLineFromNode(n, projectRoot) : '';
         const blob = `${n.name}\n${n.signature || ''}\n${line}`.toLowerCase();
@@ -6256,6 +6358,10 @@ export class ToolHandler {
     const xmlMechanismClose = xmlStem
       && filesRendered >= 1
       && /convertxml|ConvertXML|fastConvertToJSObject/i.test(bodyText);
+    const nativeRenderClose = queryAsNativeRenderThreadSurvey(query)
+      && filesRendered >= 1
+      && (/plugin_manager|egl_core|OnSurfaceCreated|EGLCore|nativerender/i.test(bodyText)
+        || /\*\*CMake \/ link \+ GL libs\*\*/.test(bodyText));
     // Don't soft-close onto an antithetical Primary (Delete* while ask is install/parse).
     const nextContradictsPipeline = !!(
       nextMgr
@@ -6266,7 +6372,8 @@ export class ToolHandler {
     const softClose = !nextContradictsPipeline && ((hasStrongManager && filesRendered >= 1
       && (digestCoversNext || managerHits.length >= 2 || topIsStrong))
       || importEvidenceClose
-      || xmlMechanismClose);
+      || xmlMechanismClose
+      || nativeRenderClose);
     const closedAnswer = softClose || mechanismClosed || (hasFlowPath && topIsStrong);
 
     lines.push('---');
@@ -7609,15 +7716,49 @@ export class ToolHandler {
     projectRoot: string,
   ): { section: string; hitCount: number } {
     const topicBoost = /图标|icon|appicon|dock|launcher/i.test(query);
-    const searchTerms = ['onHover', 'HoverAnimation', 'HoverEffect', 'HoverConstants', 'hover'];
+    const searchTerms = topicBoost
+      ? [
+          'onHover', 'AppIconCommonView', 'HoverAnimationUtil', 'AppIconHoverEvent',
+          'setIconHoverEventIface', 'HoverAnimation', 'HoverEffect',
+        ]
+      : ['onHover', 'HoverAnimation', 'HoverEffect', 'HoverConstants', 'hover'];
     const seen = new Set<string>();
     const hits: Array<{ file: string; line: number; name: string; kind: string; score: number; snippet: string }> = [];
+
+    const scoreHit = (
+      r: SearchResult,
+      term: string,
+      snippet: string,
+    ): number => {
+      const nameLc = r.node.name.toLowerCase();
+      const pathLc = r.node.filePath.toLowerCase().replace(/\\/g, '/');
+      const termLc = term.toLowerCase();
+      let score = nameLc === 'onhover' || nameLc.startsWith('onhover') ? 40 : 10;
+      if (/hover/.test(nameLc)) score += 15;
+      if (/onhover/.test(snippet.toLowerCase())) score += 35;
+      if (/appiconcommonview|hoveranimationutil|appiconhover/i.test(nameLc)) score += 45;
+      if (/seticonhover|geticonhover/i.test(nameLc)) score += 35;
+      if (topicBoost && /launchercommon|launchericon|appicon|smartdock|appcenter/i.test(pathLc)) {
+        score += 50;
+      }
+      if (topicBoost && /controlcenter|commonconstants|controlpanel/i.test(pathLc)) {
+        score -= 45;
+      }
+      if (topicBoost && nameLc === 'hoverconstants' && !/launcher|appicon/i.test(pathLc)) {
+        score -= 40;
+      }
+      if (topicBoost && /import/.test(snippet) && !/onhover|hoveranimation|appicon/i.test(snippet.toLowerCase())) {
+        score -= 25;
+      }
+      if (termLc === 'onhover' && /component|struct/.test(r.node.kind)) score += 10;
+      return score;
+    };
 
     for (const term of searchTerms) {
       let results: SearchResult[] = [];
       try {
         results = cg.searchNodes(term, {
-          kinds: ['method', 'function', 'property', 'field', 'variable', 'constant', 'class', 'component'],
+          kinds: ['method', 'function', 'property', 'field', 'variable', 'constant', 'class', 'component', 'struct'],
           limit: 30,
         });
       } catch {
@@ -7632,9 +7773,6 @@ export class ToolHandler {
         const key = `${r.node.filePath}:${r.node.startLine}:${r.node.name}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        let score = nameLc === 'onhover' || nameLc.startsWith('onhover') ? 40 : 10;
-        if (/hover/.test(nameLc)) score += 15;
-        if (topicBoost && /icon|appicon|dock|launcher|smartdock|appcenter/i.test(pathLc)) score += 25;
         let snippet = (r.node.signature || r.node.name).slice(0, 120);
         try {
           const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
@@ -7645,12 +7783,35 @@ export class ToolHandler {
             snippet = lines.slice(from, to).map((l) => l.trim()).filter(Boolean).join(' / ').slice(0, 160);
           }
         } catch { /* keep signature */ }
+        // App icon views often expose `.onHover` on a builder line — scan nearby.
+        if (topicBoost && /appiconcommonview/i.test(pathLc)) {
+          try {
+            const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+            if (abs && existsSync(abs)) {
+              const lines = readFileSync(abs, 'utf-8').split('\n');
+              for (let i = 0; i < lines.length; i++) {
+                if (!/\.onHover\s*\(/.test(lines[i] ?? '')) continue;
+                const hk = `${r.node.filePath}:${i + 1}:onHover`;
+                if (seen.has(hk)) continue;
+                seen.add(hk);
+                hits.push({
+                  file: r.node.filePath,
+                  line: i + 1,
+                  name: 'onHover',
+                  kind: 'property',
+                  score: 90,
+                  snippet: (lines[i] ?? '').trim().slice(0, 160),
+                });
+              }
+            }
+          } catch { /* optional */ }
+        }
         hits.push({
           file: r.node.filePath,
           line: r.node.startLine,
           name: r.node.name,
           kind: r.node.kind,
-          score,
+          score: scoreHit(r, term, snippet),
           snippet,
         });
       }
@@ -7671,18 +7832,28 @@ export class ToolHandler {
     }
 
     hits.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+    // Icon-hover asks: drop import-only control-center noise from the visible set.
+    const filtered = topicBoost
+      ? hits.filter((h) => {
+          const pl = h.file.toLowerCase();
+          if (h.score >= 35) return true;
+          if (/controlcenter|commonconstants/.test(pl) && h.name === 'HoverConstants') return false;
+          return h.score > 0;
+        })
+      : hits;
+    const displayHits = filtered.length > 0 ? filtered : hits;
     const lines = [
       '**Hover / pointer handler survey**',
       '',
       '> **ANSWER NOW** from these in-repo hover handlers + snippets. Do not Grep `onHover` again unless a named Type is still missing.',
       '',
     ];
-    const shown = hits.slice(0, 12);
+    const shown = displayHits.slice(0, 12);
     for (const h of shown) {
       lines.push(`- \`${h.name}\` (${h.kind}) — \`${h.file}:${h.line}\``);
       if (h.snippet) lines.push(`  \`${h.snippet.slice(0, 100)}\``);
     }
-    if (hits.length > shown.length) lines.push(`- … and ${hits.length - shown.length} more`);
+    if (displayHits.length > shown.length) lines.push(`- … and ${displayHits.length - shown.length} more`);
     lines.push('');
     return { section: lines.join('\n'), hitCount: shown.length };
   }
@@ -8330,7 +8501,7 @@ export class ToolHandler {
     // Include PascalCase SDK modules (Telephony) — deps-only missed them.
     const rawSymbols = extractApiUsageTokens(query).slice(0, 6);
     if (rawSymbols.length === 0) return { section: '', fileCount: 0 };
-    // Expand Telephony → telephony / @ohos.telephony so import call sites hit.
+    // Expand Telephony → telephony / @ohos.telephony / @kit.TelephonyKit call sites.
     const symbols: string[] = [];
     for (const sym of rawSymbols) {
       symbols.push(sym);
@@ -8339,6 +8510,11 @@ export class ToolHandler {
         if (!symbols.includes(lc)) symbols.push(lc);
         const ohos = `@ohos.${lc}`;
         if (!symbols.includes(ohos)) symbols.push(ohos);
+      }
+    }
+    if (rawSymbols.some((s) => /^telephony$/i.test(s))) {
+      for (const kit of ['@kit.TelephonyKit', '@hms.telephony.enhanced', '@hms.telephony.vsim', 'TelephonyKit']) {
+        if (!symbols.includes(kit)) symbols.push(kit);
       }
     }
 
@@ -8355,8 +8531,46 @@ export class ToolHandler {
       hits.set(fp, prev);
     };
 
-    for (const sym of symbols.slice(0, 6)) {
+    if (rawSymbols.some((s) => /^telephony$/i.test(s))) {
+      for (const kit of ['@kit.TelephonyKit', '@hms.telephony.enhanced', '@hms.telephony.vsim']) {
+        let importHits: SearchResult[] = [];
+        try {
+          importHits = cg.searchNodes(kit.replace(/^@/, ''), { kinds: ['import'], limit: 40 });
+        } catch { importHits = []; }
+        for (const r of importHits) {
+          const line = resolveImportLineFromNode(r.node, projectRoot);
+          if (line.includes(kit) || line.toLowerCase().includes(kit.toLowerCase())) {
+            addHit(r.node.filePath, r.node.startLine);
+          }
+        }
+        // FTS stem fallback (`TelephonyKit`, `telephony.vsim`, …).
+        const stem = kit.split('.').pop() ?? kit;
+        try {
+          importHits = cg.searchNodes(stem, { kinds: ['import'], limit: 40 });
+        } catch { importHits = []; }
+        for (const r of importHits) {
+          const line = resolveImportLineFromNode(r.node, projectRoot);
+          if (line.includes('@kit.TelephonyKit') || line.includes('@hms.telephony')) {
+            addHit(r.node.filePath, r.node.startLine);
+          }
+        }
+      }
+    }
+
+    for (const sym of symbols.slice(0, 8)) {
       const symLc = sym.toLowerCase();
+      if (sym.startsWith('@')) {
+        let importNodes: SearchResult[] = [];
+        try {
+          importNodes = cg.searchNodes(sym.replace(/^@/, ''), { kinds: ['import'], limit: 28 });
+        } catch { importNodes = []; }
+        for (const r of importNodes) {
+          const line = resolveImportLineFromNode(r.node, projectRoot).toLowerCase();
+          if (line.includes(symLc.replace(/^@/, '')) || line.includes(symLc)) {
+            addHit(r.node.filePath, r.node.startLine);
+          }
+        }
+      }
       let nodes: SearchResult[] = [];
       try {
         nodes = cg.searchNodes(sym.replace(/^@/, ''), { limit: 40 });
@@ -8433,6 +8647,14 @@ export class ToolHandler {
     // Prefer project call/import sites over SDK .d.ts stubs.
     const rankedFiles = [...hits.entries()].sort((a, b) => {
       if (a[1].stub !== b[1].stub) return a[1].stub ? 1 : -1;
+      const telephonyBoost = (fp: string) =>
+        rawSymbols.some((s) => /^telephony$/i.test(s))
+        && /@kit\.telephonykit|@hms\.telephony|telephonykit/i.test(fp.toLowerCase())
+          ? -1
+          : 0;
+      const ta = telephonyBoost(a[0]);
+      const tb = telephonyBoost(b[0]);
+      if (ta !== tb) return ta - tb;
       return a[0].localeCompare(b[0]);
     });
     const projectHits = rankedFiles.filter(([, v]) => !v.stub);
@@ -8466,8 +8688,16 @@ export class ToolHandler {
     }
 
     // Recompute display after call-site enrichment.
+    const telephonyBoost = (fp: string) =>
+      rawSymbols.some((s) => /^telephony$/i.test(s))
+      && /@kit\.telephonykit|@hms\.telephony|telephonykit/i.test(fp.toLowerCase())
+        ? -1
+        : 0;
     const rankedFiles2 = [...hits.entries()].sort((a, b) => {
       if (a[1].stub !== b[1].stub) return a[1].stub ? 1 : -1;
+      const ta = telephonyBoost(a[0]);
+      const tb = telephonyBoost(b[0]);
+      if (ta !== tb) return ta - tb;
       return a[0].localeCompare(b[0]);
     });
     const projectHits2 = rankedFiles2.filter(([, v]) => !v.stub);
@@ -8516,6 +8746,26 @@ export class ToolHandler {
       for (const m of [...methodNames].sort().slice(0, 24)) lines.push(`- \`${m}\``);
       if (methodNames.size > 24) lines.push(`- … and ${methodNames.size - 24} more`);
       lines.push('');
+    }
+    if (rawSymbols.some((s) => /^telephony$/i.test(s))) {
+      const kitSurfaces = new Set<string>();
+      for (const [fp, info] of display2.slice(0, 40)) {
+        const abs = validatePathWithinRoot(projectRoot, fp);
+        if (!abs || !existsSync(abs)) continue;
+        let fileLines: string[] = [];
+        try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { continue; }
+        for (const ln of info.lines.slice(0, 8)) {
+          const lineText = fileLines[ln - 1] ?? '';
+          for (const m of lineText.matchAll(/@kit\.TelephonyKit|@hms\.telephony(?:\.\w+)?/g)) {
+            if (m[0]) kitSurfaces.add(m[0]);
+          }
+        }
+      }
+      if (kitSurfaces.size > 0) {
+        lines.push('**@kit / @hms Telephony imports**');
+        for (const k of [...kitSurfaces].sort()) lines.push(`- \`${k}\``);
+        lines.push('');
+      }
     }
     let shown = 0;
     const isImportish = (s: string) => /^\s*import\b/.test(s) || /\bfrom\s+['"]@/.test(s);

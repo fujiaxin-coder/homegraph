@@ -80,6 +80,7 @@ import {
   queryAsAssignedFlagImpactSurvey,
   queryAsNamedControlStateSyncSurvey,
   queryAsksKitInstallDeps,
+  queryIsTypeNameFocus,
 } from '../src/search/query-utils';
 
 describe('extractFileBasenamesFromQuery', () => {
@@ -1038,6 +1039,12 @@ describe('P0 explore shapes', () => {
     expect(extractApiUsageTokens('Telephony 调用方法 usage calls radio call sim')).toEqual([
       'Telephony',
     ]);
+  });
+
+  it('bare PascalCase type search prefers caller inventory path', () => {
+    expect(queryIsTypeNameFocus('Configuration')).toBe(true);
+    expect(shouldBuildCallerInventory('Configuration 哪些方法被外部调用')).toBe(true);
+    expect(queryShouldPreferExploreOverSearch('Configuration')).toBe(true);
   });
 
   it('routes system-capability howto and declaration / return-consumer shapes', () => {

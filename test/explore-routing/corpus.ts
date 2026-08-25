@@ -126,8 +126,9 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     maxChars: 8_000,
     mustContain: [
       /CMake|EGLCore|PluginRender|plugin_manager|GLESv3/i,
-      /Partial locator|ANSWER NOW|Coarse locate/i,
+      /ANSWER NOW|Coarse locate/i,
     ],
+    mustNotMatch: [/enum-member coverage may be incomplete/i],
   },
 
   // --- inventory ---
@@ -138,6 +139,18 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     expect: 'inventory',
     pins: { preferExplore: true },
     maxChars: 7_500,
+  },
+  {
+    id: 'inv-telephony-en-bag',
+    shape: 'PascalCase SDK module EN bag → @kit import survey',
+    query: 'Telephony 调用方法 usage calls radio call sim',
+    expect: 'inventory',
+    pins: { preferExplore: true },
+    maxChars: 8_000,
+    mustContain: [
+      /API usage sites|@kit \/ @hms Telephony|@kit\.TelephonyKit|@hms\.telephony/i,
+      /ANSWER NOW/i,
+    ],
   },
   {
     id: 'inv-kit-extra-deps',
@@ -180,6 +193,8 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     expect: 'inventory',
     pins: { preferExplore: true },
     maxChars: 5_000,
+    mustContain: [/onHover|AppIconCommonView|HoverAnimationUtil|AppIconHoverEvent/i, /ANSWER NOW/i],
+    mustNotMatch: [/HoverConstants.*controlcenter/i],
   },
   {
     id: 'inv-module-cycles',
@@ -276,7 +291,7 @@ export const ROUTING_CORPUS: ExploreRouteCase[] = [
     mustContain: [
       /Event type classes|TimeFormatEvent|NtfHideContentEvent/i,
       /ANSWER NOW/i,
-      /DataShareMgr|Manager/i,
+      /DataShareMgr|Manager|produceOn|InnerEventUtil\.on|\.on\(/i,
     ],
     mustNotMatch: [/enum-member coverage may be incomplete/i],
   },
