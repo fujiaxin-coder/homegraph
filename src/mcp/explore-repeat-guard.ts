@@ -164,6 +164,21 @@ function isCountedCall(call: ExploreCallRecord): boolean {
   return (call.responseBytes || 0) >= 400;
 }
 
+/** Shared mechanism domain stems (theme/install/xml/…) between two queries. */
+function domainStemOverlap(a: string, b: string): number {
+  const sa = new Set(mechanismDomainPathTokens(a));
+  const sb = new Set(mechanismDomainPathTokens(b));
+  let shared = 0;
+  for (const t of sa) {
+    if (sb.has(t)) shared++;
+  }
+  return shared;
+}
+
+function hadClosedExplore(calls: ReadonlyArray<ExploreCallRecord>): boolean {
+  return calls.some((c) => isCountedCall(c) && c.partial !== true);
+}
+
 /**
  * Whether this explore should short-refuse instead of re-running.
  */
@@ -196,6 +211,19 @@ export function decideExploreRepeat(
         matched: last,
         reason: 'next-anchor',
       };
+    }
+  }
+
+  // After a closed ANSWER explore, refuse NL paraphrase bags that share domain
+  // stems (theme/install/parse…) — stops D33-style explore×N token storms.
+  if (hadClosedExplore(counted) && !isTightExploreFollowUp(query)) {
+    for (const call of counted) {
+      if (call.partial === true) continue;
+      const overlap = queryTokenOverlapScore(qTokens, exploreQueryTokens(call.query));
+      const domainShared = domainStemOverlap(query, call.query);
+      if (domainShared >= 2 || overlap >= 0.28) {
+        return { refuse: true, matched: call, reason: 'overlap' };
+      }
     }
   }
 
@@ -388,6 +416,15 @@ export function scoreDomainRoleForQuery(
     if (/Extension$/i.test(name) || /ExtensionAbility/i.test(name)) score += 22;
     if (/BackupLauncher|RestoreLauncher|DataRestore|Controller$/i.test(name)) score += 12;
     if (/EventManager$/i.test(name) && !/Extension/i.test(name)) score -= 6;
+  }
+  // Pipeline verbs (parse/install/activate/download): prefer matching Types,
+  // demote antithetical Delete/Remove/Uninstall names that share a domain stem.
+  if (/(?:解析|安装|激活|下载|parse|install|activate|download)/i.test(query)) {
+    if (/Activate|Installer|PackParser|PackageInstall|ThemePack/i.test(name)) score += 14;
+    if (/^(?:Delete|Remove|Uninstall|Clear|Cancel)/i.test(name)
+      || /Delete|Uninstall|RemoveOnline|CancelRestore/i.test(name)) {
+      score -= 36;
+    }
   }
   // Weak helpers: only keep if they already scored on tokens.
   if (/(Utils|Constants|Info|Entry|Helper)$/i.test(name)) score -= 8;
