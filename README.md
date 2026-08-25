@@ -179,7 +179,10 @@ Agent 侧工具名前缀为 `homegraph_`。
 
 | 工具 | 用途 |
 |------|------|
-| `homegraph_explore` | **主工具**：一次调用返回相关符号的完整源码、调用路径与影响范围；支持自然语言问题或符号/文件名列表 |
+| `homegraph_explore` | **主工具**：一次调用返回相关符号的完整源码、调用路径与影响范围；支持自然语言问题或符号/文件名列表。高置信度的用法 / 模块依赖 / NAPI 问法会委派到下方三个聚焦工具的同一套 survey |
+| `homegraph_usages` | 只读用法清单：命名 API / member / field / 常量的引用与调用点（常量袋可走有界文本扫描） |
+| `homegraph_modules` | 只读模块依赖 / 循环依赖清单（命名模块或路径） |
+| `homegraph_native` | 只读 NAPI / native export 清单（命名路径或 Type） |
 | `homegraph_search` | 按名称快速搜索符号（仅返回位置，不含源码） |
 | `homegraph_node` | 读取单个符号或整个文件的源码（带行号）及调用关系；可替代 Read 读文件 |
 | `homegraph_callers` / `homegraph_callees` | 查看调用方 / 被调用方 |

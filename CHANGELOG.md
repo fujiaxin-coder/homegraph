@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+
+- README MCP tools table documents experimental `homegraph_usages` / `homegraph_modules` / `homegraph_native` and notes that high-confidence `homegraph_explore` queries delegate to the same surveys (Spec 0015 supplemental).
+
 ### Fixes
 
 - Explore inventory sufficiency: Kit install/deps EN rewrites (`parameters … dependencies` beside a `@kit`) take the oh-package survey instead of a bare import-site ANSWER NOW; Event→Manager surveys treat exported `*Event` classes from a named Event module file as the event-type list and scan indexed `.on` / `produceOn` consumer wiring before ANSWER NOW on dispatch asks (stops class-list-only storms); hover-handler surveys boost app-icon `onHover` / `HoverAnimationUtil` sites and demote control-center `HoverConstants` import noise on icon-hover asks; Telephony API usage expands to `@kit.TelephonyKit` / `@hms.telephony.*` import call sites (agent EN keyword bags); native GL/thread light-mechanism soft-closes on CMake + `plugin_manager` / `egl_core` digests; bare PascalCase type **search** redirects to caller inventory (stops search→node×N fan-out); multi-Type dependency inventories surface source `extends` bases when graph edges are thin; light-mechanism Primary/soft-close demotes antithetical `Delete*`/`Uninstall*` Types when the ask is parse/install/activate/download; **container composition** surveys list pages sharing a shell component + `@LocalStorageLink` / ViewModel injection snippets; **SDK stub-only lifecycle** Types get enum + callback inventory from indexed `.d.ts` with ANSWER NOW (stops Partial→search/Grep storms); **member UI-consequence** asks annotate filter/call sites as the UI effect; light-mechanism soft-closes on `convertxml` digests for agent EN bags like `XML parsing implementation`; explore repeat guard refuses paraphrase bags after a closed ANSWER when domain stems overlap (theme/install/parse…).
