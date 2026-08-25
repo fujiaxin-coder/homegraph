@@ -42,6 +42,7 @@ import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractK
 
 import {
   existsSync,
+  readdirSync,
   readFileSync,
   statSync,
 } from 'fs';
@@ -1082,6 +1083,63 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
+    name: 'homegraph_usages',
+    description:
+      'Focused in-repo usage inventory for one named API, `.member`, ALL_CAPS constant, field, or mutex. ' +
+      'Required: `query`. Returns usage files/lines only; it does not build a general flow or source dump. ' +
+      'Use directly for a narrow where-used question; `homegraph_explore` auto-routes equivalent high-confidence queries here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Required. Exact API/member/constant/field name, with or without where-used wording.',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['query'],
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'homegraph_modules',
+    description:
+      'Focused dependency/cycle inventory for named path modules or `*common` / `*service` / `*component` / `*constants` modules. ' +
+      'Required: `query`. It does not build a general code flow or scan unrelated survey families. ' +
+      '`homegraph_explore` auto-routes equivalent high-confidence dependency questions here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Required. Dependency/cycle question containing the exact module names or paths.',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['query'],
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'homegraph_native',
+    description:
+      'Focused NAPI/native export inventory for one named path or Type. Required: `query`. ' +
+      'Returns indexed export descriptors/registration sites without a general domain file dump. ' +
+      '`homegraph_explore` auto-routes equivalent high-confidence NAPI/export questions here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Required. NAPI/native export question containing the exact path or Type name.',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['query'],
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
     name: 'homegraph_status',
     description: 'Index health check (files / nodes / edges). No required args when a default project is loaded. Skip unless debugging.',
     inputSchema: {
@@ -1283,12 +1341,156 @@ export function getStaticTools(): ToolDefinition[] {
   return allow.size ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, ''))) : tools;
 }
 
+/** Prose that reads like an identifier but never names a symbol worth scanning. */
+const BARE_USAGE_STOPWORDS = new Set([
+  'class', 'method', 'function', 'interface', 'module', 'import', 'export', 'value',
+  'file', 'files', 'code', 'usage', 'usages', 'where', 'which', 'what', 'when',
+  'call', 'calls', 'called', 'caller', 'callers', 'used', 'uses', 'using',
+  'true', 'false', 'null', 'undefined', 'this', 'return', 'const', 'type',
+  'string', 'number', 'boolean', 'object', 'array', 'void', 'async', 'await',
+]);
+
+/** Identifier-shaped tokens from a bare symbol bag. */
+export function extractBareUsageSymbols(query: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /\b([A-Z][A-Za-z0-9]{3,}(?:\.[A-Za-z_]\w*)?|[A-Z][A-Z0-9_]{3,}|[a-z]+[A-Z]\w{2,}(?:\.[A-Za-z_]\w*)?)\b/g;
+  for (const m of query.matchAll(re)) {
+    const tok = m[1]!;
+    const key = tok.toLowerCase();
+    if (seen.has(key) || BARE_USAGE_STOPWORDS.has(key)) continue;
+    seen.add(key);
+    out.push(tok);
+  }
+  return out;
+}
+
+/** Wording that asks how something works — never a plain usage inventory. */
+const FLOW_INTENT_RE =
+  /如何|怎[么样]|机制|流程|原理|为什么|为何|架构|生命周期|时序|调用链|关系|\b(how|why|flow|mechanism|lifecycle|architecture|sequence|pipeline|between|implement|implementation)\b/i;
+
+/** Action-shaped identifiers are probably call-flow anchors, not inventories. */
+const ACTION_SEGMENTS = new Set([
+  'trigger', 'callback', 'handler', 'listener', 'observer', 'dispatch', 'emit',
+  'notify', 'render', 'draw', 'init', 'start', 'stop', 'update', 'refresh',
+  'subscribe', 'publish', 'invoke', 'execute', 'run', 'process', 'handle',
+  'post', 'send', 'receive', 'load', 'save', 'open', 'close',
+]);
+
+function identifierSegments(token: string): string[] {
+  return token
+    .replace(/[._]/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * True only for a short bag of ALL_CAPS constants. Type/method bags remain on
+ * explore-flow because routing those to usages would discard call paths.
+ */
+export function queryAsBareSymbolInventory(query: string): boolean {
+  if (process.env.HOMEGRAPH_EXPLORE_SHAPE_ROUTING === '0') return false;
+  const tokens = String(query || '').split(/[\s,、，]+/).filter(Boolean);
+  if (tokens.length === 0 || tokens.length > 6) return false;
+  if (FLOW_INTENT_RE.test(query)) return false;
+  if (tokens.some((t) => identifierSegments(t).some((s) => ACTION_SEGMENTS.has(s)))) return false;
+  return tokens.every((t) => /^[A-Z][A-Z0-9_]{3,}$/.test(t));
+}
+
 /**
  * Tool handler that executes tools against a HomeGraph instance
  *
  * Supports cross-project queries via the projectPath parameter.
  * Other projects are opened on-demand and cached for performance.
  */
+const ANSWER_NOW_TOKEN = /\bANSWER NOW\b/gi;
+
+/** Whether one ANSWER NOW occurrence is postponed/negated rather than a stop directive. */
+function isNegatedAnswerNowAt(text: string, index: number): boolean {
+  const prefix = text
+    .slice(Math.max(0, index - 96), index)
+    .replace(/[*_`]/g, '')
+    .replace(/\s+/g, ' ');
+  return /(?:\b(?:do|should|must|can)\s+not|\bcannot|\bnever|\bbefore|\buntil|\bnot)\s+(?:\S+\s+){0,3}$/i
+    .test(prefix);
+}
+
+/** True only for a positive instruction to stop and answer, not "do not/before ANSWER NOW". */
+export function hasPositiveAnswerNowDirective(text: string): boolean {
+  const answerNow = new RegExp(ANSWER_NOW_TOKEN.source, ANSWER_NOW_TOKEN.flags);
+  for (let match = answerNow.exec(text); match; match = answerNow.exec(text)) {
+    if (!isNegatedAnswerNowAt(text, match.index)) return true;
+  }
+  return false;
+}
+
+function stripPositiveAnswerNowFromLine(line: string): { text: string; changed: boolean } {
+  let changed = false;
+  let out = line.replace(
+    /\*\*[^*\n]*\bANSWER NOW\b[^*\n]*\*\*/gi,
+    (span: string, offset: number, source: string) => {
+      const tokenOffset = span.search(/\bANSWER NOW\b/i);
+      if (tokenOffset < 0 || isNegatedAnswerNowAt(source, offset + tokenOffset)) return span;
+      changed = true;
+      return '';
+    },
+  );
+  out = out.replace(ANSWER_NOW_TOKEN, (token: string, offset: number, source: string) => {
+    if (isNegatedAnswerNowAt(source, offset)) return token;
+    changed = true;
+    return '';
+  });
+  if (!changed) return { text: line, changed: false };
+
+  // A positive close often carries a matching search prohibition. Once the
+  // whole response is Partial, that prohibition is contradictory too.
+  out = out
+    .replace(
+      /\s*(?:[,;—-]\s*)?(?:and\s+)?do\s+\*{0,2}not\*{0,2}\s+(?:(?:re-)?(?:Read|Grep|Glob)|`?homegraph_(?:search|explore|node|callers|callees)`?)[^.;\n]*/gi,
+      '',
+    )
+    .replace(/\s*(?:[,;—-]\s*)?no\s+(?:glob|grep|read|search|explore)(?:\s*\/\s*(?:glob|grep|read|search|explore))*\s+needed\b[^.;\n]*/gi, '')
+    .replace(/\(\s*[,;—-]*\s*\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.;,])/g, '$1')
+    .replace(/^(>\s*)[\s.;,—-]+/, '$1')
+    .trimEnd();
+  return { text: out, changed: true };
+}
+
+/**
+ * Drop stop-searching directives from an output that also declares itself partial.
+ *
+ * Section builders each append their own footer and cannot see their siblings, so
+ * one output can carry both `**Partial locator**` ("these are anchors, keep
+ * looking") and `**ANSWER NOW**` ("stop, do not Grep"). Measured on a 54-question
+ * run: 21 such outputs across 17 of 48 questions. Whichever the agent obeys, the
+ * other was wrong — it either answers from an inventory the tool just called
+ * incomplete, or it keeps searching against an explicit prohibition.
+ *
+ * Partial wins: an under-informed agent that keeps looking recovers, while one
+ * that stops on a partial answer cannot. Negated mentions (`do **not** ANSWER
+ * NOW`) are the correct pairing and are preserved.
+ */
+export function reconcilePartialAnswerNow(text: string): string {
+  if (!/\*\*Partial locator\*\*/i.test(text)) return text;
+  let changed = false;
+  const out = text
+    .split('\n')
+    .map((line) => {
+      if (!/ANSWER NOW/i.test(line)) return line;
+      const stripped = stripPositiveAnswerNowFromLine(line);
+      if (stripped.changed) changed = true;
+      return stripped.text;
+    })
+    .filter((line) => line.trim() !== '>')
+    .join('\n');
+  if (!changed) return text;
+  return `${out}\n\n> This survey is a **Partial locator**: the sections above are anchors, not a closed answer. Continue with the narrower lookup named above, or a text search, before answering.`;
+}
+
 export class ToolHandler {
   // Cache of opened HomeGraph instances for cross-project queries
   private projectCache: Map<string, HomeGraph> = new Map();
@@ -2027,7 +2229,10 @@ export class ToolHandler {
             const cgFast = this.getHomeGraph(projectPath);
             const rootFast = cgFast.getProjectRoot();
             const fast =
-              (toolName === 'homegraph_explore' || toolName === 'homegraph_search'
+              (toolName === 'homegraph_explore'
+                ? this.trySpecializedExploreRoute(cgFast, q, rootFast)
+                : null)
+              ?? (toolName === 'homegraph_explore' || toolName === 'homegraph_search'
                 ? this.tryFastInventoryExplore(cgFast, q, rootFast)
                 : null)
               ?? (toolName === 'homegraph_explore' || toolName === 'homegraph_search'
@@ -2340,6 +2545,9 @@ export class ToolHandler {
       case 'homegraph_impact': return await this.handleImpact(args);
       case 'homegraph_diff_impact': return await this.handleDiffImpact(args);
       case 'homegraph_explore': return await this.handleExplore(args);
+      case 'homegraph_usages': return await this.handleSpecializedUsages(args);
+      case 'homegraph_modules': return await this.handleSpecializedModules(args);
+      case 'homegraph_native': return await this.handleSpecializedNative(args);
       case 'homegraph_node': return await this.handleNode(args);
       case 'homegraph_files': return await this.handleFiles(args);
       case 'homegraph_arkui_migrate': return await this.handleArkuiMigrate(args);
@@ -3829,18 +4037,15 @@ export class ToolHandler {
   /**
    * Multi-module / circular dependency survey — lean cycle list, not an import flood.
    */
-  private buildModuleDependencySurveySection(
-    cg: HomeGraph,
-    query: string,
-  ): { section: string; hitCount: number } {
-    // Prefer leaf module tokens (`launchercommon`) over shared parents (`staticcommon`)
-    // — parent matches flood unrelated windowscene cycles.
+  private extractFocusedModuleNames(query: string): Set<string> {
     const leafModules = new Set<string>();
     for (const p of (query.match(
       /\b[A-Za-z][\w]*(?:common|service|component|constants)\b/gi,
     ) ?? [])) {
       const low = p.toLowerCase();
-      if (!/^(?:static|feature|product|base|common)$/i.test(low)) leafModules.add(low);
+      if (!/^(?:static|staticcommon|feature|product|base|basecommon|common)$/i.test(low)) {
+        leafModules.add(low);
+      }
     }
     for (const seg of query.match(/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)+/g) ?? []) {
       const leaf = seg.split(/[/\\]/).pop()?.toLowerCase();
@@ -3848,6 +4053,16 @@ export class ToolHandler {
         leafModules.add(leaf);
       }
     }
+    return leafModules;
+  }
+
+  private buildModuleDependencySurveySection(
+    cg: HomeGraph,
+    query: string,
+  ): { section: string; hitCount: number } {
+    // Prefer leaf module tokens (`launchercommon`) over shared parents (`staticcommon`)
+    // — parent matches flood unrelated windowscene cycles.
+    const leafModules = this.extractFocusedModuleNames(query);
     if (leafModules.size === 0) return { section: '', hitCount: 0 };
 
     const rel = (p: string) => p.replace(/\\/g, '/');
@@ -3899,6 +4114,146 @@ export class ToolHandler {
     }
     lines.push('');
     return { section: lines.join('\n'), hitCount: matchedCycles.length };
+  }
+
+  /** Bounded manifest-only dependency graph for modules named in the query. */
+  private buildFocusedModuleManifestSection(
+    projectRoot: string,
+    query: string,
+  ): { section: string; manifestCount: number; cycleCount: number } {
+    const moduleNames = this.extractFocusedModuleNames(query);
+    if (moduleNames.size === 0) return { section: '', manifestCount: 0, cycleCount: 0 };
+
+    const skipDirs = new Set([
+      'node_modules', 'oh_modules', '.git', '.homegraph', '.hvigor', '.preview',
+      'build', 'dist', 'out', 'test', 'ohosTest',
+    ]);
+    const queue: Array<{ rel: string; depth: number }> = [{ rel: '', depth: 0 }];
+    const manifests = new Map<string, string[]>();
+    const linterFiles: string[] = [];
+    const asksDetection = /构建系统|如何检测|怎么检测|检测方式|linter|build\s+system|how.{0,24}detect/i.test(query);
+    let visited = 0;
+    let cursor = 0;
+
+    while (cursor < queue.length && visited < 8000) {
+      const { rel, depth } = queue[cursor++]!;
+      visited++;
+      const abs = resolvePath(projectRoot, rel);
+      let entries: import('fs').Dirent[];
+      try { entries = readdirSync(abs, { withFileTypes: true }); } catch { continue; }
+
+      const leaf = rel.split('/').pop()?.toLowerCase() ?? '';
+      if (moduleNames.has(leaf) && entries.some((entry) => entry.isFile() && entry.name === 'oh-package.json5')) {
+        const paths = manifests.get(leaf) ?? [];
+        if (paths.length < 3) paths.push(rel ? `${rel}/oh-package.json5` : 'oh-package.json5');
+        manifests.set(leaf, paths);
+      }
+
+      for (const entry of entries) {
+        const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isFile()) {
+          if (/^(?:code-)?linter.*\.json5?$/i.test(entry.name) && linterFiles.length < 8) {
+            linterFiles.push(childRel);
+          }
+          continue;
+        }
+        if (!entry.isDirectory() || depth >= 6) continue;
+        if (entry.name.startsWith('.') || skipDirs.has(entry.name)) continue;
+        queue.push({ rel: childRel, depth: depth + 1 });
+      }
+      if (manifests.size === moduleNames.size && (!asksDetection || linterFiles.length > 0)) break;
+    }
+
+    if (manifests.size === 0) return { section: '', manifestCount: 0, cycleCount: 0 };
+
+    const normalizeDependency = (name: string): string => {
+      const noProtocol = name.replace(/^file:/i, '').replace(/\\/g, '/');
+      return noProtocol.split('/').filter(Boolean).pop()?.toLowerCase() ?? '';
+    };
+    const graph = new Map<string, Set<string>>();
+    const rows: string[] = [];
+
+    for (const moduleName of [...moduleNames].sort()) {
+      const manifestPaths = manifests.get(moduleName) ?? [];
+      if (manifestPaths.length === 0) {
+        rows.push(`- \`${moduleName}\` — manifest not found within the bounded project scan`);
+        graph.set(moduleName, new Set());
+        continue;
+      }
+
+      const manifestRel = manifestPaths[0]!;
+      let parsed: unknown;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        parsed = require('jsonc-parser').parse(readFileSync(resolvePath(projectRoot, manifestRel), 'utf-8'));
+      } catch {
+        rows.push(`- \`${moduleName}\` — could not parse \`${manifestRel}\``);
+        graph.set(moduleName, new Set());
+        continue;
+      }
+
+      const deps = (parsed as { dependencies?: Record<string, unknown> } | null)?.dependencies;
+      const declared = deps && typeof deps === 'object' ? Object.entries(deps) : [];
+      const namedDeps = new Set<string>();
+      for (const [depName, depValue] of declared) {
+        const candidates = [normalizeDependency(depName)];
+        if (typeof depValue === 'string') candidates.push(normalizeDependency(depValue));
+        for (const candidate of candidates) {
+          if (candidate !== moduleName && moduleNames.has(candidate)) namedDeps.add(candidate);
+        }
+      }
+      graph.set(moduleName, namedDeps);
+      const target = namedDeps.size > 0
+        ? [...namedDeps].sort().map((name) => `\`${name}\``).join(', ')
+        : '(none among the named modules)';
+      rows.push(`- \`${moduleName}\` → ${target} — \`${manifestRel}\` (${declared.length} declared dependencies total)`);
+    }
+
+    const cycles = new Set<string>();
+    const visit = (start: string, current: string, path: string[], seen: Set<string>): void => {
+      for (const next of graph.get(current) ?? []) {
+        if (next === start && path.length > 1) {
+          const core = path;
+          const rotations = core.map((_, index) => {
+            const rotated = [...core.slice(index), ...core.slice(0, index)];
+            return [...rotated, rotated[0]!].join(' -> ');
+          });
+          cycles.add(rotations.sort()[0]!);
+          continue;
+        }
+        if (seen.has(next)) continue;
+        visit(start, next, [...path, next], new Set([...seen, next]));
+      }
+    };
+    for (const moduleName of graph.keys()) visit(moduleName, moduleName, [moduleName], new Set([moduleName]));
+
+    const lines = [
+      '**Named module manifest dependencies**', '', ...rows, '',
+      cycles.size > 0
+        ? `Detected **${cycles.size}** cycle(s) among the named modules:`
+        : 'Detected **no cycle** among the named modules.',
+    ];
+    for (const cycle of cycles) lines.push(`- \`${cycle}\``);
+
+    if (asksDetection) {
+      lines.push('', '**Build / linter cycle checks**', '');
+      let matched = 0;
+      for (const rel of linterFiles) {
+        let fileLines: string[] = [];
+        try { fileLines = readFileSync(resolvePath(projectRoot, rel), 'utf-8').split('\n'); } catch { continue; }
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          if (!/no-cycle|circular|cycle/i.test(line)) continue;
+          lines.push(`- \`${rel}:${i + 1}\` — \`${line.trim().slice(0, 140)}\``);
+          if (++matched >= 12) break;
+        }
+        if (matched >= 12) break;
+      }
+      if (matched === 0) lines.push('- No explicit cycle-check rule was found in the bounded linter-config scan.');
+    }
+
+    lines.push('');
+    return { section: lines.join('\n'), manifestCount: manifests.size, cycleCount: cycles.size };
   }
 
   /**
@@ -4723,7 +5078,8 @@ export class ToolHandler {
       const cg = this.getHomeGraph(args.projectPath as string | undefined);
       const projectRoot = cg.getProjectRoot();
       if (toolName === 'homegraph_explore') {
-        return this.tryFastInventoryExplore(cg, query, projectRoot)
+        return this.trySpecializedExploreRoute(cg, query, projectRoot)
+          ?? this.tryFastInventoryExplore(cg, query, projectRoot)
           ?? this.tryLightMechanismExplore(cg, query, projectRoot)
           ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
       }
@@ -4736,6 +5092,222 @@ export class ToolHandler {
       return null;
     }
     return null;
+  }
+
+  /** Conservative compatibility router: ambiguous mechanism queries stay broad. */
+  private specializedExploreRouteForQuery(query: string): 'modules' | 'native' | 'usages' | null {
+    if (queryAsModuleDependencySurvey(query)) return 'modules';
+    if (queryAsModuleExportSurvey(query)) return 'native';
+    if (queryAsReturnValueConsumerSurvey(query)) return null;
+    if (shouldBuildApiUsageSurvey(query)) return 'usages';
+    if (queryAsBareSymbolInventory(query)) return 'usages';
+    if (!shouldBuildMemberSurvey(query)) return null;
+    return /哪里(?:用|使用|调用)|哪些.{0,24}(?:用|使用|调用|依赖)|使用位置|引用位置|调用位置|\busages?\b|\bwhere\b.{0,36}\bused\b|\bwhich\b.{0,36}\b(?:files?|functions?|methods?)\b.{0,24}\b(?:use|call|depend)/i.test(query)
+      ? 'usages'
+      : null;
+  }
+
+  /** Run exactly one bounded survey family and expose the selected route. */
+  private runSpecializedExploreRoute(
+    route: 'modules' | 'native' | 'usages',
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): ToolResult {
+    let section = '';
+    let status: 'complete' | 'no_indexed_evidence' | 'not_surveyed' = 'no_indexed_evidence';
+    let coverage = '';
+
+    if (route === 'modules') {
+      const manifestResult = this.buildFocusedModuleManifestSection(projectRoot, query);
+      const graphResult = manifestResult.manifestCount === 0
+        ? this.buildModuleDependencySurveySection(cg, query)
+        : { section: '', hitCount: 0 };
+      section = manifestResult.section || graphResult.section;
+      status = section ? 'complete' : 'no_indexed_evidence';
+      coverage = manifestResult.manifestCount > 0
+        ? 'named module manifests plus bounded linter evidence only; no full-repo cycle walk or unrelated surveys were built'
+        : 'named-module dependency/cycle graph only; no source bodies or unrelated surveys were built';
+    } else if (route === 'native') {
+      const result = this.buildModuleExportSurveySection(cg, query, projectRoot);
+      section = result.section;
+      status = result.hitCount > 0 ? 'complete' : 'no_indexed_evidence';
+      coverage = 'named path/Type NAPI export registrations only; no domain file dump was built';
+    } else {
+      const apiUsage = shouldBuildApiUsageSurvey(query)
+        ? this.buildApiUsageSection(cg, query, projectRoot)
+        : { section: '', fileCount: 0 };
+      const memberUsage = shouldBuildMemberSurvey(query)
+        && !(queryAsFieldUsageSurvey(query) && apiUsage.fileCount > 0)
+        ? this.buildMemberSurveySection(cg, query, projectRoot)
+        : '';
+      let scanned = shouldBuildApiUsageSurvey(query) || shouldBuildMemberSurvey(query);
+      section = [apiUsage.section, memberUsage].filter(Boolean).join('\n');
+      if (!section) {
+        const bare = this.buildBareSymbolUsageSection(cg, query, projectRoot);
+        scanned = scanned || bare.scanned;
+        section = bare.section;
+      }
+      status = section ? 'complete' : (scanned ? 'no_indexed_evidence' : 'not_surveyed');
+      coverage = 'named API/member/constant/field usage sites only; no general call-flow or source dump was built';
+    }
+
+    const body = section
+      || (status === 'not_surveyed'
+        ? '- No survey ran: this query carries no symbol name to scan. Re-run naming the symbol(s), or use `homegraph_explore`.'
+        : '- No matching evidence was found in the current index for this focused survey.');
+    return this.textResult(this.truncateOutput([
+      `**HomeGraph specialized route: ${route}**`,
+      `Status: ${status}`,
+      `Coverage: ${coverage}.`,
+      '',
+      body,
+    ].join('\n')));
+  }
+
+  /** Usage sites for a bare symbol bag, including non-call textual references. */
+  private buildBareSymbolUsageSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; scanned: boolean } {
+    const symbols = extractBareUsageSymbols(query);
+    if (symbols.length === 0) return { section: '', scanned: false };
+
+    const MAX_SYMBOLS = 4;
+    const MAX_FILES_SCANNED = 80;
+    const MAX_FILES_REPORTED = 14;
+    const MAX_LINES_PER_FILE = 3;
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const byFile = new Map<string, Array<{ line: number; text: string; symbol: string }>>();
+    const seenFiles = new Set<string>();
+    let matchedFiles = 0;
+
+    const matchers = symbols.slice(0, MAX_SYMBOLS).map((sym) => ({
+      sym,
+      re: new RegExp(`\\b${sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`),
+    }));
+
+    const scanFile = (fp: string): { rows: Array<{ line: number; text: string; symbol: string }>; bytes: number } => {
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      if (!abs) return { rows: [], bytes: 0 };
+      let content: string;
+      try { content = readFileSync(abs, 'utf-8'); } catch { return { rows: [], bytes: 0 }; }
+      const bytes = content.length;
+      const hit = matchers.filter((m) => m.re.test(content));
+      if (hit.length === 0) return { rows: [], bytes };
+      const fileLines = content.split('\n');
+      const rows: Array<{ line: number; text: string; symbol: string }> = [];
+      for (let i = 0; i < fileLines.length && rows.length < MAX_LINES_PER_FILE; i++) {
+        const text = (fileLines[i] ?? '').trim();
+        if (!text) continue;
+        const m = hit.find((x) => x.re.test(text));
+        if (m) rows.push({ line: i + 1, text, symbol: m.sym });
+      }
+      return { rows, bytes };
+    };
+
+    const record = (fp: string, rows: Array<{ line: number; text: string; symbol: string }>): void => {
+      if (rows.length === 0) return;
+      matchedFiles++;
+      if (byFile.size < MAX_FILES_REPORTED) byFile.set(fp, rows);
+    };
+
+    for (const { sym } of matchers) {
+      let nodes: SearchResult[] = [];
+      try { nodes = cg.searchNodes(sym, { limit: 60 }); } catch { continue; }
+      for (const r of nodes) {
+        if (seenFiles.size >= MAX_FILES_SCANNED) break;
+        const fp = rel(r.node.filePath);
+        if (isTestFile(fp) || seenFiles.has(fp)) continue;
+        seenFiles.add(fp);
+        record(fp, scanFile(fp).rows);
+      }
+    }
+
+    const SWEEP_DEADLINE_MS = 3000;
+    const SWEEP_MAX_FILES = 20000;
+    const SWEEP_MAX_BYTES = 256 * 1024 * 1024;
+    let sweepRan = false;
+    let sweepComplete = false;
+    if (process.env.HOMEGRAPH_EXPLORE_USAGE_SWEEP !== '0') {
+      let corpus: Array<{ path: string }> = [];
+      try { corpus = cg.getFiles() as Array<{ path: string }>; } catch { corpus = []; }
+      if (corpus.length > 0) {
+        sweepRan = true;
+        sweepComplete = true;
+        const started = Date.now();
+        let swept = 0;
+        let bytesRead = 0;
+        for (const f of corpus) {
+          if (swept >= SWEEP_MAX_FILES || bytesRead >= SWEEP_MAX_BYTES
+            || (swept % 64 === 0 && Date.now() - started > SWEEP_DEADLINE_MS)) {
+            sweepComplete = false;
+            break;
+          }
+          const fp = rel(String(f?.path ?? ''));
+          if (!fp || isTestFile(fp) || seenFiles.has(fp)) continue;
+          seenFiles.add(fp);
+          swept++;
+          const scan = scanFile(fp);
+          bytesRead += scan.bytes;
+          record(fp, scan.rows);
+        }
+      }
+    }
+
+    if (byFile.size === 0) return { section: '', scanned: true };
+    const truncated = matchedFiles > byFile.size;
+    const lines: string[] = [
+      `**Symbol usage sites** — \`${symbols.slice(0, MAX_SYMBOLS).join('`, `')}\``, '',
+      sweepRan && sweepComplete
+        ? '> Full in-repo text sweep of every indexed source file: includes non-call references with no `calls` edge.'
+        : '> Scanned in-repo: includes non-call references with no `calls` edge.',
+      '',
+    ];
+    for (const [file, rows] of byFile) {
+      lines.push(`- \`${file}\``);
+      for (const row of rows) lines.push(`    - ${row.line}: \`${row.text.slice(0, 120)}\``);
+    }
+    lines.push('');
+    if (truncated) {
+      lines.push(`> Showing ${byFile.size} of ${matchedFiles} matching file(s) — narrow the symbol to see the rest.`);
+    } else if (sweepRan && sweepComplete) {
+      lines.push(`> ${byFile.size} file(s) — every indexed source file was swept, so this is the complete in-repo list. **ANSWER NOW** from it: do not re-grep these names.`);
+    } else {
+      lines.push(`> ${byFile.size} indexed use site file(s); the text sweep did not complete, so files that merely reference these names may be missing.`);
+    }
+    return { section: lines.join('\n'), scanned: true };
+  }
+
+  private trySpecializedExploreRoute(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): ToolResult | null {
+    const route = this.specializedExploreRouteForQuery(query);
+    return route ? this.runSpecializedExploreRoute(route, cg, query, projectRoot) : null;
+  }
+
+  private async handleSpecializedUsages(args: Record<string, unknown>): Promise<ToolResult> {
+    const query = this.validateString(args.query, 'query');
+    if (typeof query !== 'string') return query;
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    return this.runSpecializedExploreRoute('usages', cg, query, cg.getProjectRoot());
+  }
+
+  private async handleSpecializedModules(args: Record<string, unknown>): Promise<ToolResult> {
+    const query = this.validateString(args.query, 'query');
+    if (typeof query !== 'string') return query;
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    return this.runSpecializedExploreRoute('modules', cg, query, cg.getProjectRoot());
+  }
+
+  private async handleSpecializedNative(args: Record<string, unknown>): Promise<ToolResult> {
+    const query = this.validateString(args.query, 'query');
+    if (typeof query !== 'string') return query;
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    return this.runSpecializedExploreRoute('native', cg, query, cg.getProjectRoot());
   }
 
   /**
@@ -11466,7 +12038,9 @@ export class ToolHandler {
 
   private textResult(text: string): ToolResult {
     return {
-      content: [{ type: 'text', text }],
+      // Single choke point for every tool's text, so no section builder can ship
+      // a stop-searching directive on an output that declares itself partial.
+      content: [{ type: 'text', text: reconcilePartialAnswerNow(text) }],
     };
   }
 

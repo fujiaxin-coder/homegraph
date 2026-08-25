@@ -18,6 +18,8 @@ Will you **explain or edit in-repo code**? → \`homegraph_explore\` **once** wi
 
 Already know **one** exact symbol? Prefer smaller tools: \`homegraph_callers\` / \`homegraph_callees\` / \`homegraph_node\`. Spelling unknown → \`homegraph_search\` last.
 
+For a narrow inventory, call \`homegraph_usages\` (where-used), \`homegraph_modules\` (named module deps/cycles), or \`homegraph_native\` (NAPI exports). Existing clients may keep calling \`homegraph_explore\`: high-confidence shapes route to the same bounded handlers.
+
 **Must explore-first:** how/mechanism wiring, named Type / \`.member\`, in-repo \`@kit\`/\`@ohos\` **usages**, deps/cycles, NAPI / \`.d.ts\` wrap sites, pre-edit orientation.
 
 ArkUI V1↔V2 / state-decorator migration on a named component → \`homegraph_arkui_migrate\` once (not explore stitching).
@@ -63,6 +65,8 @@ export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — per-project (p
 Pass \`projectPath\` to a folder that has \`.homegraph/\`.
 
 **Call first:** explain/edit in-repo code → \`homegraph_explore\` with task keywords (no Grep-first). Named Type / \`Type.member\` / usages / deps / NAPI / \`@kit\` → explore.
+
+Narrow inventories may call \`homegraph_usages\`, \`homegraph_modules\`, or \`homegraph_native\` directly; pass the same \`projectPath\`.
 
 **Skip:** topic file-lists, concept compares, literal hunts, git history, media. No index → Read/Grep/Glob; user runs \`homegraph init\`.
 
