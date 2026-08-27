@@ -89,7 +89,14 @@ describe('parseGraphSourcesMode / resolveGraphSources', () => {
 });
 
 describe('daemon paths isolate non-both sources', () => {
-  const root = path.join(os.tmpdir(), 'homegraph-sources-daemon-root');
+  // Keep the project root short: when the in-project socket path exceeds
+  // POSIX_SOCKET_PATH_LIMIT (100) we skip straight to the tmpdir fallback
+  // (homegraph-<hash>.sock), and the historical `daemon.sock` basename only
+  // appears on the in-project candidate.
+  const root =
+    process.platform === 'win32'
+      ? path.join(os.tmpdir(), 'hg-d')
+      : '/tmp/hg-daemon-src';
 
   it('both keeps historical daemon.pid / daemon.sock names', () => {
     delete process.env[GRAPH_SOURCES_ENV];
