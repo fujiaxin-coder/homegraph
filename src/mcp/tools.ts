@@ -31,6 +31,7 @@ import {
   worktreeMismatchNotice,
   type WorktreeIndexMismatch,
 } from '../sync/worktree';
+import { getUpdateNotice } from '../upgrade/update-check';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
 import {
@@ -11597,6 +11598,11 @@ export class ToolHandler {
         const label = p.indexing ? 'indexing in progress' : 'pending sync';
         lines.push(`- ${p.path} (edited ${ageMs}ms ago, ${label})`);
       }
+    }
+
+    const updateNotice = getUpdateNotice();
+    if (updateNotice) {
+      lines.push('', '**Update available:**', updateNotice);
     }
 
     return this.textResult(lines.join('\n'));
