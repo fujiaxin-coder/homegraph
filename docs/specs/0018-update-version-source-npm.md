@@ -63,7 +63,7 @@ canonical 代码仓在 GitCode（`ProgramAnalysis/homegraph`）；GitHub 镜像�
 ### 3.2 不纳入
 
 - **不**改 `homegraph upgrade` 的安装方式（仍 `npm install -g`）；
-- **不**改 update-check 的 TTL、缓存路径、MCP 展示面逻辑（除非顺带修正 `homegraph_status` 未接 `getUpdateNotice`——见 §6 可选跟进）；
+- **不**改 update-check 的 TTL、缓存路径、MCP 展示面逻辑（`homegraph_status` 接 `getUpdateNotice` 已于 0018 跟进完成）；
 - **不**在 `devecocli update` 内嵌 homegraph 版本检查（属 deveco-cli 集成 Spec，本 Spec 只修 homegraph 自身）；
 - **不**引入 `blockedVersions` 召回门（deveco-cli 特有，homegraph 无 npm 包 metadata 约定）；
 - **不**要求 GitCode / GitHub 镜像仓库改名或发版流程变更。
@@ -156,6 +156,7 @@ could not resolve the latest version from npm. Check your network, or pin a vers
 - [x] `resolveLatestVersion()` 默认通过 npm 取得 latest，返回 `vX.Y.Z`；不再请求 `github.com/homegraph/homegraph`。
 - [x] `homegraph upgrade --check` 在可访问 npm registry 时成功；当前版本低于 npm latest 时提示升级。
 - [x] MCP 启动后 `~/.homegraph/update-check.json` 在 TTL 外会写入 npm 解析的 `latest`；旧版本 server 的 initialize instructions 出现更新提示（需 `HOMEGRAPH_NO_UPDATE_CHECK` 未设置）。
+- [x] `homegraph_status` 在缓存已知新版本时输出 **Update available** 段（调用 `getUpdateNotice()`）。
 - [x] 离线 / mock npm 失败：upgrade 报错；update-check 不抛、不刷屏，backoff 生效。
 - [x] Windows npm spawn 路径仍经 `npmInvocation` 或等价逻辑（若有独立 npm view 封装则复用）。
 - [x] `npm test` 通过；新增/更新测试覆盖 npm 解析分支。
@@ -167,7 +168,6 @@ could not resolve the latest version from npm. Check your network, or pin a vers
 
 | 项 | 说明 |
 | --- | --- |
-| `homegraph_status` 展示 update notice | CHANGELOG #1243 声称含 status，但 `handleStatus()` 未调用 `getUpdateNotice()`；可开 0019 或在本 Spec PR 顺带一行 |
 | deveco-cli 联动 | `devecocli graph status` 读 npm 比较 homegraph 版本；依赖本 Spec 修复后的语义 |
 | dist-tag 文档 | 若团队使用 `next` tag 发 beta，在 README 说明 `npm_config_tag=next` |
 
