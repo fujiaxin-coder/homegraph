@@ -10,7 +10,9 @@ import {
   isUpdateAvailable,
   normalizeVersion,
   stripV,
-  parseLatestTagFromLocation,
+  getPublishTag,
+  resolveLatestVersion,
+  npmInvocation,
   reindexAdvisory,
   runUpgrade,
   verifyResolvedVersion,
@@ -194,17 +196,67 @@ describe('version helpers', () => {
     expect(stripV('0.9.9')).toBe('0.9.9');
   });
 
-  it('parseLatestTagFromLocation extracts the tag from a releases redirect', () => {
-    expect(parseLatestTagFromLocation('https://github.com/homegraph/homegraph/releases/tag/v0.9.9')).toBe('v0.9.9');
-    expect(parseLatestTagFromLocation('https://github.com/o/r/releases/tag/v1.2.3?foo=bar')).toBe('v1.2.3');
-    expect(parseLatestTagFromLocation(undefined)).toBeNull();
-    expect(parseLatestTagFromLocation('https://github.com/o/r/releases')).toBeNull();
-  });
-
   it('reindexAdvisory mentions the refresh commands', () => {
     const a = reindexAdvisory();
     expect(a).toContain('homegraph sync');
     expect(a).toContain('homegraph index -f');
+  });
+});
+
+describe('resolveLatestVersion (npm registry)', () => {
+  it('getPublishTag defaults to latest and respects npm_config_tag', () => {
+    expect(getPublishTag({} as NodeJS.ProcessEnv)).toBe('latest');
+    expect(getPublishTag({ npm_config_tag: 'next' } as NodeJS.ProcessEnv)).toBe('next');
+    expect(getPublishTag({ npm_config_tag: '  ' } as NodeJS.ProcessEnv)).toBe('latest');
+  });
+
+  it('resolves and normalizes a version from npm view output', async () => {
+    const version = await resolveLatestVersion({
+      runNpmView: () => ({ code: 0, stdout: '1.5.4\n' }),
+    });
+    expect(version).toBe('v1.5.4');
+  });
+
+  it('uses the configured dist-tag in the npm view spec', async () => {
+    let seenSpec = '';
+    await resolveLatestVersion({
+      tag: 'beta',
+      runNpmView: (spec) => {
+        seenSpec = spec;
+        return { code: 0, stdout: '2.0.0-beta.1' };
+      },
+    });
+    expect(seenSpec).toBe(`${NPM_PACKAGE}@beta`);
+  });
+
+  it('takes the last stdout line when npm prints warnings above the version', async () => {
+    const version = await resolveLatestVersion({
+      runNpmView: () => ({ code: 0, stdout: 'npm warn old config\n1.6.0\n' }),
+    });
+    expect(version).toBe('v1.6.0');
+  });
+
+  it('throws when npm exits non-zero or returns non-semver', async () => {
+    await expect(
+      resolveLatestVersion({ runNpmView: () => ({ code: 1, stdout: '' }) }),
+    ).rejects.toThrow(/from npm/i);
+    await expect(
+      resolveLatestVersion({ runNpmView: () => ({ code: 0, stdout: 'not-a-version' }) }),
+    ).rejects.toThrow(/from npm/i);
+    await expect(
+      resolveLatestVersion({ runNpmView: () => null }),
+    ).rejects.toThrow(/from npm/i);
+  });
+
+  it('routes npm view through cmd.exe on Windows', () => {
+    expect(npmInvocation('win32', ['view', 'homegraph@latest', 'version'])).toEqual({
+      cmd: 'cmd.exe',
+      args: ['/d', '/s', '/c', 'npm view homegraph@latest version'],
+    });
+    expect(npmInvocation('linux', ['view', 'homegraph@latest', 'version'])).toEqual({
+      cmd: 'npm',
+      args: ['view', 'homegraph@latest', 'version'],
+    });
   });
 });
 

@@ -5,7 +5,7 @@
  * server (and the prompt hook alongside it) silently stays on whatever version
  * was last manually upgraded — users discover the drift only when something
  * breaks. This module gives the running server *visibility* without changing
- * behavior: a non-blocking check against the latest GitHub release, surfaced
+ * behavior: a non-blocking check against the latest npm registry version, surfaced
  * as a one-line notice (stderr log, MCP initialize instructions, and
  * `homegraph_status`) telling the user to run `homegraph upgrade`.
  *
@@ -20,9 +20,9 @@
  *     (broad don't-phone-home convention — set by e.g. the Pro container's
  *     data plane) suppresses the network call AND the notice entirely.
  *
- * The check itself reuses `resolveLatestVersion` — the GitHub release-redirect
- * trick with the API fallback — so version resolution can't drift from what
- * `homegraph upgrade` installs. Results are cached in `~/.homegraph/` (the
+ * The check itself reuses `resolveLatestVersion` — `npm view homegraph@<tag>
+ * version` — so version resolution can't drift from what `homegraph upgrade`
+ * installs. Results are cached in `~/.homegraph/` (the
  * same global state dir the daemon registry uses) with a 24h TTL
  * on success and a 1h backoff after failure, shared across every proxy /
  * daemon process on the machine.
@@ -73,7 +73,8 @@ function resolveDeps(deps: UpdateCheckDeps = {}): ResolvedDeps {
     env: deps.env ?? process.env,
     now: deps.now ?? Date.now,
     resolveLatest:
-      deps.resolveLatest ?? (() => resolveLatestVersion(undefined, UPDATE_CHECK_NETWORK_TIMEOUT_MS)),
+      deps.resolveLatest ??
+      (() => resolveLatestVersion({ timeoutMs: UPDATE_CHECK_NETWORK_TIMEOUT_MS })),
     currentVersion: deps.currentVersion ?? HomeGraphPackageVersion,
   };
 }

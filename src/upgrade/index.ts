@@ -18,10 +18,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as https from 'https';
 import { spawnSync } from 'child_process';
 
-export const REPO = 'homegraph/homegraph';
 export const NPM_PACKAGE = 'homegraph';
 
 // ---------------------------------------------------------------------------
@@ -187,71 +185,86 @@ export function stripV(v: string): string {
   return t.startsWith('v') ? t.slice(1) : t;
 }
 
-/**
- * Parse the release tag out of the `Location` header GitHub returns for
- * `/releases/latest` → `…/releases/tag/v0.9.9`. Pure so it's unit-tested.
- */
-export function parseLatestTagFromLocation(location: string | undefined): string | null {
-  if (!location) return null;
-  const m = /\/releases\/tag\/([^/?#]+)/.exec(location);
-  return m ? decodeURIComponent(m[1]!) : null;
+// ---------------------------------------------------------------------------
+// Latest-version resolution (npm registry)
+// ---------------------------------------------------------------------------
+
+/** npm dist-tag for latest-version lookup; defaults to `latest`. */
+export function getPublishTag(env: NodeJS.ProcessEnv = process.env): string {
+  const tag = env.npm_config_tag;
+  return tag && tag.trim() ? tag.trim() : 'latest';
 }
 
-// ---------------------------------------------------------------------------
-// Latest-version resolution (network)
-// ---------------------------------------------------------------------------
+export interface NpmViewResult {
+  code: number;
+  stdout: string;
+}
 
-function httpsGet(
-  url: string,
-  headers: Record<string, string>,
-  timeoutMs: number
-): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers }, (res) => {
-      let body = '';
-      res.on('data', (c) => (body += c));
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
-    });
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error(`request timed out after ${timeoutMs}ms`)));
+/** Injectable npm `view` runner — production uses {@link defaultNpmView}. */
+export type NpmViewRunner = (
+  spec: string,
+  timeoutMs: number,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+) => NpmViewResult | null;
+
+/** Run `npm view <spec> version` and capture stdout (nothing reaches the terminal). */
+export function defaultNpmView(
+  spec: string,
+  timeoutMs: number,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): NpmViewResult | null {
+  const inv = npmInvocation(platform, ['view', spec, 'version']);
+  const r = spawnSync(inv.cmd, inv.args, {
+    encoding: 'utf-8',
+    env,
+    windowsHide: true,
+    timeout: timeoutMs,
   });
+  if (r.error) return null;
+  return { code: r.status ?? -1, stdout: r.stdout ?? '' };
 }
 
+export interface ResolveLatestOptions {
+  timeoutMs?: number;
+  packageName?: string;
+  tag?: string;
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  runNpmView?: NpmViewRunner;
+}
+
+const RESOLVE_LATEST_ERROR =
+  'could not resolve the latest version from npm. Check your network, or pin a version: `homegraph upgrade <version>`.';
+
 /**
- * Resolve the latest release tag (e.g. `v0.9.9`).
+ * Resolve the latest installable version (e.g. `v1.5.4`) from the npm registry.
  *
- * Primary: read the redirect `Location` from `github.com/<repo>/releases/latest`
- * — the unauthenticated GitHub API is rate-limited to 60 req/h/IP and 403s on
- * shared/cloud hosts (issue #325); the redirect has no such limit. Fall back
- * to the API only if the redirect can't be read.
+ * Uses `npm view homegraph@<dist-tag> version` — the same source `homegraph
+ * upgrade` installs from — so version resolution can't drift from what npm
+ * would actually install. Custom registry mirrors follow the user's npm config.
  */
-export async function resolveLatestVersion(repo = REPO, timeoutMs = 12000): Promise<string> {
-  try {
-    const res = await httpsGet(
-      `https://github.com/${repo}/releases/latest`,
-      { 'User-Agent': 'homegraph-upgrade' },
-      timeoutMs
-    );
-    const loc = res.headers.location;
-    const tag = parseLatestTagFromLocation(Array.isArray(loc) ? loc[0] : loc);
-    if (tag) return normalizeVersion(tag);
-  } catch {
-    /* fall through to API */
+export async function resolveLatestVersion(options: ResolveLatestOptions = {}): Promise<string> {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const timeoutMs = options.timeoutMs ?? 12_000;
+  const packageName = options.packageName ?? NPM_PACKAGE;
+  const tag = options.tag ?? getPublishTag(env);
+  const spec = `${packageName}@${tag}`;
+  const runNpmView = options.runNpmView ?? defaultNpmView;
+
+  const result = runNpmView(spec, timeoutMs, platform, env);
+  if (!result || result.code !== 0) {
+    throw new Error(RESOLVE_LATEST_ERROR);
   }
-  try {
-    const res = await httpsGet(
-      `https://api.github.com/repos/${repo}/releases/latest`,
-      { 'User-Agent': 'homegraph-upgrade', Accept: 'application/vnd.github+json' },
-      timeoutMs
-    );
-    const tag = JSON.parse(res.body)?.tag_name;
-    if (typeof tag === 'string' && tag) return normalizeVersion(tag);
-  } catch {
-    /* fall through to error */
+  // Take the last non-empty line so a stray npm warning above the version
+  // can't spoil the parse.
+  const version = result.stdout.trim().split(/\r?\n/).pop()?.trim() ?? '';
+  if (!parseSemver(version)) {
+    throw new Error(RESOLVE_LATEST_ERROR);
   }
-  throw new Error(
-    'could not resolve the latest version from GitHub. Check your network, or pin a version: `homegraph upgrade <version>`.'
-  );
+  return normalizeVersion(version);
 }
 
 // ---------------------------------------------------------------------------
