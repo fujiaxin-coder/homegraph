@@ -84,9 +84,9 @@ describe('resolveBusyTimeoutMs', () => {
     else process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS = prev;
   });
 
-  it('defaults to 25s when unset', () => {
+  it('defaults to 15s when unset', () => {
     delete process.env.CODEGRAPH_QUERY_BUSY_TIMEOUT_MS;
-    expect(resolveBusyTimeoutMs()).toBe(25_000);
+    expect(resolveBusyTimeoutMs()).toBe(15_000);
   });
 
   it('clamps 60000 so soft-timeout cannot race a ~60s MCP client hard timeout', () => {

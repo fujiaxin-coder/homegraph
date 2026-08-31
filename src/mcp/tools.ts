@@ -5503,7 +5503,7 @@ export class ToolHandler {
   private tryFastInventoryExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
     if (!shouldTryFastInventoryExplore(query)) return null;
 
-    // Multi-Type dependency asks: inventory-only early exit (avoids fat compact / 25s busy).
+    // Multi-Type dependency asks: inventory-only early exit (avoids fat compact / busy timeout).
     if (queryAsMultiTypeDependencySurvey(query)) {
       const multi = this.buildMultiTypeDependencySection(cg, query);
       if (multi.section) {
