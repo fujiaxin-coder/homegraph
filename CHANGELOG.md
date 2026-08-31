@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- ArkTS / ArkUI indexing stores the component `.id('…')` from ViewTree onto the matching custom `@Component` node as `arkuiId` (DB column `arkui_id`) — distinct from the graph primary key (Spec 0019).
+
 
 ## [1.5.5] - 2026-08-31
 

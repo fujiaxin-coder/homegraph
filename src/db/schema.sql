@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     decorators TEXT, -- JSON array
     type_parameters TEXT, -- JSON array
     return_type TEXT, -- normalized return/result type name (e.g. C++ method return, for receiver-type inference)
+    arkui_id TEXT, -- ArkUI .id('…') on custom component usages (Spec 0019); not nodes.id
     updated_at INTEGER NOT NULL
 );
 
@@ -106,6 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_nodes_file_path ON nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_nodes_language ON nodes(language);
 CREATE INDEX IF NOT EXISTS idx_nodes_file_line ON nodes(file_path, start_line);
 CREATE INDEX IF NOT EXISTS idx_nodes_lower_name ON nodes(lower(name));
+CREATE INDEX IF NOT EXISTS idx_nodes_arkui_id ON nodes(arkui_id) WHERE arkui_id IS NOT NULL;
 
 -- Full-text search index on node names, docstrings, and signatures
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(

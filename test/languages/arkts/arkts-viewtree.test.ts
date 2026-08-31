@@ -50,6 +50,7 @@ struct SubComponent {
 struct CommonTest {
   build() {
     SubComponent()
+      .id('sub_comp_id')
       .width(100)
       .height(200)
   }
@@ -101,6 +102,18 @@ describe('languages/arkts viewtree', () => {
     expect(
       edgeBetween(result.edges, 'build', 'SubComponent', result.nodes, 'child-component')
     ).toBeDefined();
+  });
+
+  it('stores ArkUI .id() on the custom component node (Spec 0019)', () => {
+    const root = makeArktsProject(NESTED_COMPONENT_FIXTURE);
+    bindExtractionContext(root, mockArktsQueries() as never);
+
+    const result = new ArkTSExtractor('CommonTest.ets', '').extract();
+    expect(result.errors.filter((e) => e.severity === 'error')).toHaveLength(0);
+
+    const sub = nodeByName(result.nodes, 'SubComponent', 'component');
+    expect(sub).toBeDefined();
+    expect(sub!.arkuiId).toBe('sub_comp_id');
   });
 
   it('links build to onClick handlers and state fields to build', () => {
