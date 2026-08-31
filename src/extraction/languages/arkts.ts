@@ -56,6 +56,7 @@ import {
   CALLBACK_METHOD_NAME,
   ClassSignature,
   MethodSignature,
+  Constant,
 } from 'arkanalyzer';
 import type { AliasType, Local, Stmt, ViewTreeNode } from 'arkanalyzer';
 import {
@@ -2076,6 +2077,40 @@ function viewTreeLineFromStmt(stmt: Stmt | undefined): number {
   return stmt?.getOriginFullPosition()?.getFirstLine() ?? 1;
 }
 
+/**
+ * ArkUI `.id('…')` from ViewTree attributes (string Constant only).
+ * Not the HomeGraph node primary key.
+ */
+export function viewTreeArkuiId(node: ViewTreeNode): string | undefined {
+  try {
+    const entry = node.attributes?.get('id');
+    if (!entry) return undefined;
+    const values = entry[1];
+    if (!values?.length) return undefined;
+    for (const v of values) {
+      if (v == null) continue;
+      const isConstant =
+        v instanceof Constant ||
+        typeof (v as { getValue?: unknown }).getValue === 'function';
+      if (!isConstant) continue;
+      const raw = String((v as { getValue: () => string }).getValue()).trim();
+      if (!raw) continue;
+      const unquoted = raw.replace(/^['"]|['"]$/g, '');
+      if (unquoted) return unquoted;
+    }
+  } catch {
+    // attribute map may throw on malformed IR
+  }
+  return undefined;
+}
+
+/** First non-empty `arkuiId` wins when the same component is used with multiple ids. */
+function assignArkuiId(result: ExtractionResult, nodeId: string, arkuiId: string): void {
+  const n = result.nodes.find((x) => x.id === nodeId);
+  if (!n || n.arkuiId) return;
+  n.arkuiId = arkuiId;
+}
+
 function isViewTreeClassSignature(sig: ClassSignature | MethodSignature): sig is ClassSignature {
   // Prefer instanceof; duck-type fallback if duplicate arkanalyzer copies break instanceof.
   if (sig instanceof ClassSignature) return true;
@@ -2471,6 +2506,8 @@ function indexViewTreeForClass(
               // keep build() line
             }
             link(buildId, childId, 'references', 'child-component', line);
+            const arkuiId = viewTreeArkuiId(node);
+            if (arkuiId) assignArkuiId(result, childId, arkuiId);
           }
         } else {
           // MethodSignature: builder stub (sig only) or live ArkMethod.

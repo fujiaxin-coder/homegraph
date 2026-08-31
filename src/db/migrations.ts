@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 /**
  * Migration definition
@@ -148,6 +148,20 @@ const migrations: Migration[] = [
       }
       db.exec(
         'CREATE INDEX IF NOT EXISTS idx_files_generated ON files(path) WHERE generated = 1'
+      );
+    },
+  },
+  {
+    version: 10,
+    description:
+      "Add nodes.arkui_id — ArkUI .id('…') from ViewTree for custom components (Spec 0019)",
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'arkui_id')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN arkui_id TEXT');
+      }
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_nodes_arkui_id ON nodes(arkui_id) WHERE arkui_id IS NOT NULL'
       );
     },
   },
