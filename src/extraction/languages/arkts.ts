@@ -1689,12 +1689,17 @@ function cleanArkCommentContent(raw: string): string {
 /**
  * Declaration-leading docstring from ArkAnalyzer metadata (Spec 0020).
  * Prefer leading comments; fall back to JSDoc description.
+ *
+ * Accepts `object` (not only models typed with `getMetadata`) so Local / AliasType
+ * and other ArkAnalyzer types without that method in their .d.ts still type-check;
+ * runtime skips when metadata is absent.
  */
-export function docstringFromArkModel(model: ArkMetaModel): string | undefined {
+export function docstringFromArkModel(model: object): string | undefined {
   try {
-    if (typeof model.getMetadata !== 'function') return undefined;
+    const meta = model as ArkMetaModel;
+    if (typeof meta.getMetadata !== 'function') return undefined;
 
-    const leading = model.getMetadata(ARK_META_LEADING_COMMENTS) as
+    const leading = meta.getMetadata(ARK_META_LEADING_COMMENTS) as
       | { getComments?: () => Array<{ content?: string }> }
       | undefined;
     if (leading && typeof leading.getComments === 'function') {
@@ -1705,7 +1710,7 @@ export function docstringFromArkModel(model: ArkMetaModel): string | undefined {
       if (parts.length > 0) return parts.join('\n').trim();
     }
 
-    const jsdoc = model.getMetadata(ARK_META_JSDOC);
+    const jsdoc = meta.getMetadata(ARK_META_JSDOC);
     const docs: string[] = [];
     const pushDesc = (j: unknown) => {
       if (j && typeof (j as { getDescription?: unknown }).getDescription === 'function') {
@@ -1725,7 +1730,7 @@ export function docstringFromArkModel(model: ArkMetaModel): string | undefined {
   return undefined;
 }
 
-function docstringExtras(model: ArkMetaModel): Partial<Node> {
+function docstringExtras(model: object): Partial<Node> {
   const docstring = docstringFromArkModel(model);
   return docstring ? { docstring } : {};
 }
