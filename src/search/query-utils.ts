@@ -274,7 +274,30 @@ export type HomeGraphDeferKind =
   | 'sdk-catalog'
   | 'greenfield'
   | 'vcs-history'
-  | 'media-assets';
+  | 'media-assets'
+  | 'path-pinned-edit';
+
+/**
+ * Single-file edit with an explicit `path/Foo.ext` (or `Foo.ext`) in the query —
+ * Read that file is sufficient; explore adds reasoning tax without locate value.
+ */
+export function queryAsPathPinnedEdit(query: string): boolean {
+  if (queryAsMechanismSurvey(query)) return false;
+  if (queryAsCrossModuleFlowSurvey(query)) return false;
+  if (shouldBuildCallerInventory(query)) return false;
+  if (queryNamesMultipleExploreAnchors(query)) return false;
+  const files = extractFileBasenamesFromQuery(query);
+  if (files.length !== 1) return false;
+  const stem = files[0]!;
+  const ext = QUERY_SOURCE_FILE_EXT;
+  const hasExplicitFile =
+    new RegExp(`[\\\\/]${stem}\\.(?:${ext})\\b`, 'i').test(query)
+    || new RegExp(`\\b${stem}\\.(?:${ext})\\b`, 'i').test(query);
+  if (!hasExplicitFile) return false;
+  if (queryAsInterpretationSurvey(query)) return false;
+  if (queryAsCodeChangeOrientation(query)) return true;
+  return /移除|删除|添加|增加|修改|调整|清理|去掉|refactor|remove|delete|add|modify|update|fix/i.test(query);
+}
 
 /**
  * Agent is about to change an existing codebase (feature / fix / refactor).
@@ -365,6 +388,9 @@ export function queryShouldDeferToBuiltinTools(query: string): HomeGraphDeferKin
   // Layout chains (`.width('100%')`) can look like member access — still Skip.
   if (queryLooksLikeLiteralOrCopyHunt(q)) return 'literal-hunt';
 
+  // 5b) Path-pinned single-file edits — Read the named file; explore is noise.
+  if (queryAsPathPinnedEdit(q)) return 'path-pinned-edit';
+
   // 6) Topic → file list with no Type/file anchor → Glob/Grep.
   if (
     !hasType
@@ -411,6 +437,8 @@ export function homegraphDeferGuidance(kind: HomeGraphDeferKind, query: string):
       'Git/commit/blame/diff history is not in the symbol graph — use git / IDE history.',
     'media-assets':
       'Media/binary asset inventories (.png/.mp4/fonts/…) need Glob, not the symbol graph.',
+    'path-pinned-edit':
+      'Task already names one source file (`…/Foo.ets`) — **Read that file** and edit. HomeGraph explore on path-pinned edits adds context tax without locate value.',
   };
   return [
     'Skip HomeGraph for this question shape — do **not** retry any `homegraph_*` tool for it.',
@@ -562,6 +590,9 @@ export function queryAsksKitInstallDeps(query: string): boolean {
 /** Shared-object / binary suffixes — not Type.member (libfoo.so → member "so"). */
 const FILE_EXT_MEMBER_NOISE = new Set([
   'so', 'dll', 'dylib', 'a', 'lib', 'exe', 'apk', 'hap', 'bin', 'wasm', 'o', 'obj',
+  // Source/config extensions — `Foo.ets` is a file anchor, not Foo.member.
+  'ets', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'json', 'json5', 'yaml', 'yml', 'toml',
+  'hpp', 'h', 'cpp', 'c', 'cmake', 'txt', 'md',
 ]);
 
 export function extractMemberAccessFromQuery(query: string): QueryMemberAccess[] {
@@ -2034,16 +2065,35 @@ export function shouldLimitToQueryNamedFile(
   hasFlowPath: boolean,
   multiAnchorQuery: boolean,
 ): boolean {
-  if (hasFlowPath || multiAnchorQuery) return false;
-  return extractFileBasenamesFromQuery(query).length === 1;
+  if (hasFlowPath) return false;
+  const files = extractFileBasenamesFromQuery(query);
+  if (files.length !== 1) return false;
+  if (!multiAnchorQuery) return true;
+  // One explicit `…/Foo.ets` plus only its own stem-as-Type / directory path
+  // scaffolding is still file-scoped — don't expand digests to siblings.
+  const stem = files[0]!.toLowerCase();
+  const extraTypes = extractTypeNamesFromQuery(query).filter((t) => t.toLowerCase() !== stem);
+  if (extraTypes.length > 0) return false;
+  if (extractMemberAccessFromQuery(query).length > 0) return false;
+  return true;
 }
 
 /** Multiple named anchors in one query → trace/connect intent, not flat inventory. */
 export function queryNamesMultipleExploreAnchors(query: string): boolean {
-  const typeCount = extractTypeNamesFromQuery(query).length;
+  const files = extractFileBasenamesFromQuery(query);
+  const fileStems = new Set(files.map((f) => f.toLowerCase()));
+  // Basename-as-Type is the same anchor as the file — don't double-count.
+  const typeCount = extractTypeNamesFromQuery(query).filter((t) => !fileStems.has(t.toLowerCase())).length;
   const memberCount = extractMemberAccessFromQuery(query).length;
-  const fileCount = extractFileBasenamesFromQuery(query).length;
-  const pathCount = extractPathSegmentsFromQuery(query).length;
+  const fileCount = files.length;
+  let pathCount = extractPathSegmentsFromQuery(query).length;
+  // Directory prefixes of a named `…/Foo.ext` are scaffolding, not a 2nd anchor.
+  if (fileCount === 1 && pathCount > 0) {
+    const ext = QUERY_SOURCE_FILE_EXT;
+    if (new RegExp(`[\\\\/]${files[0]}\\.(?:${ext})\\b`, 'i').test(query)) {
+      pathCount = 0;
+    }
+  }
   if (typeCount >= 2 || memberCount >= 2) return true;
   return typeCount + memberCount + fileCount + pathCount >= 2;
 }

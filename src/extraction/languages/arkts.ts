@@ -3530,7 +3530,8 @@ class ArkTSAdapter {
     const localNode = makeNode(relativePath, language, kind, name, qn, line, endLine, col, {
       signature: local.getType()?.toString(),
       ...modelModifiersToNodeExtras(local),
-      ...docstringExtras(local),
+      // Local's public TS surface doesn't declare getMetadata; runtime may still carry it.
+      ...docstringExtras(local as unknown as ArkMetaModel),
     });
     this.addNode(result, localNode);
     result.edges.push(arkEdge(parentId, localNode.id, 'contains'));
@@ -3557,7 +3558,8 @@ class ArkTSAdapter {
       const aliasNode = makeNode(relativePath, language, 'type_alias', name, qn, line, endLine, col, {
         signature: aliasType.getOriginalType()?.toString(),
         ...modelModifiersToNodeExtras(aliasType),
-        ...docstringExtras(aliasType),
+        // AliasType's public TS surface doesn't declare getMetadata; runtime may still carry it.
+        ...docstringExtras(aliasType as unknown as ArkMetaModel),
       });
       this.addNode(result, aliasNode);
       result.edges.push(arkEdge(parentId, aliasNode.id, 'contains'));
@@ -3754,7 +3756,7 @@ class ArkTSAdapter {
         const aliasNode = makeNode(relativePath, language, 'type_alias', name, qn, line, endLine, col, {
           signature: aliasType.getOriginalType()?.toString(),
           ...modelModifiersToNodeExtras(aliasType),
-          ...docstringExtras(aliasType),
+          ...docstringExtras(aliasType as unknown as ArkMetaModel),
         });
         this.addNode(result, aliasNode);
         result.edges.push(arkEdge(parentId, aliasNode.id, 'contains'));

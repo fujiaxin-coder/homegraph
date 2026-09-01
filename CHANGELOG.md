@@ -9,6 +9,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- MCP `initialize` instructions: **single-file path-pinned edits → Read + edit, skip `homegraph_*`**; explore only when locate/cross-file is needed.
+- Explore **defers** (`Skip HomeGraph`, kind `path-pinned-edit`) when the query names one `…/File.ext` and is a code-change shape — avoids explore context tax on 082-style tasks.
+- Path scaffolding (`features/.../Foo.ets` + basename-as-Type) no longer counts as multi-anchor; `.ets`/`.ts`/… are not parsed as member access.
+
 ### New Features
 
 - ArkTS / ArkUI indexing stores the component `.id('…')` from ViewTree onto the matching custom `@Component` node as `arkuiId` (DB column `arkui_id`) — distinct from the graph primary key (Spec 0019).
