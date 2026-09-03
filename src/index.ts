@@ -65,6 +65,12 @@ import {
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
+import {
+  buildProjectMapScan,
+  parseBuildPhase,
+  type BuildPhase,
+  type BuiltProjectMap,
+} from './project-map';
 import { EXTRACTION_VERSION } from './extraction/extraction-version';
 import { getHomeGraphDir } from './directory';
 import { deriveProjectNameTokens } from './search/query-utils';
@@ -102,6 +108,12 @@ export {
 } from './directory';
 export { IndexProgress, IndexResult, SyncResult } from './extraction';
 export { detectLanguage, isLanguageSupported, isGrammarLoaded, getSupportedLanguages, initGrammars, loadGrammarsForLanguages, loadAllGrammars } from './extraction';
+export {
+  buildProjectMapScan,
+  parseBuildPhase,
+  type BuildPhase,
+  type BuiltProjectMap,
+} from './project-map';
 export { ResolutionResult } from './resolution';
 export {
   HomeGraphError,
@@ -1685,6 +1697,104 @@ export class HomeGraph {
    */
   findDeadCode(kinds?: Node['kind'][]): Node[] {
     return this.graphManager.findDeadCode(kinds);
+  }
+
+  // ===========================================================================
+  // Fast project map (homegraph_project)
+  // ===========================================================================
+
+  /**
+   * Scan module boundaries + source files and persist to project_modules /
+   * project_module_files. Seconds-scale; does not touch nodes/edges.
+   */
+  buildProjectMap(): BuiltProjectMap {
+    const built = buildProjectMapScan(this.projectRoot);
+    this.queries.replaceProjectMap(
+      built.modules.map((m) => ({
+        id: m.id,
+        name: m.name,
+        rootPath: m.rootPath,
+        kind: m.kind,
+        fileCount: m.fileCount,
+      })),
+      built.files
+    );
+    try {
+      this.queries.setMetadata('fast_built_at', String(Date.now()));
+      this.queries.setMetadata('fast_build_ms', String(built.durationMs));
+    } catch {
+      /* metadata advisory */
+    }
+    return built;
+  }
+
+  setBuildPhase(phase: BuildPhase): void {
+    try {
+      this.queries.setMetadata('build_phase', phase);
+      this.queries.setMetadata('build_phase_updated_at', String(Date.now()));
+    } catch {
+      /* metadata advisory */
+    }
+  }
+
+  /**
+   * Effective build phase. Legacy indexes without metadata count as `full`
+   * when they already have symbol nodes.
+   */
+  getBuildPhase(): BuildPhase {
+    const parsed = parseBuildPhase(this.queries.getMetadata('build_phase'));
+    if (parsed) return parsed;
+    try {
+      if (this.queries.getNodeAndEdgeCount().nodes > 0) return 'full';
+      if (this.queries.getProjectModuleCount() > 0) return 'fast';
+    } catch {
+      /* ignore */
+    }
+    return 'none';
+  }
+
+  getProjectMap(options: { module?: string; includeFiles?: boolean } = {}): {
+    phase: BuildPhase;
+    modules: Array<{
+      id: string;
+      name: string;
+      rootPath: string;
+      kind: string;
+      fileCount: number;
+      files?: Array<{ path: string; language: string }>;
+    }>;
+    fileCount: number;
+  } {
+    const includeFiles = options.includeFiles !== false;
+    let modules = this.queries.getProjectModules();
+    if (options.module) {
+      const q = options.module.toLowerCase();
+      modules = modules.filter(
+        (m) =>
+          m.name.toLowerCase().includes(q) ||
+          m.rootPath.toLowerCase().includes(q) ||
+          m.id.toLowerCase() === q
+      );
+    }
+    const fileCount = modules.reduce((n, m) => n + m.fileCount, 0);
+    if (!includeFiles) {
+      return { phase: this.getBuildPhase(), modules, fileCount };
+    }
+    const allFiles = this.queries.getProjectModuleFiles();
+    const byMod = new Map<string, Array<{ path: string; language: string }>>();
+    for (const f of allFiles) {
+      let list = byMod.get(f.moduleId);
+      if (!list) {
+        list = [];
+        byMod.set(f.moduleId, list);
+      }
+      list.push({ path: f.path, language: f.language });
+    }
+    return {
+      phase: this.getBuildPhase(),
+      modules: modules.map((m) => ({ ...m, files: byMod.get(m.id) ?? [] })),
+      fileCount,
+    };
   }
 
   /**

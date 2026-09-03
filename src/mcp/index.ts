@@ -157,9 +157,24 @@ function spawnDetachedDaemon(root: string): void {
     const env: NodeJS.ProcessEnv = { ...process.env, [DAEMON_INTERNAL_ENV]: '1' };
     delete env[HOST_PPID_ENV];
     const sources = resolveGraphSources();
+    const args = [
+      ...process.execArgv,
+      scriptPath,
+      'serve',
+      'mcp',
+      '--path',
+      root,
+      '--sources',
+      sources,
+    ];
+    // Propagate product-host auto-init so the detached daemon also creates
+    // .homegraph/ when the workspace was empty at first connect.
+    if ((process.env.HOMEGRAPH_AUTO_INIT ?? '').trim()) {
+      args.push('--auto-init');
+    }
     const child = spawn(
       process.execPath,
-      [...process.execArgv, scriptPath, 'serve', 'mcp', '--path', root, '--sources', sources],
+      args,
       {
         detached: true,
         stdio,

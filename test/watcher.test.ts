@@ -428,6 +428,26 @@ describe('FileWatcher', () => {
 
       watcher.stop();
     });
+
+    it('fixedWindow: first event arms timer; later events do not extend it', async () => {
+      const syncFn = vi.fn().mockResolvedValue({ filesChanged: 1, durationMs: 10 });
+      const watcher = newWatcher(syncFn, { debounceMs: 400, fixedWindow: true });
+
+      watcher.start();
+      await watcher.waitUntilReady();
+
+      __emitWatchEventForTests(testDir, 'src/a.ts');
+      // Halfway through the fixed window — must NOT reset the deadline.
+      await new Promise((r) => setTimeout(r, 200));
+      __emitWatchEventForTests(testDir, 'src/b.ts');
+
+      // Trailing debounce would fire ~400ms after b (~600ms from start).
+      // Fixed window must fire ~400ms after a (~200ms after this point).
+      await new Promise((r) => setTimeout(r, 250));
+      expect(syncFn.mock.calls.length).toBe(1);
+
+      watcher.stop();
+    });
   });
 
   describe('filtering', () => {

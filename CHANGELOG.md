@@ -11,8 +11,14 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- Product-host indexing (Spec 0021): `--auto-init` / `HOMEGRAPH_AUTO_INIT` creates `.homegraph/` when missing, builds a seconds-scale **project map** (modules → files in `project_modules` / `project_module_files`, schema v11), exposes read tool `homegraph_project`, then runs the full symbol index in a **detached** `homegraph index` child so the MCP stdio server stays responsive on large repos. `build_phase` metadata (`fast` / `indexing` / `full`) gates deep tools with success-shaped guidance while symbols are still building; opening an index heals a stuck phase after `index_state` completes.
+- Watch coalesce for product hosts: `HOMEGRAPH_WATCH_FIXED_WINDOW_MS` arms a fixed window on the **first** change (later edits in the window do not extend it), then incremental sync — e.g. DevEco sets `300000` (5 minutes).
 - ArkTS / ArkUI indexing stores the component `.id('…')` from ViewTree onto the matching custom `@Component` node as `arkuiId` (DB column `arkui_id`) — distinct from the graph primary key (Spec 0019).
 - ArkTS indexing fills `nodes.docstring` from ArkAnalyzer leading comments / JSDoc (Scene `enableLeadingComments` + `enableJSDoc`), so declaration docs join `nodes_fts` like other languages (Spec 0020).
+
+### Docs
+
+- `DEVELOPMENT.md` documents the **code-first Spec closing** order (§1.4.1): write Spec → verify code → check acceptance → CHANGELOG `[Unreleased]` → commit with `Spec:` footer.
 
 
 ## [1.5.5] - 2026-08-31
