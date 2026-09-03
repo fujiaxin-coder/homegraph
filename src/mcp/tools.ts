@@ -1152,6 +1152,28 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
+    name: 'homegraph_project',
+    description:
+      'Shallow project map: modules + files per module (no symbols/call edges). ' +
+      'PRIMARY for engineering overview while the full index is still building; also useful after full index. ' +
+      'Optional `module` filters by name/path; `includeFiles` defaults true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        module: {
+          type: 'string',
+          description: 'Optional module name or root path substring to filter.',
+        },
+        includeFiles: {
+          type: 'boolean',
+          description: 'Include per-module file lists (default true). Set false for module list only.',
+        },
+        projectPath: projectPathProperty,
+      },
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
     name: 'homegraph_arkui_migrate',
     description:
       'ArkUI migrate / state-semantics snapshot in ONE call (components, state decorators + args, ' +
@@ -1683,6 +1705,7 @@ export class ToolHandler {
         'homegraph_search',
         'homegraph_node',
         'homegraph_diff_impact',
+        'homegraph_project',
       ]);
       if (stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
         visible = visible.filter(t => TINY_REPO_CORE_TOOLS.has(t.name));
@@ -2218,6 +2241,18 @@ export class ToolHandler {
         return await this.handleStatus(args);
       }
 
+      // While auto-init is still on the fast/indexing phases (no symbols yet),
+      // deep tools return guidance so the agent uses homegraph_project instead
+      // of abandoning HomeGraph after empty explore results.
+      if (toolName !== 'homegraph_project') {
+        try {
+          const gated = this.maybeDeepToolPhaseGate(this.getHomeGraph(projectPath), toolName);
+          if (gated) return gated;
+        } catch {
+          /* NotIndexed / sources disabled — fall through to normal handlers */
+        }
+      }
+
       // Every read tool races a deadline ≪ MCP client ~60s hard timeout and
       // Named-member / local-compact questions finish in tens of ms on the warm
       // main connection. Serving them here — before the query-pool offload —
@@ -2450,7 +2485,8 @@ export class ToolHandler {
       || toolName === 'homegraph_node'
       || toolName === 'homegraph_callers'
       || toolName === 'homegraph_callees'
-      || toolName === 'homegraph_files';
+      || toolName === 'homegraph_files'
+      || toolName === 'homegraph_project';
 
     const work = (): Promise<ToolResult> => {
       if (!light && this.queryPool && this.queryPool.healthy) {
@@ -2539,6 +2575,17 @@ export class ToolHandler {
    * NotIndexed/PathRefusal, which {@link executeReadTool} classifies.
    */
   private async dispatchTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    if (toolName !== 'homegraph_project' && toolName !== 'homegraph_status') {
+      try {
+        const gated = this.maybeDeepToolPhaseGate(
+          this.getHomeGraph(args.projectPath as string | undefined),
+          toolName
+        );
+        if (gated) return gated;
+      } catch {
+        /* fall through */
+      }
+    }
     switch (toolName) {
       case 'homegraph_search': return await this.handleSearch(args);
       case 'homegraph_callers': return await this.handleCallers(args);
@@ -2551,12 +2598,45 @@ export class ToolHandler {
       case 'homegraph_native': return await this.handleSpecializedNative(args);
       case 'homegraph_node': return await this.handleNode(args);
       case 'homegraph_files': return await this.handleFiles(args);
+      case 'homegraph_project': return await this.handleProject(args);
       case 'homegraph_arkui_migrate': return await this.handleArkuiMigrate(args);
       case 'homegraph_spec_match': return await this.handleSpecMatch(args);
       case 'homegraph_spec_find': return await this.handleSpecFind(args);
       case 'homegraph_spec_trace': return await this.handleSpecTrace(args);
       default: return this.errorResult(`Unknown tool: ${toolName}`);
     }
+  }
+
+  /**
+   * Gate symbol/graph tools while auto-init is still on the fast map or
+   * background full index (and no nodes exist yet). Success-shaped guidance —
+   * never isError — so agents keep using HomeGraph.
+   */
+  private maybeDeepToolPhaseGate(cg: HomeGraph, _toolName: string): ToolResult | null {
+    const phase = cg.getBuildPhase();
+    if (phase === 'full') return null;
+    try {
+      if (cg.getStats().nodeCount > 0) return null;
+    } catch {
+      /* ignore */
+    }
+    if (phase === 'fast' || phase === 'indexing') {
+      return this.textResult(
+        [
+          `Full symbol index is still building (phase=${phase}).`,
+          'Use `homegraph_project` for the module/file map now, then retry this tool once indexing finishes.',
+        ].join('\n')
+      );
+    }
+    if (phase === 'building_fast' || phase === 'none') {
+      return this.textResult(
+        [
+          'HomeGraph is still preparing the project map.',
+          'Retry in a few seconds, or call `homegraph_project` once the fast build completes.',
+        ].join('\n')
+      );
+    }
+    return null;
   }
 
   private async handleSearch(args: Record<string, unknown>): Promise<ToolResult> {
@@ -11521,6 +11601,7 @@ export class ToolHandler {
       lines.push(`> ⚠ ${worktreeMismatchWarning(mismatch).replace(/\n/g, '\n> ')}`, '');
     }
     lines.push(
+      `**Build phase:** ${cg.getBuildPhase()}`,
       `**Files indexed:** ${stats.fileCount}`,
       `**Total nodes:** ${stats.nodeCount}`,
       `**Total edges:** ${stats.edgeCount}`,
@@ -11606,6 +11687,75 @@ export class ToolHandler {
     }
 
     return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * Handle homegraph_project — shallow module → file map (fast build).
+   */
+  private async handleProject(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    const phase = cg.getBuildPhase();
+    if (phase === 'building_fast') {
+      return this.textResult(
+        'Fast project map is still building — retry in a few seconds.'
+      );
+    }
+
+    let map = cg.getProjectMap({
+      module: typeof args.module === 'string' ? args.module : undefined,
+      includeFiles: args.includeFiles !== false,
+    });
+
+    // On-demand build for indexes that never ran the fast path (legacy / CLI init).
+    if (map.modules.length === 0) {
+      try {
+        cg.buildProjectMap();
+        if (phase === 'none') {
+          cg.setBuildPhase(cg.getStats().nodeCount > 0 ? 'full' : 'fast');
+        }
+        map = cg.getProjectMap({
+          module: typeof args.module === 'string' ? args.module : undefined,
+          includeFiles: args.includeFiles !== false,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return this.textResult(`Failed to build project map: ${message}`);
+      }
+    }
+
+    if (map.modules.length === 0) {
+      return this.textResult('No modules found in the project map.');
+    }
+
+    const FILE_CAP = 80;
+    const lines: string[] = [
+      `**Project map** (phase=${map.phase})`,
+      `modules: ${map.modules.length} · files: ${map.fileCount}`,
+      '',
+    ];
+    if (map.phase === 'fast' || map.phase === 'indexing') {
+      lines.push(
+        '_Full symbol index still building — this map has modules/files only (no call graph)._',
+        ''
+      );
+    }
+
+    for (const m of map.modules) {
+      const rootLabel = m.rootPath || '.';
+      lines.push(`### ${m.name} (\`${rootLabel}\`) · ${m.kind} · ${m.fileCount} files`);
+      if (m.files && m.files.length > 0) {
+        const shown = m.files.slice(0, FILE_CAP);
+        for (const f of shown) {
+          lines.push(`- ${f.path}`);
+        }
+        if (m.files.length > FILE_CAP) {
+          lines.push(`- … +${m.files.length - FILE_CAP} more`);
+        }
+      }
+      lines.push('');
+    }
+
+    return this.textResult(lines.join('\n').trimEnd());
   }
 
   /**

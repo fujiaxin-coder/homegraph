@@ -20,6 +20,8 @@ Already know **one** exact symbol? Prefer smaller tools: \`homegraph_callers\` /
 
 For a narrow inventory, call \`homegraph_usages\` (where-used), \`homegraph_modules\` (named module deps/cycles), or \`homegraph_native\` (NAPI exports). Existing clients may keep calling \`homegraph_explore\`: high-confidence shapes route to the same bounded handlers.
 
+Engineering overview / module→file map (including while the full index is still building) → \`homegraph_project\`.
+
 **Must explore-first:** how/mechanism wiring, named Type / \`.member\`, in-repo \`@kit\`/\`@ohos\` **usages**, deps/cycles, NAPI / \`.d.ts\` wrap sites, pre-edit orientation.
 
 ArkUI V1↔V2 / state-decorator migration on a named component → \`homegraph_arkui_migrate\` once (not explore stitching).

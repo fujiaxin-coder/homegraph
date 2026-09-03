@@ -200,6 +200,28 @@ CREATE TABLE IF NOT EXISTS project_metadata (
     updated_at INTEGER NOT NULL
 );
 
+-- Fast project map (module → files). Written by the seconds-scale fast build;
+-- full symbol index still uses nodes/edges/files. See homegraph_project.
+CREATE TABLE IF NOT EXISTS project_modules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    root_path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    file_count INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_module_files (
+    module_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    PRIMARY KEY (module_id, path),
+    FOREIGN KEY (module_id) REFERENCES project_modules(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_modules_root ON project_modules(root_path);
+CREATE INDEX IF NOT EXISTS idx_project_module_files_path ON project_module_files(path);
+
 -- MCP tool response cache (invalidated wholesale on index stamp change)
 CREATE TABLE IF NOT EXISTS mcp_query_cache (
     cache_key   TEXT PRIMARY KEY,

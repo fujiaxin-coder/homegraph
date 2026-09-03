@@ -1529,6 +1529,7 @@ async function runServeMcp(options: {
   path?: string;
   watch?: boolean;
   sources?: string;
+  autoInit?: boolean;
 }): Promise<void> {
   const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
 
@@ -1536,6 +1537,12 @@ async function runServeMcp(options: {
   // the same env-var chokepoint the watcher and MCP server already honor.
   if (options.watch === false) {
     process.env.HOMEGRAPH_NO_WATCH = '1';
+  }
+
+  // Product hosts (DevEco Code) pass --auto-init so unindexed workspaces get
+  // .homegraph/ + background index + watch without a separate `homegraph init`.
+  if (options.autoInit) {
+    process.env.HOMEGRAPH_AUTO_INIT = '1';
   }
 
   // Spec 0005: resolve --sources over HOMEGRAPH_SOURCES, then stamp env so
@@ -1612,6 +1619,7 @@ program
   .option('-p, --path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
   .option('--mcp', 'Legacy alias for `serve mcp` (stdio MCP server)')
   .option('--no-watch', 'Disable the file watcher (no auto-sync; useful on slow filesystems like WSL2 /mnt drives)')
+  .option('--auto-init', 'If no .homegraph/ exists, create it and index in the background (for product hosts)')
   .option(
     '--sources <mode>',
     'Graph sources for MCP queries: both|project|sdk|none (default both; env HOMEGRAPH_SOURCES)'
@@ -1621,6 +1629,7 @@ program
     mcp?: boolean;
     watch?: boolean;
     sources?: string;
+    autoInit?: boolean;
   }) => {
     try {
       if (mode === 'mcp' || options.mcp) {

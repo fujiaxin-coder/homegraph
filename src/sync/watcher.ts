@@ -175,11 +175,21 @@ const IS_TEST_RUNTIME = !!(process.env.VITEST || process.env.NODE_ENV === 'test'
  */
 export interface WatchOptions {
   /**
-   * Debounce delay in milliseconds.
-   * After the last file change, wait this long before triggering sync.
+   * Debounce / window delay in milliseconds.
+   * - Default trailing mode: after the *last* file change, wait this long before sync.
+   * - Fixed-window mode ({@link fixedWindow}): after the *first* change, wait this
+   *   long before sync; later changes in the window do not extend the timer.
    * Default: 2000ms
    */
   debounceMs?: number;
+
+  /**
+   * When true, the first pending change starts a fixed timer of {@link debounceMs}
+   * and subsequent changes only accumulate into `pendingFiles` — they do not
+   * reset the timer. Matches product hosts that want a long coalesce window
+   * (e.g. 5 minutes) without syncing on every save.
+   */
+  fixedWindow?: boolean;
 
   /**
    * Callback when a sync completes (for logging/diagnostics).
@@ -337,6 +347,7 @@ export class FileWatcher {
 
   private readonly projectRoot: string;
   private readonly debounceMs: number;
+  private readonly fixedWindow: boolean;
   private readonly syncFn: (paths?: string[]) => Promise<{ filesChanged: number; durationMs: number }>;
   private readonly onSyncComplete?: WatchOptions['onSyncComplete'];
   private readonly onSyncError?: WatchOptions['onSyncError'];
@@ -351,6 +362,7 @@ export class FileWatcher {
     this.projectRoot = projectRoot;
     this.syncFn = syncFn;
     this.debounceMs = options.debounceMs ?? 2000;
+    this.fixedWindow = options.fixedWindow ?? false;
     this.onSyncComplete = options.onSyncComplete;
     this.onSyncError = options.onSyncError;
     this.onDegraded = options.onDegraded;
@@ -786,9 +798,20 @@ export class FileWatcher {
   }
 
   /**
-   * Schedule a normal debounced sync after a source edit.
+   * Schedule a sync after a source edit.
+   * - Trailing (default): each event resets the quiet window (adaptive quick vs full).
+   * - Fixed window: first event arms the timer; later events do not extend it.
    */
   private scheduleSync(): void {
+    if (this.fixedWindow) {
+      if (this.debounceTimer) return;
+      this.debounceTimer = setTimeout(() => {
+        this.debounceTimer = null;
+        this.flush();
+      }, this.debounceMs);
+      return;
+    }
+
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
     }

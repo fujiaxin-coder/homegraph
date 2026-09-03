@@ -2647,6 +2647,89 @@ export class QueryBuilder {
   }
 
   // ===========================================================================
+  // Fast project map (module → files)
+  // ===========================================================================
+
+  clearProjectMap(): void {
+    this.db.exec('DELETE FROM project_module_files');
+    this.db.exec('DELETE FROM project_modules');
+  }
+
+  replaceProjectMap(
+    modules: Array<{
+      id: string;
+      name: string;
+      rootPath: string;
+      kind: string;
+      fileCount: number;
+    }>,
+    files: Array<{ moduleId: string; path: string; language: string }>
+  ): void {
+    const now = Date.now();
+    this.db.transaction(() => {
+      this.db.exec('DELETE FROM project_module_files');
+      this.db.exec('DELETE FROM project_modules');
+      const insertMod = this.db.prepare(
+        'INSERT INTO project_modules (id, name, root_path, kind, file_count, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+      );
+      for (const m of modules) {
+        insertMod.run(m.id, m.name, m.rootPath, m.kind, m.fileCount, now);
+      }
+      const insertFile = this.db.prepare(
+        'INSERT INTO project_module_files (module_id, path, language) VALUES (?, ?, ?)'
+      );
+      for (const f of files) {
+        insertFile.run(f.moduleId, f.path, f.language);
+      }
+    })();
+  }
+
+  getProjectModuleCount(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as c FROM project_modules').get() as
+      | { c: number }
+      | undefined;
+    return row?.c ?? 0;
+  }
+
+  getProjectModules(): Array<{
+    id: string;
+    name: string;
+    rootPath: string;
+    kind: string;
+    fileCount: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        'SELECT id, name, root_path as rootPath, kind, file_count as fileCount FROM project_modules ORDER BY root_path'
+      )
+      .all() as Array<{
+      id: string;
+      name: string;
+      rootPath: string;
+      kind: string;
+      fileCount: number;
+    }>;
+    return rows;
+  }
+
+  getProjectModuleFiles(
+    moduleId?: string
+  ): Array<{ moduleId: string; path: string; language: string }> {
+    if (moduleId) {
+      return this.db
+        .prepare(
+          'SELECT module_id as moduleId, path, language FROM project_module_files WHERE module_id = ? ORDER BY path'
+        )
+        .all(moduleId) as Array<{ moduleId: string; path: string; language: string }>;
+    }
+    return this.db
+      .prepare(
+        'SELECT module_id as moduleId, path, language FROM project_module_files ORDER BY path'
+      )
+      .all() as Array<{ moduleId: string; path: string; language: string }>;
+  }
+
+  // ===========================================================================
   // MCP Query Cache
   // ===========================================================================
 
@@ -2689,6 +2772,8 @@ export class QueryBuilder {
       this.db.exec('DELETE FROM edges');
       this.db.exec('DELETE FROM nodes');
       this.db.exec('DELETE FROM files');
+      this.db.exec('DELETE FROM project_module_files');
+      this.db.exec('DELETE FROM project_modules');
     })();
   }
 }

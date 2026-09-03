@@ -59,9 +59,28 @@ ls docs/specs/
 | Spec | 在 `docs/specs/` 新增或修订 Spec；状态先标「草案」 | `NNNN-….md` |
 | 对齐 | 与需求方/评审确认目标与验收；必要时改 Spec | 状态 →「已确认」 |
 | 实现 | 从已确认 Spec 开分支编码；实现偏离时先改 Spec 再改代码 | 代码 + 测试 |
-| 合入 | PR 描述关联 Spec 路径；对照验收清单勾选 | Spec 状态 →「已完成」（可同 PR 更新） |
+| 收尾 | 对照验收清单勾选；更新 `CHANGELOG.md` `[Unreleased]`；实现类 commit 带 `Spec:` footer | Spec 状态 →「已完成」 |
+| 合入 | PR 描述关联 Spec 路径；清单自检 | PR 合入 |
 
 同一需求若需拆「需求 Spec」与「设计/实现说明」，编号继续增序（如 `0001-…` 需求、`0002-…` 设计），并在文内互相链接。
+
+### 1.4.1 代码已先行时的收尾顺序（Agent 必遵）
+
+探索 / 联调时可能**先改了代码、后补 Spec**（例如产品集成联调）。收尾时**不要**再按「先 Spec 再从零实现」重做一遍，按下列顺序闭环：
+
+```text
+1. 写 / 补齐 Spec（docs/specs/NNNN-….md）——范围、行为、验收清单对齐真实改动
+2. 核对代码已满足 Spec（缺测 / 缺口再补；不要无关重构）
+3. Spec 验收项全部勾选 [x]，状态改为「已完成」
+4. 更新 CHANGELOG.md → ## [Unreleased]（用户向措辞；可写 Spec 编号）
+5. 按 §3 写 commit（实现类 footer 必须：Spec: docs/specs/NNNN-….md）
+```
+
+说明：
+
+- 步骤 1–5 可落在**同一条**实现 commit，也可先 `docs:` 落 Spec 再 `feat:`/`fix:` 带代码（两条都建议 `Spec:` footer 或实现 commit 带 Spec）。
+- **禁止**只交代码不交 Spec / 不勾验收 / 不写 Unreleased（§1.5 豁免除外）。
+- 用户说「按 DEVELOPMENT 做收尾」时，默认走本节，无需再口述一遍。
 
 ### 1.5 何时可以不写新 Spec
 
@@ -268,11 +287,21 @@ chore: remove unused assets after inventory
 
 ## 5. 推荐最小闭环
 
+**常规（先 Spec 后实现）：**
+
 ```text
 fetch/pull main
   → 编写 Spec 到 docs/specs/NNNN-<english-slug>.md（先确认）
   → 开分支 → 按 Spec 实现 → build + test
-  → commit（规范 type；实现类带 Spec: footer）→ push → 开 PR（关联 Spec + 清单自检）→ 评审合入
+  → Spec 验收勾选 + CHANGELOG [Unreleased]
+  → commit（规范 type；实现类带 Spec: footer）→ push → 开 PR → 评审合入
+```
+
+**代码已先行（补 Spec 收尾，见 §1.4.1）：**
+
+```text
+核对实现 ↔ 写/补 Spec → 勾选验收 → CHANGELOG [Unreleased]
+  → commit（带 Spec: footer）→ push / PR
 ```
 
 合入后删除已合并的本地/远端特性分支，保持仓库分支列表干净。
