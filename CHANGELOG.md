@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.5.6] - 2026-09-03
+
 ### New Features
 
 - Product-host indexing (Spec 0021): `--auto-init` / `HOMEGRAPH_AUTO_INIT` creates `.homegraph/` when missing, builds a seconds-scale **project map** (modules → files in `project_modules` / `project_module_files`, schema v11), exposes read tool `homegraph_project`, then runs the full symbol index in a **detached** `homegraph index` child so the MCP stdio server stays responsive on large repos. `build_phase` metadata (`fast` / `indexing` / `full`) gates deep tools with success-shaped guidance while symbols are still building; opening an index heals a stuck phase after `index_state` completes.
@@ -19,7 +22,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Docs
 
 - `DEVELOPMENT.md` documents the **code-first Spec closing** order (§1.4.1): write Spec → verify code → check acceptance → CHANGELOG `[Unreleased]` → commit with `Spec:` footer.
-
 
 ## [1.5.5] - 2026-08-31
 
@@ -184,3 +186,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.5.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.1
 [1.5.0]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.0
 [1.4.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.4.1
+[1.5.6]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.6
