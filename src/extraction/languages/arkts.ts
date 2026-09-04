@@ -56,6 +56,7 @@ import {
   CALLBACK_METHOD_NAME,
   ClassSignature,
   MethodSignature,
+  Constant,
 } from 'arkanalyzer';
 import type { AliasType, Local, Stmt, ViewTreeNode } from 'arkanalyzer';
 import {
@@ -1667,6 +1668,73 @@ function modelModifiersToNodeExtras(model: ModelWithModifiers): Partial<Node> {
   return extra;
 }
 
+/** ArkMetadataKind values — package entry does not re-export the enum. */
+const ARK_META_LEADING_COMMENTS = 0;
+const ARK_META_JSDOC = 2;
+
+type ArkMetaModel = {
+  getMetadata?: (kind: number) => unknown;
+};
+
+/** Strip line/block comment markers so FTS stores prose (aligned with tree-sitter helpers). */
+function cleanArkCommentContent(raw: string): string {
+  let c = raw.trim().replace(/\r\n/g, '\n');
+  if (c.startsWith('/*')) c = c.replace(/^\/\*+!?/, '').replace(/\*+\/$/, '');
+  return c
+    .replace(/^\/\/[/!]?\s?/gm, '')
+    .replace(/^\s*\*\s?/gm, '')
+    .trim();
+}
+
+/**
+ * Declaration-leading docstring from ArkAnalyzer metadata (Spec 0020).
+ * Prefer leading comments; fall back to JSDoc description.
+ *
+ * Accepts `object` (not only models typed with `getMetadata`) so Local / AliasType
+ * and other ArkAnalyzer types without that method in their .d.ts still type-check;
+ * runtime skips when metadata is absent.
+ */
+export function docstringFromArkModel(model: object): string | undefined {
+  try {
+    const meta = model as ArkMetaModel;
+    if (typeof meta.getMetadata !== 'function') return undefined;
+
+    const leading = meta.getMetadata(ARK_META_LEADING_COMMENTS) as
+      | { getComments?: () => Array<{ content?: string }> }
+      | undefined;
+    if (leading && typeof leading.getComments === 'function') {
+      const parts = leading
+        .getComments()
+        .map((c) => cleanArkCommentContent(String(c?.content ?? '')))
+        .filter(Boolean);
+      if (parts.length > 0) return parts.join('\n').trim();
+    }
+
+    const jsdoc = meta.getMetadata(ARK_META_JSDOC);
+    const docs: string[] = [];
+    const pushDesc = (j: unknown) => {
+      if (j && typeof (j as { getDescription?: unknown }).getDescription === 'function') {
+        const d = String((j as { getDescription: () => string }).getDescription() ?? '').trim();
+        if (d) docs.push(d);
+      }
+    };
+    if (Array.isArray(jsdoc)) {
+      for (const j of jsdoc) pushDesc(j);
+    } else {
+      pushDesc(jsdoc);
+    }
+    if (docs.length > 0) return docs.join('\n').trim();
+  } catch {
+    // metadata access must not abort indexing
+  }
+  return undefined;
+}
+
+function docstringExtras(model: object): Partial<Node> {
+  const docstring = docstringFromArkModel(model);
+  return docstring ? { docstring } : {};
+}
+
 function fieldNodeKind(field: ArkField, cls: ArkClass): NodeKind | null {
   switch (field.getCategory()) {
     case FIELD_CATEGORY.ENUM_MEMBER:
@@ -2076,6 +2144,40 @@ function viewTreeLineFromStmt(stmt: Stmt | undefined): number {
   return stmt?.getOriginFullPosition()?.getFirstLine() ?? 1;
 }
 
+/**
+ * ArkUI `.id('…')` from ViewTree attributes (string Constant only).
+ * Not the HomeGraph node primary key.
+ */
+export function viewTreeArkuiId(node: ViewTreeNode): string | undefined {
+  try {
+    const entry = node.attributes?.get('id');
+    if (!entry) return undefined;
+    const values = entry[1];
+    if (!values?.length) return undefined;
+    for (const v of values) {
+      if (v == null) continue;
+      const isConstant =
+        v instanceof Constant ||
+        typeof (v as { getValue?: unknown }).getValue === 'function';
+      if (!isConstant) continue;
+      const raw = String((v as { getValue: () => string }).getValue()).trim();
+      if (!raw) continue;
+      const unquoted = raw.replace(/^['"]|['"]$/g, '');
+      if (unquoted) return unquoted;
+    }
+  } catch {
+    // attribute map may throw on malformed IR
+  }
+  return undefined;
+}
+
+/** First non-empty `arkuiId` wins when the same component is used with multiple ids. */
+function assignArkuiId(result: ExtractionResult, nodeId: string, arkuiId: string): void {
+  const n = result.nodes.find((x) => x.id === nodeId);
+  if (!n || n.arkuiId) return;
+  n.arkuiId = arkuiId;
+}
+
 function isViewTreeClassSignature(sig: ClassSignature | MethodSignature): sig is ClassSignature {
   // Prefer instanceof; duck-type fallback if duplicate arkanalyzer copies break instanceof.
   if (sig instanceof ClassSignature) return true;
@@ -2471,6 +2573,8 @@ function indexViewTreeForClass(
               // keep build() line
             }
             link(buildId, childId, 'references', 'child-component', line);
+            const arkuiId = viewTreeArkuiId(node);
+            if (arkuiId) assignArkuiId(result, childId, arkuiId);
           }
         } else {
           // MethodSignature: builder stub (sig only) or live ArkMethod.
@@ -3431,6 +3535,7 @@ class ArkTSAdapter {
     const localNode = makeNode(relativePath, language, kind, name, qn, line, endLine, col, {
       signature: local.getType()?.toString(),
       ...modelModifiersToNodeExtras(local),
+      ...docstringExtras(local),
     });
     this.addNode(result, localNode);
     result.edges.push(arkEdge(parentId, localNode.id, 'contains'));
@@ -3457,6 +3562,7 @@ class ArkTSAdapter {
       const aliasNode = makeNode(relativePath, language, 'type_alias', name, qn, line, endLine, col, {
         signature: aliasType.getOriginalType()?.toString(),
         ...modelModifiersToNodeExtras(aliasType),
+        ...docstringExtras(aliasType),
       });
       this.addNode(result, aliasNode);
       result.edges.push(arkEdge(parentId, aliasNode.id, 'contains'));
@@ -3501,6 +3607,7 @@ class ArkTSAdapter {
     const { line, endLine, col } = linesFromPosition(positions[0]);
     const nsNode = makeNode(relativePath, language, 'namespace', ns.getName(), qn, line, endLine, col, {
       ...modelModifiersToNodeExtras(ns),
+      ...docstringExtras(ns),
     });
     this.addNode(result, nsNode);
     result.edges.push(arkEdge(parentId, nsNode.id, 'contains'));
@@ -3544,6 +3651,7 @@ class ArkTSAdapter {
     const classDecs = encodeDecoratorEntries(modelDecoratorEntries(cls));
     const classNode = makeNode(relativePath, language, kind, displayName, qn, line, endLine, col, {
       ...modelModifiersToNodeExtras(cls),
+      ...docstringExtras(cls),
       ...(classDecs.length > 0 ? { decorators: classDecs } : {}),
     });
     this.addNode(result, classNode);
@@ -3584,6 +3692,7 @@ class ArkTSAdapter {
         col,
         {
           ...modelModifiersToNodeExtras(cls),
+          ...docstringExtras(cls),
           ...(classDecs.length > 0 ? { decorators: classDecs } : {}),
         }
       );
@@ -3650,6 +3759,7 @@ class ArkTSAdapter {
         const aliasNode = makeNode(relativePath, language, 'type_alias', name, qn, line, endLine, col, {
           signature: aliasType.getOriginalType()?.toString(),
           ...modelModifiersToNodeExtras(aliasType),
+          ...docstringExtras(aliasType),
         });
         this.addNode(result, aliasNode);
         result.edges.push(arkEdge(parentId, aliasNode.id, 'contains'));
@@ -3701,6 +3811,7 @@ class ArkTSAdapter {
       signature: field.getType()?.toString(),
       ...(encodedDecs.length > 0 ? { decorators: encodedDecs } : {}),
       ...modelModifiersToNodeExtras(field),
+      ...docstringExtras(field),
     });
     this.addNode(result, fieldNode);
     this.fieldToId.set(field, fieldNode.id);
@@ -4056,6 +4167,7 @@ class ArkTSAdapter {
       ...(signature ? { signature } : {}),
       ...(returnType ? { returnType } : {}),
       ...modelModifiersToNodeExtras(method),
+      ...docstringExtras(method),
     });
     this.addNode(result, methodNode);
     this.methodToId.set(method, methodNode.id);
@@ -4211,6 +4323,9 @@ function buildSceneConfig(rootDir: string, extra?: { memoryLimitMB?: number }) {
   return buildSceneConfigFromProject(rootDir, process.env.OHOS_SDK_HOME, {
     supportFileExts: ['.ets', '.ts', '.d.ts'],
     enableMethodBodyBuild: true,
+    // Spec 0020: feed nodes.docstring → nodes_fts (leading + JSDoc).
+    enableLeadingComments: true,
+    enableJSDoc: true,
     ...(extra?.memoryLimitMB !== undefined ? { memoryLimitMB: extra.memoryLimitMB } : {}),
   });
 }

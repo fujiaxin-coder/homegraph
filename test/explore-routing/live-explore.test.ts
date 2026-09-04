@@ -60,12 +60,14 @@ describe.runIf(runLive)('explore-routing live probes', () => {
 
       // Kind smoke checks — wrong section = wrong route landed in output.
       if (c.expect === 'light') {
-        expect(text).toMatch(/Locator partial|Mechanism explore complete|CMake \/ link|Source Code|Partial locator/i);
+        expect(text).toMatch(
+          /Locator partial|Mechanism explore complete|CMake \/ link|Source Code|Partial locator|Coarse locate/i,
+        );
         expect(text).not.toMatch(/Skip HomeGraph/i);
       }
       if (c.expect === 'inventory') {
         expect(text).toMatch(
-          /ANSWER NOW|Kit module|Caller inventory|API usage|oh-package|Member|Related files|NAPI|Module dep|Control\/Toggle|Declaration|Data-source|Hover|System-capability|Dependency list|Unique caller/i,
+          /ANSWER NOW|Kit module|Caller inventory|API usage|oh-package|Member|Related files|NAPI|Module dep|Control\/Toggle|Declaration|Data-source|Hover|System-capability|Dependency list|Unique caller|Event→Manager|Event type classes|Named-Type dependency/i,
         );
         expect(text).not.toMatch(/Mechanism explore complete/i);
       }

@@ -9,10 +9,34 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.5.6] - 2026-09-03
+
+### New Features
+
+- Product-host indexing (Spec 0021): `--auto-init` / `HOMEGRAPH_AUTO_INIT` creates `.homegraph/` when missing, builds a seconds-scale **project map** (modules → files in `project_modules` / `project_module_files`, schema v11), exposes read tool `homegraph_project`, then runs the full symbol index in a **detached** `homegraph index` child so the MCP stdio server stays responsive on large repos. `build_phase` metadata (`fast` / `indexing` / `full`) gates deep tools with success-shaped guidance while symbols are still building; opening an index heals a stuck phase after `index_state` completes.
+- Watch coalesce for product hosts: `HOMEGRAPH_WATCH_FIXED_WINDOW_MS` arms a fixed window on the **first** change (later edits in the window do not extend it), then incremental sync — e.g. DevEco sets `300000` (5 minutes).
+- ArkTS / ArkUI indexing stores the component `.id('…')` from ViewTree onto the matching custom `@Component` node as `arkuiId` (DB column `arkui_id`) — distinct from the graph primary key (Spec 0019).
+- ArkTS indexing fills `nodes.docstring` from ArkAnalyzer leading comments / JSDoc (Scene `enableLeadingComments` + `enableJSDoc`), so declaration docs join `nodes_fts` like other languages (Spec 0020).
+
+### Docs
+
+- `DEVELOPMENT.md` documents the **code-first Spec closing** order (§1.4.1): write Spec → verify code → check acceptance → CHANGELOG `[Unreleased]` → commit with `Spec:` footer.
+
+## [1.5.5] - 2026-08-31
+
+### Docs
+
+- README MCP tools table documents experimental `homegraph_usages` / `homegraph_modules` / `homegraph_native` and notes that high-confidence `homegraph_explore` queries delegate to the same surveys (Spec 0015 supplemental).
+- `docs/RELEASE.md` documents the maintainer flow: local `prepare-release.mjs` + annotated tag, then push main and tag together before the Actions Release workflow publishes to npm.
+
 ### Fixes
 
+- Explore inventory sufficiency: Kit install/deps EN rewrites (`parameters … dependencies` beside a `@kit`) take the oh-package survey instead of a bare import-site ANSWER NOW; Event→Manager surveys treat exported `*Event` classes from a named Event module file as the event-type list and scan indexed `.on` / `produceOn` consumer wiring before ANSWER NOW on dispatch asks (stops class-list-only storms); hover-handler surveys boost app-icon `onHover` / `HoverAnimationUtil` sites and demote control-center `HoverConstants` import noise on icon-hover asks; Telephony API usage expands to `@kit.TelephonyKit` / `@hms.telephony.*` import call sites (agent EN keyword bags); native GL/thread light-mechanism soft-closes on CMake + `plugin_manager` / `egl_core` digests; bare PascalCase type **search** redirects to caller inventory (stops search→node×N fan-out); multi-Type dependency inventories surface source `extends` bases when graph edges are thin; light-mechanism Primary/soft-close demotes antithetical `Delete*`/`Uninstall*` Types when the ask is parse/install/activate/download; **container composition** surveys list pages sharing a shell component + `@LocalStorageLink` / ViewModel injection snippets; **SDK stub-only lifecycle** Types get enum + callback inventory from indexed `.d.ts` with ANSWER NOW (stops Partial→search/Grep storms); **member UI-consequence** asks annotate filter/call sites as the UI effect; light-mechanism soft-closes on `convertxml` digests for agent EN bags like `XML parsing implementation`; explore repeat guard refuses paraphrase bags after a closed ANSWER when domain stems overlap (theme/install/parse…).
 - Explore soft-close / routing guards: treat `parser` like parse noise so short stems (`xml`) survive agent EN bags; light-mechanism can close on distinctive import evidence + digests (path-diversified import bullets); compact no longer demotes UI surface / `Type.member` / `$r`-vs-download asks to Partial when digests already answer; `Type` + plural `methods` (e.g. `class definition methods`) routes to caller inventory without mistaking singular `method` bags; module/cycle surveys (`*constants` + 循环依赖) no longer concept-skip.
 - MCP no longer refuses tools or aborts catch-up based on process RSS (`HOMEGRAPH_MAX_RSS_MB`). That soft ceiling compared Windows Working Set to macOS resident size and falsely Partial'd queries on large indexes; growth controls remain SQLite `mmap_size=0`, small page cache, and default query-pool size 1. Large on-disk indexes and `HOMEGRAPH_SKIP_CATCHUP_SYNC` still skip catch-up.
+- `homegraph upgrade --check` and the MCP background update notice now resolve the latest version from the **npm registry** (`npm view homegraph@<tag> version`) instead of GitHub Releases — the old `homegraph/homegraph` repo path returned 404, so update checks silently failed and never surfaced an upgrade prompt (Spec 0018).
+- `homegraph_status` now includes an **Update available** section when the cached npm update check knows a newer release (#1243).
 - `homegraph_arkui_migrate` treats bare `@Provide` / `@Consume` (and V2 Provider/Consumer) as keyed by the **variable name** when no `('key')` arg is present, so implicit ProvideConsume channels are no longer dropped from `keyChannels`.
 
 ## [1.5.4] - 2026-08-19
@@ -155,9 +179,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Incremental sync now picks up cross-file relationships that only become resolvable after an edit — for example, when a file gains an export that another, unchanged file was already importing or calling. Previously the reference in the unchanged file was never revisited, so callers, impact, and flow results silently omitted the new edge (while status reported a clean index) until a full re-index. References that can't be resolved yet are now remembered and automatically retried whenever a change introduces a symbol that could satisfy them — this also covers a class gaining a new method that other files already call. Thanks @loadcosmos for the report with a minimal reproduction. (#1240)
 - The reverse case is fixed too: when an edit removes or moves a symbol (or deletes its file), callers in unchanged files now re-resolve during the same sync — rebinding to the symbol's new home when it moved, or waiting to reconnect automatically when it comes back — instead of silently losing their relationship until a full re-index. (#1240)
 
+[1.5.5]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.5
 [1.5.4]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.4
 [1.5.3]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.3
 [1.5.2]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.2
 [1.5.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.1
 [1.5.0]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.0
 [1.4.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.4.1
+[1.5.6]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.6

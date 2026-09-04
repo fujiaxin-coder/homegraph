@@ -185,6 +185,13 @@ export interface Node {
    */
   returnType?: string;
 
+  /**
+   * ArkUI `.id('…')` component id from ViewTree attributes (not the graph
+   * primary key `id`). Only set for custom `@Component` nodes when a usage
+   * site carries a string-literal id (Spec 0019).
+   */
+  arkuiId?: string;
+
   /** When the node was last updated */
   updatedAt: number;
 }

@@ -77,6 +77,7 @@ interface NodeRow {
   decorators: string | null;
   type_parameters: string | null;
   return_type: string | null;
+  arkui_id: string | null;
   updated_at: number;
 }
 
@@ -151,6 +152,7 @@ function rowToNode(row: NodeRow): Node {
     decorators: row.decorators ? safeJsonParse(row.decorators, undefined) : undefined,
     typeParameters: row.type_parameters ? safeJsonParse(row.type_parameters, undefined) : undefined,
     returnType: row.return_type ?? undefined,
+    arkuiId: row.arkui_id ?? undefined,
     updatedAt: row.updated_at,
   };
 }
@@ -376,13 +378,13 @@ export class QueryBuilder {
           start_line, end_line, start_column, end_column,
           docstring, signature, visibility,
           is_exported, is_async, is_static, is_abstract,
-          decorators, type_parameters, return_type, updated_at
+          decorators, type_parameters, return_type, arkui_id, updated_at
         ) VALUES (
           @id, @kind, @name, @qualifiedName, @filePath, @language,
           @startLine, @endLine, @startColumn, @endColumn,
           @docstring, @signature, @visibility,
           @isExported, @isAsync, @isStatic, @isAbstract,
-          @decorators, @typeParameters, @returnType, @updatedAt
+          @decorators, @typeParameters, @returnType, @arkuiId, @updatedAt
         )
       `);
     }
@@ -426,6 +428,7 @@ export class QueryBuilder {
       decorators: node.decorators ? JSON.stringify(node.decorators) : null,
       typeParameters: node.typeParameters ? JSON.stringify(node.typeParameters) : null,
       returnType: node.returnType ?? null,
+      arkuiId: node.arkuiId ?? null,
       updatedAt: node.updatedAt ?? Date.now(),
     });
 
@@ -515,6 +518,7 @@ export class QueryBuilder {
           decorators = @decorators,
           type_parameters = @typeParameters,
           return_type = @returnType,
+          arkui_id = @arkuiId,
           updated_at = @updatedAt
         WHERE id = @id
       `);
@@ -550,6 +554,7 @@ export class QueryBuilder {
       decorators: node.decorators ? JSON.stringify(node.decorators) : null,
       typeParameters: node.typeParameters ? JSON.stringify(node.typeParameters) : null,
       returnType: node.returnType ?? null,
+      arkuiId: node.arkuiId ?? null,
       updatedAt: node.updatedAt ?? Date.now(),
     });
 
@@ -2642,6 +2647,89 @@ export class QueryBuilder {
   }
 
   // ===========================================================================
+  // Fast project map (module → files)
+  // ===========================================================================
+
+  clearProjectMap(): void {
+    this.db.exec('DELETE FROM project_module_files');
+    this.db.exec('DELETE FROM project_modules');
+  }
+
+  replaceProjectMap(
+    modules: Array<{
+      id: string;
+      name: string;
+      rootPath: string;
+      kind: string;
+      fileCount: number;
+    }>,
+    files: Array<{ moduleId: string; path: string; language: string }>
+  ): void {
+    const now = Date.now();
+    this.db.transaction(() => {
+      this.db.exec('DELETE FROM project_module_files');
+      this.db.exec('DELETE FROM project_modules');
+      const insertMod = this.db.prepare(
+        'INSERT INTO project_modules (id, name, root_path, kind, file_count, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+      );
+      for (const m of modules) {
+        insertMod.run(m.id, m.name, m.rootPath, m.kind, m.fileCount, now);
+      }
+      const insertFile = this.db.prepare(
+        'INSERT INTO project_module_files (module_id, path, language) VALUES (?, ?, ?)'
+      );
+      for (const f of files) {
+        insertFile.run(f.moduleId, f.path, f.language);
+      }
+    })();
+  }
+
+  getProjectModuleCount(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as c FROM project_modules').get() as
+      | { c: number }
+      | undefined;
+    return row?.c ?? 0;
+  }
+
+  getProjectModules(): Array<{
+    id: string;
+    name: string;
+    rootPath: string;
+    kind: string;
+    fileCount: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        'SELECT id, name, root_path as rootPath, kind, file_count as fileCount FROM project_modules ORDER BY root_path'
+      )
+      .all() as Array<{
+      id: string;
+      name: string;
+      rootPath: string;
+      kind: string;
+      fileCount: number;
+    }>;
+    return rows;
+  }
+
+  getProjectModuleFiles(
+    moduleId?: string
+  ): Array<{ moduleId: string; path: string; language: string }> {
+    if (moduleId) {
+      return this.db
+        .prepare(
+          'SELECT module_id as moduleId, path, language FROM project_module_files WHERE module_id = ? ORDER BY path'
+        )
+        .all(moduleId) as Array<{ moduleId: string; path: string; language: string }>;
+    }
+    return this.db
+      .prepare(
+        'SELECT module_id as moduleId, path, language FROM project_module_files ORDER BY path'
+      )
+      .all() as Array<{ moduleId: string; path: string; language: string }>;
+  }
+
+  // ===========================================================================
   // MCP Query Cache
   // ===========================================================================
 
@@ -2684,6 +2772,8 @@ export class QueryBuilder {
       this.db.exec('DELETE FROM edges');
       this.db.exec('DELETE FROM nodes');
       this.db.exec('DELETE FROM files');
+      this.db.exec('DELETE FROM project_module_files');
+      this.db.exec('DELETE FROM project_modules');
     })();
   }
 }

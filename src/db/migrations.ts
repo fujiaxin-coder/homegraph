@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 /**
  * Migration definition
@@ -149,6 +149,46 @@ const migrations: Migration[] = [
       db.exec(
         'CREATE INDEX IF NOT EXISTS idx_files_generated ON files(path) WHERE generated = 1'
       );
+    },
+  },
+  {
+    version: 10,
+    description:
+      "Add nodes.arkui_id — ArkUI .id('…') from ViewTree for custom components (Spec 0019)",
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'arkui_id')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN arkui_id TEXT');
+      }
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_nodes_arkui_id ON nodes(arkui_id) WHERE arkui_id IS NOT NULL'
+      );
+    },
+  },
+  {
+    version: 11,
+    description:
+      'Add project_modules / project_module_files for fast project-map (homegraph_project)',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_modules (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          root_path TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file_count INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS project_module_files (
+          module_id TEXT NOT NULL,
+          path TEXT NOT NULL,
+          language TEXT NOT NULL,
+          PRIMARY KEY (module_id, path),
+          FOREIGN KEY (module_id) REFERENCES project_modules(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_modules_root ON project_modules(root_path);
+        CREATE INDEX IF NOT EXISTS idx_project_module_files_path ON project_module_files(path);
+      `);
     },
   },
 ];

@@ -31,6 +31,7 @@ import {
   worktreeMismatchNotice,
   type WorktreeIndexMismatch,
 } from '../sync/worktree';
+import { getUpdateNotice } from '../upgrade/update-check';
 import type { PendingFile } from '../sync';
 import type { Node, Edge, SearchResult, Subgraph, NodeKind } from '../types';
 import {
@@ -38,7 +39,7 @@ import {
   graphSourceFlags,
   graphSourcesDisabledGuidance,
 } from '../graph-sources';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, queryAsContainerCompositionSurvey, queryAsMemberUiConsequenceSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
 
 import {
   existsSync,
@@ -1151,6 +1152,28 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
+    name: 'homegraph_project',
+    description:
+      'Shallow project map: modules + files per module (no symbols/call edges). ' +
+      'PRIMARY for engineering overview while the full index is still building; also useful after full index. ' +
+      'Optional `module` filters by name/path; `includeFiles` defaults true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        module: {
+          type: 'string',
+          description: 'Optional module name or root path substring to filter.',
+        },
+        includeFiles: {
+          type: 'boolean',
+          description: 'Include per-module file lists (default true). Set false for module list only.',
+        },
+        projectPath: projectPathProperty,
+      },
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
     name: 'homegraph_arkui_migrate',
     description:
       'ArkUI migrate / state-semantics snapshot in ONE call (components, state decorators + args, ' +
@@ -1682,6 +1705,7 @@ export class ToolHandler {
         'homegraph_search',
         'homegraph_node',
         'homegraph_diff_impact',
+        'homegraph_project',
       ]);
       if (stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
         visible = visible.filter(t => TINY_REPO_CORE_TOOLS.has(t.name));
@@ -2217,6 +2241,18 @@ export class ToolHandler {
         return await this.handleStatus(args);
       }
 
+      // While auto-init is still on the fast/indexing phases (no symbols yet),
+      // deep tools return guidance so the agent uses homegraph_project instead
+      // of abandoning HomeGraph after empty explore results.
+      if (toolName !== 'homegraph_project') {
+        try {
+          const gated = this.maybeDeepToolPhaseGate(this.getHomeGraph(projectPath), toolName);
+          if (gated) return gated;
+        } catch {
+          /* NotIndexed / sources disabled — fall through to normal handlers */
+        }
+      }
+
       // Every read tool races a deadline ≪ MCP client ~60s hard timeout and
       // Named-member / local-compact questions finish in tens of ms on the warm
       // main connection. Serving them here — before the query-pool offload —
@@ -2449,7 +2485,8 @@ export class ToolHandler {
       || toolName === 'homegraph_node'
       || toolName === 'homegraph_callers'
       || toolName === 'homegraph_callees'
-      || toolName === 'homegraph_files';
+      || toolName === 'homegraph_files'
+      || toolName === 'homegraph_project';
 
     const work = (): Promise<ToolResult> => {
       if (!light && this.queryPool && this.queryPool.healthy) {
@@ -2538,6 +2575,17 @@ export class ToolHandler {
    * NotIndexed/PathRefusal, which {@link executeReadTool} classifies.
    */
   private async dispatchTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    if (toolName !== 'homegraph_project' && toolName !== 'homegraph_status') {
+      try {
+        const gated = this.maybeDeepToolPhaseGate(
+          this.getHomeGraph(args.projectPath as string | undefined),
+          toolName
+        );
+        if (gated) return gated;
+      } catch {
+        /* fall through */
+      }
+    }
     switch (toolName) {
       case 'homegraph_search': return await this.handleSearch(args);
       case 'homegraph_callers': return await this.handleCallers(args);
@@ -2550,12 +2598,45 @@ export class ToolHandler {
       case 'homegraph_native': return await this.handleSpecializedNative(args);
       case 'homegraph_node': return await this.handleNode(args);
       case 'homegraph_files': return await this.handleFiles(args);
+      case 'homegraph_project': return await this.handleProject(args);
       case 'homegraph_arkui_migrate': return await this.handleArkuiMigrate(args);
       case 'homegraph_spec_match': return await this.handleSpecMatch(args);
       case 'homegraph_spec_find': return await this.handleSpecFind(args);
       case 'homegraph_spec_trace': return await this.handleSpecTrace(args);
       default: return this.errorResult(`Unknown tool: ${toolName}`);
     }
+  }
+
+  /**
+   * Gate symbol/graph tools while auto-init is still on the fast map or
+   * background full index (and no nodes exist yet). Success-shaped guidance —
+   * never isError — so agents keep using HomeGraph.
+   */
+  private maybeDeepToolPhaseGate(cg: HomeGraph, _toolName: string): ToolResult | null {
+    const phase = cg.getBuildPhase();
+    if (phase === 'full') return null;
+    try {
+      if (cg.getStats().nodeCount > 0) return null;
+    } catch {
+      /* ignore */
+    }
+    if (phase === 'fast' || phase === 'indexing') {
+      return this.textResult(
+        [
+          `Full symbol index is still building (phase=${phase}).`,
+          'Use `homegraph_project` for the module/file map now, then retry this tool once indexing finishes.',
+        ].join('\n')
+      );
+    }
+    if (phase === 'building_fast' || phase === 'none') {
+      return this.textResult(
+        [
+          'HomeGraph is still preparing the project map.',
+          'Retry in a few seconds, or call `homegraph_project` once the fast build completes.',
+        ].join('\n')
+      );
+    }
+    return null;
   }
 
   private async handleSearch(args: Record<string, unknown>): Promise<ToolResult> {
@@ -2572,6 +2653,16 @@ export class ToolHandler {
     // getProjectRoot) must fall through to FTS search rather than error.
     try {
       const projectRoot = cg.getProjectRoot();
+      // Bare PascalCase type search — agents almost always fan out callers next;
+      // route to caller inventory instead of FTS → node×N.
+      if (queryIsTypeNameFocus(query)) {
+        const types = extractTypeNamesFromQuery(query);
+        if (types.length === 1) {
+          const callerQ = `${types[0]} 哪些方法被外部调用`;
+          const callerRedirect = this.tryFastInventoryExplore(cg, callerQ, projectRoot);
+          if (callerRedirect) return callerRedirect;
+        }
+      }
       if (queryShouldPreferExploreOverSearch(query)) {
         const exploreRedirect = this.tryFastInventoryExplore(cg, query, projectRoot)
           ?? this.tryLightMechanismExplore(cg, query, projectRoot)
@@ -4740,6 +4831,10 @@ export class ToolHandler {
     const enumMembers: Array<{ name: string; file: string; line: number }> = [];
     const seenMember = new Set<string>();
 
+    /** Exported `*Event` classes from a named Event module file (not enum members). */
+    const eventClasses: Array<{ name: string; file: string; line: number }> = [];
+    const seenEventClass = new Set<string>();
+
     const considerEventFile = (fp: string, preferredName: string) => {
       eventFiles.add(fp);
       if (/Event$/i.test(preferredName)) eventNames.add(preferredName);
@@ -4752,12 +4847,23 @@ export class ToolHandler {
             seenMember.add(key);
             enumMembers.push({ name: sib.name, file: rel(sib.filePath), line: sib.startLine || 1 });
           }
-          // Only add sibling Types that are themselves *Event (avoid file-wide enum spam).
+          // Barrel / module files often export many `*Event` classes (not enums).
           if (
             (sib.kind === 'enum' || sib.kind === 'class' || sib.kind === 'type_alias' || sib.kind === 'interface')
             && /Event$/i.test(sib.name)
           ) {
             eventNames.add(sib.name);
+            if (sib.kind === 'class' || sib.kind === 'enum' || sib.kind === 'type_alias') {
+              const ck = `${sib.name}:${rel(sib.filePath)}`;
+              if (!seenEventClass.has(ck)) {
+                seenEventClass.add(ck);
+                eventClasses.push({
+                  name: sib.name,
+                  file: rel(sib.filePath),
+                  line: sib.startLine || 1,
+                });
+              }
+            }
           }
         }
       } catch { /* */ }
@@ -4820,6 +4926,8 @@ export class ToolHandler {
       '',
     ];
 
+    const rankedClasses = [...eventClasses].sort((a, b) => a.name.localeCompare(b.name));
+
     if (enumMembers.length > 0) {
       lines.push('### Event enum members (indexed)');
       for (const m of enumMembers.slice(0, 40)) {
@@ -4829,14 +4937,38 @@ export class ToolHandler {
       lines.push('');
     }
 
+    // Named `*Event` module files often export many Event classes (not enums).
+    // Listing them is the answer to "有哪些事件类型" — don't force Grep for members.
+    if (eventClasses.length > 0) {
+      lines.push('### Event type classes (exported from Event module)');
+      for (const c of rankedClasses.slice(0, 40)) {
+        lines.push(`- \`${c.name}\` — \`${c.file}:${c.line}\``);
+      }
+      if (rankedClasses.length > 40) {
+        lines.push(`- … and ${rankedClasses.length - 40} more Event class(es)`);
+      }
+      lines.push('');
+    }
+
     lines.push('### Event Type anchors');
-    const sortedEvents = [...eventNames].sort((a, b) => a.localeCompare(b));
+    // Prefer concrete Event classes over the barrel file stem when both exist.
+    const anchorEvents = (
+      eventClasses.length > 0
+        ? eventClasses.map((c) => c.name)
+        : [...eventNames]
+    ).filter((n, i, arr) => arr.indexOf(n) === i)
+      .sort((a, b) => a.localeCompare(b));
+    const sortedEvents = anchorEvents;
     for (const ev of sortedEvents.slice(0, 12)) {
       let loc = '';
       try {
         const n = cg.getNodesByName(ev).find((x) => !isTestFile(x.filePath));
         if (n) loc = ` — \`${rel(n.filePath)}:${n.startLine}\``;
       } catch { /* */ }
+      if (!loc) {
+        const fromClass = eventClasses.find((c) => c.name === ev);
+        if (fromClass) loc = ` — \`${fromClass.file}:${fromClass.line}\``;
+      }
       if (!loc) {
         for (const fp of eventFiles) {
           const base = rel(fp).split('/').pop() || '';
@@ -4853,7 +4985,7 @@ export class ToolHandler {
 
     // Search handlers by primary Event names (+ a few members), not every noisy sibling.
     const searchKeys = [
-      ...sortedEvents.slice(0, 6),
+      ...sortedEvents.slice(0, 12),
       ...enumMembers.slice(0, 12).map((m) => m.name),
     ];
     type Hit = { file: string; line: number; snippet: string; score: number; events: Set<string> };
@@ -4900,15 +5032,99 @@ export class ToolHandler {
     }
 
     const ranked = [...hits.values()].sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+
+    // Event consumer registrations — `.on(Event` / produceOn wiring (dispatch map).
+    type ConsumerHit = { file: string; line: number; snippet: string; event: string; score: number };
+    const consumerHits: ConsumerHit[] = [];
+    const consumerSeen = new Set<string>();
+    const eventNamesForConsumers = rankedClasses.length > 0
+      ? rankedClasses.map((c) => c.name)
+      : sortedEvents;
+    const addConsumer = (file: string, line: number, snippet: string, event: string, score: number) => {
+      const key = `${file}:${line}:${event}`;
+      if (consumerSeen.has(key)) return;
+      consumerSeen.add(key);
+      consumerHits.push({ file, line, snippet: snippet.slice(0, 120), event, score });
+    };
+    for (const ev of eventNamesForConsumers.slice(0, 24)) {
+      let results: SearchResult[] = [];
+      try { results = cg.searchNodes(ev, { limit: 36 }); } catch { continue; }
+      const esc = ev.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const onRe = new RegExp(
+        `(?:InnerEventUtil|evtBus|eventMgr|EventMgr|focusMode\\w*EventMgr)\\.on\\s*\\(\\s*${esc}|\\.on\\s*\\(\\s*${esc}`,
+      );
+      const seenFiles = new Set<string>();
+      for (const r of results) {
+        const fp = rel(r.node.filePath);
+        if (isTestFile(fp) || eventFiles.has(r.node.filePath)) continue;
+        if (seenFiles.has(fp)) continue;
+        seenFiles.add(fp);
+        const abs = pathIsAbsolute(r.node.filePath)
+          ? r.node.filePath
+          : pathJoin(projectRoot, r.node.filePath);
+        let content = '';
+        try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+        const fileLines = content.split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          if (!onRe.test(line) && !line.includes(`produceOn(${ev}`) && !line.includes(`produceOn(${ev},`)) {
+            continue;
+          }
+          let score = 4;
+          if (/Controller|Manager|Handler|Vm$/i.test(fp)) score += 6;
+          if (/\.on\s*\(/.test(line)) score += 4;
+          if (/produceOn/.test(line)) score += 3;
+          addConsumer(fp, i + 1, line.trim(), ev, score);
+        }
+      }
+    }
+    // DataShareManager produceOn registrations (producer side of dispatch).
+    let mgrNodes: Node[] = [];
+    try {
+      mgrNodes = cg.getNodesByName('DataShareManager').filter((n) => !isTestFile(n.filePath));
+    } catch { mgrNodes = []; }
+    for (const n of mgrNodes.slice(0, 2)) {
+      const fp = rel(n.filePath);
+      const abs = pathIsAbsolute(n.filePath) ? n.filePath : pathJoin(projectRoot, n.filePath);
+      try {
+        const fileLines = readFileSync(abs, 'utf-8').split('\n');
+        for (let i = 0; i < fileLines.length; i++) {
+          const line = fileLines[i] ?? '';
+          if (!/produceOn\s*\(/.test(line)) continue;
+          const evM = line.match(/produceOn\s*\(\s*([A-Za-z_][\w]*Event)/);
+          const evName = evM?.[1] ?? 'produceOn';
+          addConsumer(fp, i + 1, line.trim(), evName, 5);
+          if (consumerHits.length >= 10) break;
+        }
+      } catch { /* optional */ }
+    }
+    consumerHits.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+
+    if (consumerHits.length > 0) {
+      lines.push('### Event consumer registrations (`.on` / `produceOn`)');
+      for (const h of consumerHits.slice(0, 16)) {
+        lines.push(`- \`${h.file}:${h.line}\` ← \`${h.event}\`  \`${h.snippet}\``);
+      }
+      if (consumerHits.length > 16) {
+        lines.push(`- … and ${consumerHits.length - 16} more consumer site(s)`);
+      }
+      lines.push('');
+    }
+
     lines.push('### Manager / handler files referencing these events');
     const memberCount = enumMembers.length;
-    // Complete only when we have enum members (the usual "有哪些类型") + ≥1 handler,
-    // or a small tight Type set with strong handlers — never a huge Type dump alone.
+    const eventClassCount = eventClasses.length;
+    const dispatchAsk = /分发|分发给|DataShareMgr|dispatch|routed?\s+to/i.test(query);
+    // Complete when: enum members + handlers, OR Event classes + consumer wiring
+    // for dispatch asks, OR a tight Event Type set.
     const complete =
       ranked.length > 0
       && (
-        (memberCount > 0 && memberCount <= 48)
+        (memberCount > 0 && memberCount <= 48 && ranked.length >= 1)
+        || (eventClassCount >= 3 && eventClassCount <= 64
+          && (dispatchAsk ? consumerHits.length >= 2 : ranked.length >= 1))
         || (sortedEvents.length > 0 && sortedEvents.length <= 4 && ranked.length >= 1 && ranked[0]!.score >= 5)
+        || (dispatchAsk && consumerHits.length >= 3)
       );
 
     if (ranked.length === 0) {
@@ -4931,8 +5147,17 @@ export class ToolHandler {
       lines.push('');
       if (complete) {
         lines.push(
-          '> Event→Manager inventory — **ANSWER NOW** from enum members + handler files above; '
-            + 'ONE narrow Grep only if a specific `case` branch is still missing.',
+          eventClassCount > 0
+            ? '> Event→Manager inventory — **ANSWER NOW** from Event type classes + consumer `.on` / handler files above; '
+              + 'ONE narrow Grep only if a specific Manager→event branch is still missing.'
+            : '> Event→Manager inventory — **ANSWER NOW** from enum members + handler files above; '
+              + 'ONE narrow Grep only if a specific `case` branch is still missing.',
+        );
+      } else if (eventClassCount >= 3 && dispatchAsk && consumerHits.length === 0) {
+        lines.push(
+          '> **Partial locator** — Event type list above is complete, but consumer `.on` / dispatch wiring '
+            + 'was not indexed. ONE Grep for `.on(EventName` or `produceOn` in `*Manager*` files — '
+            + 'do **not** repo-storm; do **not** ANSWER NOW as a full dispatch map.',
         );
       } else {
         lines.push(
@@ -4944,10 +5169,10 @@ export class ToolHandler {
     lines.push('');
     return {
       section: lines.join('\n'),
-      hitCount: ranked.length + memberCount,
-      eventCount: Math.max(sortedEvents.length, memberCount > 0 ? 1 : 0),
+      hitCount: ranked.length + memberCount + eventClassCount,
+      eventCount: Math.max(sortedEvents.length, eventClassCount, memberCount > 0 ? 1 : 0),
       handlerCount: ranked.length,
-      memberCount,
+      memberCount: memberCount + eventClassCount,
       complete,
     };
   }
@@ -5046,22 +5271,64 @@ export class ToolHandler {
     lines.push('### Cross links (imports / callers)');
     if (edges.length === 0) {
       lines.push('- No import/caller edges indexed between these Types yet.');
+    } else {
+      const uniq = [...new Set(edges)].slice(0, 40);
+      lines.push(...uniq);
+    }
+    lines.push('');
+
+    // Text-scan `extends Base` when graph edges are missing — shared bases are
+    // the usual answer to "这几个 Installer/Parser 的依赖关系".
+    const extendsHits: string[] = [];
+    const baseNames = new Set<string>();
+    let projectRoot = '';
+    try { projectRoot = cg.getProjectRoot(); } catch { /* */ }
+    for (const a of locs) {
+      let content = '';
+      try {
+        const full = pathIsAbsolute(a.file) ? a.file : (projectRoot ? pathJoin(projectRoot, a.file) : '');
+        if (full && existsSync(full)) content = readFileSync(full, 'utf-8');
+      } catch { /* */ }
+      if (!content) continue;
+      const m = content.match(
+        new RegExp(
+          `(?:export\\s+)?(?:abstract\\s+)?class\\s+${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+extends\\s+([A-Za-z_][A-Za-z0-9_]*)`,
+        ),
+      );
+      if (!m?.[1]) continue;
+      const base = m[1]!;
+      baseNames.add(base);
+      extendsHits.push(`- \`${a.name}\` extends \`${base}\``);
+    }
+    if (extendsHits.length > 0) {
+      lines.push('### Inheritance (source `extends`)');
+      lines.push(...[...new Set(extendsHits)].slice(0, 20));
+      if (baseNames.size > 0) {
+        lines.push('');
+        lines.push(
+          `Shared / parent Type(s): ${[...baseNames].slice(0, 8).map((b) => `\`${b}\``).join(', ')}.`,
+        );
+      }
       lines.push('');
+    }
+
+    const hasGraph = edges.length > 0;
+    const hasExtends = extendsHits.length > 0;
+    if (!hasGraph && !hasExtends) {
       lines.push(
         '> **Partial locator** — Type files above are anchors. '
           + '`homegraph_node` / `homegraph_callees` one Type at a time; do **not** ANSWER NOW as a full graph.',
       );
     } else {
-      const uniq = [...new Set(edges)].slice(0, 40);
-      lines.push(...uniq);
-      lines.push('');
       lines.push(
-        '> Multi-Type dependency inventory — **ANSWER NOW** from locations + edges above; '
-          + 'only `homegraph_node` one Type if a body detail is still missing.',
+        '> Multi-Type dependency inventory — **ANSWER NOW** from locations'
+          + (hasExtends ? ' + `extends` bases' : '')
+          + (hasGraph ? ' + import/caller edges' : '')
+          + ' above; only `homegraph_node` one Type if a body detail is still missing.',
       );
     }
     lines.push('');
-    return { section: lines.join('\n'), hitCount: locs.length + edges.length };
+    return { section: lines.join('\n'), hitCount: locs.length + edges.length + extendsHits.length };
   }
 
   /**
@@ -5316,7 +5583,7 @@ export class ToolHandler {
   private tryFastInventoryExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
     if (!shouldTryFastInventoryExplore(query)) return null;
 
-    // Multi-Type dependency asks: inventory-only early exit (avoids fat compact / 25s busy).
+    // Multi-Type dependency asks: inventory-only early exit (avoids fat compact / busy timeout).
     if (queryAsMultiTypeDependencySurvey(query)) {
       const multi = this.buildMultiTypeDependencySection(cg, query);
       if (multi.section) {
@@ -5491,6 +5758,11 @@ export class ToolHandler {
       : { section: '', hitCount: 0 };
     if (hoverResult.section) lines.push(hoverResult.section);
 
+    const containerResult = queryAsContainerCompositionSurvey(query)
+      ? this.buildContainerCompositionSection(cg, query, projectRoot)
+      : { section: '', hitCount: 0, complete: false };
+    if (containerResult.section) lines.push(containerResult.section);
+
     const importInventoryFilter = hasImportInventoryFilter(query);
     const multiAnchor = queryNamesMultipleExploreAnchors(query);
     // Type / caller surveys: skip expensive named-symbol flow synthesize —
@@ -5544,7 +5816,7 @@ export class ToolHandler {
       || callerSection || memberSection || configSection
       || systemCapResult.section || declarationResult.section || moduleDepResult.section
       || moduleExportResult.section || dtsWrapResult.section || controlSyncResult.section
-      || eventDispatchResult.section;
+      || eventDispatchResult.section || containerResult.section;
     if (!hasAnySection) return null;
 
     // Data-source / API usage inventories are complete without source dumps —
@@ -5647,6 +5919,13 @@ export class ToolHandler {
             + 'ONE narrow Grep for members/`case`, or one tighter explore — do **not** ANSWER NOW as a full map; no node fan-out.'
           : 'Event→Manager survey — 0 event types / handlers indexed. **Partial locator** — do **not** ANSWER NOW; '
             + 'ONE Grep for enum members / `case` branches OK.',
+      );
+    }
+    if (containerResult.section && queryAsContainerCompositionSurvey(query)) {
+      return finishCompact(
+        containerResult.complete
+          ? `Container composition survey — **${containerResult.hitCount}** page/site(s). **ANSWER NOW** from injection snippets above; do not Grep \`LocalStorageLink\` again.`
+          : `Container composition survey — **${containerResult.hitCount}** site(s). **Partial locator** — Read the top page file for full build() wiring.`,
       );
     }
     if (apiUsageResult.fileCount > 0 && !dataSourceResult.section) {
@@ -6045,6 +6324,10 @@ export class ToolHandler {
         if (t.length >= 4 && fpLc.includes(`/${t}/`)) score += 60;
         if (t.length >= 4 && fpLc.includes(t)) score += 20;
       }
+      if (queryAsNativeRenderThreadSurvey(query)) {
+        if (/plugin_manager|egl_core|nativerender|xcomponent|render_service/i.test(fpLc)) score += 90;
+        if (/\.cpp$|\.h$|cmake/i.test(fpLc)) score += 25;
+      }
       for (const n of nodes) {
         const line = n.kind === 'import' ? resolveImportLineFromNode(n, projectRoot) : '';
         const blob = `${n.name}\n${n.signature || ''}\n${line}`.toLowerCase();
@@ -6151,9 +6434,27 @@ export class ToolHandler {
     const importEvidenceClose = distinctiveEarly.length > 0
       && importResult.siteCount >= 3
       && filesRendered >= 1;
-    const softClose = (hasStrongManager && filesRendered >= 1
+    const xmlStem = distinctiveEarly.some((t) => t.toLowerCase() === 'xml');
+    const bodyText = lines.join('\n');
+    const xmlMechanismClose = xmlStem
+      && filesRendered >= 1
+      && /convertxml|ConvertXML|fastConvertToJSObject/i.test(bodyText);
+    const nativeRenderClose = queryAsNativeRenderThreadSurvey(query)
+      && filesRendered >= 1
+      && (/plugin_manager|egl_core|OnSurfaceCreated|EGLCore|nativerender/i.test(bodyText)
+        || /\*\*CMake \/ link \+ GL libs\*\*/.test(bodyText));
+    // Don't soft-close onto an antithetical Primary (Delete* while ask is install/parse).
+    const nextContradictsPipeline = !!(
+      nextMgr
+      && /(?:解析|安装|激活|下载|parse|install|activate|download)/i.test(query)
+      && (/^(?:Delete|Remove|Uninstall|Clear|Cancel)/i.test(nextMgr.name)
+        || /Delete|Uninstall|RemoveOnline|CancelRestore/i.test(nextMgr.name))
+    );
+    const softClose = !nextContradictsPipeline && ((hasStrongManager && filesRendered >= 1
       && (digestCoversNext || managerHits.length >= 2 || topIsStrong))
-      || importEvidenceClose;
+      || importEvidenceClose
+      || xmlMechanismClose
+      || nativeRenderClose);
     const closedAnswer = softClose || mechanismClosed || (hasFlowPath && topIsStrong);
 
     lines.push('---');
@@ -6472,6 +6773,7 @@ export class ToolHandler {
     const typeNameSet = new Set(typeNames.map((t) => t.toLowerCase()));
     const bridge = queryNeedsCoNamedUseBridge(query);
     const memberFocus = queryHasNamedMemberFocus(query);
+    const uiConsequence = queryAsMemberUiConsequenceSurvey(query);
     const uiCluster = queryAsFocusedUiCluster(query);
     const typeLifecycle = queryAsTypeLifecycleSurvey(query);
     const componentSurface = queryAsComponentSurfaceSurvey(query)
@@ -6728,30 +7030,43 @@ export class ToolHandler {
       && !queryHasNamedMemberFocus(query)
       && !queryAsNamedComponentAction(query);
 
+    let lifecycleStubComplete = false;
+    let lifecycleStubSection = '';
+    if (typeLifecycle && stubHeavy) {
+      const stubPaths = [...fileNodes.keys()].filter(isStubPath);
+      const lifecycleResult = this.buildSdkStubLifecycleSection(projectRoot, stubPaths, query);
+      lifecycleStubSection = lifecycleResult.section;
+      lifecycleStubComplete = lifecycleResult.complete;
+    }
+
     const lines: string[] = [
       `**Exploration: ${query}**`,
       '',
-      stubHeavy
-        ? '> **Partial locator** — indexed hits are SDK / `.d.ts` stubs, not in-repo implementations. '
-          + 'Prefer `homegraph_search` / ONE explore for `*State*` / impl class names; '
-          + 'ONE narrow Grep for in-repo impl names is OK — do not ANSWER NOW from the stub alone.'
-        : resourceProvenanceAsk
-          ? '> **Coarse locate — check Source digests for `$r` / Image / download.** '
-            + 'Treat visible bodies as already Read. ONE narrow Grep for `$r`/`http` only if digests lack load origin — '
-            + 'do **not** re-explore or fan out Read on the same Page/Dialog.'
-          : multiTypeThin
-            ? '> **Partial locator** — multi-Type bag below is a coarse anchor set. '
-              + 'Pick ONE Type/`Type.member` for a tighter explore, or ONE narrow Grep for unindexed wiring — do **not** ANSWER NOW as a full cross-Type mechanism.'
-            : '> **Coarse locate complete.** Treat Source + trail as already Read for these symbols. '
-              + 'Answer from them; do **not** re-Grep/Read/node the same symbols. '
-              + 'ONE narrow Grep is OK only for residual literals / unindexed wiring — not a repo-wide storm.',
+      lifecycleStubComplete
+        ? '> **Coarse locate complete — SDK lifecycle inventory below.** **ANSWER NOW** from state enum + callbacks; '
+          + 'do not Grep in-repo or re-explore the same stub names.'
+        : stubHeavy
+          ? '> **Partial locator** — indexed hits are SDK / `.d.ts` stubs, not in-repo implementations. '
+            + 'Prefer `homegraph_search` / ONE explore for `*State*` / impl class names; '
+            + 'ONE narrow Grep for in-repo impl names is OK — do not ANSWER NOW from the stub alone.'
+          : resourceProvenanceAsk
+            ? '> **Coarse locate — check Source digests for `$r` / Image / download.** '
+              + 'Treat visible bodies as already Read. ONE narrow Grep for `$r`/`http` only if digests lack load origin — '
+              + 'do **not** re-explore or fan out Read on the same Page/Dialog.'
+            : multiTypeThin
+              ? '> **Partial locator** — multi-Type bag below is a coarse anchor set. '
+                + 'Pick ONE Type/`Type.member` for a tighter explore, or ONE narrow Grep for unindexed wiring — do **not** ANSWER NOW as a full cross-Type mechanism.'
+              : '> **Coarse locate complete.** Treat Source + trail as already Read for these symbols. '
+                + 'Answer from them; do **not** re-Grep/Read/node the same symbols. '
+                + 'ONE narrow Grep is OK only for residual literals / unindexed wiring — not a repo-wide storm.',
       '',
       `Local-symbol focus: **${seedIds.size}** seed(s)` +
         (neighborIds.size > 0 ? `, **${neighborIds.size}** caller/callee neighbor(s)` : '') +
         ' — compact explore (definition + edge trail, no related-file dump).',
       '',
     ];
-    if (stubHeavy && implAsk) {
+    if (lifecycleStubSection) lines.push(lifecycleStubSection);
+    if (stubHeavy && implAsk && !lifecycleStubComplete) {
       lines.push(
         '> Stub-only compact — state/callback answers usually live in project `.ets` / `.ts` under the feature, not `@ohos.*.d.ts`.',
         '',
@@ -6991,7 +7306,10 @@ export class ToolHandler {
         lines.push('');
         lines.push(
           memberFocus
-            ? '> These lines are the in-repo **call/filter sites** for the named member. **ANSWER NOW** from them + Source — do not Grep/`homegraph_callers` the same member.'
+            ? uiConsequence
+              ? '> UI-consequence ask: call/filter sites above show **how true/expired values affect UI** '
+                + '(often exclusion from render stacks). **ANSWER NOW** from them + Source — do not Read/Grep the same member.'
+              : '> These lines are the in-repo **call/filter sites** for the named member. **ANSWER NOW** from them + Source — do not Grep/`homegraph_callers` the same member.'
             : '> These lines are the in-repo use sites. Answer from them + Source; do not grep the same names again.',
         );
         lines.push('');
@@ -7099,7 +7417,7 @@ export class ToolHandler {
     const digest = exploreLocatorDigestEnabled();
     lines.push(digest ? '**Source digests**' : '**Source Code**', '');
     lines.push(
-      stubHeavy
+      stubHeavy && !lifecycleStubComplete
         ? '> Stub digests only — treat as Partial locator. Do **not** ANSWER NOW from `.d.ts` alone; search in-repo impl next.'
         : digest
           ? '> Short digests — treat as already Read for these symbols. Answer from anchors + digests; '
@@ -7299,6 +7617,177 @@ export class ToolHandler {
   }
 
   /**
+   * When a lifecycle Type only exists as SDK `.d.ts`, extract state enums +
+   * callback registrations from the stub so agents stop grep-storming in-repo.
+   */
+  private buildSdkStubLifecycleSection(
+    projectRoot: string,
+    stubFilePaths: string[],
+    _query: string,
+  ): { section: string; complete: boolean } {
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const enums: string[] = [];
+    const callbacks: string[] = [];
+
+    for (const fp of stubFilePaths.slice(0, 4)) {
+      const abs = validatePathWithinRoot(projectRoot, fp);
+      if (!abs || !existsSync(abs)) continue;
+      let content = '';
+      try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+      const fileLines = content.split('\n');
+
+      for (let i = 0; i < fileLines.length; i++) {
+        const line = fileLines[i] ?? '';
+        if (/^\s*enum\s+\w*State\w*\s*\{/.test(line)) {
+          const members: string[] = [];
+          for (let j = i + 1; j < Math.min(fileLines.length, i + 48); j++) {
+            const l = fileLines[j] ?? '';
+            if (/^\s*\}/.test(l)) break;
+            const m = l.match(/^\s*(\w+)\s*[,=]/);
+            if (m?.[1]) members.push(m[1]);
+          }
+          if (members.length > 0) {
+            enums.push(`\`${line.trim().slice(0, 72)}\` → ${members.slice(0, 14).join(', ')}`);
+          }
+        }
+        if (
+          /on\s*\(\s*type\s*:\s*['"][\w]+['"]/.test(line)
+          || /Register the callback|Register.*Callback|move scene session|foreground|background|sessionStateChange/i.test(
+            line,
+          )
+        ) {
+          callbacks.push(`- \`${rel(fp)}:${i + 1}\`  \`${line.trim().slice(0, 110)}\``);
+        }
+      }
+    }
+
+    if (enums.length === 0 && callbacks.length < 3) {
+      return { section: '', complete: false };
+    }
+
+    const lines = [
+      '**SDK lifecycle surface (indexed stub)**',
+      '',
+      '> Lifecycle Type is stub-only — state enum + callbacks below are authoritative. **ANSWER NOW**; '
+        + 'do not Grep in-repo for the same SDK API names.',
+      '',
+    ];
+    if (enums.length > 0) {
+      lines.push('**State enum(s)**', '');
+      for (const e of enums.slice(0, 4)) lines.push(`- ${e}`);
+      lines.push('');
+    }
+    if (callbacks.length > 0) {
+      lines.push('**Callbacks / transitions**', '');
+      lines.push(...callbacks.slice(0, 22));
+      if (callbacks.length > 22) lines.push(`- … and ${callbacks.length - 22} more`);
+      lines.push('');
+    }
+    const complete = enums.length > 0 && callbacks.length >= 3;
+    return { section: lines.join('\n'), complete: complete || callbacks.length >= 6 };
+  }
+
+  /**
+   * Pages sharing a container component + how they inject differentiated
+   * ViewModel / LocalStorage state into the shared shell.
+   */
+  private buildContainerCompositionSection(
+    cg: HomeGraph,
+    query: string,
+    projectRoot: string,
+  ): { section: string; hitCount: number; complete: boolean } {
+    const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+    const containerName =
+      types.find((t) => /(?:Screen|Page|View|Container)$/i.test(t))
+      ?? types.find((t) => /Screen/i.test(t))
+      ?? types[0];
+    const viewModelName = types.find((t) => /ViewModel$/i.test(t));
+    if (!containerName) return { section: '', hitCount: 0, complete: false };
+
+    const rel = (p: string) => p.replace(/\\/g, '/');
+    const hits: Array<{ file: string; snippet: string; score: number }> = [];
+    const seen = new Set<string>();
+
+    const ingestFile = (fp: string, content: string, baseScore: number): void => {
+      if (seen.has(fp) || isTestFile(fp)) return;
+      if (!content.includes(containerName)) return;
+      const useRe = new RegExp(`${containerName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[({]`);
+      if (!useRe.test(content) && !content.includes(`import { ${containerName}`)) return;
+      const fileLines = content.split('\n');
+      const snippets: string[] = [];
+      for (let i = 0; i < fileLines.length; i++) {
+        const line = fileLines[i] ?? '';
+        if (
+          line.includes(containerName)
+          || /@LocalStorageLink|LocalStorageProp|screenSession/i.test(line)
+          || (viewModelName && line.includes(viewModelName))
+          || /new\s+\w+ViewModel/i.test(line)
+        ) {
+          snippets.push(`L${i + 1}: ${line.trim().slice(0, 100)}`);
+          if (snippets.length >= 4) break;
+        }
+      }
+      if (snippets.length === 0) return;
+      seen.add(fp);
+      let score = baseScore;
+      if (/@LocalStorageLink/i.test(content)) score += 30;
+      if (/CommonScbView|EntryView|DevView/i.test(fp)) score += 20;
+      if (viewModelName && content.includes(viewModelName)) score += 15;
+      hits.push({ file: fp, snippet: snippets.join(' / '), score });
+    };
+
+    let results: SearchResult[] = [];
+    try {
+      results = cg.searchNodes(containerName, { kinds: ['import', 'component', 'class', 'struct'], limit: 36 });
+    } catch { /* */ }
+    for (const r of results) {
+      if (isOhosApiFilePath(r.node.filePath)) continue;
+      const fp = rel(r.node.filePath);
+      if (!/\.(ets|tsx|jsx|vue|svelte)$/i.test(fp)) continue;
+      const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+      if (!abs) continue;
+      let content = '';
+      try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+      ingestFile(fp, content, 12);
+    }
+
+    if (hits.length < 4) {
+      try {
+        for (const f of cg.getFiles()) {
+          if (hits.length >= 14) break;
+          const fp = rel(f.path);
+          if (!/\.ets$/i.test(fp)) continue;
+          const abs = validatePathWithinRoot(projectRoot, f.path);
+          if (!abs) continue;
+          let content = '';
+          try { content = readFileSync(abs, 'utf-8'); } catch { continue; }
+          ingestFile(fp, content, 8);
+        }
+      } catch { /* optional */ }
+    }
+
+    hits.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+    if (hits.length === 0) return { section: '', hitCount: 0, complete: false };
+
+    const lines = [
+      '**Container composition / ViewModel injection survey**',
+      '',
+      `> Pages using \`${containerName}\`${viewModelName ? ` with \`${viewModelName}\`` : ''}. `
+        + '**ANSWER NOW** from injection snippets — do not fan out Read/callers per page.',
+      '',
+    ];
+    for (const h of hits.slice(0, 10)) {
+      lines.push(`- \`${h.file}\` — ${h.snippet.slice(0, 220)}`);
+    }
+    if (hits.length > 10) lines.push(`- … and ${hits.length - 10} more`);
+    lines.push('');
+    const complete =
+      hits.length >= 2
+      && hits.some((h) => /@LocalStorageLink|screenSession|ViewModel/i.test(h.snippet));
+    return { section: lines.join('\n'), hitCount: Math.min(hits.length, 10), complete };
+  }
+
+  /**
    * Hover / pointer-handler inventory — onHover / Hover* symbols + short snippets.
    * Used when the agent asks about hover effects without naming a Type yet.
    */
@@ -7308,15 +7797,49 @@ export class ToolHandler {
     projectRoot: string,
   ): { section: string; hitCount: number } {
     const topicBoost = /图标|icon|appicon|dock|launcher/i.test(query);
-    const searchTerms = ['onHover', 'HoverAnimation', 'HoverEffect', 'HoverConstants', 'hover'];
+    const searchTerms = topicBoost
+      ? [
+          'onHover', 'AppIconCommonView', 'HoverAnimationUtil', 'AppIconHoverEvent',
+          'setIconHoverEventIface', 'HoverAnimation', 'HoverEffect',
+        ]
+      : ['onHover', 'HoverAnimation', 'HoverEffect', 'HoverConstants', 'hover'];
     const seen = new Set<string>();
     const hits: Array<{ file: string; line: number; name: string; kind: string; score: number; snippet: string }> = [];
+
+    const scoreHit = (
+      r: SearchResult,
+      term: string,
+      snippet: string,
+    ): number => {
+      const nameLc = r.node.name.toLowerCase();
+      const pathLc = r.node.filePath.toLowerCase().replace(/\\/g, '/');
+      const termLc = term.toLowerCase();
+      let score = nameLc === 'onhover' || nameLc.startsWith('onhover') ? 40 : 10;
+      if (/hover/.test(nameLc)) score += 15;
+      if (/onhover/.test(snippet.toLowerCase())) score += 35;
+      if (/appiconcommonview|hoveranimationutil|appiconhover/i.test(nameLc)) score += 45;
+      if (/seticonhover|geticonhover/i.test(nameLc)) score += 35;
+      if (topicBoost && /launchercommon|launchericon|appicon|smartdock|appcenter/i.test(pathLc)) {
+        score += 50;
+      }
+      if (topicBoost && /controlcenter|commonconstants|controlpanel/i.test(pathLc)) {
+        score -= 45;
+      }
+      if (topicBoost && nameLc === 'hoverconstants' && !/launcher|appicon/i.test(pathLc)) {
+        score -= 40;
+      }
+      if (topicBoost && /import/.test(snippet) && !/onhover|hoveranimation|appicon/i.test(snippet.toLowerCase())) {
+        score -= 25;
+      }
+      if (termLc === 'onhover' && /component|struct/.test(r.node.kind)) score += 10;
+      return score;
+    };
 
     for (const term of searchTerms) {
       let results: SearchResult[] = [];
       try {
         results = cg.searchNodes(term, {
-          kinds: ['method', 'function', 'property', 'field', 'variable', 'constant', 'class', 'component'],
+          kinds: ['method', 'function', 'property', 'field', 'variable', 'constant', 'class', 'component', 'struct'],
           limit: 30,
         });
       } catch {
@@ -7331,9 +7854,6 @@ export class ToolHandler {
         const key = `${r.node.filePath}:${r.node.startLine}:${r.node.name}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        let score = nameLc === 'onhover' || nameLc.startsWith('onhover') ? 40 : 10;
-        if (/hover/.test(nameLc)) score += 15;
-        if (topicBoost && /icon|appicon|dock|launcher|smartdock|appcenter/i.test(pathLc)) score += 25;
         let snippet = (r.node.signature || r.node.name).slice(0, 120);
         try {
           const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
@@ -7344,12 +7864,35 @@ export class ToolHandler {
             snippet = lines.slice(from, to).map((l) => l.trim()).filter(Boolean).join(' / ').slice(0, 160);
           }
         } catch { /* keep signature */ }
+        // App icon views often expose `.onHover` on a builder line — scan nearby.
+        if (topicBoost && /appiconcommonview/i.test(pathLc)) {
+          try {
+            const abs = validatePathWithinRoot(projectRoot, r.node.filePath);
+            if (abs && existsSync(abs)) {
+              const lines = readFileSync(abs, 'utf-8').split('\n');
+              for (let i = 0; i < lines.length; i++) {
+                if (!/\.onHover\s*\(/.test(lines[i] ?? '')) continue;
+                const hk = `${r.node.filePath}:${i + 1}:onHover`;
+                if (seen.has(hk)) continue;
+                seen.add(hk);
+                hits.push({
+                  file: r.node.filePath,
+                  line: i + 1,
+                  name: 'onHover',
+                  kind: 'property',
+                  score: 90,
+                  snippet: (lines[i] ?? '').trim().slice(0, 160),
+                });
+              }
+            }
+          } catch { /* optional */ }
+        }
         hits.push({
           file: r.node.filePath,
           line: r.node.startLine,
           name: r.node.name,
           kind: r.node.kind,
-          score,
+          score: scoreHit(r, term, snippet),
           snippet,
         });
       }
@@ -7370,18 +7913,28 @@ export class ToolHandler {
     }
 
     hits.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+    // Icon-hover asks: drop import-only control-center noise from the visible set.
+    const filtered = topicBoost
+      ? hits.filter((h) => {
+          const pl = h.file.toLowerCase();
+          if (h.score >= 35) return true;
+          if (/controlcenter|commonconstants/.test(pl) && h.name === 'HoverConstants') return false;
+          return h.score > 0;
+        })
+      : hits;
+    const displayHits = filtered.length > 0 ? filtered : hits;
     const lines = [
       '**Hover / pointer handler survey**',
       '',
       '> **ANSWER NOW** from these in-repo hover handlers + snippets. Do not Grep `onHover` again unless a named Type is still missing.',
       '',
     ];
-    const shown = hits.slice(0, 12);
+    const shown = displayHits.slice(0, 12);
     for (const h of shown) {
       lines.push(`- \`${h.name}\` (${h.kind}) — \`${h.file}:${h.line}\``);
       if (h.snippet) lines.push(`  \`${h.snippet.slice(0, 100)}\``);
     }
-    if (hits.length > shown.length) lines.push(`- … and ${hits.length - shown.length} more`);
+    if (displayHits.length > shown.length) lines.push(`- … and ${displayHits.length - shown.length} more`);
     lines.push('');
     return { section: lines.join('\n'), hitCount: shown.length };
   }
@@ -7536,8 +8089,8 @@ export class ToolHandler {
       }
     }
 
-    // "需要额外安装哪些依赖" — surface oh-package.json5 lines naming the kit.
-    if (/额外安装|还需.*依赖|需要.*依赖|install(?:ing)?\s+(?:extra\s+)?deps?|which\s+deps?/i.test(query)) {
+    // Install/deps asks (incl. agent EN "parameters dependencies") — oh-package lines.
+    if (queryAsksKitInstallDeps(query)) {
       const depLines: string[] = [];
       try {
         for (const f of cg.getFiles()) {
@@ -8029,7 +8582,7 @@ export class ToolHandler {
     // Include PascalCase SDK modules (Telephony) — deps-only missed them.
     const rawSymbols = extractApiUsageTokens(query).slice(0, 6);
     if (rawSymbols.length === 0) return { section: '', fileCount: 0 };
-    // Expand Telephony → telephony / @ohos.telephony so import call sites hit.
+    // Expand Telephony → telephony / @ohos.telephony / @kit.TelephonyKit call sites.
     const symbols: string[] = [];
     for (const sym of rawSymbols) {
       symbols.push(sym);
@@ -8038,6 +8591,11 @@ export class ToolHandler {
         if (!symbols.includes(lc)) symbols.push(lc);
         const ohos = `@ohos.${lc}`;
         if (!symbols.includes(ohos)) symbols.push(ohos);
+      }
+    }
+    if (rawSymbols.some((s) => /^telephony$/i.test(s))) {
+      for (const kit of ['@kit.TelephonyKit', '@hms.telephony.enhanced', '@hms.telephony.vsim', 'TelephonyKit']) {
+        if (!symbols.includes(kit)) symbols.push(kit);
       }
     }
 
@@ -8054,8 +8612,46 @@ export class ToolHandler {
       hits.set(fp, prev);
     };
 
-    for (const sym of symbols.slice(0, 6)) {
+    if (rawSymbols.some((s) => /^telephony$/i.test(s))) {
+      for (const kit of ['@kit.TelephonyKit', '@hms.telephony.enhanced', '@hms.telephony.vsim']) {
+        let importHits: SearchResult[] = [];
+        try {
+          importHits = cg.searchNodes(kit.replace(/^@/, ''), { kinds: ['import'], limit: 40 });
+        } catch { importHits = []; }
+        for (const r of importHits) {
+          const line = resolveImportLineFromNode(r.node, projectRoot);
+          if (line.includes(kit) || line.toLowerCase().includes(kit.toLowerCase())) {
+            addHit(r.node.filePath, r.node.startLine);
+          }
+        }
+        // FTS stem fallback (`TelephonyKit`, `telephony.vsim`, …).
+        const stem = kit.split('.').pop() ?? kit;
+        try {
+          importHits = cg.searchNodes(stem, { kinds: ['import'], limit: 40 });
+        } catch { importHits = []; }
+        for (const r of importHits) {
+          const line = resolveImportLineFromNode(r.node, projectRoot);
+          if (line.includes('@kit.TelephonyKit') || line.includes('@hms.telephony')) {
+            addHit(r.node.filePath, r.node.startLine);
+          }
+        }
+      }
+    }
+
+    for (const sym of symbols.slice(0, 8)) {
       const symLc = sym.toLowerCase();
+      if (sym.startsWith('@')) {
+        let importNodes: SearchResult[] = [];
+        try {
+          importNodes = cg.searchNodes(sym.replace(/^@/, ''), { kinds: ['import'], limit: 28 });
+        } catch { importNodes = []; }
+        for (const r of importNodes) {
+          const line = resolveImportLineFromNode(r.node, projectRoot).toLowerCase();
+          if (line.includes(symLc.replace(/^@/, '')) || line.includes(symLc)) {
+            addHit(r.node.filePath, r.node.startLine);
+          }
+        }
+      }
       let nodes: SearchResult[] = [];
       try {
         nodes = cg.searchNodes(sym.replace(/^@/, ''), { limit: 40 });
@@ -8132,6 +8728,14 @@ export class ToolHandler {
     // Prefer project call/import sites over SDK .d.ts stubs.
     const rankedFiles = [...hits.entries()].sort((a, b) => {
       if (a[1].stub !== b[1].stub) return a[1].stub ? 1 : -1;
+      const telephonyBoost = (fp: string) =>
+        rawSymbols.some((s) => /^telephony$/i.test(s))
+        && /@kit\.telephonykit|@hms\.telephony|telephonykit/i.test(fp.toLowerCase())
+          ? -1
+          : 0;
+      const ta = telephonyBoost(a[0]);
+      const tb = telephonyBoost(b[0]);
+      if (ta !== tb) return ta - tb;
       return a[0].localeCompare(b[0]);
     });
     const projectHits = rankedFiles.filter(([, v]) => !v.stub);
@@ -8165,8 +8769,16 @@ export class ToolHandler {
     }
 
     // Recompute display after call-site enrichment.
+    const telephonyBoost = (fp: string) =>
+      rawSymbols.some((s) => /^telephony$/i.test(s))
+      && /@kit\.telephonykit|@hms\.telephony|telephonykit/i.test(fp.toLowerCase())
+        ? -1
+        : 0;
     const rankedFiles2 = [...hits.entries()].sort((a, b) => {
       if (a[1].stub !== b[1].stub) return a[1].stub ? 1 : -1;
+      const ta = telephonyBoost(a[0]);
+      const tb = telephonyBoost(b[0]);
+      if (ta !== tb) return ta - tb;
       return a[0].localeCompare(b[0]);
     });
     const projectHits2 = rankedFiles2.filter(([, v]) => !v.stub);
@@ -8215,6 +8827,26 @@ export class ToolHandler {
       for (const m of [...methodNames].sort().slice(0, 24)) lines.push(`- \`${m}\``);
       if (methodNames.size > 24) lines.push(`- … and ${methodNames.size - 24} more`);
       lines.push('');
+    }
+    if (rawSymbols.some((s) => /^telephony$/i.test(s))) {
+      const kitSurfaces = new Set<string>();
+      for (const [fp, info] of display2.slice(0, 40)) {
+        const abs = validatePathWithinRoot(projectRoot, fp);
+        if (!abs || !existsSync(abs)) continue;
+        let fileLines: string[] = [];
+        try { fileLines = readFileSync(abs, 'utf-8').split('\n'); } catch { continue; }
+        for (const ln of info.lines.slice(0, 8)) {
+          const lineText = fileLines[ln - 1] ?? '';
+          for (const m of lineText.matchAll(/@kit\.TelephonyKit|@hms\.telephony(?:\.\w+)?/g)) {
+            if (m[0]) kitSurfaces.add(m[0]);
+          }
+        }
+      }
+      if (kitSurfaces.size > 0) {
+        lines.push('**@kit / @hms Telephony imports**');
+        for (const k of [...kitSurfaces].sort()) lines.push(`- \`${k}\``);
+        lines.push('');
+      }
     }
     let shown = 0;
     const isImportish = (s: string) => /^\s*import\b/.test(s) || /\bfrom\s+['"]@/.test(s);
@@ -10969,6 +11601,7 @@ export class ToolHandler {
       lines.push(`> ⚠ ${worktreeMismatchWarning(mismatch).replace(/\n/g, '\n> ')}`, '');
     }
     lines.push(
+      `**Build phase:** ${cg.getBuildPhase()}`,
       `**Files indexed:** ${stats.fileCount}`,
       `**Total nodes:** ${stats.nodeCount}`,
       `**Total edges:** ${stats.edgeCount}`,
@@ -11048,7 +11681,81 @@ export class ToolHandler {
       }
     }
 
+    const updateNotice = getUpdateNotice();
+    if (updateNotice) {
+      lines.push('', '**Update available:**', updateNotice);
+    }
+
     return this.textResult(lines.join('\n'));
+  }
+
+  /**
+   * Handle homegraph_project — shallow module → file map (fast build).
+   */
+  private async handleProject(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    const phase = cg.getBuildPhase();
+    if (phase === 'building_fast') {
+      return this.textResult(
+        'Fast project map is still building — retry in a few seconds.'
+      );
+    }
+
+    let map = cg.getProjectMap({
+      module: typeof args.module === 'string' ? args.module : undefined,
+      includeFiles: args.includeFiles !== false,
+    });
+
+    // On-demand build for indexes that never ran the fast path (legacy / CLI init).
+    if (map.modules.length === 0) {
+      try {
+        cg.buildProjectMap();
+        if (phase === 'none') {
+          cg.setBuildPhase(cg.getStats().nodeCount > 0 ? 'full' : 'fast');
+        }
+        map = cg.getProjectMap({
+          module: typeof args.module === 'string' ? args.module : undefined,
+          includeFiles: args.includeFiles !== false,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return this.textResult(`Failed to build project map: ${message}`);
+      }
+    }
+
+    if (map.modules.length === 0) {
+      return this.textResult('No modules found in the project map.');
+    }
+
+    const FILE_CAP = 80;
+    const lines: string[] = [
+      `**Project map** (phase=${map.phase})`,
+      `modules: ${map.modules.length} · files: ${map.fileCount}`,
+      '',
+    ];
+    if (map.phase === 'fast' || map.phase === 'indexing') {
+      lines.push(
+        '_Full symbol index still building — this map has modules/files only (no call graph)._',
+        ''
+      );
+    }
+
+    for (const m of map.modules) {
+      const rootLabel = m.rootPath || '.';
+      lines.push(`### ${m.name} (\`${rootLabel}\`) · ${m.kind} · ${m.fileCount} files`);
+      if (m.files && m.files.length > 0) {
+        const shown = m.files.slice(0, FILE_CAP);
+        for (const f of shown) {
+          lines.push(`- ${f.path}`);
+        }
+        if (m.files.length > FILE_CAP) {
+          lines.push(`- … +${m.files.length - FILE_CAP} more`);
+        }
+      }
+      lines.push('');
+    }
+
+    return this.textResult(lines.join('\n').trimEnd());
   }
 
   /**

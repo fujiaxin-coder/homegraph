@@ -95,6 +95,9 @@ afterEach(() => {
   cleanupArktsProjects();
 });
 
+// ArkTS Scene indexAll is routinely 3–6s on Windows; default 5s testTimeout flakes.
+const ARKTS_INDEX_TIMEOUT_MS = 20_000;
+
 describe('languages/arkts viewtree flow', () => {
   let cg: HomeGraph | undefined;
 
@@ -119,7 +122,7 @@ describe('languages/arkts viewtree flow', () => {
     expect(handlerNode?.kind).toBe('method');
     expect(handlerNode?.name.startsWith('%AM')).toBe(true);
     expect(handlerNode?.qualifiedName).toContain('ParentPage');
-  });
+  }, ARKTS_INDEX_TIMEOUT_MS);
 
   it('allows ViewTree onClick references but not structural ViewTree references in Flow BFS', async () => {
     const root = makeArktsProject(LAMBDA_HANDLER_FIXTURE);
@@ -146,7 +149,7 @@ describe('languages/arkts viewtree flow', () => {
       metadata: { synthesizedBy: 'viewtree', via: 'child-component' },
     };
     expect(flowEdgeFilter(handler, structural)).toBe(false);
-  });
+  }, ARKTS_INDEX_TIMEOUT_MS);
 
   it('connects lifecycle → build → handler in homegraph_explore main Flow', async () => {
     const root = makeArktsProject(NAMED_HANDLER_FIXTURE);
@@ -163,7 +166,7 @@ describe('languages/arkts viewtree flow', () => {
     expect(text).toMatch(/aboutToAppear/);
     expect(text).toMatch(/build/);
     expect(text).toMatch(/handleClick/);
-  });
+  }, ARKTS_INDEX_TIMEOUT_MS);
 
   it('labels indexed ViewTree onClick references for Flow output', async () => {
     const root = makeArktsProject(LAMBDA_HANDLER_FIXTURE);
@@ -183,7 +186,7 @@ describe('languages/arkts viewtree flow', () => {
     const callback = [...cg!.getNodesByKind('method')].find((n) => n.id === onClickEdge!.target);
     expect(callback?.name.startsWith('%AM')).toBe(true);
     expect(onClickEdge!.metadata?.via).toBe('onClick');
-  });
+  }, ARKTS_INDEX_TIMEOUT_MS);
 
   it('does not treat ViewTree child-component references as Flow hops', async () => {
     const root = makeArktsProject({
@@ -229,5 +232,5 @@ struct CommonTest {
     const text = res.content[0]!.text as string;
 
     expect(text).not.toContain('**Flow (call path among the symbols you queried)**');
-  });
+  }, ARKTS_INDEX_TIMEOUT_MS);
 });

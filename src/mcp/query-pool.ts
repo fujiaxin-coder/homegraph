@@ -56,11 +56,11 @@ export interface PoolWorker {
 
 /**
  * Default soft backstop — must stay **well below** typical MCP client hard
- * timeouts (~60s). Large monorepo explores often need >15s; leave headroom
- * under client cuts. Env `CODEGRAPH_QUERY_BUSY_TIMEOUT_MS` is clamped to
- * {@link MAX_BUSY_TIMEOUT_MS} so a mistaken `60000` cannot race the client.
+ * timeouts (~60s). Default 15s keeps the agent from waiting on a stuck explore;
+ * raise via `CODEGRAPH_QUERY_BUSY_TIMEOUT_MS` (clamped to
+ * {@link MAX_BUSY_TIMEOUT_MS}) when large monorepos need more headroom.
  */
-const DEFAULT_BUSY_TIMEOUT_MS = 25_000;
+const DEFAULT_BUSY_TIMEOUT_MS = 15_000;
 
 /** Hard ceiling — leave headroom under ~60s client timeouts. */
 const MAX_BUSY_TIMEOUT_MS = 45_000;

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     decorators TEXT, -- JSON array
     type_parameters TEXT, -- JSON array
     return_type TEXT, -- normalized return/result type name (e.g. C++ method return, for receiver-type inference)
+    arkui_id TEXT, -- ArkUI .id('…') on custom component usages (Spec 0019); not nodes.id
     updated_at INTEGER NOT NULL
 );
 
@@ -106,6 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_nodes_file_path ON nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_nodes_language ON nodes(language);
 CREATE INDEX IF NOT EXISTS idx_nodes_file_line ON nodes(file_path, start_line);
 CREATE INDEX IF NOT EXISTS idx_nodes_lower_name ON nodes(lower(name));
+CREATE INDEX IF NOT EXISTS idx_nodes_arkui_id ON nodes(arkui_id) WHERE arkui_id IS NOT NULL;
 
 -- Full-text search index on node names, docstrings, and signatures
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
@@ -197,6 +199,28 @@ CREATE TABLE IF NOT EXISTS project_metadata (
     value TEXT NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- Fast project map (module → files). Written by the seconds-scale fast build;
+-- full symbol index still uses nodes/edges/files. See homegraph_project.
+CREATE TABLE IF NOT EXISTS project_modules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    root_path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    file_count INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_module_files (
+    module_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    PRIMARY KEY (module_id, path),
+    FOREIGN KEY (module_id) REFERENCES project_modules(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_modules_root ON project_modules(root_path);
+CREATE INDEX IF NOT EXISTS idx_project_module_files_path ON project_module_files(path);
 
 -- MCP tool response cache (invalidated wholesale on index stamp change)
 CREATE TABLE IF NOT EXISTS mcp_query_cache (

@@ -9,11 +9,14 @@
  * suppressing both the network call and the notice, the dev-sentinel guard,
  * and the notice text itself.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import HomeGraph from '../src/index';
+import { ToolHandler } from '../src/mcp/tools';
 import { initializeInstructions } from '../src/mcp/session';
+import * as updateCheck from '../src/upgrade/update-check';
 import {
   refreshUpdateCheck,
   getUpdateNotice,
@@ -238,6 +241,44 @@ describe('update check (#1243)', () => {
       );
       await new Promise((r) => setTimeout(r, 20));
       expect(lines).toHaveLength(0);
+    });
+  });
+
+  describe('homegraph_status surface (#1243)', () => {
+    let testDir: string;
+    let cg: HomeGraph;
+    let handler: ToolHandler;
+
+    beforeEach(async () => {
+      testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-status-notice-'));
+      fs.mkdirSync(path.join(testDir, 'src'));
+      fs.writeFileSync(path.join(testDir, 'src', 'a.ts'), 'export const x = 1;\n');
+      cg = HomeGraph.initSync(testDir, { config: { include: ['**/*.ts'], exclude: [] } });
+      await cg.indexAll();
+      handler = new ToolHandler(cg);
+    });
+
+    afterEach(() => {
+      try { cg.close(); } catch { /* ignore */ }
+      if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+      vi.restoreAllMocks();
+    });
+
+    it('includes update notice when getUpdateNotice returns one', async () => {
+      const notice = formatUpdateNotice('v1.4.0', 'v1.5.0');
+      vi.spyOn(updateCheck, 'getUpdateNotice').mockReturnValue(notice);
+      const res = await handler.execute('homegraph_status', {});
+      const text = res.content[0]?.text ?? '';
+      expect(text).toContain('**Update available:**');
+      expect(text).toContain('v1.5.0');
+      expect(text).toContain('homegraph upgrade');
+    });
+
+    it('omits update section when getUpdateNotice returns null', async () => {
+      vi.spyOn(updateCheck, 'getUpdateNotice').mockReturnValue(null);
+      const res = await handler.execute('homegraph_status', {});
+      const text = res.content[0]?.text ?? '';
+      expect(text).not.toContain('**Update available:**');
     });
   });
 });

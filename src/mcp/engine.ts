@@ -11,14 +11,17 @@
  */
 
 import * as os from 'os';
+import * as path from 'path';
+import { spawn } from 'child_process';
 import type HomeGraph from '../index';
-import { findNearestHomeGraphRoot } from '../directory';
+import { findNearestHomeGraphRoot, isInitialized } from '../directory';
 import { watchDisabledReason } from '../sync';
 import { ToolHandler } from './tools';
 import { QueryPool, resolvePoolSize } from './query-pool';
 import { shouldSkipCatchUpSync } from './memory-budget';
 import { getDatabasePath } from '../db';
 import { resolveGraphSources, graphSourceFlags } from '../graph-sources';
+import { validateProjectPath } from '../utils';
 
 // Lazy-load the heavy HomeGraph chain (sqlite + query/graph/context layers) OFF
 // the MCP startup path. It's only needed once a tool actually opens a project —
@@ -205,7 +208,14 @@ export class MCPEngine {
   private async doInitialize(searchFrom: string): Promise<void> {
     this.toolHandler.setDefaultProjectHint(searchFrom);
 
-    const resolvedRoot = findNearestHomeGraphRoot(searchFrom);
+    let resolvedRoot = findNearestHomeGraphRoot(searchFrom);
+    if (!resolvedRoot && autoInitEnabled()) {
+      const created = await this.tryAutoInit(searchFrom);
+      if (created) return; // cg + watch + background index already running
+      // fall through — still no index; tools return NotIndexed guidance
+      this.projectPath = searchFrom;
+      return;
+    }
     if (!resolvedRoot) {
       // No .homegraph/ above searchFrom. Sessions may still discover one later via roots/list
       this.projectPath = searchFrom;
@@ -223,6 +233,7 @@ export class MCPEngine {
       }
       this.cg = await loadHomeGraph().open(resolvedRoot, { sources: mode });
       this.toolHandler.setDefaultHomeGraph(this.cg);
+      this.healBuildPhase(this.cg);
       this.startWatching();
       this.catchUpSync();
       this.maybeStartPool(resolvedRoot);
@@ -230,6 +241,191 @@ export class MCPEngine {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[HomeGraph MCP] Failed to open project at ${resolvedRoot}: ${msg}\n`);
     }
+  }
+
+  /**
+   * Product hosts (e.g. DevEco Code) pass `--auto-init` / HOMEGRAPH_AUTO_INIT=1 so
+   * opening an unindexed workspace creates `.homegraph/`, builds a fast project
+   * map (modules + files), then starts a background full index + watcher —
+   * no separate `homegraph init` step for the user.
+   *
+   * @returns true if the engine is fully wired to a new (or racing) index
+   */
+  private async tryAutoInit(searchFrom: string): Promise<boolean> {
+    const root = path.resolve(searchFrom);
+    const invalid = validateProjectPath(root);
+    if (invalid) {
+      process.stderr.write(`[HomeGraph MCP] Auto-init skipped — ${invalid}\n`);
+      return false;
+    }
+    if (isInitialized(root)) {
+      // Race: another process finished init between our findNearest and here.
+      return false;
+    }
+
+    try {
+      process.stderr.write(`[HomeGraph MCP] Auto-init at ${root}\n`);
+      const HomeGraph = loadHomeGraph();
+      // Create DB immediately so tools/open succeed; index in background.
+      const cg = await HomeGraph.init(root, { index: false });
+      this.cg = cg;
+      this.projectPath = root;
+      this.toolHandler.setDefaultHomeGraph(cg);
+      this.startWatching();
+      this.maybeStartPool(root);
+      // Fast map in-process (seconds, MCP stays up). Full index in a *detached*
+      // child — in-process indexAll wedges the MCP event loop on large repos,
+      // so DevEco marks the server "Connection closed" and agents fall back.
+      void (async () => {
+        try {
+          cg.setBuildPhase('building_fast');
+          const map = cg.buildProjectMap();
+          cg.setBuildPhase('fast');
+          process.stderr.write(
+            `[HomeGraph MCP] Fast project map ready — modules=${map.modules.length} files=${map.files.length} (${map.durationMs}ms)\n`
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[HomeGraph MCP] Fast project map failed: ${msg}\n`);
+        }
+        this.startDetachedFullIndex(cg, root);
+      })();
+      return true;
+    } catch (err) {
+      // Concurrent init from another process — treat as success path via open.
+      if (isInitialized(root)) {
+        process.stderr.write(`[HomeGraph MCP] Auto-init raced; opening existing index at ${root}\n`);
+        try {
+          const mode = resolveGraphSources();
+          if (!graphSourceFlags(mode).openProjectDb) return false;
+          this.cg = await loadHomeGraph().open(root, { sources: mode });
+          this.projectPath = root;
+          this.toolHandler.setDefaultHomeGraph(this.cg);
+          this.healBuildPhase(this.cg);
+          this.startWatching();
+          this.catchUpSync();
+          this.maybeStartPool(root);
+          return true;
+        } catch (openErr) {
+          const msg = openErr instanceof Error ? openErr.message : String(openErr);
+          process.stderr.write(`[HomeGraph MCP] Auto-init open-after-race failed: ${msg}\n`);
+          return false;
+        }
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[HomeGraph MCP] Auto-init failed: ${msg}\n`);
+      return false;
+    }
+  }
+
+  /**
+   * If a previous auto-init child finished indexing but never flipped
+   * build_phase (MCP died mid-flight), heal so deep tools unlock.
+   */
+  private healBuildPhase(cg: HomeGraph): void {
+    try {
+      const phase = cg.getBuildPhase();
+      if (phase === 'full') return;
+      const state = cg.getQueryBuilder().getMetadata('index_state');
+      if (state === 'complete' || state === 'partial') {
+        cg.setBuildPhase('full');
+        process.stderr.write(`[HomeGraph MCP] Healed build_phase → full (index_state=${state})\n`);
+        return;
+      }
+      // Index finished enough to have symbols but metadata stuck on indexing.
+      if ((phase === 'indexing' || phase === 'fast') && cg.getStats().nodeCount > 0 && state !== 'indexing') {
+        cg.setBuildPhase('full');
+        process.stderr.write(`[HomeGraph MCP] Healed build_phase → full (nodes present, index_state=${state ?? 'null'})\n`);
+      }
+    } catch {
+      /* advisory */
+    }
+  }
+
+  /**
+   * Run `homegraph index` in a detached sibling process so the MCP stdio
+   * server stays responsive (fast map + homegraph_project keep working).
+   */
+  private startDetachedFullIndex(cg: HomeGraph, root: string): void {
+    cg.setBuildPhase('indexing');
+    const scriptPath = process.argv[1];
+    if (!scriptPath) {
+      process.stderr.write('[HomeGraph MCP] No script path — falling back to in-process indexAll\n');
+      this.startInProcessFullIndex(cg);
+      return;
+    }
+
+    const args = [...process.execArgv, scriptPath, 'index', root];
+    const env = { ...process.env };
+    delete env.HOMEGRAPH_AUTO_INIT;
+
+    process.stderr.write(`[HomeGraph MCP] Spawning background full index (detached) for ${root}\n`);
+    try {
+      const child = spawn(process.execPath, args, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env,
+      });
+      child.on('error', (err) => {
+        process.stderr.write(`[HomeGraph MCP] Detached index spawn error: ${err.message}; falling back in-process\n`);
+        this.startInProcessFullIndex(cg);
+      });
+      child.unref();
+      this.watchIndexCompletion(cg);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[HomeGraph MCP] Detached index spawn failed (${msg}); falling back in-process\n`);
+      this.startInProcessFullIndex(cg);
+    }
+  }
+
+  private startInProcessFullIndex(cg: HomeGraph): void {
+    cg.setBuildPhase('indexing');
+    void cg
+      .indexAll()
+      .then((result) => {
+        cg.setBuildPhase('full');
+        const files =
+          result && typeof result === 'object' && 'filesIndexed' in result
+            ? String((result as { filesIndexed?: number }).filesIndexed)
+            : '?';
+        process.stderr.write(`[HomeGraph MCP] Auto-init index complete — files=${files}\n`);
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[HomeGraph MCP] Auto-init index failed: ${msg}\n`);
+        try {
+          cg.setBuildPhase('fast');
+        } catch {
+          /* ignore */
+        }
+      });
+  }
+
+  private watchIndexCompletion(cg: HomeGraph): void {
+    const started = Date.now();
+    const maxMs = 3 * 60 * 60 * 1000;
+    const timer = setInterval(() => {
+      try {
+        const state = cg.getQueryBuilder().getMetadata('index_state');
+        if (state === 'complete' || state === 'partial') {
+          cg.setBuildPhase('full');
+          clearInterval(timer);
+          process.stderr.write(`[HomeGraph MCP] Auto-init index complete — index_state=${state}\n`);
+          return;
+        }
+        if (state === 'failed') {
+          cg.setBuildPhase('fast');
+          clearInterval(timer);
+          process.stderr.write('[HomeGraph MCP] Auto-init index failed — index_state=failed\n');
+          return;
+        }
+      } catch {
+        /* lock / transient */
+      }
+      if (Date.now() - started > maxMs) clearInterval(timer);
+    }, 2000);
   }
 
   /**
@@ -252,18 +448,24 @@ export class MCPEngine {
       return;
     }
 
-    // Optional override for the debounce window via env var (issue #403).
-    // Useful for workspaces with bursty writes (formatter-on-save chains,
-    // large generated outputs) where the 2s default fires too often. Clamped
-    // to [100ms, 60s]; out-of-range / non-numeric values fall back to the
-    // FileWatcher default. We log the active value so it's discoverable.
-    const debounceMs = parseDebounceEnv(process.env.HOMEGRAPH_WATCH_DEBOUNCE_MS);
-    if (debounceMs !== undefined) {
+    // Optional overrides:
+    // - HOMEGRAPH_WATCH_FIXED_WINDOW_MS: first-change fixed window (e.g. 300000 = 5min),
+    //   later edits in the window do not extend the timer (product hosts / DevEco).
+    // - HOMEGRAPH_WATCH_DEBOUNCE_MS: classic trailing quiet window ([100ms, 60s]).
+    const fixedWindowMs = parseFixedWindowEnv(process.env.HOMEGRAPH_WATCH_FIXED_WINDOW_MS);
+    const debounceMs = fixedWindowMs ?? parseDebounceEnv(process.env.HOMEGRAPH_WATCH_DEBOUNCE_MS);
+    if (fixedWindowMs !== undefined) {
+      process.stderr.write(
+        `[HomeGraph MCP] File watcher fixed window: ${fixedWindowMs}ms ` +
+          `(HOMEGRAPH_WATCH_FIXED_WINDOW_MS; first change starts timer, later changes do not extend)\n`
+      );
+    } else if (debounceMs !== undefined) {
       process.stderr.write(`[HomeGraph MCP] File watcher debounce: ${debounceMs}ms (HOMEGRAPH_WATCH_DEBOUNCE_MS)\n`);
     }
 
     const started = this.cg.watch({
       debounceMs,
+      fixedWindow: fixedWindowMs !== undefined,
       onSyncComplete: (result) => {
         if (result.filesChanged > 0) {
           process.stderr.write(
@@ -334,6 +536,24 @@ export class MCPEngine {
       });
     this.toolHandler.setCatchUpGate(p);
   }
+}
+
+/** DevEco / product hosts opt in via `--auto-init` or HOMEGRAPH_AUTO_INIT=1. */
+function autoInitEnabled(): boolean {
+  const v = (process.env.HOMEGRAPH_AUTO_INIT ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/**
+ * Parse HOMEGRAPH_WATCH_FIXED_WINDOW_MS — first-change fixed coalesce window.
+ * Range: 1s … 30min. Used by product hosts (e.g. DevEco Code = 5 minutes).
+ */
+export function parseFixedWindowEnv(raw: string | undefined): number | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return undefined;
+  if (n < 1000 || n > 30 * 60 * 1000) return undefined;
+  return n;
 }
 
 /**

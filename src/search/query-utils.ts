@@ -548,6 +548,10 @@ export function queryAsksKitInstallDeps(query: string): boolean {
       query,
     )
     || /install(?:ing)?\s+(?:extra\s+)?deps?|which\s+deps?|need(?:s)?\s+(?:other\s+)?deps?/i.test(query)
+    // Agent EN rewrites of 「其他参数和依赖」often drop "other/extra" and keep
+    // "parameters … dependencies" / "import usage … dependencies" beside a Kit name.
+    || /parameters?\s+(?:and\s+)?dependenc/i.test(query)
+    || /(?:import|usage).{0,48}(?:parameters?.{0,24})?dependenc/i.test(query)
   );
 }
 
@@ -1085,6 +1089,38 @@ export function queryLooksLikeLiteralOrCopyHunt(query: string): boolean {
     || /从.{0,16}包.{0,40}(?:导入|import).{0,20}\btext\b|导入的\s*text\s*对象|imported\s+text\s+objects?/i.test(
       query,
     )
+  );
+}
+
+/**
+ * Container page + ViewModel/config injection — which pages share a shell
+ * component and pass differentiated state into a shared ViewModel.
+ */
+export function queryAsContainerCompositionSurvey(query: string): boolean {
+  if (queryAsMechanismSurvey(query) || queryAsCrossModuleFlowSurvey(query)) return false;
+  const types = extractTypeNamesFromQuery(query).filter((t) => !isFrameworkUiDecoratorName(t));
+  const hasContainerAsk =
+    (/共享|共用|share|shared/i.test(query) && /容器|container|Screen|Page|View/i.test(query))
+    || types.some((t) => /(?:Screen|Page|View|Container)$/i.test(t));
+  const hasInjectAsk = /注入|inject|差异化|differentiat|配置|config|property/i.test(query);
+  const hasViewModel = types.some((t) => /ViewModel$/i.test(t)) || /\bViewModel\b/i.test(query);
+  return (hasContainerAsk && hasInjectAsk && (hasViewModel || types.length >= 2))
+    || (types.length >= 2
+      && types.some((t) => /(?:Screen|Page|View|Container)$/i.test(t))
+      && types.some((t) => /ViewModel$/i.test(t))
+      && hasInjectAsk);
+}
+
+/**
+ * Named member + UI consequence ("how does UI mark/show when member returns true").
+ * Definition/filter sites alone are rarely sufficient — steer to UI evidence.
+ */
+export function queryAsMemberUiConsequenceSurvey(query: string): boolean {
+  if (!queryHasNamedMemberFocus(query)) return false;
+  if (queryAsCoNamedTypeMethodInteraction(query)) return false;
+  return (
+    /UI|界面|显示|标记|展示|render|visual|样式|效果|\bmark\b/i.test(query)
+    && /如何|怎样|what|how/i.test(query)
   );
 }
 
@@ -1750,6 +1786,7 @@ export function shouldTryFastInventoryExplore(query: string): boolean {
     || queryAsDataSourceSurvey(query)
     || queryAsEventDispatchSurvey(query)
     || queryAsMultiTypeDependencySurvey(query)
+    || queryAsContainerCompositionSurvey(query)
     || shouldBuildHoverHandlerSurvey(query)
     || queryAsModuleExportSurvey(query)
     || queryAsModuleDependencySurvey(query)
