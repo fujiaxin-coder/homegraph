@@ -1,0 +1,157 @@
+{
+  "id": "ArkTs_Exp_218",
+  "title": "新增 Spatial Upscale：ArkTS 下拉菜单 → NAPI → C++ 渲染",
+  "repo": "HarmonyOS_Samples/xengine-samplecode-vulkan-temporal-upscale-demo-cpp",
+  "base_commit": "ac62730ec1d150613f93842534a3f4cf4aff7bf1",
+  "task": "## 需求背景\n当前应用仅支持 FSR 和 Temporal 两种超分方案，缺少基础的空域超分选项。部分场景下用户需要一种计算开销更低、实现更简单的超分方案作为补充选择。\n\n## 功能目标\n在超分模式选择列表中新增 \"Spatial Upscale\" 选项，为用户提供第三种超分方案。\n## 功能规格\n\n### 交互设计\n- 在超分模式下拉菜单中新增 \"spatial upscale\" 选项\n- 选项顺序：no upscale → spatial upscale → fsr upscale → temporal upscale\n\n### 功能行为\n- 选择 spatial upscale 时，应用空域超分算法对低分辨率图像进行放大\n- 支持锐化参数配置，默认值 0.2\n- 输出高分辨率图像到目标缓冲区\n\n### 技术约束\n- 使用 XEngine 图形引擎提供的 XEG_SpatialUpscale 接口\n- 检测设备是否支持该扩展，不支持时禁用选项\n- 输入输出图像格式：RGBA8\n\n## 验收标准\n1. 下拉菜单正确显示 4 个超分选项\n2. 选择 spatial upscale 后画面正确放大\n3. 切换模式时无崩溃、无内存泄漏\n4. 不支持该功能的设备上优雅降级",
+  "guided_anchor_origin": "Read-only git show of the original base commit; no gold patch was read. Guided anchors are not evidence of autonomous Planner discovery.",
+  "limitations": [
+    "Most menu labels are direct literals; this case does not establish resource-value-to-key lookup coverage.",
+    "Static graph edges may not connect dynamic NAPI calls.",
+    "Read-only tool demonstration; no code implementation or device verification.",
+    "The legacy modules survey recognizes only certain module naming patterns; entry may return no indexed evidence. The separate imports step tests the typed Planner route."
+  ],
+  "steps": [
+    {
+      "id": "project",
+      "session": "task",
+      "tool": "homegraph_project",
+      "arguments": {
+        "includeFiles": false
+      },
+      "purpose": "查看工程模块；尚不触发 Planner。"
+    },
+    {
+      "id": "path_first",
+      "session": "task",
+      "tool": "homegraph_explore",
+      "arguments": {
+        "query": "修改 entry/src/main/ets/pages/Index.ets 新增 spatial upscale 选项"
+      },
+      "purpose": "演示已知单文件路径时跳过检索；应不调用 Planner。"
+    },
+    {
+      "id": "plan",
+      "session": "task",
+      "tool": "homegraph_explore",
+      "arguments": {
+        "query": "## 需求背景\n当前应用仅支持 FSR 和 Temporal 两种超分方案，缺少基础的空域超分选项。部分场景下用户需要一种计算开销更低、实现更简单的超分方案作为补充选择。\n\n## 功能目标\n在超分模式选择列表中新增 \"Spatial Upscale\" 选项，为用户提供第三种超分方案。\n## 功能规格\n\n### 交互设计\n- 在超分模式下拉菜单中新增 \"spatial upscale\" 选项\n- 选项顺序：no upscale → spatial upscale → fsr upscale → temporal upscale\n\n### 功能行为\n- 选择 spatial upscale 时，应用空域超分算法对低分辨率图像进行放大\n- 支持锐化参数配置，默认值 0.2\n- 输出高分辨率图像到目标缓冲区\n\n### 技术约束\n- 使用 XEngine 图形引擎提供的 XEG_SpatialUpscale 接口\n- 检测设备是否支持该扩展，不支持时禁用选项\n- 输入输出图像格式：RGBA8\n\n## 验收标准\n1. 下拉菜单正确显示 4 个超分选项\n2. 选择 spatial upscale 后画面正确放大\n3. 切换模式时无崩溃、无内存泄漏\n4. 不支持该功能的设备上优雅降级"
+      },
+      "purpose": "完整原题驱动，观察规划、局部源码范围与跨语言定位。"
+    },
+    {
+      "id": "literal",
+      "session": "task",
+      "tool": "homegraph_explore",
+      "arguments": {
+        "query": "定位 \"no upscale\"、\"fsr upscale\"、\"temporal upscale\" 的下拉菜单和选择事件，再检查它如何调用 native 渲染逻辑。"
+      },
+      "purpose": "针对原题已有选项补查文案；保留真实重复保护/预算结果。"
+    },
+    {
+      "id": "repeat_guard",
+      "session": "task",
+      "tool": "homegraph_explore",
+      "arguments": {
+        "query": "## 需求背景\n当前应用仅支持 FSR 和 Temporal 两种超分方案，缺少基础的空域超分选项。部分场景下用户需要一种计算开销更低、实现更简单的超分方案作为补充选择。\n\n## 功能目标\n在超分模式选择列表中新增 \"Spatial Upscale\" 选项，为用户提供第三种超分方案。\n## 功能规格\n\n### 交互设计\n- 在超分模式下拉菜单中新增 \"spatial upscale\" 选项\n- 选项顺序：no upscale → spatial upscale → fsr upscale → temporal upscale\n\n### 功能行为\n- 选择 spatial upscale 时，应用空域超分算法对低分辨率图像进行放大\n- 支持锐化参数配置，默认值 0.2\n- 输出高分辨率图像到目标缓冲区\n\n### 技术约束\n- 使用 XEngine 图形引擎提供的 XEG_SpatialUpscale 接口\n- 检测设备是否支持该扩展，不支持时禁用选项\n- 输入输出图像格式：RGBA8\n\n## 验收标准\n1. 下拉菜单正确显示 4 个超分选项\n2. 选择 spatial upscale 后画面正确放大\n3. 切换模式时无崩溃、无内存泄漏\n4. 不支持该功能的设备上优雅降级"
+      },
+      "purpose": "观察同一任务中的重复请求保护；这是保护机制演示。"
+    },
+    {
+      "id": "search",
+      "session": "guided",
+      "tool": "homegraph_search",
+      "arguments": {
+        "query": "SetUpscaleMethod",
+        "limit": 5
+      },
+      "purpose": "以下是独立会话的定向诊断，锚点来自人工读取原始源码，并非 Planner 自动发现。"
+    },
+    {
+      "id": "ui_source",
+      "session": "guided",
+      "tool": "homegraph_node",
+      "arguments": {
+        "file": "entry/src/main/ets/pages/Index.ets",
+        "offset": 48,
+        "limit": 40
+      },
+      "purpose": "查看下拉选项和 onSelect→setUpscaleMethod。"
+    },
+    {
+      "id": "native_body",
+      "session": "guided",
+      "tool": "homegraph_node",
+      "arguments": {
+        "symbol": "SetUpscaleMethod",
+        "file": "entry/src/main/cpp/render/plugin_render.cpp",
+        "includeCode": true
+      },
+      "purpose": "查看 C++ 的参数解析和渲染设置。"
+    },
+    {
+      "id": "usages",
+      "session": "guided",
+      "tool": "homegraph_usages",
+      "arguments": {
+        "query": "setUpscaleMethod SetUpscaleMethod where used"
+      },
+      "purpose": "检查 ArkTS 调用点及 C++ 注册/引用位置。"
+    },
+    {
+      "id": "native_exports",
+      "session": "guided",
+      "tool": "homegraph_native",
+      "arguments": {
+        "query": "entry/src/main/cpp/render/plugin_render.cpp NAPI exports setUpscaleMethod"
+      },
+      "purpose": "检查字符串导出名到 C++ 回调的 NAPI 注册关系。"
+    },
+    {
+      "id": "callers",
+      "session": "guided",
+      "tool": "homegraph_callers",
+      "arguments": {
+        "symbol": "SetUpscaleMethod"
+      },
+      "purpose": "入向调用；动态 NAPI 调用可能没有静态边，不把空边当作无调用。"
+    },
+    {
+      "id": "callees",
+      "session": "guided",
+      "tool": "homegraph_callees",
+      "arguments": {
+        "symbol": "SetUpscaleMethod"
+      },
+      "purpose": "出向调用；与 callers 对照方向。"
+    },
+    {
+      "id": "modules",
+      "session": "guided",
+      "tool": "homegraph_modules",
+      "arguments": {
+        "query": "entry module dependencies"
+      },
+      "purpose": "查看模块依赖；模块依赖不能代替 NAPI 注册或数据流。"
+    },
+    {
+      "id": "imports",
+      "session": "imports",
+      "tool": "homegraph_explore",
+      "arguments": {
+        "query": "请列出 entry/src/main/ets/pages/Index.ets 的直接 import 依赖及方向，不分析循环依赖。"
+      },
+      "purpose": "对照专用 modules：观察 Planner 的 module_imports 路由是否能返回实际文件导入边。"
+    },
+    {
+      "id": "new_api",
+      "session": "guided",
+      "tool": "homegraph_search",
+      "arguments": {
+        "query": "XEG_SpatialUpscale",
+        "limit": 5
+      },
+      "purpose": "新需求中的 API 可能未出现在当前源码/索引；空结果需如实展示。"
+    }
+  ]
+}

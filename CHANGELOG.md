@@ -17,6 +17,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- Standard-library Python retrieval debugger with an original-source Spatial Upscale demo, interactive steps, rules/LLM comparison, and persistent MCP/Planner evidence and error records (Spec 0025).
+
 - Experimental structured query planning for explore (Spec 0022): shared local routing features; optional, explicitly configured one-call model intent/decomposition/rephrase; bounded dependent retrieval with a shared deadline/output budget, validated anchors, worker propagation, context hints and direction-aware cache keys. Model failures fall back locally; compact diagnostic metadata includes planning usage/time and per-step coverage. No remote model calls by default.
 
 ### Fixes

@@ -5,6 +5,7 @@
 | 你想… | 去读 |
 | --- | --- |
 | Spec、commit、PR、拉代码 | 仓库根 [DEVELOPMENT.md](../DEVELOPMENT.md) |
+| Python 逐步调试 Planner / MCP，Spatial Upscale 演示 | [debug-retrieval-demo.md](./debug-retrieval-demo.md) |
 | 本地 build / CLI / Cursor MCP | [local-dev-guide.md](./local-dev-guide.md) |
 | A/B 测评怎么做（外部仓 + 仓内入口） | [how-to-evaluate.md](./how-to-evaluate.md) |
 | npm 发包、GitHub Release、GitCode 发行版、镜像 | [RELEASE.md](./RELEASE.md) |
