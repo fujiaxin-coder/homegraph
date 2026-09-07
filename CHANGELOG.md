@@ -9,6 +9,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- MCP `initialize` instructions: **single-file path-pinned edits → Read + edit, skip `homegraph_*`**; explore only when locate/cross-file is needed.
+- Explore **defers** (`Skip HomeGraph`, kind `path-pinned-edit`) when the query names one `…/File.ext` and is a code-change shape — avoids explore context tax on 082-style tasks.
+- Path scaffolding (`features/.../Foo.ets` + basename-as-Type) no longer counts as multi-anchor; `.ets`/`.ts`/… are not parsed as member access.
+
 ### New Features
 
 - Experimental structured query planning for explore (Spec 0022): shared local routing features; optional, explicitly configured one-call model intent/decomposition/rephrase; bounded dependent retrieval with a shared deadline/output budget, validated anchors, worker propagation, context hints and direction-aware cache keys. Model failures fall back locally; compact diagnostic metadata includes planning usage/time and per-step coverage. No remote model calls by default.

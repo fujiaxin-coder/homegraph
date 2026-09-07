@@ -27,3 +27,7 @@ Validation: build and 255 tests across 15 affected HomeGraph suites pass. Evalua
 No benchmark gold patch/test_patch/ground_truth.diff is consulted. No benchmark-specific behavior or hardcoded task identifiers in tool implementation. Official device verification remains unavailable; no success-rate claim without evidence.
 
 Completion record (2026-09-07): all 103 result files and per-case session/MCP/Agent logs were retained across the original and continuation segments. 100 executions were confirmed complete, 84 patches were nonempty, and three executions were not confirmed complete. These are execution/artifact counts, not correctness or UI acceptance results.
+
+Integration follow-up (2026-09-07): the publication target is SMAT/HomeGraph develop. Preserve its c79f0f6 path-first skip for pinned single-file edits, explicit-filename source seeding and ArkTS parser changes while retaining structured retrieval hints and bounded evidence recovery. The experiment baseline included smat/main at 0e5be20 but had not included this develop-only commit; results above describe the frozen experiment version.
+
+Integration validation: build passed; 366 tests across 21 suites passed, including path-first provider bypass, MCP instructions, query routing and ArkTS parsing. This merged source has not been used for another full103 inference run.

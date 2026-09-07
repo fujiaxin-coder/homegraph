@@ -138,7 +138,8 @@ describe('query planner contracts', () => {
     expect(fetcher).not.toHaveBeenCalled();
     expect(plan.telemetry.decision).toMatchObject({ eligible: false, reason: 'focused_query' });
   });
-  it.each(['git history of AlertComponent', 'check official documentation only'])
+  it.each(['git history of AlertComponent', 'check official documentation only',
+    '移除订单列表搜索入口 features/order/src/main/ets/views/OrderListPage.ets'])
     ('does not plan a builtin-only query merely because task context exists: %s', async (query) => {
       const fetcher = configured();
       const plan = await planQuery(query, { ...options(), taskContext: QUESTION });

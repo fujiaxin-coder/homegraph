@@ -7091,6 +7091,17 @@ export class ToolHandler {
     // when a local/flag/lifecycle shape already owns the query (flag impact was
     // falling through to a 20k Dynamic-dispatch dump).
     if (planFeature(plan, 'shouldTryLightMechanismExplore', query, shouldTryLightMechanismExplore)) return null;
+    // Explicit `…/Foo.ets` path asks need file-scoped full explore, not compact
+    // trails seeded from path-segment homonyms (`/order/` → `order` property).
+    if (
+      shouldLimitToQueryNamedFile(
+        query,
+        false,
+        queryNamesMultipleExploreAnchors(query),
+      )
+    ) {
+      return null;
+    }
     if (
       queryAsMechanismSurvey(query)
       && !queryAsLocalSymbolDetail(query)
@@ -9635,7 +9646,9 @@ export class ToolHandler {
       : { searchLimit: 8, traversalDepth: 3, maxNodes: 200, minScore: 0.2 };
     const contextQuery = interpretationQuery && queryFileBasenames.length === 1
       ? `${queryFileBasenames[0]} ${query}`
-      : query;
+      : queryFileBasenames.length === 1
+        ? `${queryFileBasenames[0]} ${query}`
+        : query;
     const subgraph = await cg.findRelevantContext(contextQuery, {
       ...contextOpts,
       ...(plan && (plan.source === 'llm' || plan.literalTexts?.length) ? { retrievalHints: {
@@ -9644,6 +9657,28 @@ export class ToolHandler {
         searchTerms: plan.searchTerms, literalTexts: plan.literalTexts, sourceScope: plan.sourceScope, nodeIds: (plan.bindings ?? []).map((node) => node.id),
       } } : {}),
     });
+
+    // Path-first: always seed nodes from an explicit `Foo.ets` basename so a
+    // CJK-only ask + path (or a shared prop like showSearchIcon) cannot leave
+    // the named file out of the subgraph / digests.
+    if (queryFileBasenames.length > 0 && plan?.sourceScope !== 'sdk') {
+      for (const base of queryFileBasenames.slice(0, 3)) {
+        let hits: SearchResult[] = [];
+        try {
+          hits = cg.searchNodes(base, { limit: 50 });
+        } catch {
+          continue;
+        }
+        for (const r of hits) {
+          if (!fileMatchesQueryBasename(r.node.filePath, [base])) continue;
+          if (!subgraph.nodes.has(r.node.id)) {
+            subgraph.nodes.set(r.node.id, r.node);
+            subgraph.roots.push(r.node.id);
+          }
+        }
+      }
+    }
+
 
     const literalSource = this.renderLiteralSource(cg, subgraph);
     if (subgraph.nodes.size === 0) {
