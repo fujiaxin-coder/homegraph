@@ -19,7 +19,8 @@ import {
   scoreDomainRoleForQuery,
 } from '../src/mcp/explore-repeat-guard';
 import type { ExploreCallRecord, ExploreProjectState } from '../src/mcp/explore-session-state';
-import { ExploreSessionState } from '../src/mcp/explore-session-state';
+import { ExploreSessionState, inferExploreEvidenceStatus, EXPLORE_SESSION_LIMITS } from '../src/mcp/explore-session-state';
+import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX } from '../src/mcp/server-instructions';
 import { isTestFile } from '../src/search/query-utils';
 
 function call(partial: Partial<ExploreCallRecord> & { query: string }): ExploreCallRecord {
@@ -32,6 +33,10 @@ function call(partial: Partial<ExploreCallRecord> & { query: string }): ExploreC
     responseBytes: partial.responseBytes ?? 5000,
     partial: partial.partial,
     nextAnchor: partial.nextAnchor,
+    evidenceStatus: partial.evidenceStatus ?? (partial.partial ? 'partial' : 'complete'),
+    coveredObligations: partial.coveredObligations,
+    uncoveredObligations: partial.uncoveredObligations,
+    locatedNodes: partial.locatedNodes,
   };
 }
 
@@ -59,7 +64,7 @@ describe('explore-repeat-guard', () => {
     expect(queryTokenOverlapScore(a, b)).toBeGreaterThanOrEqual(0.45);
   });
 
-  it('refuses overlapping second explore without novel anchors', () => {
+  it('allows a differently scoped request even when query tokens overlap', () => {
     const state = prior([
       call({
         query: 'how is notification subscribe implemented multi thread',
@@ -67,9 +72,7 @@ describe('explore-repeat-guard', () => {
       }),
     ]);
     const d = decideExploreRepeat(state, 'notification subscribe 多线程 实现');
-    expect(d.refuse).toBe(true);
-    expect(d.reason).toBe('overlap');
-    expect(formatExploreRepeatRefuse(d, 'notification subscribe 多线程 实现')).toMatch(/Skip repeat explore/);
+    expect(d.refuse).toBe(false);
   });
 
   it('allows one tight Type follow-up after a single prior explore', () => {
@@ -93,7 +96,7 @@ describe('explore-repeat-guard', () => {
     expect(formatExploreRepeatRefuse(d, 'RestoreController')).toMatch(/narrow Grep|Stop exploring/i);
   });
 
-  it('refuses paraphrase that ignores Partial Next anchor', () => {
+  it('allows one recovery even when Partial suggested an irrelevant Next anchor', () => {
     const state = prior([
       call({
         query: 'notification subscribe multi thread',
@@ -103,8 +106,7 @@ describe('explore-repeat-guard', () => {
       }),
     ]);
     const d = decideExploreRepeat(state, '通知订阅 多线程 怎么实现');
-    expect(d.refuse).toBe(true);
-    expect(d.reason).toBe('next-anchor');
+    expect(d.refuse).toBe(false);
   });
 
   it('allows follow-up that names the Partial Next anchor', () => {
@@ -120,7 +122,7 @@ describe('explore-repeat-guard', () => {
     expect(d.refuse).toBe(false);
   });
 
-  it('refuses novel Type after Partial when Next anchor is omitted', () => {
+  it('allows a newly scoped Type after Partial when Next anchor is omitted', () => {
     const state = prior([
       call({
         query: 'notification subscribe multi thread',
@@ -130,17 +132,17 @@ describe('explore-repeat-guard', () => {
       }),
     ]);
     const d = decideExploreRepeat(state, 'NotificationBridgeEventManager');
-    expect(d.refuse).toBe(true);
-    expect(d.reason).toBe('next-anchor');
+    expect(d.refuse).toBe(false);
   });
 
-  it('ignores tiny Partial-sized prior calls for overlap/budget', () => {
+  it('counts short empty attempts so one failed recovery cannot retry forever', () => {
     const state = prior([
-      call({ query: 'badge manager source', responseBytes: 242 }),
-      call({ query: 'badge manager source', responseBytes: 242 }),
+      call({ query: 'badge manager source', responseBytes: 242, evidenceStatus: 'empty' }),
+      call({ query: 'badge manager source', responseBytes: 242, evidenceStatus: 'empty' }),
     ]);
     const d = decideExploreRepeat(state, 'badge manager source');
-    expect(d.refuse).toBe(false);
+    expect(d.refuse).toBe(true);
+    expect(d.reason).toBe('hard-cap');
   });
 
   it('extracts Next anchor from Partial footer text', () => {
@@ -194,10 +196,10 @@ describe('explore-repeat-guard', () => {
     const second = decideDepthToolFuse(state, 1, 'homegraph_node');
     expect(second.refuse).toBe(true);
     expect(second.reason).toBe('partial-depth-cap');
-    expect(formatDepthToolRefuse(second, 'homegraph_node', 'Foo')).toMatch(/Skip HomeGraph depth/);
+    expect(formatDepthToolRefuse(second, 'homegraph_node', 'Foo')).toMatch(/evidence may still be incomplete/);
   });
 
-  it('refuses callers/callees immediately after Partial (no free depth shot)', () => {
+  it('allows one relation recovery after Partial with the shared depth budget', () => {
     const state = prior([
       call({
         query: 'how does subscribe work across threads',
@@ -207,9 +209,8 @@ describe('explore-repeat-guard', () => {
       }),
     ]);
     const d = decideDepthToolFuse(state, 0, 'homegraph_callers');
-    expect(d.refuse).toBe(true);
-    expect(d.reason).toBe('partial-no-callers');
-    expect(formatDepthToolRefuse(d, 'homegraph_callers')).toMatch(/do \*\*not\*\* call/);
+    expect(d.refuse).toBe(false);
+    expect(decideDepthToolFuse(state, 1, 'homegraph_callees').refuse).toBe(true);
   });
 
   it('does not fuse depth tools after a closed (non-Partial) explore', () => {
@@ -243,8 +244,82 @@ describe('ExploreSessionState depth counter', () => {
       sourceBytes: 0,
       responseBytes: 4000,
       partial: false,
+      evidenceStatus: 'complete',
     });
     expect(s.depthToolCount('/repo')).toBe(0);
+  });
+});
+
+describe('evidence-aware recovery receipts', () => {
+  it.each(['empty', 'sdk-only', 'partial'] as const)('allows one recovery after %s evidence', (evidenceStatus) => {
+    const s = new ExploreSessionState();
+    s.record(call({ query: 'feedback feature bottom menu', evidenceStatus, responseBytes: 170 }));
+    const state = s.forProject('/repo');
+    expect(decideExploreRepeat(state, 'feedback feature bottom menu').refuse).toBe(false);
+    expect(decideExploreRepeat(state, 'bottom navigation menu resources configuration').refuse).toBe(false);
+    expect(decideDepthToolFuse(state, 0, 'homegraph_callers').refuse).toBe(false);
+    s.record(call({ query: 'bottom navigation menu resources configuration', evidenceStatus, responseBytes: 120 }));
+    expect(decideExploreRepeat(s.forProject('/repo'), 'FeedbackPage').reason).toBe('hard-cap');
+  });
+
+  it('deduplicates genuinely repeated requests once usable evidence was returned', () => {
+    const state = prior([call({ query: 'FeedbackPage menu configuration', evidenceStatus: 'complete' })]);
+    const d = decideExploreRepeat(state, '  FeedbackPage   menu configuration ');
+    expect(d.refuse).toBe(true);
+    expect(d.reason).toBe('overlap');
+    expect(formatExploreRepeatRefuse(d, 'FeedbackPage menu configuration')).toMatch(/does not mean the task.*complete/);
+    expect(decideExploreRepeat(state, 'FeedbackPage submission history routes').refuse).toBe(false);
+  });
+
+  it('does not deduplicate reversed relation requests with the same token bag', () => {
+    const state = prior([call({ query: 'AlphaController calls BetaService', evidenceStatus: 'complete' })]);
+    expect(decideExploreRepeat(state, 'BetaService calls AlphaController').refuse).toBe(false);
+  });
+
+  it('does not lose the lifetime retrieval budget when old call detail was evicted', () => {
+    const state = prior([call({ query: 'one retained incomplete attempt', evidenceStatus: 'empty' })]);
+    state.callCount = 10;
+    expect(decideExploreRepeat(state, 'new obligation').reason).toBe('hard-cap');
+  });
+
+  it('infers empty and SDK-only legacy receipts from actual emitted source', () => {
+    const empty = call({ query: 'playback button' });
+    delete empty.evidenceStatus;
+    expect(inferExploreEvidenceStatus(empty)).toBe('empty');
+    empty.files = [{ path: 'ohos-sdk:api/@ohos.util.Stack.d.ts', bytes: 400, ranges: [{ start: 5, end: 10 }] }];
+    expect(inferExploreEvidenceStatus(empty)).toBe('sdk-only');
+    empty.files.push({ path: 'entry/src/main/ets/pages/Player.ets', bytes: 500, ranges: [{ start: 20, end: 40 }] });
+    expect(inferExploreEvidenceStatus(empty)).toBe('complete');
+    empty.partial = true;
+    expect(inferExploreEvidenceStatus(empty)).toBe('partial');
+  });
+
+  it('preserves bounded evidence coverage and located nodes across the session worker view', () => {
+    const s = new ExploreSessionState();
+    const located = { id: 'local-player', name: 'Player', filePath: 'Player.ets', startLine: 10 };
+    s.record(call({
+      query: 'playback handler', evidenceStatus: 'complete', locatedNodes: [located],
+      coveredObligations: ['handler', 'handler'],
+      uncoveredObligations: Array.from({ length: 30 }, (_, i) => `missing ${i}`),
+    }));
+    const first = s.view().projects[0]!.calls[0]!;
+    expect(first.partial).toBe(true);
+    expect(first.evidenceStatus).toBe('partial');
+    expect(first.locatedNodes).toEqual([located]);
+    expect(first.coveredObligations).toEqual(['handler']);
+    expect(first.uncoveredObligations).toHaveLength(EXPLORE_SESSION_LIMITS.MAX_OBLIGATIONS);
+    first.locatedNodes![0]!.name = 'modified outside state';
+    first.coveredObligations!.push('invented');
+    expect(s.forProject('/repo')!.calls[0]!.locatedNodes![0]!.name).toBe('Player');
+    expect(s.forProject('/repo')!.calls[0]!.coveredObligations).toEqual(['handler']);
+  });
+
+  it('server guidance keeps authorized coding and verification active after retrieval', () => {
+    for (const instructions of [SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX]) {
+      expect(instructions).toMatch(/Retrieval completion is not task completion/);
+      expect(instructions).not.toMatch(/ANSWER NOW|must name the \*\*Next anchor\*\*|stop — do not retry/);
+      expect(instructions).toMatch(/edits and validation/);
+    }
   });
 });
 
@@ -330,24 +405,25 @@ describe('pickBestDomainRoleAnchor', () => {
     expect(best?.name).toBe('BackupExtension');
   });
 
-  it('soft-close footer is not Partial; second-Partial stop is explicit', () => {
+  it('coarse and partial footers distinguish retrieval limits from coding completion', () => {
     expect(formatMechanismSoftCloseFooter({ name: 'FooManager', kind: 'class', filePath: 'a.ts' }))
-      .toMatch(/ANSWER from anchors/i);
+      .toMatch(/Retrieval is not task completion/i);
     expect(formatMechanismSoftCloseFooter({ name: 'FooManager', kind: 'class', filePath: 'a.ts' }))
       .not.toMatch(/Partial locator/);
-    expect(formatMechanismSoftCloseHeader()).toMatch(/Coarse locate — ANSWER/i);
+    expect(formatMechanismSoftCloseHeader()).toMatch(/Coarse source evidence/i);
     expect(formatMechanismSoftCloseHeader()).not.toMatch(/Partial locator/);
-    expect(formatSecondPartialStopFooter('FooManager')).toMatch(/Second Partial — stop HomeGraph/);
+    expect(formatSecondPartialStopFooter('FooManager')).toMatch(/Evidence remains incomplete/);
+    expect(formatSecondPartialStopFooter('FooManager')).toMatch(/continue the requested edits and validation/);
   });
 
-  it('inferExplorePartialMeta: Coarse locate ANSWER wins over leftover Partial header', () => {
+  it('a textual completion slogan never clears reported partial evidence', () => {
     const text = [
       '> **Partial locator** — Manager / domain inventory below are anchors',
       '...digests...',
       '> **Coarse locate — ANSWER from anchors + digests above.** Primary Type: `FooManager`.',
     ].join('\n');
     const meta = inferExplorePartialMeta(text);
-    expect(meta.partial).toBe(false);
+    expect(meta.partial).toBe(true);
     expect(meta.nextAnchor).toBeUndefined();
   });
 });

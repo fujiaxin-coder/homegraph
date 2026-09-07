@@ -27,6 +27,7 @@ import { logDebug } from '../errors';
 import { validatePathWithinRoot, isConfigLeafNode } from '../utils';
 import { isTestFile, extractSearchTerms, scorePathRelevance, getStemVariants, isDistinctiveIdentifier, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, resolveImportLineFromNode } from '../search/query-utils';
 import { LOW_CONFIDENCE_MARKER } from './markers';
+import { findLiteralEvidence, normalizeLiteralTexts } from '../search/literal-evidence';
 
 /**
  * Extract likely symbol names from a natural language query
@@ -188,7 +189,7 @@ const HIGH_VALUE_NODE_KINDS: NodeKind[] = [
 /**
  * Default options for finding relevant context
  */
-const DEFAULT_FIND_OPTIONS: Required<FindRelevantContextOptions> = {
+const DEFAULT_FIND_OPTIONS: Required<Omit<FindRelevantContextOptions, 'retrievalHints'>> = {
   searchLimit: 3,        // Reduced from 5
   traversalDepth: 1,     // Reduced from 2
   maxNodes: 20,          // Reduced from 50
@@ -196,6 +197,30 @@ const DEFAULT_FIND_OPTIONS: Required<FindRelevantContextOptions> = {
   edgeKinds: [],
   nodeKinds: HIGH_VALUE_NODE_KINDS, // Filter out imports/exports by default
 };
+
+/** Hints may cross a worker/library boundary; never trust their runtime shape. */
+function normalizeRetrievalHints(value: unknown): FindRelevantContextOptions['retrievalHints'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const hints = value as Record<string, unknown>;
+  if (!Array.isArray(hints.symbols) || !Array.isArray(hints.searchTerms)) return undefined;
+  const normalize = (items: unknown[], lowerCase: boolean): string[] => {
+    const result = new Set<string>();
+    for (const item of items.slice(0, 32)) {
+      if (typeof item !== 'string' || item.length > 256 || /[\u0000-\u001f\u007f]/.test(item)) continue;
+      const term = item.trim();
+      if (term) result.add(lowerCase ? term.toLowerCase() : term);
+    }
+    return [...result];
+  };
+  return {
+    symbols: normalize(hints.symbols, false),
+    searchTerms: normalize(hints.searchTerms, true),
+    ...(Array.isArray(hints.nodeIds) ? { nodeIds: normalize(hints.nodeIds, false) } : {}),
+    ...(Array.isArray(hints.literalTexts) ? { literalTexts: normalizeLiteralTexts(hints.literalTexts) } : {}),
+    ...(['local', 'sdk', 'all'].includes(String(hints.sourceScope))
+      ? { sourceScope: hints.sourceScope as 'local' | 'sdk' | 'all' } : {}),
+  };
+}
 
 // Re-export the low-confidence sentinel (defined in a dependency-free leaf so
 // the MCP layer can import it without pulling this module's deps onto the
@@ -458,22 +483,63 @@ export class ContextBuilder {
     options: FindRelevantContextOptions = {}
   ): Promise<Subgraph> {
     const opts = { ...DEFAULT_FIND_OPTIONS, ...options };
+    const hints = normalizeRetrievalHints(opts.retrievalHints);
 
     // Start with empty subgraph
     const nodes = new Map<string, Node>();
     const edges: Edge[] = [];
     const roots: string[] = [];
 
-    // Handle empty query - return empty subgraph
-    if (!query || query.trim().length === 0) {
+    // Identity-only retrieval does not need to invent a lexical query.
+    if ((!query || query.trim().length === 0) && !hints?.nodeIds?.length && !hints?.literalTexts?.length) {
       return { nodes, edges, roots };
     }
 
     // === HYBRID SEARCH ===
 
-    // Step 1: Extract potential symbol names from query
-    const symbolsFromQuery = extractSymbolsFromQuery(query);
-    logDebug('Extracted symbols from query', { query, symbols: symbolsFromQuery });
+    // Step 1: Reuse the shared plan when supplied. An intentionally empty hint
+    // list remains empty: re-extracting from the question would undo planning.
+    const symbolsFromQuery = hints?.symbols ?? extractSymbolsFromQuery(query);
+    const searchTerms = hints?.searchTerms ?? extractSearchTerms(query);
+    logDebug('Context retrieval symbols', { query, symbols: symbolsFromQuery, planned: !!hints });
+
+    // A binding is an identity, not a name search hint. Revalidate it in this
+    // index and keep it outside fuzzy scoring/import redirection: converting a
+    // bound ID back to a bare name can silently switch to another file's node.
+    // Explicit kind filters still apply; the default lexical kind filter must
+    // not discard an explicitly bound file/import/property node.
+    const boundResults: SearchResult[] = [];
+    for (const id of hints?.nodeIds ?? []) {
+      const node = this.queries.getNodeById(id);
+      if (!node || (options.nodeKinds?.length && !options.nodeKinds.includes(node.kind))) continue;
+      boundResults.push({ node, score: 0 });
+    }
+    const boundIds = new Set(boundResults.map(result => result.node.id));
+
+    // Verbatim labels are an independent retrieval channel. The witness range
+    // stays available even when the UI/resource file has no extracted AST node.
+    const literalEvidence = hints?.literalTexts?.length && hints.sourceScope !== 'sdk'
+      ? findLiteralEvidence(this.projectRoot, {
+        literalTexts: hints.literalTexts,
+        files: this.queries.getAllFiles().map(file => file.path),
+      }) : undefined;
+    const literalResults: SearchResult[] = [];
+    const literalIds = new Set<string>();
+    for (const hit of literalEvidence?.hits ?? []) {
+      const candidates = this.queries.getNodesByFile(hit.filePath)
+        .filter(node => node.startLine <= hit.line && node.endLine >= hit.line
+          && !['import', 'export', 'parameter'].includes(node.kind)
+          && (!options.nodeKinds?.length || options.nodeKinds.includes(node.kind)))
+        .sort((a, b) => {
+          const callable = (node: Node): number => ['method', 'function', 'component'].includes(node.kind) ? 1 : 0;
+          return callable(b) - callable(a) || (a.endLine - a.startLine) - (b.endLine - b.startLine);
+        });
+      const node = candidates[0];
+      if (node && !literalIds.has(node.id)) {
+        literalIds.add(node.id);
+        literalResults.push({ node, score: 1000 });
+      }
+    }
 
     // Step 2: Look up exact matches for extracted symbols
     let exactMatches: SearchResult[] = [];
@@ -625,7 +691,6 @@ export class ContextBuilder {
     // where file names are the primary identifiers.
     let textResults: SearchResult[] = [];
     try {
-      const searchTerms = extractSearchTerms(query);
       if (searchTerms.length > 0) {
         // Search each term individually to get broader coverage,
         // then boost results that match multiple terms
@@ -745,7 +810,7 @@ export class ContextBuilder {
     // than nodes matching just one generic term. Without this, "ExecutionUtils"
     // (matches only "execution") fills budget slots meant for "ShardSearchRequest"
     // (matches "shard" + "search" + "request").
-    const queryTermsForBoost = extractSearchTerms(query);
+    const queryTermsForBoost = searchTerms;
     if (queryTermsForBoost.length >= 2) {
       // Group terms that are substrings of each other (stem variants of the same
       // root word). "indexed", "indexe", "index" should count as ONE concept match,
@@ -986,6 +1051,11 @@ export class ContextBuilder {
     // Final sort and truncation — all search channels (exact, text, CamelCase,
     // compound) have now contributed. Sort by score so multi-term matches from
     // later steps can outrank dampened single-term matches from earlier steps.
+    // Planner scope is explicit, not a growing vocabulary of prose stopwords.
+    // SDK-only lexical matches cannot establish a local business entry point.
+    const isSdkResult = (result: SearchResult): boolean => result.node.filePath.startsWith('ohos-sdk:');
+    if (hints?.sourceScope === 'local') searchResults = searchResults.filter(result => !isSdkResult(result));
+    else if (hints?.sourceScope === 'sdk') searchResults = searchResults.filter(isSdkResult);
     searchResults.sort((a, b) => b.score - a.score);
     searchResults = searchResults.slice(0, opts.searchLimit * 3);
 
@@ -996,6 +1066,25 @@ export class ContextBuilder {
     // If someone searches "terminal" and finds `import { TerminalPanel }`,
     // they want the TerminalPanel class, not the import statement
     filteredResults = this.resolveImportsToDefinitions(filteredResults);
+
+    if (hints?.sourceScope === 'local') filteredResults = filteredResults.filter(result => !isSdkResult(result));
+    if (hints?.sourceScope === 'sdk') filteredResults = filteredResults.filter(isSdkResult);
+    if (literalResults.length) {
+      // Reserve first roots for observed UI text before native graph-density
+      // heuristics. Bound identities, if supplied below, still take priority.
+      filteredResults = [...literalResults, ...filteredResults.filter(result => !literalIds.has(result.node.id))];
+    }
+
+    if (boundResults.length > 0) {
+      const rootLimit = Math.max(0, Math.min(
+        Number.isFinite(opts.searchLimit) ? Math.floor(opts.searchLimit) : DEFAULT_FIND_OPTIONS.searchLimit,
+        Number.isFinite(opts.maxNodes) ? Math.floor(opts.maxNodes) : DEFAULT_FIND_OPTIONS.maxNodes,
+      ));
+      filteredResults = [
+        ...boundResults,
+        ...filteredResults.filter(result => !boundIds.has(result.node.id)),
+      ].slice(0, rootLimit);
+    }
 
     // Cap entry points so traversal budget isn't spread too thin.
     // With 36 entry points and maxNodes=120, each gets only 3 nodes — useless.
@@ -1013,7 +1102,8 @@ export class ContextBuilder {
     // Single-keyword and symbol-name queries are exempt (their single match IS the
     // answer), so the handoff never fires on them.
     let confidence: 'high' | 'low' = 'high';
-    const confTerms = extractSearchTerms(query, { stems: false }).filter(t => t.length >= 3);
+    const confTerms = (hints?.searchTerms ?? extractSearchTerms(query, { stems: false }))
+      .filter(t => t.length >= 3);
     if (confTerms.length >= 2 && filteredResults.length > 0) {
       const distinctive = new Set(
         symbolsFromQuery.filter(isDistinctiveIdentifier).map(s => s.toLowerCase())
@@ -1030,7 +1120,7 @@ export class ContextBuilder {
         }
         return false;
       });
-      if (!anyStrong) confidence = 'low';
+      if (!anyStrong && !literalResults.length) confidence = 'low';
     }
 
     // Add entry points to subgraph
@@ -1045,7 +1135,10 @@ export class ContextBuilder {
     // ensures subclasses and superclasses always appear in results.
     // Budget: up to maxNodes/4 hierarchy nodes to avoid flooding.
     const typeHierarchyKinds = new Set<string>(['class', 'interface', 'struct', 'trait', 'protocol']);
-    const maxHierarchyNodes = Math.ceil(opts.maxNodes / 4);
+    // Identity-bound retrieval uses the bounded BFS below for hierarchy edges
+    // as well. The legacy full hierarchy survey ignores traversalDepth and can
+    // visit an entire family even for a depth-zero binding lookup.
+    const maxHierarchyNodes = boundResults.length > 0 ? 0 : Math.ceil(opts.maxNodes / 4);
     let hierarchyNodesAdded = 0;
     for (const result of filteredResults) {
       if (hierarchyNodesAdded >= maxHierarchyNodes) break;
@@ -1183,14 +1276,18 @@ export class ContextBuilder {
         method: 1, function: 1, property: 0, field: 0, variable: 0,
       };
       nodeIds.sort((a, b) => {
+        const bindingOrder = Number(boundIds.has(b)) - Number(boundIds.has(a));
+        if (bindingOrder) return bindingOrder;
         const aRoot = rootSet.has(a) ? 10 : 0;
         const bRoot = rootSet.has(b) ? 10 : 0;
         const aKind = kindPriority[finalNodes.get(a)!.kind] ?? 0;
         const bKind = kindPriority[finalNodes.get(b)!.kind] ?? 0;
         return (bRoot + bKind) - (aRoot + aKind);
       });
-      // Remove excess nodes (keep the highest-priority ones)
-      for (const id of nodeIds.slice(maxPerFile)) {
+      // Explicit identities already paid for a bounded root slot. Diversity
+      // preferences must not erase them; total maxNodes still remains a cap.
+      const keepPerFile = Math.max(maxPerFile, nodeIds.filter(id => boundIds.has(id)).length);
+      for (const id of nodeIds.slice(keepPerFile)) {
         finalNodes.delete(id);
       }
     }
@@ -1198,12 +1295,13 @@ export class ContextBuilder {
     // at most 15% of the budget. Many codebases have dozens of near-identical
     // test implementations (e.g., 6 Guard classes in integration tests) that
     // individually survive score dampening but collectively flood the result.
-    // Test entry points are NOT exempt — they should be evicted too.
+    // Lexically chosen test entry points are NOT exempt. Explicit identity
+    // bindings are exempt from this preference, but not from maxNodes.
     if (!isTestQuery) {
       const maxNonProd = Math.max(3, Math.ceil(opts.maxNodes * 0.15));
       const nonProdIds: string[] = [];
       for (const [id, node] of finalNodes) {
-        if (isTestFile(node.filePath)) {
+        if (isTestFile(node.filePath) && !boundIds.has(id)) {
           nonProdIds.push(id);
         }
       }
@@ -1240,7 +1338,12 @@ export class ContextBuilder {
       }
     }
 
-    return { nodes: finalNodes, edges: finalEdges, roots, confidence };
+    return {
+      nodes: finalNodes, edges: finalEdges,
+      roots: boundResults.length > 0 ? roots.filter(id => finalNodes.has(id)) : roots,
+      confidence,
+      ...(literalEvidence ? { literalEvidence } : {}),
+    };
   }
 
   /**

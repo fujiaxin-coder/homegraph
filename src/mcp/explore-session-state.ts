@@ -81,6 +81,9 @@ export interface ExploreFileEmission {
   rangesTruncated?: boolean;
 }
 
+/** Retrieval coverage only; even complete evidence does not complete a coding task. */
+export type ExploreEvidenceStatus = 'complete' | 'partial' | 'empty' | 'sdk-only';
+
 /** What one explore call emitted, as reported by the handler. */
 export interface ExploreEmission {
   /** Resolved project root — the key state is filed under. */
@@ -92,14 +95,24 @@ export interface ExploreEmission {
   sourceBytes: number;
   /** Total chars of the response the agent received. */
   responseBytes: number;
+  /** Internal receipt: declarations actually shown, not all retrieval candidates.
+   * A located node is source-grounded, not proof of relevance to the user's task.
+   */
+  locatedNodes?: Array<{ id: string; name: string; qualifiedName?: string; filePath: string; startLine: number }>;
+  /** Derived by the executor from emitted evidence, never from a completion banner. */
+  evidenceStatus?: ExploreEvidenceStatus;
+  /** Bounded descriptions of retrieval obligations with emitted supporting evidence. */
+  coveredObligations?: string[];
+  /** Requested retrieval obligations that the emitted evidence did not cover. */
+  uncoveredObligations?: string[];
   /**
-   * True when the response was an honest Partial / coarse locator (not a
-   * closed ANSWER NOW). Used by the repeat guard to fuse failures.
+   * True when some requested evidence is missing. Legacy renderers may supply
+   * this without evidenceStatus; a textual completion banner cannot clear it.
    */
   partial?: boolean;
   /**
-   * Concrete next Type / file the Partial named — follow-up explore must
-   * include this string (case-insensitive) or be refused as paraphrase churn.
+   * Suggested next Type / file. Advisory: a missing evidence obligation may
+   * require a different source, especially after an irrelevant first hit.
    */
   nextAnchor?: string;
 }
@@ -151,7 +164,29 @@ export const EXPLORE_SESSION_LIMITS = {
   MAX_RANGES_PER_FILE: 24,
   /** Most-recent calls per project included in {@link ExploreSessionView}. */
   MAX_VIEW_CALLS: 4,
+  MAX_LOCATED_NODES: 64,
+  MAX_OBLIGATIONS: 12,
 } as const;
+
+/** Conservative fallback for older renderers that have not supplied a receipt. */
+export function inferExploreEvidenceStatus(emission: ExploreEmission): ExploreEvidenceStatus {
+  if (emission.evidenceStatus === 'empty' || emission.evidenceStatus === 'sdk-only') {
+    return emission.evidenceStatus;
+  }
+  if (emission.partial || emission.uncoveredObligations?.length || emission.evidenceStatus === 'partial') {
+    return 'partial';
+  }
+  if (emission.evidenceStatus === 'complete') return 'complete';
+  const paths = [
+    ...(Array.isArray(emission.files) ? emission.files : [])
+      .filter((f) => f && f.bytes > 0 && f.ranges?.length > 0).map((f) => f.path),
+    ...(Array.isArray(emission.locatedNodes) ? emission.locatedNodes : [])
+      .filter((n) => n && typeof n.filePath === 'string').map((n) => n.filePath),
+  ];
+  if (paths.length === 0) return 'empty';
+  if (paths.every((p) => /^(?:ohos-sdk|sdk):/i.test(p))) return 'sdk-only';
+  return 'complete';
+}
 
 /**
  * Key a project root is filed under. Resolved so `/repo` and `/repo/` agree;
@@ -248,7 +283,13 @@ export class ExploreSessionState {
       files: this.boundFiles(emission.files),
       sourceBytes: Math.max(0, emission.sourceBytes || 0),
       responseBytes: Math.max(0, emission.responseBytes || 0),
-      partial: emission.partial === true,
+      evidenceStatus: inferExploreEvidenceStatus(emission),
+      coveredObligations: boundObligations(emission.coveredObligations),
+      uncoveredObligations: boundObligations(emission.uncoveredObligations),
+      locatedNodes: (Array.isArray(emission.locatedNodes) ? emission.locatedNodes : []).filter((n) => n && typeof n.id === 'string'
+        && typeof n.name === 'string' && typeof n.filePath === 'string' && Number.isFinite(n.startLine))
+        .slice(0, EXPLORE_SESSION_LIMITS.MAX_LOCATED_NODES).map((n) => ({ ...n })),
+      partial: inferExploreEvidenceStatus(emission) !== 'complete',
       nextAnchor: typeof emission.nextAnchor === 'string' && emission.nextAnchor.trim()
         ? emission.nextAnchor.trim().slice(0, 120)
         : undefined,
@@ -257,7 +298,7 @@ export class ExploreSessionState {
     if (state.calls.length > EXPLORE_SESSION_LIMITS.MAX_CALLS_RETAINED) {
       state.calls.splice(0, state.calls.length - EXPLORE_SESSION_LIMITS.MAX_CALLS_RETAINED);
     }
-    // Fresh explore → reset depth fuse window (Partial gets one drill; closed clears).
+    // Fresh retrieval resets the bounded recovery window; task completion is unrelated.
     if (record.partial) this.depthAfterPartial.set(key, 0);
     else this.depthAfterPartial.delete(key);
     return record;
@@ -308,7 +349,7 @@ export class ExploreSessionState {
         responseBytes: state.responseBytes,
         calls: state.calls
           .slice(-EXPLORE_SESSION_LIMITS.MAX_VIEW_CALLS)
-          .map((c) => ({ ...c, files: c.files.map((f) => ({ ...f, ranges: [...f.ranges] })) })),
+          .map(cloneCall),
       })),
     };
   }
@@ -371,7 +412,23 @@ function cloneProject(state: MutableProjectState): ExploreProjectState {
     projectRoot: state.projectRoot,
     callCount: state.callCount,
     responseBytes: state.responseBytes,
-    calls: state.calls.map((c) => ({ ...c, files: c.files.map((f) => ({ ...f, ranges: [...f.ranges] })) })),
+    calls: state.calls.map(cloneCall),
+  };
+}
+
+function boundObligations(values: string[] | undefined): string[] | undefined {
+  if (!Array.isArray(values)) return undefined;
+  return [...new Set(values.filter((s) => typeof s === 'string' && s.trim())
+    .map((s) => s.trim().slice(0, 240)))].slice(0, EXPLORE_SESSION_LIMITS.MAX_OBLIGATIONS);
+}
+
+function cloneCall(c: ExploreCallRecord): ExploreCallRecord {
+  return {
+    ...c,
+    files: c.files.map((f) => ({ ...f, ranges: f.ranges.map((r) => ({ ...r })) })),
+    locatedNodes: c.locatedNodes?.map((n) => ({ ...n })),
+    coveredObligations: c.coveredObligations ? [...c.coveredObligations] : undefined,
+    uncoveredObligations: c.uncoveredObligations ? [...c.uncoveredObligations] : undefined,
   };
 }
 

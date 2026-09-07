@@ -1,18 +1,15 @@
 /**
  * Session-level explore repeat / partial guidance (generic).
  *
- * Stops agents from treating `homegraph_explore` as an iterative keyword
- * searcher: overlapping queries after a successful explore get a short refuse
- * instead of another multi-kB payload. Partial/busy replies carry concrete
- * retry anchors extracted from the query — never an empty 242-char shell.
- *
- * Failure fuse (post A/B): hard-cap explores per session, require tight
- * single-Type follow-ups after 2 calls, and bind Partial → named Next anchor.
+ * Repeated evidence is deduplicated; lexical overlap alone cannot prove that a
+ * follow-up's evidence obligation is already covered. Incomplete retrieval gets
+ * one bounded recovery, including when the first response was short or SDK-only.
  *
  * Shape-driven only — no product nouns.
  */
 
 import { mechanismDomainPathTokens } from '../search/query-utils';
+import { inferExploreEvidenceStatus } from './explore-session-state';
 import type { ExploreCallRecord, ExploreProjectState } from './explore-session-state';
 
 /** Tokens that do not distinguish one explore bag from another. */
@@ -125,14 +122,10 @@ export function extractNextAnchorFromText(text: string): string | undefined {
 }
 
 export function inferExplorePartialMeta(text: string): { partial: boolean; nextAnchor?: string } {
-  // Soft-close / coarse-locate ANSWER must win over a leftover Partial header
-  // (same response used to emit both — session fuse must treat it as closed).
-  const closedAnswer =
-    /\*\*ANSWER NOW\*\*|Mechanism explore complete — \*\*ANSWER NOW\*\*|Explore complete — ANSWER NOW|Coarse locate — ANSWER|Coarse locate complete/i
-      .test(text);
+  // Compatibility for renderers without structured receipts. A positive
+  // completion slogan must never erase a separately reported coverage gap.
   const partial =
-    /\*\*Partial locator\*\*|Partial locator|⚠️ \*\*Partial result\*\*|\*\*Partial result\*\*/i.test(text)
-    && !closedAnswer;
+    /\*\*Partial locator\*\*|Partial locator|⚠️ \*\*Partial result\*\*|\*\*Partial result\*\*/i.test(text);
   return {
     partial,
     nextAnchor: partial ? extractNextAnchorFromText(text) : undefined,
@@ -146,10 +139,9 @@ export interface ExploreRepeatDecision {
   reason: 'overlap' | 'call-budget' | 'hard-cap' | 'next-anchor' | 'ok';
 }
 
-const OVERLAP_THRESHOLD = 0.45;
 /**
- * Absolute explore fuse per session/project (counted responses ≥400 chars).
- * After this many, refuse — answer from prior Anchors or ONE narrow Grep.
+ * Absolute retrieval budget per session/project. Empty receipts count as
+ * attempts too, so failed recovery cannot create an unbounded retry loop.
  */
 const MAX_EXPLORES = 2;
 
@@ -161,22 +153,7 @@ const MAX_EXPLORES = 2;
 const MAX_DEPTH_AFTER_PARTIAL = 1;
 
 function isCountedCall(call: ExploreCallRecord): boolean {
-  return (call.responseBytes || 0) >= 400;
-}
-
-/** Shared mechanism domain stems (theme/install/xml/…) between two queries. */
-function domainStemOverlap(a: string, b: string): number {
-  const sa = new Set(mechanismDomainPathTokens(a));
-  const sb = new Set(mechanismDomainPathTokens(b));
-  let shared = 0;
-  for (const t of sa) {
-    if (sb.has(t)) shared++;
-  }
-  return shared;
-}
-
-function hadClosedExplore(calls: ReadonlyArray<ExploreCallRecord>): boolean {
-  return calls.some((c) => isCountedCall(c) && c.partial !== true);
+  return call.evidenceStatus !== undefined || (call.responseBytes || 0) >= 400;
 }
 
 /**
@@ -188,13 +165,11 @@ export function decideExploreRepeat(
 ): ExploreRepeatDecision {
   if (!prior || prior.calls.length === 0) return { refuse: false, reason: 'ok' };
 
-  const qTokens = exploreQueryTokens(query);
   const counted = prior.calls.filter(isCountedCall);
-  const novel = novelAnchorsVsPriors(query, prior.calls);
   const last = counted[counted.length - 1];
 
-  // Hard fuse — never explore×N after two counted calls (inventory Manager hops included).
-  if (counted.length >= MAX_EXPLORES) {
+  // Keep the lifetime budget even if bounded state has evicted early receipts.
+  if (Math.max(prior.callCount, counted.length) >= MAX_EXPLORES) {
     return {
       refuse: true,
       matched: last,
@@ -202,48 +177,20 @@ export function decideExploreRepeat(
     };
   }
 
-  // Partial named a Next anchor — follow-up MUST include that name (no novel-Type bypass).
-  if (last?.partial && last.nextAnchor) {
-    const na = last.nextAnchor.toLowerCase();
-    if (!query.toLowerCase().includes(na)) {
-      return {
-        refuse: true,
-        matched: last,
-        reason: 'next-anchor',
-      };
-    }
-  }
-
-  // After a closed ANSWER explore, refuse NL paraphrase bags that share domain
-  // stems (theme/install/parse…) — stops D33-style explore×N token storms.
-  if (hadClosedExplore(counted) && !isTightExploreFollowUp(query)) {
-    for (const call of counted) {
-      if (call.partial === true) continue;
-      const overlap = queryTokenOverlapScore(qTokens, exploreQueryTokens(call.query));
-      const domainShared = domainStemOverlap(query, call.query);
-      if (domainShared >= 2 || overlap >= 0.28) {
-        return { refuse: true, matched: call, reason: 'overlap' };
-      }
-    }
-  }
-
-  // Overlap with any prior counted explore — unless a tight novel Type/file bag
-  // (and, after Partial, only when Next anchor is already in the query above).
-  if (novel.length > 0 && isTightExploreFollowUp(query)) {
+  // Missing or SDK-only evidence is not a successfully answered query. Permit
+  // its single recovery even if the query overlaps or uses another next anchor.
+  if (last && inferExploreEvidenceStatus(last) !== 'complete') {
     return { refuse: false, reason: 'ok' };
   }
 
-  let best: ExploreCallRecord | undefined;
-  let bestScore = 0;
+  const normalized = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
   for (const call of counted) {
-    const score = queryTokenOverlapScore(qTokens, exploreQueryTokens(call.query));
-    if (score > bestScore) {
-      bestScore = score;
-      best = call;
+    if (inferExploreEvidenceStatus(call) !== 'complete') continue;
+    // Even the same token bag can reverse a relation ("A calls B" versus
+    // "B calls A"). Only an identical normalized request proves repetition.
+    if (normalized(query) === normalized(call.query)) {
+      return { refuse: true, matched: call, reason: 'overlap' };
     }
-  }
-  if (best && bestScore >= OVERLAP_THRESHOLD) {
-    return { refuse: true, matched: best, reason: 'overlap' };
   }
 
   return { refuse: false, reason: 'ok' };
@@ -260,13 +207,13 @@ export function formatExploreRepeatRefuse(
     ? `\nAlready covered files include: ${files.map((f) => `\`${f}\``).join(', ')}.`
     : '';
   const next = decision.matched?.nextAnchor
-    ? `\nPrior **Next anchor** was \`${decision.matched.nextAnchor}\` — use that name, or ONE narrow Grep.`
+    ? `\nSuggested **Next anchor:** \`${decision.matched.nextAnchor}\`.`
     : '';
 
   let why: string;
   switch (decision.reason) {
     case 'hard-cap':
-      why = `This session already ran **${MAX_EXPLORES}** \`homegraph_explore\` calls on this project. Stop exploring.`;
+      why = `This session reached its **${MAX_EXPLORES}** \`homegraph_explore\` retrieval attempts on this project, including incomplete attempts.`;
       break;
     case 'next-anchor':
       why = `Prior explore was Partial and named a **Next anchor** — do not re-explore a paraphrase of "${priorQ}${priorQ.length >= 100 ? '…' : ''}".`;
@@ -275,15 +222,15 @@ export function formatExploreRepeatRefuse(
       why = `Explore call budget exhausted for this project in the session.`;
       break;
     default:
-      why = `This query overlaps a prior explore (bag ≈ "${priorQ}${priorQ.length >= 100 ? '…' : ''}").`;
+      why = `This query repeats the same evidence request as "${priorQ}${priorQ.length >= 100 ? '…' : ''}".`;
   }
 
   return [
-    '**Skip repeat explore — stop HomeGraph drill-down.**',
+    '**Explore retrieval limit — reuse evidence already returned.**',
     why + fileLine + next,
     `Current query: "${query.trim().slice(0, 160)}${query.trim().length > 160 ? '…' : ''}"`,
-    'Answer from Anchors / digests already in this conversation, or run **ONE narrow Grep** for residual unindexed wiring.',
-    'Do **not** glob/read the whole repo, and do **not** fan out `homegraph_explore` / `homegraph_node` / callers on the same bag.',
+    'This limit does not mean the task or its evidence is complete. Inspect missing source with a targeted Read or narrow Grep, then continue the requested edits and validation.',
+    'Do not repeat the same explore or reread unchanged source already shown; keep any remaining inspection scoped to uncovered evidence.',
   ].join('\n');
 }
 
@@ -309,24 +256,17 @@ export function latestCountedExplore(
  * Whether `homegraph_node` / callers / callees should short-refuse after a
  * Partial explore (same failure class as explore×N — depth fan-out).
  *
- * After Partial: callers/callees are refused immediately (wrong tool + often a
- * multi-def token bomb). `homegraph_node` gets one shot, then refuse.
+ * Any one focused depth tool may recover missing evidence. The shared budget
+ * prevents fan-out without declaring callers/callees intrinsically invalid.
  */
 export function decideDepthToolFuse(
   prior: ExploreProjectState | null | undefined,
   depthCallCount: number,
-  toolName?: string,
+  _toolName?: string,
 ): DepthToolFuseDecision {
   const last = latestCountedExplore(prior);
-  if (!last?.partial) return { refuse: false, reason: 'ok' };
+  if (!last || inferExploreEvidenceStatus(last) === 'complete') return { refuse: false, reason: 'ok' };
   const nextAnchor = last.nextAnchor;
-  if (toolName === 'homegraph_callers' || toolName === 'homegraph_callees') {
-    return {
-      refuse: true,
-      reason: 'partial-no-callers',
-      nextAnchor,
-    };
-  }
   if (depthCallCount >= MAX_DEPTH_AFTER_PARTIAL) {
     return {
       refuse: true,
@@ -344,20 +284,18 @@ export function formatDepthToolRefuse(
   symbolHint?: string,
 ): string {
   const next = decision.nextAnchor
-    ? `\nPrior **Next anchor** was \`${decision.nextAnchor}\` — ONE \`homegraph_node\` / tighter explore with that name, or ONE narrow Grep.`
+    ? `\nSuggested **Next anchor:** \`${decision.nextAnchor}\`.`
     : '';
   const sym = symbolHint?.trim()
     ? `\nRequested: \`${symbolHint.trim().slice(0, 80)}\``
     : '';
-  const why = decision.reason === 'partial-no-callers'
-    ? `Prior \`homegraph_explore\` was a Partial locator — do **not** call \`${toolName}\` next (multi-def dumps + fan-out).`
-    : `Prior \`homegraph_explore\` was a Partial locator; this session already used its **${MAX_DEPTH_AFTER_PARTIAL}** `
-      + `allowed \`homegraph_node\` call on this project.`;
+  const why = `Prior retrieval was incomplete; this session already used its **${MAX_DEPTH_AFTER_PARTIAL}** `
+    + `focused depth recovery call on this project (requested \`${toolName}\`).`;
   return [
-    '**Skip HomeGraph depth drill — stop after Partial.**',
+    '**Depth recovery budget reached — evidence may still be incomplete.**',
     why + next + sym,
-    'Answer from Anchors / digests already in this conversation, or run **ONE narrow Grep** for residual unindexed wiring.',
-    'Do **not** fan out more `homegraph_node` / callers / callees, and do **not** glob/read the whole repo.',
+    'Use a targeted Read or narrow Grep for the missing evidence, then continue the requested edits and validation.',
+    'Reuse source already shown and avoid repeating the same depth query.',
   ].join('\n');
 }
 
@@ -460,29 +398,28 @@ export function formatNextAnchorCaption(c: DomainRoleAnchorCandidate): string {
 }
 
 /**
- * Soft-close opening banner (must match footer — never pair with Partial locator).
+ * Coarse retrieval banner: source reuse is separate from task completion.
  */
 export function formatMechanismSoftCloseHeader(): string {
   return (
-    '> **Coarse locate — ANSWER from anchors + digests below.** '
-    + 'Treat inventory + Source as already Read. '
-    + 'ONE narrow Grep only for residual unindexed wiring — do not re-explore or fan out depth tools.'
+    '> **Coarse source evidence below.** '
+    + 'Reuse the source shown for these symbols. '
+    + 'Check relevance and uncovered wiring before continuing the requested edits or explanation.'
   );
 }
 
 /**
- * Soft-close footer: enough inventory + digest to answer without another explore.
- * Must NOT contain "Partial locator" so the session fuse treats the call as closed.
+ * Coarse retrieval footer; never claims that an inventory completes the task.
  */
 export function formatMechanismSoftCloseFooter(next?: DomainRoleAnchorCandidate): string {
   const hint = next
     ? ` Primary Type: \`${next.name}\`.`
     : '';
   return (
-    '> **Coarse locate — ANSWER from anchors + digests above.**'
+    '> **Coarse source evidence returned.**'
     + hint
-    + ' ONE narrow Grep only for residual unindexed wiring named above. '
-    + 'Do **not** re-explore, fan out `homegraph_node` / callers, or glob/read the repo.'
+    + ' Retrieval is not task completion. Reuse the displayed source; inspect uncovered code '
+    + 'with one focused follow-up or targeted Read/Grep, then continue authorized edits and checks.'
   );
 }
 
@@ -491,9 +428,8 @@ export function formatMechanismPartialFooter(nextCaption: string): string {
   return (
     '> **Partial locator** — not a full mechanism closure. '
     + `**Next anchor:** ${nextCaption}. `
-    + 'ONE tighter `homegraph_explore` **only** with that exact name, '
-    + 'or **ONE narrow Grep** for residual unindexed wiring — '
-    + 'do **not** fan out `homegraph_node` / Read / glob, and do **not** ANSWER NOW from inventory alone.'
+    + 'One focused recovery may use this anchor or a different uncovered part of the task. '
+    + 'Use targeted Read/Grep if the evidence remains missing; an inventory alone does not establish behavior.'
   );
 }
 
@@ -508,10 +444,10 @@ export function formatSecondPartialStopFooter(nextAnchor?: string): string {
   return [
     '',
     '---',
-    '> **Second Partial — stop HomeGraph.** Do **not** call `homegraph_explore` again.'
+    '> **Second Partial — explore retrieval budget reached.** Do not repeat `homegraph_explore`.'
     + next
-    + ' Answer from Anchors / digests already returned, or **ONE narrow Grep** for residual unindexed wiring. '
-    + 'Do not glob/read the whole repo.',
+    + ' Evidence remains incomplete. Inspect only missing source with targeted Read or narrow Grep, '
+    + 'then continue the requested edits and validation. Reuse unchanged source already returned.',
   ].join('\n');
 }
 
@@ -561,9 +497,9 @@ export function formatPartialExploreGuidance(opts: {
 
   return [
     `⚠️ **Partial result** — ${why}. This is NOT an error.`,
-    'Prefer **ONE narrow Grep** for residual unindexed wiring using names already in the question — do **not** glob/read the repo.',
+    'A targeted Read or **ONE narrow Grep** may recover missing evidence using names already in the question.',
     anchorLine,
-    'At most **one** `homegraph_node` (or callers/callees) after Partial — further depth calls are refused. Do not open a Grep/Read storm.',
-    'If a second explore still Partials, **stop HomeGraph** and answer from anchors + ONE narrow Grep.',
+    'At most **one** focused `homegraph_node` or callers/callees recovery after Partial; reuse source already returned.',
+    'If a second explore is still Partial, its retrieval budget is exhausted. Inspect missing source directly and continue the requested work; do not infer task completion.',
   ].join('\n');
 }

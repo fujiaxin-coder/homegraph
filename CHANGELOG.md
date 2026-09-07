@@ -9,6 +9,23 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- Experimental structured query planning for explore (Spec 0022): shared local routing features; optional, explicitly configured one-call model intent/decomposition/rephrase; bounded dependent retrieval with a shared deadline/output budget, validated anchors, worker propagation, context hints and direction-aware cache keys. Model failures fall back locally; compact diagnostic metadata includes planning usage/time and per-step coverage. No remote model calls by default.
+
+### Fixes
+
+- Grounded retrieval plans separate concise semantic concepts, verbatim UI text, exact anchors, source scope and relationship direction. Unanchored reference requests first discover source and retain the missing reference obligation. Bounded literal/resource lookup prioritizes local application evidence; rendering deduplicates same-source declarations and marks incomplete evidence. Repeat protection permits a bounded recovery for weak or changed evidence, and retrieval guidance no longer closes the coding task (Spec 0024).
+- The optional model planner now requests English step queries and short English semantic search terms, while preserving literal identifiers, paths and task constraints. This is a prompt-only refinement: retrieval, anchor validation, request count and budgets are unchanged (Spec 0023).
+- Model-planned explore steps now keep their own retrieval terms instead of repeating the whole task as search seeds. General/flow steps consume planned hints through full context retrieval; task constraints remain separate. Dependency candidates come only from displayed source declarations and retain node/file identity, with visible location receipts surviving shared-output trimming. Unseen fuzzy hits and inherited nodes no longer manufacture new bindings; default rule routes are unchanged (Spec 0023).
+- Explicit model planning now considers task-scoped natural-language queries before shape fast paths; exact symbol/path lookups remain cheap. Compact metadata explains planning eligibility, skip reasons and the original rule route, separately from provider failures (Spec 0023).
+- Planner instructions distinguish read-only evidence lookup from code-editing workflows and provide a compact JSON shape; more than three steps still fail closed, with a specific step-count diagnostic and no silent truncation or retry (Spec 0023).
+- After a model planning request fails, local fallback retrieval now uses the remaining shared deadline instead of the unbounded main-thread fast path; rule-only fast retrieval is unchanged (Spec 0023).
+- Query planning keeps framework labels out of lexical retrieval, preserves host-provided task constraints before agent shorthand, accepts bounded numeric step IDs, and supports an explicit planning timeout up to 10 seconds while reserving retrieval time within the shared deadline (default remains 5 seconds; Spec 0023).
+- Experimental query planning (Spec 0023): focused feature queries cannot be broadened into whole-project overviews by a model rewrite. Optional bounded task context preserves original actions/product scope across planning and cache keys; model-proposed broad anchors are discarded when an unauthorized overview is downgraded. Explicit project maps remain supported.
+- An explicit `HOMEGRAPH_MCP_TOOLS` selection now overrides default small-repository tool trimming, so requested specialized tools remain callable on small ArkTS projects (Spec 0023).
+
+- MCP first-tool guidance now gives `homegraph_usages`, `homegraph_modules`, and `homegraph_native` mutually exclusive priority for their narrow intents instead of simultaneously telling agents those questions are explore-first; general `homegraph_explore` remains the compatibility fallback and still auto-routes high-confidence shapes.
 
 ## [1.5.6] - 2026-09-03
 

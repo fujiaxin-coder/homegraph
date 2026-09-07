@@ -179,10 +179,10 @@ Agent 侧工具名前缀为 `homegraph_`。
 
 | 工具 | 用途 |
 |------|------|
-| `homegraph_explore` | **主工具**：一次调用返回相关符号的完整源码、调用路径与影响范围；支持自然语言问题或符号/文件名列表。高置信度的用法 / 模块依赖 / NAPI 问法会委派到下方三个聚焦工具的同一套 survey |
-| `homegraph_usages` | 只读用法清单：命名 API / member / field / 常量的引用与调用点（常量袋可走有界文本扫描） |
-| `homegraph_modules` | 只读模块依赖 / 循环依赖清单（命名模块或路径） |
-| `homegraph_native` | 只读 NAPI / native export 清单（命名路径或 Type） |
+| `homegraph_usages` | **精确用法清单首选**：查询一个已命名 API、成员、常量或字段在哪里被引用 |
+| `homegraph_modules` | **模块拓扑首选**：查询已命名模块之间的依赖关系或循环依赖 |
+| `homegraph_native` | **Native 边界首选**：查询已命名路径或类型的 NAPI/native 导出和注册位置 |
+| `homegraph_explore` | **通用结构探索**：一次调用返回相关符号的源码、调用路径与影响范围；窄清单问题优先使用上面三个专用工具 |
 | `homegraph_search` | 按名称快速搜索符号（仅返回位置，不含源码） |
 | `homegraph_node` | 读取单个符号或整个文件的源码（带行号）及调用关系；可替代 Read 读文件 |
 | `homegraph_callers` / `homegraph_callees` | 查看调用方 / 被调用方 |
@@ -194,6 +194,12 @@ Agent 侧工具名前缀为 `homegraph_`。
 | `homegraph_spec_match` | 将新需求描述与 Commit4Spec 知识图谱做全文匹配，返回相似历史Spec及关联提交与代码片段 |
 | `homegraph_spec_find` | 根据文件路径反向查找关联的Spec |
 | `homegraph_spec_trace` | 根据代码符号追溯回关联的Spec |
+
+### 查询规划（实验性）
+
+`homegraph_explore` 现在共用结构化查询计划：默认 `HOMEGRAPH_QUERY_PLANNER=rules`，保持本地确定性路由；`off` 可回退旧执行路径。显式启用 `llm` 后，复杂问题可在一次模型调用中做意图识别、问题分解和检索改写，再复用既有工具的内部实现。
+
+模型规划需要单独配置 URL、模型和密钥；仅发送问题，不发送仓库源码。最多 3 个子任务共用截止时间和输出预算，规划失败退回本地规则。配置、指标、限制见 [查询规划指南](docs/query-planning.md)。这不是新增的 CodeGraph 构建算法，也尚未证明能降低真实任务的 token 或延迟。
 
 ### Commit4Spec（Spec知识图谱）
 

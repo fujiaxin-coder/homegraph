@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import HomeGraph from '../src/index';
 import { ToolHandler, tools } from '../src/mcp/tools';
+import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX } from '../src/mcp/server-instructions';
 
 describe('specialized explore routing', () => {
   let testDir: string;
@@ -47,8 +48,27 @@ describe('specialized explore routing', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (cg) cg.destroy();
     fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('honors explicitly selected specialized tools on an indexed small repo', async () => {
+    vi.stubEnv('HOMEGRAPH_MCP_TOOLS', 'explore,usages,modules,native');
+    expect(cg.getStats().fileCount).toBeLessThan(500);
+    expect(handler.getTools().map(tool => tool.name).sort()).toEqual([
+      'homegraph_explore', 'homegraph_modules', 'homegraph_native', 'homegraph_usages',
+    ]);
+    const result = await handler.execute('homegraph_usages', { query: 'COLOR_MODE_DARK' });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain('consumer/theme.ts');
+  });
+
+  it('keeps default small-repo tool trimming when no surface is selected', () => {
+    vi.stubEnv('HOMEGRAPH_MCP_TOOLS', '');
+    const names = handler.getTools().map(tool => tool.name);
+    expect(names).toContain('homegraph_explore');
+    expect(names).not.toContain('homegraph_usages');
   });
 
   async function text(tool: string, query: string): Promise<string> {
@@ -62,7 +82,28 @@ describe('specialized explore routing', () => {
       const definition = tools.find((tool) => tool.name === name);
       expect(definition, name).toBeDefined();
       expect(definition!.annotations?.readOnlyHint).toBe(true);
+      expect(definition!.annotations?.title, name).toBeTruthy();
+      expect(definition!.description, name).toMatch(/^PRIMARY first tool/);
+      expect(definition!.description, name).toContain('instead of homegraph_explore');
       expect(definition!.inputSchema.required).toContain('query');
+    }
+  });
+
+  it('presents one exclusive first-tool decision in indexed and no-root guidance', () => {
+    for (const instructions of [SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX]) {
+      expect(instructions).toContain('homegraph_usages');
+      expect(instructions).toContain('homegraph_modules');
+      expect(instructions).toContain('homegraph_native');
+      expect(instructions).toMatch(/exactly (?:ONE|one) first tool/);
+      expect(instructions).toContain('Do not call explore after a focused');
+      expect(instructions).not.toMatch(/Must explore-first:[^\n]*(?:usages|deps\/cycles|NAPI)/i);
+    }
+    const explore = tools.find((tool) => tool.name === 'homegraph_explore')!;
+    expect(explore.annotations?.title).toBe('HomeGraph General Explore');
+    expect(explore.description).toContain('homegraph_usages, homegraph_modules, or homegraph_native instead');
+    const exploreIndex = tools.findIndex((tool) => tool.name === 'homegraph_explore');
+    for (const name of ['homegraph_usages', 'homegraph_modules', 'homegraph_native']) {
+      expect(tools.findIndex((tool) => tool.name === name), name).toBeLessThan(exploreIndex);
     }
   });
 

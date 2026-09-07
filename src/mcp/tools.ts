@@ -7,6 +7,8 @@
 import type HomeGraph from '../index';
 import type { QueryPool } from './query-pool';
 import { resolveToolDeadlineMs } from './query-pool';
+import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLine } from './evidence-rendering';
+import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
 import { shouldSkipCatchUpSync } from './memory-budget';
 import { findNearestHomeGraphRoot } from '../directory';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
@@ -42,7 +44,10 @@ import {
 import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, queryAsContainerCompositionSurvey, queryAsMemberUiConsequenceSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
 
 import {
+  closeSync,
   existsSync,
+  openSync,
+  readSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -55,6 +60,7 @@ import {
   EXPLORE_EMISSION_KEY,
   EXPLORE_SESSION_VIEW_ARG,
   ExploreSessionState,
+  inferExploreEvidenceStatus,
   readExploreSessionView,
   viewForProject,
   type ExploreEmission,
@@ -84,6 +90,7 @@ import {
   formatSecondPartialStopFooter,
   inferExplorePartialMeta,
   pickBestDomainRoleAnchor,
+  type ExploreRepeatDecision,
 } from './explore-repeat-guard';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import {
@@ -147,6 +154,23 @@ const MAX_OUTPUT_LENGTH = 15000;
  * far beyond any realistic legitimate query.
  */
 const MAX_INPUT_LENGTH = 10_000;
+
+// Server-owned, structured-clone-safe request context. Never accept these from MCP clients.
+const QUERY_PLAN_ARG = '__homegraphQueryPlan';
+const QUERY_DEADLINE_ARG = '__homegraphQueryDeadlineAt';
+const QUERY_STARTED_ARG = '__homegraphQueryStartedAt';
+const QUERY_INDEX_STATE_ARG = '__homegraphQueryIndexState';
+const QUERY_FAST_ATTEMPTED_ARG = '__homegraphQueryFastAttempted';
+
+function readQueryPlan(args: Record<string, unknown>): QueryPlan | undefined {
+  const plan = args[QUERY_PLAN_ARG] as QueryPlan | undefined;
+  return plan?.version === QUERY_PLAN_VERSION && typeof plan.originalQuery === 'string'
+    && typeof plan.canonicalQuery === 'string' && Array.isArray(plan.steps) ? plan : undefined;
+}
+
+function planFeature(plan: QueryPlan | undefined, name: string, query: string, fallback: (q: string) => boolean): boolean {
+  return plan?.features[name] ?? fallback(query);
+}
 
 /** Example values for success-shaped bad-arg guidance (keyed by arg name). */
 const BAD_ARG_EXAMPLES: Record<string, unknown> = {
@@ -786,6 +810,8 @@ export interface ToolResult {
     text: string;
   }>;
   isError?: boolean;
+  /** Compact diagnostics for hosts/evaluators; never credentials or source dumps. */
+  _meta?: Record<string, unknown>;
   /**
    * Internal: what an explore call emitted (CG-17). {@link ToolHandler.execute}
    * records it into the calling session's state and deletes it before the result
@@ -1045,19 +1071,83 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
+    name: 'homegraph_usages',
+    description:
+      'PRIMARY first tool for a narrow WHERE-USED question about one named API, `.member`, ALL_CAPS constant, field, or mutex. ' +
+      'Choose this instead of homegraph_explore when the requested answer is usage/reference locations. ' +
+      'Required: `query`. Returns usage files/lines only; it does not build a general flow or source dump. ' +
+      '`homegraph_explore` auto-routes equivalent high-confidence queries here only for compatibility.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Required. Exact API/member/constant/field name, with or without where-used wording.',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['query'],
+    },
+    annotations: { ...READ_ONLY_ANNOTATIONS, title: 'HomeGraph Where-used Inventory' },
+  },
+  {
+    name: 'homegraph_modules',
+    description:
+      'PRIMARY first tool for a narrow DEPENDENCY/CYCLE question about named path modules or `*common` / `*service` / `*component` / `*constants` modules. ' +
+      'Choose this instead of homegraph_explore when the requested answer is module topology. ' +
+      'Required: `query`. It does not build a general code flow or scan unrelated survey families. ' +
+      '`homegraph_explore` auto-routes equivalent high-confidence dependency questions here only for compatibility.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Required. Dependency/cycle question containing the exact module names or paths.',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['query'],
+    },
+    annotations: { ...READ_ONLY_ANNOTATIONS, title: 'HomeGraph Module Dependencies' },
+  },
+  {
+    name: 'homegraph_native',
+    description:
+      'PRIMARY first tool for a narrow NAPI/NATIVE EXPORT or registration question about one named path or Type. ' +
+      'Choose this instead of homegraph_explore when the requested answer is the ArkTS↔native export surface. Required: `query`. ' +
+      'Returns indexed export descriptors/registration sites without a general domain file dump. ' +
+      '`homegraph_explore` auto-routes equivalent high-confidence NAPI/export questions here only for compatibility.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Required. NAPI/native export question containing the exact path or Type name.',
+        },
+        projectPath: projectPathProperty,
+      },
+      required: ['query'],
+    },
+    annotations: { ...READ_ONLY_ANNOTATIONS, title: 'HomeGraph Native Exports' },
+  },
+  {
     name: 'homegraph_explore',
     description:
-      'PRIMARY entry for understanding THIS repo before you edit or answer structural questions. ' +
+      'GENERAL PRIMARY entry for understanding THIS repo before you edit or answer structural questions. ' +
+      'For an explicit narrow where-used, named module dependency/cycle, or NAPI/native export inventory, choose ' +
+      'homegraph_usages, homegraph_modules, or homegraph_native instead; this tool keeps conservative auto-routing only for compatibility. ' +
       'Returns call paths + compact line-numbered source for the relevant symbols. Required: `query`. ' +
       'CALL FIRST (alone, no parallel Grep/Read) when you will change an existing codebase — pass the user task or domain keywords ' +
       '(page/module/feature/component words); locate where to edit before writing code. Also CALL FIRST for how/wired questions, ' +
       'named Type/Component/Page/Dialog, Type.member, click→handler, inheritance/subtypes, declaration/attribute sites, ' +
-      'ALL_CAPS constant / field-mutex usages, path-module NAPI/exports or inter-deps, and in-repo @kit/@ohos *usages/dependencies* ' +
-      '(which files import a named export — not the SDK feature catalog). PascalCase names optional when domain keywords suffice. ' +
+      'or a cross-symbol mechanism/flow. Use the named focused tools for exact usage, module-topology, or native-export inventories. ' +
+      'PascalCase names optional when domain keywords suffice. ' +
+      'For edits preserve the requested action, target product/module and exclusions; taskContext may carry the full task. ' +
       'Prefer callers/node when one named symbol is already enough. ' +
       'DO NOT call for topic file-lists with no Type/file, literal copy hunts / pure existence compares with no anchors, ' +
       'official-docs-only asks, empty-project-from-scratch scaffolds, git history, or media/binary asset inventories — those return Skip. ' +
-      '@kit / OHOS API questions ARE in scope when the SDK API graph is available — call explore (usages or API symbols). ' +
+      '@kit / OHOS API questions ARE in scope when the SDK API graph is available — exact where-used → homegraph_usages; ' +
+      'mechanism/API-symbol flow → homegraph_explore. ' +
       'Literal string/pattern hunts → Grep; media assets → Glob; git history → git. ' +
       'One explore; then answer or edit from Source + trail — do not re-grep/node/read the same symbols. ' +
       'Overlapping paraphrase explores are refused (name a new Type/file/@kit to continue). ' +
@@ -1070,7 +1160,12 @@ export const tools: ToolDefinition[] = [
           type: 'string',
           description:
             'Required. For pre-edit orientation or how/mechanism: pass the user task or domain keywords (page/module/feature words). ' +
-            'For named flows, include Type / Type.member / component names. For @kit, ask usages (depend/import sites), not SDK catalogs.',
+            'For named flows, include Type / Type.member / component names. For @kit mechanism/flow, include module/export tokens; ' +
+            'use homegraph_usages for a narrow import/usage inventory, not SDK catalogs.',
+        },
+        taskContext: {
+          type: 'string',
+          description: 'Optional original task, including requested changes, product/module scope, exclusions and acceptance requirements. Not source evidence; bounded to 4000 characters.',
         },
         maxFiles: {
           type: 'number',
@@ -1081,64 +1176,7 @@ export const tools: ToolDefinition[] = [
       },
       required: ['query'],
     },
-    annotations: READ_ONLY_ANNOTATIONS,
-  },
-  {
-    name: 'homegraph_usages',
-    description:
-      'Focused in-repo usage inventory for one named API, `.member`, ALL_CAPS constant, field, or mutex. ' +
-      'Required: `query`. Returns usage files/lines only; it does not build a general flow or source dump. ' +
-      'Use directly for a narrow where-used question; `homegraph_explore` auto-routes equivalent high-confidence queries here.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Required. Exact API/member/constant/field name, with or without where-used wording.',
-        },
-        projectPath: projectPathProperty,
-      },
-      required: ['query'],
-    },
-    annotations: READ_ONLY_ANNOTATIONS,
-  },
-  {
-    name: 'homegraph_modules',
-    description:
-      'Focused dependency/cycle inventory for named path modules or `*common` / `*service` / `*component` / `*constants` modules. ' +
-      'Required: `query`. It does not build a general code flow or scan unrelated survey families. ' +
-      '`homegraph_explore` auto-routes equivalent high-confidence dependency questions here.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Required. Dependency/cycle question containing the exact module names or paths.',
-        },
-        projectPath: projectPathProperty,
-      },
-      required: ['query'],
-    },
-    annotations: READ_ONLY_ANNOTATIONS,
-  },
-  {
-    name: 'homegraph_native',
-    description:
-      'Focused NAPI/native export inventory for one named path or Type. Required: `query`. ' +
-      'Returns indexed export descriptors/registration sites without a general domain file dump. ' +
-      '`homegraph_explore` auto-routes equivalent high-confidence NAPI/export questions here.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Required. NAPI/native export question containing the exact path or Type name.',
-        },
-        projectPath: projectPathProperty,
-      },
-      required: ['query'],
-    },
-    annotations: READ_ONLY_ANNOTATIONS,
+    annotations: { ...READ_ONLY_ANNOTATIONS, title: 'HomeGraph General Explore' },
   },
   {
     name: 'homegraph_status',
@@ -1500,10 +1538,12 @@ function stripPositiveAnswerNowFromLine(line: string): { text: string; changed: 
 export function reconcilePartialAnswerNow(text: string): string {
   if (!/\*\*Partial locator\*\*/i.test(text)) return text;
   let changed = false;
+  let fenced = false;
   const out = text
     .split('\n')
     .map((line) => {
-      if (!/ANSWER NOW/i.test(line)) return line;
+      if (/^\s*```/.test(line)) { fenced = !fenced; return line; }
+      if (fenced || !/ANSWER NOW/i.test(line)) return line;
       const stripped = stripPositiveAnswerNowFromLine(line);
       if (stripped.changed) changed = true;
       return stripped.text;
@@ -1511,7 +1551,7 @@ export function reconcilePartialAnswerNow(text: string): string {
     .filter((line) => line.trim() !== '>')
     .join('\n');
   if (!changed) return text;
-  return `${out}\n\n> This survey is a **Partial locator**: the sections above are anchors, not a closed answer. Continue with the narrower lookup named above, or a text search, before answering.`;
+  return `${out}\n\n> This survey is a **Partial locator**: the sections above are anchors, not a closed answer. Inspect missing source with a focused lookup, continue the requested edits, and verify the resulting code.`;
 }
 
 export class ToolHandler {
@@ -1707,7 +1747,9 @@ export class ToolHandler {
         'homegraph_diff_impact',
         'homegraph_project',
       ]);
-      if (stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
+      // An explicit host selection overrides the default size-based surface.
+      // Otherwise small ArkTS repos silently lose requested specialized tools.
+      if (!allow && stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
         visible = visible.filter(t => TINY_REPO_CORE_TOOLS.has(t.name));
       }
 
@@ -2138,6 +2180,9 @@ export class ToolHandler {
     args: Record<string, unknown>,
     sessionState?: ExploreSessionState,
   ): Promise<ToolResult> {
+    const requestStartedAt = Date.now();
+    args = { ...args };
+    for (const key of [QUERY_PLAN_ARG, QUERY_DEADLINE_ARG, QUERY_STARTED_ARG, QUERY_INDEX_STATE_ARG, QUERY_FAST_ATTEMPTED_ARG]) delete args[key];
     try {
       // Block the first tool call on the engine's post-open reconcile so we
       // never serve rows for files deleted/edited while no MCP server was
@@ -2178,13 +2223,37 @@ export class ToolHandler {
 
       const projectPath = args.projectPath as string | undefined;
 
+      if (toolName === 'homegraph_explore' && process.env.HOMEGRAPH_QUERY_PLANNER !== 'off') {
+        const query = this.validateString(args.query, 'query');
+        if (typeof query !== 'string') return query;
+        const cg = this.getHomeGraph(projectPath);
+        const gated = this.maybeDeepToolPhaseGate(cg, toolName);
+        if (gated) return gated;
+        // Refused repeats must not spend a model call or re-serve cached evidence.
+        if (sessionState) {
+          const repeat = decideExploreRepeat(sessionState.forProject(cg.getProjectRoot()), query);
+          if (this.shouldRefuseRepeatedEvidence(repeat, cg.getProjectRoot())) {
+            return this.textResult(formatExploreRepeatRefuse(repeat, query));
+          }
+        }
+        args[QUERY_STARTED_ARG] = requestStartedAt;
+        args[QUERY_DEADLINE_ARG] = Date.now() + resolveToolDeadlineMs();
+        args[QUERY_PLAN_ARG] = await planQuery(query, {
+          deadlineAt: args[QUERY_DEADLINE_ARG] as number,
+          taskContext: mergeQueryPlanTaskContext(process.env.HOMEGRAPH_QUERY_TASK_CONTEXT,
+            typeof args.taskContext === 'string' ? args.taskContext : undefined),
+          validateAnchor: (anchor) => this.isExactPlanAnchor(cg, anchor),
+        });
+        args[QUERY_INDEX_STATE_ARG] = `${cg.getBuildPhase()}:${cg.getStats().nodeCount}:${cg.getLastIndexedAt() ?? 0}`;
+      }
+
       // Wrong question shapes → short Skip (before cache / graph work).
       if (toolName === 'homegraph_explore' || toolName === 'homegraph_search') {
         const qEarly = typeof args.query === 'string' ? args.query : '';
         if (qEarly) {
           const deferKind = queryShouldDeferToBuiltinTools(qEarly);
-          if (deferKind) {
-            return this.textResult(homegraphDeferGuidance(deferKind, qEarly));
+          if (deferKind && readQueryPlan(args)?.source !== 'llm') {
+            return this.withQueryPlanDiagnostics(this.textResult(homegraphDeferGuidance(deferKind, qEarly)), args);
           }
         }
       }
@@ -2204,7 +2273,9 @@ export class ToolHandler {
       // Session-tracked explore must not hit the MCP query cache: a cache hit
       // would re-serve the first call's full source and defeat CG-18 dedup.
       const skipCacheForSession = toolName === 'homegraph_explore' && !!sessionState;
-      const cacheEnabled = !skipCacheForSession && isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
+      const requestPlan = readQueryPlan(args);
+      const cacheEnabled = !skipCacheForSession && requestPlan?.source !== 'llm'
+        && !requestPlan?.telemetry.fallbackReason && isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
       let cacheKey: string | undefined;
       let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
       let cacheIndex: ReturnType<typeof getMcpQueryCacheIndex> | undefined;
@@ -2224,7 +2295,8 @@ export class ToolHandler {
           cacheKey = buildMcpQueryCacheKey(toolName, args, fileCount);
           const cached = cacheIndex.getEntry(cacheQueries, cacheKey);
           if (cached) {
-            const withWorktree = this.withWorktreeNotice(cached, projectPath);
+            const diagnosed = this.withQueryPlanDiagnostics(cached, args, true);
+            const withWorktree = this.withWorktreeNotice(diagnosed, projectPath);
             return this.withStalenessNotice(withWorktree, projectPath);
           }
         } catch {
@@ -2258,13 +2330,15 @@ export class ToolHandler {
       // main connection. Serving them here — before the query-pool offload —
       // avoids cold-worker / wedged-daemon paths that otherwise surface as empty
       // MCP client `-32001` (the handler itself is fine; the transport times out).
-      if (toolName === 'homegraph_explore' || toolName === 'homegraph_search') {
+      if ((toolName === 'homegraph_explore' || toolName === 'homegraph_search')
+        && (!requestPlan || (requestPlan.source === 'rules' && requestPlan.steps.length === 1
+          && !requestPlan.telemetry.requestCount))) {
         const q = typeof args.query === 'string' ? args.query : '';
         if (q) {
           try {
             const cgFast = this.getHomeGraph(projectPath);
             const rootFast = cgFast.getProjectRoot();
-            const fast =
+            const fast = requestPlan ? this.tryPlannedFastPath(cgFast, requestPlan, rootFast) :
               (toolName === 'homegraph_explore'
                 ? this.trySpecializedExploreRoute(cgFast, q, rootFast)
                 : null)
@@ -2285,12 +2359,14 @@ export class ToolHandler {
                   sessionState,
                 );
               }
+              served = this.withQueryPlanDiagnostics(served, args);
               if (cacheEnabled && cacheKey && cacheQueries && cacheIndex && !served.isError) {
                 cacheIndex.setEntry(cacheQueries, cacheKey, toolName, served);
               }
               const withWorktree = this.withWorktreeNotice(served, projectPath);
               return this.withStalenessNotice(withWorktree, projectPath);
             }
+            if (requestPlan) args[QUERY_FAST_ATTEMPTED_ARG] = true;
           } catch {
             // Not indexed / path issue — fall through to normal dispatch.
           }
@@ -2306,7 +2382,7 @@ export class ToolHandler {
       // (a frozen main loop prevents setTimeout deadlines from firing → empty
       // `-32001`). Fast-path surveys run inside the worker via executeReadTool.
       const raw = await this.runReadToolWithDeadline(toolName, dispatchArgs);
-      const result = this.takeExploreEmission(raw, sessionState);
+      const result = this.withQueryPlanDiagnostics(this.takeExploreEmission(raw, sessionState), args);
       if (
         sessionState
         && !result.isError
@@ -2398,6 +2474,41 @@ export class ToolHandler {
     }
   }
 
+  /** A repeated query is duplicate evidence only while its source is unchanged. */
+  private shouldRefuseRepeatedEvidence(decision: ExploreRepeatDecision, projectRoot: string): boolean {
+    if (!decision.refuse) return false;
+    // Source changes do not reset the total retrieval budget.
+    if (decision.reason !== 'overlap') return true;
+    const files = decision.matched?.files.filter((file) => file.bytes > 0 && file.ranges.length > 0) ?? [];
+    if (files.length === 0 || files.length > 24) return false;
+    let remainingBytes = 2 * 1024 * 1024;
+    for (const file of files) {
+      if (!file.fingerprint) return false;
+      const absolute = validatePathWithinRoot(projectRoot, file.path);
+      if (!absolute) return false;
+      let descriptor: number | undefined;
+      try {
+        const stat = statSync(absolute);
+        const limit = Math.min(1024 * 1024, remainingBytes);
+        if (!stat.isFile() || stat.size > limit) return false;
+        // Fixed-size reads also remain bounded if the file grows after stat.
+        descriptor = openSync(absolute, 'r');
+        const buffer = Buffer.alloc(stat.size + 1);
+        let bytes = 0;
+        while (bytes < buffer.length) {
+          const read = readSync(descriptor, buffer, bytes, buffer.length - bytes, bytes);
+          if (read === 0) break;
+          bytes += read;
+        }
+        if (bytes !== stat.size) return false;
+        remainingBytes -= bytes;
+        if (fileFingerprint(buffer.subarray(0, bytes).toString('utf8')) !== file.fingerprint) return false;
+      } catch { return false; }
+      finally { if (descriptor !== undefined) { try { closeSync(descriptor); } catch { /* bookkeeping only */ } } }
+    }
+    return true;
+  }
+
   /** Count a successful depth-tool call when the latest explore was Partial. */
   private noteDepthToolUse(
     args: Record<string, unknown>,
@@ -2407,10 +2518,8 @@ export class ToolHandler {
       const cg = this.getHomeGraph(args.projectPath as string | undefined);
       const root = cg.getProjectRoot();
       const prior = sessionState.forProject(root);
-      const last = prior?.calls.length
-        ? [...prior.calls].reverse().find((c) => (c.responseBytes || 0) >= 400)
-        : undefined;
-      if (!last?.partial) return;
+      const last = prior?.calls[prior.calls.length - 1];
+      if (!last || inferExploreEvidenceStatus(last) === 'complete') return;
       sessionState.recordDepthTool(root);
     } catch { /* bookkeeping only */ }
   }
@@ -2431,19 +2540,24 @@ export class ToolHandler {
   ): ToolResult {
     const emission = result?.[EXPLORE_EMISSION_KEY];
     if (emission === undefined) return result;
+    emission.evidenceStatus = inferExploreEvidenceStatus(emission);
+    emission.partial = emission.evidenceStatus !== 'complete';
+    result._meta = { ...result._meta, homegraphEvidence: { status: emission.evidenceStatus,
+      files: emission.files, locatedNodes: emission.locatedNodes, coveredObligations: emission.coveredObligations,
+      uncoveredObligations: emission.uncoveredObligations } };
     delete result[EXPLORE_EMISSION_KEY];
     if (sessionState) {
       try {
         const prior = sessionState.forProject(emission.projectRoot);
         const priorPartials = (prior?.calls ?? []).filter(
-          (c) => c.partial === true && (c.responseBytes || 0) >= 400,
+          (c) => inferExploreEvidenceStatus(c) !== 'complete',
         );
         const metaPartial = emission.partial === true
           || (emission.partial === undefined
             && inferExplorePartialMeta(result.content?.[0]?.text ?? '').partial);
         if (metaPartial && priorPartials.length >= 1) {
           const text = result.content?.[0]?.text ?? '';
-          if (text && !/Second Partial — stop HomeGraph/i.test(text)) {
+          if (text && !/Second Partial/i.test(text)) {
             const stop = formatSecondPartialStopFooter(emission.nextAnchor);
             result = {
               ...result,
@@ -2479,14 +2593,19 @@ export class ToolHandler {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
-    const deadlineMs = resolveToolDeadlineMs();
+    const deadlineMs = typeof args[QUERY_DEADLINE_ARG] === 'number'
+      ? Math.max(0, Math.min(resolveToolDeadlineMs(), (args[QUERY_DEADLINE_ARG] as number) - Date.now()))
+      : resolveToolDeadlineMs();
+    if (deadlineMs <= 0) return this.deadlineBusyResult(resolveToolDeadlineMs(), args);
     const light =
       toolName === 'homegraph_search'
       || toolName === 'homegraph_node'
       || toolName === 'homegraph_callers'
       || toolName === 'homegraph_callees'
       || toolName === 'homegraph_files'
-      || toolName === 'homegraph_project';
+      || toolName === 'homegraph_project'
+      // Project maps may be built on demand: never run them on a read worker.
+      || (readQueryPlan(args)?.steps.some((step) => step.intent === 'overview') ?? false);
 
     const work = (): Promise<ToolResult> => {
       if (!light && this.queryPool && this.queryPool.healthy) {
@@ -2544,6 +2663,12 @@ export class ToolHandler {
    */
   async executeReadTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
     try {
+      if (toolName !== 'homegraph_project' && toolName !== 'homegraph_status') {
+        const gate = this.maybeDeepToolPhaseGate(this.getHomeGraph(args.projectPath as string | undefined), toolName);
+        if (gate) return gate;
+      }
+      const plan = toolName === 'homegraph_explore' ? readQueryPlan(args) : undefined;
+      if (plan) return await this.executeQueryPlan(args, plan);
       // Compact inventory / one-symbol surveys — safe on the worker (keeps the
       // daemon main loop free). Never run these unprotected on the MCP transport
       // thread: they can block long enough for the client to emit empty `-32001`.
@@ -5331,9 +5456,242 @@ export class ToolHandler {
     return { section: lines.join('\n'), hitCount: locs.length + edges.length + extendsHits.length };
   }
 
-  /**
-   * Main-thread fast path for inventory surveys — skips the worker queue.
-   */
+  /** Exact validation for model-proposed names: a fuzzy hit is not proof. */
+  private isExactPlanAnchor(cg: HomeGraph, anchor: string): boolean {
+    if (!anchor || anchor.length > 256) return false;
+    try {
+      const matches = cg.searchNodes(anchor, { limit: 12 });
+      return matches.some(({ node }) => node.name === anchor || node.qualifiedName === anchor
+        || node.filePath.replace(/\\/g, '/') === anchor.replace(/\\/g, '/'));
+    } catch { return false; }
+  }
+
+  /** Bind only declarations returned by this step, not input or global fuzzy hits. */
+  private locatedPlanBindings(cg: HomeGraph, result: ToolResult, inherited: QueryPlanBinding[]): QueryPlanBinding[] {
+    const seen = new Set(inherited.map((binding) => binding.id));
+    const declarations = new Set(inherited.map((binding) => `${binding.filePath}:${binding.startLine}:${binding.name}`));
+    const located: QueryPlanBinding[] = [];
+    for (const receipt of (result[EXPLORE_EMISSION_KEY]?.locatedNodes ?? []).slice(0, 32)) {
+      if (seen.has(receipt.id) || declarations.has(`${receipt.filePath}:${receipt.startLine}:${receipt.name}`)) continue;
+      const node = cg.getNode(receipt.id);
+      if (!node || ['file', 'import', 'export', 'parameter'].includes(node.kind)
+        || node.name === 'constructor' || node.name.startsWith('%AM') || node.filePath.includes('@dummy')
+        || node.name !== receipt.name || node.filePath !== receipt.filePath || node.startLine !== receipt.startLine
+        || node.qualifiedName !== receipt.qualifiedName) continue;
+      seen.add(node.id);
+      declarations.add(`${node.filePath}:${node.startLine}:${node.name}`);
+      located.push({ id: node.id, name: node.name, qualifiedName: node.qualifiedName,
+        filePath: node.filePath, startLine: node.startLine });
+      if (located.length >= 8) break;
+    }
+    return located;
+  }
+
+  private withQueryPlanDiagnostics(result: ToolResult, args: Record<string, unknown>, cacheHit = false): ToolResult {
+    const plan = readQueryPlan(args);
+    if (!plan) return result;
+    const prior = result._meta?.homegraphQueryPlan as Record<string, unknown> | undefined;
+    const started = typeof args[QUERY_STARTED_ARG] === 'number' ? args[QUERY_STARTED_ARG] as number : Date.now();
+    return { ...result, _meta: { ...result._meta, homegraphQueryPlan: {
+      ...prior, version: plan.version, source: plan.source, intent: plan.intent, route: plan.route,
+      confidence: plan.confidence,
+      plannerSeeds: { anchors: plan.anchors, searchTerms: plan.searchTerms, literalTexts: plan.literalTexts,
+        sourceScope: plan.sourceScope, relation: plan.relation },
+      hasTaskContext: !!plan.taskContext,
+      matchedFeatures: Object.entries(plan.features).filter(([, matched]) => matched).map(([name]) => name).slice(0, 12),
+      planningMs: plan.telemetry.durationMs, durationMs: Math.max(plan.telemetry.durationMs, Date.now() - started),
+      modelRequests: plan.telemetry.requestCount ?? 0,
+      planningEligible: plan.telemetry.decision?.eligible,
+      planningReason: plan.telemetry.decision?.reason,
+      skip_reason: plan.telemetry.decision?.eligible === false ? plan.telemetry.decision.reason : undefined,
+      ruleRoute: plan.telemetry.decision?.ruleRoute,
+      inputTokens: plan.telemetry.inputTokens ?? (plan.telemetry.requestCount ? null : 0),
+      outputTokens: plan.telemetry.outputTokens ?? (plan.telemetry.requestCount ? null : 0),
+      fallbackReason: plan.telemetry.fallbackReason, cacheHit,
+      steps: cacheHit ? [] : prior?.steps ?? [{ id: plan.steps[0]?.id, intent: plan.intent,
+        status: result.isError ? 'failed'
+          : inferExplorePartialMeta(result.content[0]?.text ?? '').partial ? 'partial'
+            : /Status: (?:no_indexed_evidence|not_surveyed)|No relevant code|Skip HomeGraph/i.test(result.content[0]?.text ?? '')
+              ? 'no_evidence' : 'evidence', resolvedAnchors: [] }],
+    } } };
+  }
+
+  /** Select once; legacy section builders consume the same canonical query/features. */
+  private tryPlannedFastPath(cg: HomeGraph, plan: QueryPlan, root: string): ToolResult | null {
+    const query = plan.canonicalQuery;
+    if (plan.route === 'usages' || plan.route === 'modules' || plan.route === 'native') {
+      return this.runSpecializedExploreRoute(plan.route, cg, query, root, plan);
+    }
+    // These legacy paths re-extract seeds from text and cannot consume bound
+    // node identity / step hints. Model general/flow plans use full explore;
+    // rule/default and specialized routes retain their existing fast behavior.
+    if (plan.source === 'llm' && (plan.intent === 'general' || plan.intent === 'flow')) return null;
+    return this.tryFastInventoryExplore(cg, query, root, plan)
+      ?? this.tryLightMechanismExplore(cg, query, root, plan)
+      ?? this.tryCompactLocalSymbolExplore(cg, query, root, plan);
+  }
+
+  /** Internal execution only: no recursive MCP calls, model requests or new deadline. */
+  private async executePlannedStep(args: Record<string, unknown>, plan: QueryPlan): Promise<ToolResult> {
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    if (plan.intent === 'overview') {
+      return this.handleProject({ projectPath: args.projectPath });
+    }
+    const gate = this.maybeDeepToolPhaseGate(cg, 'homegraph_explore');
+    if (gate) return gate;
+    const query = plan.canonicalQuery;
+    const defer = queryShouldDeferToBuiltinTools(query);
+    if (defer && plan.source === 'rules') return this.textResult(homegraphDeferGuidance(defer, query));
+    // A typed relationship still needs a real target. Discover source from the
+    // same bounded hints first; do not turn an unanchored usage request into an
+    // empty survey or claim that its reference obligation has been covered.
+    if (plan.source === 'llm' && plan.route === 'usages'
+      && !plan.anchors.length && !plan.bindings?.length) {
+      const result = await this.handleExplore({ ...args, query, [QUERY_PLAN_ARG]: plan });
+      const served = this.ensureExploreEmission(result, cg.getProjectRoot(), plan.originalQuery);
+      const emission = served[EXPLORE_EMISSION_KEY]!;
+      emission.partial = true;
+      emission.evidenceStatus = emission.sourceBytes > 0 ? 'partial' : 'empty';
+      emission.coveredObligations = [];
+      emission.uncoveredObligations = [plan.relation ?? 'incoming_references'];
+      if (served.content[0]?.type === 'text') served.content[0].text =
+        '**Reference target discovery — partial**\nSource candidates follow. Verify the relevant target before surveying its references; the reference obligation remains open.\n\n'
+        + served.content[0].text;
+      return served;
+    }
+    const fast = args[QUERY_FAST_ATTEMPTED_ARG] === true && plan.source === 'rules'
+      ? null : this.tryPlannedFastPath(cg, plan, cg.getProjectRoot());
+    if (fast) return fast;
+    return this.handleExplore({ ...args, query, [QUERY_PLAN_ARG]: plan });
+  }
+
+  private async executeQueryPlan(args: Record<string, unknown>, plan: QueryPlan): Promise<ToolResult> {
+    const cg = this.getHomeGraph(args.projectPath as string | undefined);
+    const root = cg.getProjectRoot();
+    const deadline = typeof args[QUERY_DEADLINE_ARG] === 'number'
+      ? args[QUERY_DEADLINE_ARG] as number : Date.now() + resolveToolDeadlineMs();
+    const prior = viewForProject(readExploreSessionView(args), root);
+    const repeat = decideExploreRepeat(prior, plan.originalQuery);
+    if (this.shouldRefuseRepeatedEvidence(repeat, root)) {
+      return this.textResult(formatExploreRepeatRefuse(repeat, plan.originalQuery));
+    }
+    const multi = plan.steps.length > 1;
+    let outputBudget = Math.min(MAX_OUTPUT_LENGTH, getExploreOutputBudget(cg.getStats().fileCount).maxOutputChars);
+    if (!Number.isFinite(outputBudget)) outputBudget = MAX_OUTPUT_LENGTH;
+    const constraints = [plan.originalQuery, plan.taskContext].filter(Boolean).join('\n');
+    const constraintLimit = Math.min(2000, Math.floor(outputBudget / 5));
+    const constraintNotice = constraints.length > constraintLimit
+      ? constraints.slice(0, constraintLimit) + '\n[Constraint display shortened; the original task remains authoritative.]'
+      : constraints;
+    const preamble = [
+      '**Planned exploration — Partial locator**',
+      '> **Partial locator** — scoped subquestion evidence, not proof that every requirement in the original question is covered.',
+      '**Task constraints (not search seeds or verified source evidence)**\n' + constraintNotice,
+    ].join('\n\n');
+    const pieces: string[] = [];
+    const diagnostics: Array<{ id: string; intent: string; status: string; resolvedAnchors: string[];
+      locatedNodes: QueryPlanBinding[]; durationMs: number }> = [];
+    const bindings = new Map<string, QueryPlanBinding[]>();
+    const files: ExploreFileEmission[] = [];
+    const seenQueries = new Set<string>();
+    let single: ToolResult | undefined;
+    let used = multi ? preamble.length + 400 : 400;
+    for (const step of plan.steps.slice(0, 3)) {
+      const started = Date.now();
+      const diagnostic = { id: step.id, intent: step.intent, status: 'pending', resolvedAnchors: [] as string[],
+        locatedNodes: [] as QueryPlanBinding[], durationMs: 0 };
+      diagnostics.push(diagnostic);
+      if (Date.now() >= deadline || used >= outputBudget) {
+        diagnostic.status = 'budget_exhausted';
+        pieces.push(`**Step ${step.id}: ${step.intent}** — not executed: shared request budget exhausted.`);
+        continue;
+      }
+      if (step.dependsOn.some((id) => !bindings.get(id)?.length)) {
+        diagnostic.status = 'dependency_unresolved';
+        pieces.push(`**Step ${step.id}: ${step.intent}** — not executed: predecessor supplied no resolved symbol anchors.`);
+        continue;
+      }
+      const resolved = step.dependsOn.flatMap((id) => bindings.get(id) ?? []);
+      // Keep rule-only single queries byte-compatible; only model subplans are adapted.
+      const compiled = plan.source === 'rules' && !multi ? plan : {
+        ...compileQueryPlanStep(plan, step, resolved.map((node) => node.qualifiedName || node.name)), bindings: resolved,
+      };
+      if (seenQueries.has(`${compiled.intent}:${compiled.canonicalQuery}`)) {
+        diagnostic.status = 'duplicate_skipped';
+        pieces.push(`**Step ${step.id}: ${step.intent}** — duplicate query skipped.`);
+        continue;
+      }
+      seenQueries.add(`${compiled.intent}:${compiled.canonicalQuery}`);
+      try {
+        const result = await this.executePlannedStep({ ...args, [QUERY_DEADLINE_ARG]: deadline }, compiled);
+        const body = result.content.map((part) => part.text).join('\n');
+        const candidates = result.isError ? [] : this.locatedPlanBindings(cg, result, resolved);
+        const childEmission = result[EXPLORE_EMISSION_KEY];
+        const hasLocalEvidence = candidates.length > 0 || (childEmission?.sourceBytes ?? 0) > 0;
+        diagnostic.status = result.isError ? 'failed'
+          : childEmission?.evidenceStatus === 'complete' ? 'evidence'
+            : hasLocalEvidence ? (childEmission?.partial ? 'partial' : 'evidence')
+              : /HarmonyOS SDK API|ohos-sdk:/.test(body) ? 'sdk_only' : 'no_evidence';
+        if (!multi) {
+          diagnostic.locatedNodes = candidates;
+          diagnostic.resolvedAnchors = candidates.map((node) => node.name);
+          single = result; break;
+        }
+        // A child cannot declare the original multi-part question answered.
+        let fenced = false;
+        const neutralBody = body.split('\n').filter((line) => {
+          if (/^\s*```/.test(line)) { fenced = !fenced; return true; }
+          return fenced || !/ANSWER NOW|Compact local explore complete|Do \*\*not\*\* (?:Read|Grep)|ONE tighter|ONE narrow/i.test(line);
+        }).join('\n');
+        const cap = Math.max(0, Math.floor((outputBudget - used) / Math.max(1, plan.steps.length - diagnostics.length + 1)) - 100);
+        // Keep the grounded location receipt before source trimming. Only the
+        // identities visibly delivered here may be consumed by the next step.
+        let receipt = '';
+        const visibleBindings: QueryPlanBinding[] = [];
+        const inline = (value: string) => value.replace(/[`\r\n]/g, ' ');
+        for (const candidate of candidates) {
+          const next = (receipt ? '' : '**Located source candidates — relevance still needs verification**\n')
+            + `- \`${inline(candidate.qualifiedName || candidate.name)}\` — \`${inline(candidate.filePath)}:${candidate.startLine}\`\n`;
+          if (receipt.length + next.length > Math.min(1600, Math.floor(cap / 2))) break;
+          receipt += next;
+          visibleBindings.push(candidate);
+        }
+        diagnostic.locatedNodes = visibleBindings;
+        diagnostic.resolvedAnchors = visibleBindings.map((node) => node.name);
+        bindings.set(step.id, visibleBindings);
+        const bodyCap = Math.max(0, cap - receipt.length - 2);
+        const trimmed = neutralBody.length > bodyCap;
+        const kept = trimEvidenceAtLine(neutralBody, bodyCap);
+        if (trimmed) diagnostic.status = 'partial';
+        else files.push(...(result[EXPLORE_EMISSION_KEY]?.files ?? []));
+        const piece = `**Step ${step.id}: ${step.intent}** (${diagnostic.status})\n${receipt}\n${kept}`;
+        pieces.push(piece);
+        used += piece.length;
+      } catch (error) {
+        if (error instanceof PathRefusalError) throw error;
+        diagnostic.status = 'failed';
+        pieces.push(`**Step ${step.id}: ${step.intent}** — retrieval failed; other step evidence is retained.`);
+      } finally { diagnostic.durationMs = Date.now() - started; }
+      // Yield between synchronous graph stages so deadlines and MCP I/O can run.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const result = single ?? this.textResult([preamble, ...pieces].join('\n\n').slice(0, outputBudget));
+    const served = this.ensureExploreEmission(result, root, plan.originalQuery);
+    const emission = served[EXPLORE_EMISSION_KEY]!;
+    emission.query = plan.originalQuery;
+    if (multi) {
+      emission.partial = true;
+      emission.evidenceStatus = 'partial';
+      emission.coveredObligations = diagnostics.filter((step) => step.status === 'evidence').map((step) => step.id);
+      emission.uncoveredObligations = diagnostics.filter((step) => step.status !== 'evidence').map((step) => step.id);
+      emission.files = files;
+      emission.sourceBytes = files.reduce((sum, file) => sum + file.bytes, 0);
+    }
+    served._meta = { ...served._meta, homegraphQueryPlan: { steps: diagnostics } };
+    return served;
+  }
+
+  /** Main-thread fast path for inventory surveys — skips the worker queue. */
   private tryFastPathResult(toolName: string, args: Record<string, unknown>): ToolResult | null {
     const query = args.query;
     if (typeof query !== 'string') return null;
@@ -5380,12 +5738,14 @@ export class ToolHandler {
     cg: HomeGraph,
     query: string,
     projectRoot: string,
+    plan?: QueryPlan,
   ): ToolResult {
     let section = '';
     let status: 'complete' | 'no_indexed_evidence' | 'not_surveyed' = 'no_indexed_evidence';
     let coverage = '';
 
     if (route === 'modules') {
+      if (plan?.relation === 'module_imports') return this.renderModuleImports(cg, plan);
       const manifestResult = this.buildFocusedModuleManifestSection(projectRoot, query);
       const graphResult = manifestResult.manifestCount === 0
         ? this.buildModuleDependencySurveySection(cg, query)
@@ -5401,10 +5761,10 @@ export class ToolHandler {
       status = result.hitCount > 0 ? 'complete' : 'no_indexed_evidence';
       coverage = 'named path/Type NAPI export registrations only; no domain file dump was built';
     } else {
-      const apiUsage = shouldBuildApiUsageSurvey(query)
+      const apiUsage = planFeature(plan, 'shouldBuildApiUsageSurvey', query, shouldBuildApiUsageSurvey)
         ? this.buildApiUsageSection(cg, query, projectRoot)
         : { section: '', fileCount: 0 };
-      const memberUsage = shouldBuildMemberSurvey(query)
+      const memberUsage = planFeature(plan, 'shouldBuildMemberSurvey', query, shouldBuildMemberSurvey)
         && !(queryAsFieldUsageSurvey(query) && apiUsage.fileCount > 0)
         ? this.buildMemberSurveySection(cg, query, projectRoot)
         : '';
@@ -5423,13 +5783,43 @@ export class ToolHandler {
       || (status === 'not_surveyed'
         ? '- No survey ran: this query carries no symbol name to scan. Re-run naming the symbol(s), or use `homegraph_explore`.'
         : '- No matching evidence was found in the current index for this focused survey.');
-    return this.textResult(this.truncateOutput([
+    const text = this.truncateOutput([
       `**HomeGraph specialized route: ${route}**`,
       `Status: ${status}`,
       `Coverage: ${coverage}.`,
       '',
       body,
-    ].join('\n')));
+    ].join('\n'));
+    return this.exploreResult(text, { projectRoot, query, files: [], sourceBytes: 0,
+      responseBytes: text.length, evidenceStatus: status === 'complete' ? 'complete' : 'empty',
+      partial: status !== 'complete', coveredObligations: status === 'complete' ? [plan?.relation ?? route] : [],
+      uncoveredObligations: status !== 'complete' ? [plan?.relation ?? route] : [] });
+  }
+
+  /** Directed file import witnesses for an explicit module-import relation. */
+  private renderModuleImports(cg: HomeGraph, plan: QueryPlan): ToolResult {
+    const scope = [...new Set([...plan.anchors, ...(plan.bindings ?? []).map(node => node.filePath)])]
+      .map(value => value.replace(/\\/g, '/')).filter(Boolean);
+    const paths = cg.getFiles().map(file => file.path).filter(file => scope.some(anchor =>
+      file === anchor || file.startsWith(anchor + '/') || file.split('/').includes(anchor)));
+    const rows: string[] = [];
+    let scanned = 0;
+    for (const file of paths.slice(0, 120)) {
+      scanned++;
+      for (const target of cg.getFileDependencies(file)) {
+        rows.push(`- \`${file}\` imports → \`${target}\``);
+        if (rows.length >= 40) break;
+      }
+      if (rows.length >= 40) break;
+    }
+    const partial = scanned < paths.length || rows.length >= 40;
+    const text = ['**Directed module imports**',
+      rows.length ? rows.join('\n') : 'No indexed import edges found for the supplied module paths.',
+      `Coverage: ${scanned} of ${paths.length} scoped files scanned; cycle analysis was not requested.`].join('\n\n');
+    return this.exploreResult(text, { projectRoot: cg.getProjectRoot(), query: plan.originalQuery,
+      files: [], sourceBytes: 0, responseBytes: text.length,
+      evidenceStatus: !rows.length ? 'empty' : partial ? 'partial' : 'complete',
+      partial: partial || !rows.length });
   }
 
   /** Usage sites for a bare symbol bag, including non-call textual references. */
@@ -5580,8 +5970,8 @@ export class ToolHandler {
   /**
    * Fast inventory-only explore — skips findRelevantContext for survey/caller/dependency queries.
    */
-  private tryFastInventoryExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
-    if (!shouldTryFastInventoryExplore(query)) return null;
+  private tryFastInventoryExplore(cg: HomeGraph, query: string, projectRoot: string, plan?: QueryPlan): ToolResult | null {
+    if (!planFeature(plan, 'shouldTryFastInventoryExplore', query, shouldTryFastInventoryExplore)) return null;
 
     // Multi-Type dependency asks: inventory-only early exit (avoids fat compact / busy timeout).
     if (queryAsMultiTypeDependencySurvey(query)) {
@@ -6066,8 +6456,8 @@ export class ToolHandler {
    * findRelevantContext. Fast enough for MCP budget; complete enough to avoid
    * agent grep/read loops (token savings).
    */
-  private tryLightMechanismExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
-    if (!shouldTryLightMechanismExplore(query)) return null;
+  private tryLightMechanismExplore(cg: HomeGraph, query: string, projectRoot: string, plan?: QueryPlan): ToolResult | null {
+    if (!planFeature(plan, 'shouldTryLightMechanismExplore', query, shouldTryLightMechanismExplore)) return null;
 
     const STRUCTURE_KINDS = new Set(['class', 'struct', 'interface', 'component', 'method', 'function']);
     const isTestPath = (p: string) => /(^|\/)(tests?|spec)\//i.test(p) || /\.(test|spec)\./i.test(p);
@@ -6686,7 +7076,7 @@ export class ToolHandler {
    * Compact explore for local-symbol behavior questions — skips findRelevantContext
    * and caps to 1–2 defining files (avoids the ~24K related-file dump).
    */
-  private tryCompactLocalSymbolExplore(cg: HomeGraph, query: string, projectRoot: string): ToolResult | null {
+  private tryCompactLocalSymbolExplore(cg: HomeGraph, query: string, projectRoot: string, plan?: QueryPlan): ToolResult | null {
     // Inventory runs *before* this on the call sites. Do not refuse compact
     // merely because inventory *intent* matched — empty inventory must fall
     // through here (bare callbacks like OnSurfaceChangedCB).
@@ -6700,7 +7090,7 @@ export class ToolHandler {
     // Light-mechanism owns domain howtos. Bare "how/如何" NL must NOT veto compact
     // when a local/flag/lifecycle shape already owns the query (flag impact was
     // falling through to a 20k Dynamic-dispatch dump).
-    if (shouldTryLightMechanismExplore(query)) return null;
+    if (planFeature(plan, 'shouldTryLightMechanismExplore', query, shouldTryLightMechanismExplore)) return null;
     if (
       queryAsMechanismSurvey(query)
       && !queryAsLocalSymbolDetail(query)
@@ -9188,9 +9578,11 @@ export class ToolHandler {
     // One normalization point so the flow-builder, relevance search, and
     // ranking all see the same canonical spelling (Erlang `mod:fn/arity`).
     const query = normalizeQuerySpelling(rawQuery);
+    const plan = readQueryPlan(args);
+    const feature = (name: string, fallback: (q: string) => boolean) => planFeature(plan, name, query, fallback);
 
     const deferKind = queryShouldDeferToBuiltinTools(query);
-    if (deferKind) {
+    if (deferKind && plan?.source !== 'llm') {
       return this.textResult(homegraphDeferGuidance(deferKind, query));
     }
 
@@ -9200,7 +9592,7 @@ export class ToolHandler {
     // Same-bag / call-budget refuse (session view injected by execute).
     const sessionPrior = viewForProject(readExploreSessionView(args), projectRoot);
     const repeat = decideExploreRepeat(sessionPrior, query);
-    if (repeat.refuse) {
+    if (!plan && this.shouldRefuseRepeatedEvidence(repeat, projectRoot)) {
       const text = formatExploreRepeatRefuse(repeat, query);
       return this.exploreResult(text, {
         projectRoot,
@@ -9211,7 +9603,8 @@ export class ToolHandler {
       });
     }
 
-    const compactLocal = this.tryFastInventoryExplore(cg, query, projectRoot)
+    // A planned step already tried fast paths once, before entering full explore.
+    const compactLocal = plan ? null : this.tryFastInventoryExplore(cg, query, projectRoot)
       ?? this.tryLightMechanismExplore(cg, query, projectRoot)
       ?? this.tryCompactLocalSymbolExplore(cg, query, projectRoot);
     if (compactLocal) return this.ensureExploreEmission(compactLocal, projectRoot, query);
@@ -9232,9 +9625,9 @@ export class ToolHandler {
     let maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
 
     const queryFileBasenames = extractFileBasenamesFromQuery(query);
-    const interpretationQuery = queryAsInterpretationSurvey(query);
-    const testOnlyInterpretation = queryAsTestOnlyInterpretation(query);
-    const crossModuleFlow = queryAsCrossModuleFlowSurvey(query);
+    const interpretationQuery = feature('queryAsInterpretationSurvey', queryAsInterpretationSurvey);
+    const testOnlyInterpretation = feature('queryAsTestOnlyInterpretation', queryAsTestOnlyInterpretation);
+    const crossModuleFlow = feature('queryAsCrossModuleFlowSurvey', queryAsCrossModuleFlowSurvey) || plan?.intent === 'flow';
 
     // Step 1: Find relevant context with generous parameters.
     const contextOpts = interpretationQuery && queryFileBasenames.length === 1
@@ -9243,10 +9636,21 @@ export class ToolHandler {
     const contextQuery = interpretationQuery && queryFileBasenames.length === 1
       ? `${queryFileBasenames[0]} ${query}`
       : query;
-    const subgraph = await cg.findRelevantContext(contextQuery, contextOpts);
+    const subgraph = await cg.findRelevantContext(contextQuery, {
+      ...contextOpts,
+      ...(plan && (plan.source === 'llm' || plan.literalTexts?.length) ? { retrievalHints: {
+        symbols: plan.anchors.filter((anchor) => !(plan.bindings ?? []).some((node) =>
+          anchor === node.name || anchor === node.qualifiedName)),
+        searchTerms: plan.searchTerms, literalTexts: plan.literalTexts, sourceScope: plan.sourceScope, nodeIds: (plan.bindings ?? []).map((node) => node.id),
+      } } : {}),
+    });
 
+    const literalSource = this.renderLiteralSource(cg, subgraph);
     if (subgraph.nodes.size === 0) {
-      return this.textResult(`No relevant code found for "${query}"`);
+      const text = literalSource.text || `No relevant code found for "${query}"`;
+      return this.exploreResult(text, { projectRoot, query, files: literalSource.files,
+        sourceBytes: literalSource.files.reduce((sum, file) => sum + file.bytes, 0), responseBytes: text.length,
+        locatedNodes: literalSource.nodes, partial: true, evidenceStatus: literalSource.text ? 'partial' : 'empty' });
     }
 
     // Seed import nodes for @kit.* / *Kit names (and named symbols like taskpool).
@@ -9369,8 +9773,8 @@ export class ToolHandler {
         if (m[3]) namedParts.push(m[3]);
       }
       const tokens = [...new Set([
-        ...namedParts,
-        ...query.split(/[\s,()[\]]+/)
+        ...(plan?.source === 'llm' ? plan.anchors : namedParts),
+        ...(plan?.source === 'llm' ? plan.anchors.join(' ') : query).split(/[\s,()[\]]+/)
           .map((t) => t.replace(FILE_EXT, '').trim())
           .filter((t) => t.length >= 3 && /^[A-Za-z_$][\w$]*(?:(?:::|\.)[\w$]+)*$/.test(t)),
       ])].slice(0, 16);
@@ -9400,7 +9804,8 @@ export class ToolHandler {
         const isQual = /[.\/]|::/.test(t);
         const raw = isQual ? this.findAllSymbols(cg, t).nodes : cg.getNodesByName(t);
         let cands = raw
-          .filter((n) => SEED_KINDS.has(n.kind) && !isTestPath(n.filePath))
+          .filter((n) => SEED_KINDS.has(n.kind) && !isTestPath(n.filePath)
+            && !(plan?.sourceScope === 'local' && isOhosApiFilePath(n.filePath)))
           .sort((a, b) => {
             // Prefer callables over types when both share a name, then body size.
             const ac = CALLABLE.has(a.kind) ? 1 : 0;
@@ -9589,6 +9994,8 @@ export class ToolHandler {
       }
       fileGroups.set(node.filePath, group);
     }
+
+    for (const group of fileGroups.values()) group.nodes = canonicalSourceDeclarations(group.nodes);
 
     if (testOnlyInterpretation) {
       for (const [, group] of fileGroups) {
@@ -9797,6 +10204,13 @@ export class ToolHandler {
     const sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
+      if (plan?.sourceScope === 'local') {
+        const sdkOrder = Number(isOhosApiFilePath(a[0])) - Number(isOhosApiFilePath(b[0]));
+        if (sdkOrder) return sdkOrder;
+      }
+      const literalOrder = Number((subgraph.literalEvidence?.hits ?? []).some((hit) => hit.filePath === b[0]))
+        - Number((subgraph.literalEvidence?.hits ?? []).some((hit) => hit.filePath === a[0]));
+      if (literalOrder) return literalOrder;
 
       // Query-named file (LocationController.ets in the question) before partial
       // substring matches (control.ets matching "Controller" inside LocationController).
@@ -9857,6 +10271,7 @@ export class ToolHandler {
       '',
     ];
     const summaryLineIdx = 2;
+    if (literalSource.text) lines.push(literalSource.text);
 
     if (testOnlyInterpretation) {
       lines.push(
@@ -9890,30 +10305,30 @@ export class ToolHandler {
         : { section: '', symbolCount: 0 };
     if (kitUsageResult.section) lines.push(kitUsageResult.section);
 
-    const domainFileResult = shouldBuildDomainFileSurvey(query)
+    const domainFileResult = feature('shouldBuildDomainFileSurvey', shouldBuildDomainFileSurvey)
       ? this.buildDomainFileSurveySection(cg, query)
       : { section: '', fileCount: 0 };
     if (domainFileResult.section) lines.push(domainFileResult.section);
 
-    const apiUsageResult = shouldBuildApiUsageSurvey(query)
-      && !shouldBuildKitModuleUsageSurvey(query)
+    const apiUsageResult = feature('shouldBuildApiUsageSurvey', shouldBuildApiUsageSurvey)
+      && !feature('shouldBuildKitModuleUsageSurvey', shouldBuildKitModuleUsageSurvey)
       ? this.buildApiUsageSection(cg, query, projectRoot)
       : { section: '', fileCount: 0 };
     if (apiUsageResult.section) lines.push(apiUsageResult.section);
 
-    const dataSourceResult = queryAsDataSourceSurvey(query)
+    const dataSourceResult = feature('queryAsDataSourceSurvey', queryAsDataSourceSurvey)
       ? this.buildDataSourceSection(cg, query)
       : { section: '', edgeCount: 0, sdkImportCount: 0, strongCount: 0 };
     if (dataSourceResult.section) lines.push(dataSourceResult.section);
 
-    const eventDispatchResult = queryAsEventDispatchSurvey(query)
+    const eventDispatchResult = feature('queryAsEventDispatchSurvey', queryAsEventDispatchSurvey)
       ? this.buildEventDispatchSection(cg, query, projectRoot)
       : { section: '', hitCount: 0, eventCount: 0, handlerCount: 0, memberCount: 0, complete: false };
     if (eventDispatchResult.section) lines.push(eventDispatchResult.section);
 
     const importInventoryFilter = hasImportInventoryFilter(query);
     const multiAnchor = queryNamesMultipleExploreAnchors(query) || crossModuleFlow;
-    const mechanismSurvey = queryAsMechanismSurvey(query);
+    const mechanismSurvey = feature('queryAsMechanismSurvey', queryAsMechanismSurvey);
 
     // Flow path — computed before omit-source so graph connectivity drives the decision,
     // not question-text keyword matching. Mechanism/cross-module surveys augment the
@@ -10175,6 +10590,16 @@ export class ToolHandler {
       string,
       { ranges: ExploreLineRange[]; bytes: number; fingerprint?: string }
     >();
+    // Session emissions may include prior-call coverage or skeleton envelopes.
+    // Dependency receipts instead require *fresh*, actually printed source and
+    // a whole surviving file section (never the tail cut by the hard ceiling).
+    const freshRangesByFile = new Map<string, ExploreLineRange[]>();
+    const sourceEndByFile = new Map<string, number>();
+    const noteFreshSource = (fp: string, ranges: ExploreLineRange[]): void => {
+      if (plan?.source !== 'llm' || !ranges.length) return;
+      freshRangesByFile.set(fp, [...(freshRangesByFile.get(fp) ?? []), ...ranges]);
+      sourceEndByFile.set(fp, lines.join('\n').length);
+    };
     const noteEmitted = (
       fp: string,
       ranges: ExploreLineRange[],
@@ -10369,6 +10794,7 @@ export class ToolHandler {
         }
         if (body.length > 0) {
           lines.push('```' + lang, body, '```', '');
+          noteFreshSource(filePath, ranges);
           totalChars += body.length + lang.length + 11;
           noteEmitted(filePath, [...ranges, ...opts.covered], body.length, fingerprint);
           renderedFilePaths.push(filePath);
@@ -10455,6 +10881,7 @@ export class ToolHandler {
         // signature line (capped, with a "+N more" tail so the structure map of a
         // god-file doesn't itself bloat the budget).
         const skel: string[] = [];
+        const freshSkelRanges: ExploreLineRange[] = [];
         let coveredUntil = 0; // skip symbols already inside an emitted body
         let sigCount = 0, sigDropped = 0;
         const SIG_MAX = Math.max(12, budget.maxSymbolsInFileHeader * 2);
@@ -10464,6 +10891,7 @@ export class ToolHandler {
             const end = n.endLine;
             const body = fileLines.slice(n.startLine - 1, end).join('\n');
             skel.push(exploreLineNumbersEnabled() ? numberSourceLines(body, n.startLine) : body);
+            freshSkelRanges.push({ start: n.startLine, end });
             coveredUntil = end;
           } else {
             // Elide the body, emit the signature. node.startLine can point at a
@@ -10475,7 +10903,10 @@ export class ToolHandler {
             if (lineNo <= coveredUntil) continue;
             if (sigCount >= SIG_MAX) { sigDropped++; continue; }
             const sig = (fileLines[lineNo - 1] || '').trim();
-            if (sig) { skel.push(exploreLineNumbersEnabled() ? `${lineNo}\t${sig}` : sig); sigCount++; }
+            if (sig) {
+              skel.push(exploreLineNumbersEnabled() ? `${lineNo}\t${sig}` : sig); sigCount++;
+              freshSkelRanges.push({ start: lineNo, end: lineNo });
+            }
           }
         }
         if (sigDropped > 0) skel.push(`… +${sigDropped} more (signatures elided)`);
@@ -10511,6 +10942,7 @@ export class ToolHandler {
             return n ? { start: n.startLine, end: n.endLine || n.startLine } : null;
           }).filter((r): r is ExploreLineRange => !!r);
           lines.push(skelHeader, '', '```' + lang, skelBody, '```', '');
+          noteFreshSource(filePath, freshSkelRanges);
           totalChars += skelBody.length + 120;
           noteEmitted(filePath, bodyRanges.length > 0 ? bodyRanges : [wholeRange], skelBody.length, fingerprint);
           renderedFilePaths.push(filePath);
@@ -10544,7 +10976,13 @@ export class ToolHandler {
         ? Math.min(Math.max(0, budget.maxOutputChars - totalChars - 200), Math.round(budget.maxCharsPerFile * 1.5))
         : budget.maxCharsPerFile * 3;
       if (fileLines.length <= WHOLE_FILE_MAX_LINES && fileContent.length <= WHOLE_FILE_MAX_CHARS) {
-        const wholeRange: ExploreLineRange = { start: 1, end: Math.max(1, fileLines.length) };
+        let sourceStart = 0;
+        if (fileLines[0]?.trim().startsWith('/*')) {
+          const endComment = fileLines.findIndex((line) => line.includes('*/'));
+          if (endComment >= 0 && endComment < 40) sourceStart = endComment + 1;
+        }
+        while (sourceStart < fileLines.length - 1 && !fileLines[sourceStart]?.trim()) sourceStart++;
+        const wholeRange: ExploreLineRange = { start: sourceStart + 1, end: Math.max(1, fileLines.length) };
         const dd = dedupeRange(wholeRange, served);
         const uniqSymbols = [...new Set(
           group.nodes
@@ -11016,6 +11454,7 @@ export class ToolHandler {
 
     const hardCeiling = Math.min(Math.round(budget.maxOutputChars * 1.5), 25000);
     let finalText: string;
+    let sourceCutoff = output.length;
     if (output.length > hardCeiling) {
       // Prefer dropping trailing notes ("Not shown above", completeness, budget)
       // over dropping a whole file's source — notes are recoverable, source isn't.
@@ -11029,7 +11468,10 @@ export class ToolHandler {
       for (const marker of noteMarkers) {
         if (trimmed.length <= hardCeiling) break;
         const at = trimmed.lastIndexOf(marker);
-        if (at > hardCeiling * 0.4) trimmed = trimmed.slice(0, at).replace(/\n+$/, '');
+        if (at > hardCeiling * 0.4) {
+          trimmed = trimmed.slice(0, at).replace(/\n+$/, '');
+          sourceCutoff = Math.min(sourceCutoff, trimmed.length);
+        }
       }
       if (trimmed.length > hardCeiling) {
         // Cut at a FILE-SECTION boundary so we drop whole trailing file-sections
@@ -11057,6 +11499,7 @@ export class ToolHandler {
           boundary = lastSection > hardCeiling * 0.5 ? lastSection : cut.lastIndexOf('\n');
         }
         const safe = boundary > 0 ? cut.slice(0, boundary) : cut;
+        sourceCutoff = Math.min(sourceCutoff, safe.length);
         finalText = safe + '\n\n... (output truncated to budget; the source above is complete and verbatim — treat it as already Read. For uncovered files/symbols, run another homegraph_explore with their exact names — not grep/read/node for symbols already shown.)';
       } else {
         finalText = trimmed;
@@ -11108,13 +11551,75 @@ export class ToolHandler {
       });
       sourceBytes += emitted.bytes;
     }
+    // Do not promote unseen subgraph hits or a large parent's unshown header.
+    // The declaration's starting line must be in a surviving, fresh source span.
+    const rootIds = new Set(subgraph.roots);
+    for (const file of literalSource.files) {
+      if (!finalText.includes(literalSource.text)) break;
+      emittedFiles.push(file); sourceBytes += file.bytes;
+    }
+    const locatedNodes = plan?.source === 'llm' ? [...(finalText.includes(literalSource.text) ? literalSource.nodes : []), ...emittedFiles.flatMap((file) =>
+      staleRendered.includes(file.path) || flow.text.length + (sourceEndByFile.get(file.path) ?? Infinity) > sourceCutoff
+        ? [] : (fileGroups.get(file.path)?.nodes ?? []).filter((node) =>
+        !['file', 'import', 'export', 'parameter'].includes(node.kind)
+        && (freshRangesByFile.get(file.path) ?? []).some((range) => node.startLine >= range.start && node.startLine <= range.end)))]
+      .sort((a, b) => Number(rootIds.has(b.id)) - Number(rootIds.has(a.id)))
+      .filter((node, i, nodes) => nodes.findIndex((other) => other.id === node.id) === i)
+      .slice(0, 32).map((node) => ({ id: node.id, name: node.name, qualifiedName: node.qualifiedName,
+        filePath: node.filePath, startLine: node.startLine })) : undefined;
     return this.exploreResult(finalText, {
       projectRoot,
       query,
       files: emittedFiles,
       sourceBytes,
+      evidenceStatus: sourceBytes > 0 ? (anyFileTrimmed || subgraph.confidence === 'low' || sourceCutoff < output.length
+        || (plan?.source === 'llm' && !(locatedNodes?.length)) ? 'partial' : 'complete')
+        : filesIncluded > 0 && /HarmonyOS SDK API/.test(finalText) ? 'sdk-only' : 'empty',
       responseBytes: finalText.length,
+      ...(locatedNodes ? { locatedNodes } : {}),
     });
+  }
+
+  /** Render literal witnesses before graph-heavy sections, including unindexed UI. */
+  private renderLiteralSource(cg: HomeGraph, subgraph: Subgraph): {
+    text: string; files: ExploreFileEmission[]; nodes: QueryPlanBinding[];
+  } {
+    const sections: string[] = [];
+    const files: ExploreFileEmission[] = [];
+    const nodes: QueryPlanBinding[] = [];
+    const seen = new Set<string>();
+    let chars = 0;
+    for (const hit of subgraph.literalEvidence?.hits ?? []) {
+      if (files.length >= 2 || seen.has(hit.filePath)) continue;
+      const absolute = validatePathWithinRoot(cg.getProjectRoot(), hit.filePath);
+      if (!absolute) continue;
+      let source: string;
+      try { source = readFileSync(absolute, 'utf8'); } catch { continue; }
+      const lines = source.split('\n');
+      // Never serve an earlier witness against a changed file.
+      if (lines.slice(hit.startLine - 1, hit.endLine).join('\n') !== hit.text) continue;
+      const containing = this.isFileStaleOnDisk(cg, hit.filePath, source) ? undefined
+        : canonicalSourceDeclarations(cg.getNodesInFile(hit.filePath))
+        .filter(node => !['file', 'import', 'export', 'parameter'].includes(node.kind)
+          && !node.name.startsWith('%') && node.name !== 'constructor'
+          && node.startLine <= hit.line && node.endLine >= hit.line)
+        .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+      const ranges: ExploreLineRange[] = [{ start: hit.startLine, end: hit.endLine }];
+      if (containing && containing.startLine < hit.startLine) {
+        ranges.unshift({ start: containing.startLine, end: Math.min(containing.startLine + 2, hit.startLine - 1) });
+      }
+      const body = ranges.map(range => lines.slice(range.start - 1, range.end)
+        .map((line, index) => `${range.start + index}\t${line}`).join('\n')).join('\n... (gap) ...\n');
+      const resource = hit.resource
+        ? `\nResource: \`${hit.resource.filePath}:${hit.resource.line}\` — ${JSON.stringify(hit.resource.value)} → \`${hit.resource.key}\`.` : '';
+      const section = `**Literal source witness: \`${hit.filePath}:${hit.line}\`**${resource}\n\n\`\`\`\n${body}\n\`\`\``;
+      if (chars + section.length > 3000) continue;
+      sections.push(section); chars += section.length; seen.add(hit.filePath);
+      files.push({ path: hit.filePath, ranges, bytes: body.length, fingerprint: fileFingerprint(source) });
+      if (containing) nodes.push({ id: containing.id, name: containing.name,
+        qualifiedName: containing.qualifiedName, filePath: containing.filePath, startLine: containing.startLine });
+    }
+    return { text: sections.join('\n\n'), files, nodes };
   }
 
   /**
@@ -11127,7 +11632,8 @@ export class ToolHandler {
     const result = this.textResult(text);
     result[EXPLORE_EMISSION_KEY] = {
       ...emission,
-      partial: emission.partial ?? meta.partial,
+      evidenceStatus: emission.evidenceStatus ?? (emission.sourceBytes > 0 ? (meta.partial ? 'partial' : 'complete') : 'partial'),
+      partial: emission.partial ?? (emission.evidenceStatus && emission.evidenceStatus !== 'complete' ? true : meta.partial),
       nextAnchor: emission.nextAnchor ?? meta.nextAnchor,
     };
     return result;
@@ -11156,7 +11662,8 @@ export class ToolHandler {
       files: [],
       sourceBytes: 0,
       responseBytes: text.length,
-      partial: meta.partial,
+      partial: true,
+      evidenceStatus: /HarmonyOS SDK API|ohos-sdk:/.test(text) ? 'sdk-only' : /No relevant code|No matching evidence|No survey ran/.test(text) ? 'empty' : 'partial',
       nextAnchor: meta.nextAnchor,
     };
     return result;
@@ -11199,7 +11706,7 @@ export class ToolHandler {
     const symbol = this.validateString(args.symbol, 'symbol');
     if (typeof symbol !== 'string') return symbol;
 
-    let matches = this.findSymbolMatches(cg, symbol);
+    let matches = canonicalSourceDeclarations(this.findSymbolMatches(cg, symbol));
     if (matches.length === 0) {
       return this.textResult(`Symbol "${symbol}" not found in the codebase`);
     }
@@ -12747,7 +13254,7 @@ export class ToolHandler {
     return {
       // Single choke point for every tool's text, so no section builder can ship
       // a stop-searching directive on an output that declares itself partial.
-      content: [{ type: 'text', text: reconcilePartialAnswerNow(text) }],
+      content: [{ type: 'text', text: neutralRetrievalGuidance(reconcilePartialAnswerNow(text)) }],
     };
   }
 
