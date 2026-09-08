@@ -1543,12 +1543,30 @@ export class ArkTSExtractor {
   }
 }
 
+/** ArkAnalyzer {@link ClassCategory} (not re-exported from the npm entry). */
 const CLASS_CATEGORY = {
   CLASS: 0,
   STRUCT: 1,
   INTERFACE: 2,
   ENUM: 3,
+  TYPE_LITERAL: 4,
+  OBJECT: 5,
+  /** C++ frontend only; never map to HomeGraph `class`. */
+  UNION: 6,
 } as const;
+
+/**
+ * IR shapes that are `ArkClass` in ArkAnalyzer but are not declaration-level
+ * types in HomeGraph's symbol graph. Indexing them as `class` inflates
+ * `graph_class` and orphans them under the file node.
+ */
+function isNonDeclarationArkClassCategory(category: number): boolean {
+  return (
+    category === CLASS_CATEGORY.TYPE_LITERAL ||
+    category === CLASS_CATEGORY.OBJECT ||
+    category === CLASS_CATEGORY.UNION
+  );
+}
 
 /** ArkAnalyzer {@link FieldCategory} values (not re-exported from the npm entry). */
 const FIELD_CATEGORY = {
@@ -1742,7 +1760,10 @@ function classNodeKind(cls: ArkClass): NodeKind {
       return 'enum';
     case CLASS_CATEGORY.STRUCT:
       return 'struct';
+    case CLASS_CATEGORY.CLASS:
+      return 'class';
     default:
+      // TYPE_LITERAL / OBJECT / UNION must be filtered before indexClass.
       return 'class';
   }
 }
@@ -3795,6 +3816,9 @@ class ArkTSAdapter {
     parentId: string
   ): void {
     if (cls.isDefaultArkClass()) return;
+    // Object / type literals (and C++ unions) are ArkAnalyzer IR classes, not
+    // HomeGraph declaration nodes — skip the shell and its nested fields.
+    if (isNonDeclarationArkClassCategory(cls.getCategory())) return;
 
     const displayName = classDisplayName(cls);
     const qn = buildClassQualifiedName(cls);
