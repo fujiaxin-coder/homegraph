@@ -16,6 +16,10 @@
 import { createHash } from 'node:crypto';
 import type { QueryBuilder } from '../db/queries';
 import type { ToolResult } from './tools';
+import { QUERY_RELATIONS, QUERY_SOURCE_SCOPES } from '../search/query-plan';
+
+const PLAN_RELATIONS: ReadonlySet<string> = new Set(QUERY_RELATIONS);
+const PLAN_SOURCE_SCOPES: ReadonlySet<string> = new Set(QUERY_SOURCE_SCOPES);
 
 /** Mirrors `getExploreOutputBudget` tier breakpoints — cache-key only. */
 function defaultExploreMaxFiles(fileCount: number): number {
@@ -25,7 +29,7 @@ function defaultExploreMaxFiles(fileCount: number): number {
 }
 
 /** Bump when cache-key normalization or cached payload shape changes. */
-export const QUERY_CACHE_FORMAT_VERSION = 1;
+export const QUERY_CACHE_FORMAT_VERSION = 3;
 
 const METADATA_INDEX_STAMP = 'query_cache_index_stamp';
 const METADATA_FORMAT_VERSION = 'query_cache_format_version';
@@ -155,7 +159,8 @@ function exploreEnvFingerprint(): string {
       ? '0'
       : '1';
   const rankMultiterm = process.env.HOMEGRAPH_RANK_NO_MULTITERM === '1' ? '0' : '1';
-  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}`;
+  const fullSource = process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE === '1' ? '1' : '0';
+  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}`;
 }
 
 function normalizeString(value: unknown): string | undefined {
@@ -169,6 +174,69 @@ function intParam(value: unknown, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(Math.floor(n)) : fallback;
 }
 
+/**
+ * Project the execution semantics of an internal plan, not its per-call timing.
+ * Ordered queries/steps/anchors preserve direction (A calls B != B calls A).
+ * Explicit projection also keeps telemetry, deadlines and unknown fields out of
+ * keys, and is safe on malformed/cyclic values at a worker or library boundary.
+ */
+function queryPlanFingerprint(value: unknown): string | undefined {
+  const record = (v: unknown): Record<string, unknown> | undefined =>
+    v !== null && typeof v === 'object' && !Array.isArray(v)
+      ? v as Record<string, unknown> : undefined;
+  const strings = (v: unknown, limit: number): string[] | undefined => {
+    if (!Array.isArray(v) || v.length > limit) return undefined;
+    return v.every(item => typeof item === 'string' && item.length <= 256)
+      ? v as string[] : undefined;
+  };
+  const query = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length <= 16_384 ? v : undefined;
+  const validRetrievalFields = (v: Record<string, unknown>): boolean =>
+    (v.searchTerms === undefined || strings(v.searchTerms, 32) !== undefined)
+    && (v.literalTexts === undefined || strings(v.literalTexts, 16) !== undefined)
+    && (v.relation === undefined || (typeof v.relation === 'string' && PLAN_RELATIONS.has(v.relation)))
+    && (v.sourceScope === undefined || (typeof v.sourceScope === 'string' && PLAN_SOURCE_SCOPES.has(v.sourceScope)));
+  const plan = record(value);
+  if (!plan || !validRetrievalFields(plan)) return undefined;
+  if ((typeof plan.version !== 'number' || !Number.isFinite(plan.version))
+      && (typeof plan.version !== 'string' || plan.version.length > 64)) return undefined;
+  const originalQuery = query(plan.originalQuery);
+  const canonicalQuery = query(plan.canonicalQuery);
+  const intent = normalizeString(plan.intent);
+  const route = normalizeString(plan.route);
+  const anchors = strings(plan.anchors, 32);
+  const searchTerms = strings(plan.searchTerms, 32);
+  if (originalQuery === undefined || canonicalQuery === undefined || !intent || !route
+      || !anchors || !searchTerms || !Array.isArray(plan.steps) || plan.steps.length > 3) return undefined;
+  const steps: Record<string, unknown>[] = [];
+  for (const value of plan.steps) {
+    const step = record(value);
+    if (!step || !validRetrievalFields(step)) return undefined;
+    const id = normalizeString(step.id);
+    const stepQuery = query(step.query);
+    const stepIntent = normalizeString(step.intent);
+    const stepAnchors = strings(step.anchors, 32);
+    const dependsOn = strings(step.dependsOn, 3);
+    if (!id || stepQuery === undefined || !stepIntent || !stepAnchors || !dependsOn) return undefined;
+    steps.push({ id, query: stepQuery, intent: stepIntent, anchors: stepAnchors, dependsOn,
+      searchTerms: strings(step.searchTerms, 32), literalTexts: strings(step.literalTexts, 16),
+      relation: normalizeString(step.relation), sourceScope: normalizeString(step.sourceScope) });
+  }
+  const features = record(plan.features);
+  if (!features || Object.keys(features).length > 64
+      || !Object.values(features).every(v => typeof v === 'boolean')) return undefined;
+  return stableJson({
+    version: plan.version, originalQuery, canonicalQuery, intent, route,
+    taskContext: query(plan.taskContext),
+    anchors, searchTerms, steps, features,
+    literalTexts: strings(plan.literalTexts, 16), relation: normalizeString(plan.relation),
+    sourceScope: normalizeString(plan.sourceScope),
+    source: typeof plan.source === 'string' ? plan.source : undefined,
+    confidence: typeof plan.confidence === 'number' || typeof plan.confidence === 'string'
+      ? plan.confidence : undefined,
+  });
+}
+
 /** Build the pre-hash fingerprint string for a tool + args pair. */
 export function buildMcpQueryCacheFingerprint(
   toolName: string,
@@ -180,7 +248,17 @@ export function buildMcpQueryCacheFingerprint(
   switch (toolName) {
     case 'homegraph_explore': {
       const query = normalizeString(args.query) ?? '';
-      parts.push(`terms:${normalizeExploreQueryTerms(query).join(',')}`);
+      const plan = queryPlanFingerprint(args.__homegraphQueryPlan);
+      if (plan) {
+        parts.push(`plan:${plan}`);
+      } else {
+        // Preserve order-independent legacy keys for calls without a valid plan.
+        parts.push(`terms:${normalizeExploreQueryTerms(query).join(',')}`);
+        const taskContext = normalizeString(args.taskContext);
+        if (taskContext) parts.push(`taskContext:${taskContext.slice(0, 4000)}`);
+      }
+      const indexState = normalizeString(args.__homegraphQueryIndexState);
+      if (indexState) parts.push(`indexState:${JSON.stringify(indexState)}`);
       if (args.maxFiles != null) {
         parts.push(`maxFiles:${intParam(args.maxFiles, 12)}`);
       } else if (fileCount != null) {

@@ -180,7 +180,7 @@ describe('No-root-index session policy', () => {
     // Playbook wording drifts (`Use` / `open` / section title) — pin the
     // structural cue that this is the full indexed-workspace guide.
     expect(instructions).toMatch(
-      /Call first|Call HomeGraph first|open `homegraph_explore`|Use `homegraph_explore`/i
+      /When to call \(path-first\)|Call first|Call HomeGraph first|open `homegraph_explore`|Use `homegraph_explore`/i
     );
     expect(instructions).not.toMatch(/inactive/i);
 

@@ -351,6 +351,8 @@ export interface UnresolvedReference {
  * A subgraph containing a subset of the knowledge graph
  */
 export interface Subgraph {
+  /** Bounded local source witnesses; may exist even when AST indexing missed the UI file. */
+  literalEvidence?: import('./search/literal-evidence').LiteralEvidenceResult;
   /** Nodes in this subgraph */
   nodes: Map<string, Node>;
 
@@ -640,6 +642,22 @@ export interface TaskContext {
  * Options for finding relevant context
  */
 export interface FindRelevantContextOptions {
+  /**
+   * Optional retrieval plan hints. Supplied symbols/search terms replace query
+   * extraction, not graph validation; missing hints preserve legacy retrieval.
+   * Optional node IDs are revalidated against this index and retain their exact
+   * file identity as bounded traversal roots, without a second name lookup.
+   * Each list is bounded to 32 entries of at most 256 characters at runtime.
+   */
+  retrievalHints?: {
+    symbols: string[];
+    searchTerms: string[];
+    nodeIds?: string[];
+    literalTexts?: string[];
+    /** Scope applies to lexical roots; verified node bindings retain their identity. */
+    sourceScope?: 'local' | 'sdk' | 'all';
+  };
+
   /** Number of semantic search results (default: 5) */
   searchLimit?: number;
 

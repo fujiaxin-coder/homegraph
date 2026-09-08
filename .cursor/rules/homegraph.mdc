@@ -1,34 +1,36 @@
----
-description: HomeGraph MCP — mechanism first via explore; skip wrong shapes; prefer lean tools
-alwaysApply: true
----
-<!-- HOMEGRAPH_START -->
-## HomeGraph
-
-This project has a HomeGraph MCP server (search, node, explore, spec tools, …). It is a tree-sitter symbol graph — use it for **in-repo structure**.
-
-### Call first (before Grep/Read)
-
-For how/mechanism/wiring, named Type/Component/`Type.member`, inheritance/subtypes, or in-repo `@kit`/`@ohos` **usages**: call `homegraph_explore` immediately — **no Grep-first**, no parallel Grep on that turn. Domain keywords are enough when names are unknown.
-
-Prefer the smallest tool when a name is already known: `callers`/`callees`/`node` for one symbol; `explore` for multi-file flows and usage inventories.
-
-### Do not call HomeGraph
-
-Skip every `homegraph_*` tool for topic file-lists, concept/UI-behavior with no named anchors, SDK/`@kit` **feature catalogs** (not usages), and literal pattern hunts. If a tool returns **Skip HomeGraph**, do not retry.
-
-`@kit` usages in this repo ≠ SDK catalog. Usages → explore. Catalogs → SDK docs.
-
-### After explore
-
-Treat returned line-numbered source as already Read — do not re-grep/node/read the same symbols.
-
-### Index lag
-
-If a response starts with "⚠️ Some files referenced below were edited since the last index sync…", Read only those listed files.
-
-### If `.homegraph/` doesn't exist
-
-Ask the user whether to run `homegraph init -i`.
-<!-- HOMEGRAPH_END -->
-
+---
+description: HomeGraph MCP — mechanism first via explore; skip wrong shapes; prefer lean tools
+alwaysApply: true
+---
+<!-- HOMEGRAPH_START -->
+## HomeGraph
+
+This project has a HomeGraph MCP server (search, node, explore, spec tools, …). It is a tree-sitter symbol graph — use it for **in-repo structure**.
+
+### When to call (path-first)
+
+User task already names **one** in-repo relative path to a source file (e.g. `features/.../Foo.ets`) and is a code change → **Read that file and edit**; **do not call `homegraph_*`** (Skip is correct).
+
+For how/mechanism/wiring, named Type/Component/`Type.member`, inheritance/subtypes, or in-repo `@kit`/`@ohos` **usages** when **no** single-file path: call `homegraph_explore` — **no Grep-first** storm. Domain keywords are enough when names are unknown.
+
+Prefer the smallest tool when a name is already known: `callers`/`callees`/`node` for one symbol; `explore` for multi-file flows and usage inventories.
+
+### Do not call HomeGraph
+
+Skip every `homegraph_*` tool for topic file-lists, concept/UI-behavior with no named anchors, SDK/`@kit` **feature catalogs** (not usages), and literal pattern hunts. If a tool returns **Skip HomeGraph**, do not retry.
+
+`@kit` usages in this repo ≠ SDK catalog. Usages → explore. Catalogs → SDK docs.
+
+### After explore
+
+Treat returned line-numbered source as already Read — do not re-grep/node/read the same symbols.
+
+### Index lag
+
+If a response starts with "⚠️ Some files referenced below were edited since the last index sync…", Read only those listed files.
+
+### If `.homegraph/` doesn't exist
+
+Ask the user whether to run `homegraph init -i`.
+<!-- HOMEGRAPH_END -->
+

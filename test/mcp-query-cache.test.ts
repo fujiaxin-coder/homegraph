@@ -8,6 +8,7 @@ import * as path from 'path';
 import * as os from 'os';
 import HomeGraph from '../src/index';
 import { ToolHandler } from '../src/mcp/tools';
+import { buildRuleQueryPlan } from '../src/search/query-plan';
 import {
   buildMcpQueryCacheFingerprint,
   buildMcpQueryCacheKey,
@@ -39,6 +40,7 @@ describe.skipIf(!hasSqliteBindings())('MCP query cache', () => {
   let handler: ToolHandler;
 
   beforeEach(async () => {
+    vi.stubEnv('HOMEGRAPH_QUERY_PLANNER', 'rules');
     resetMcpQueryCacheIndices();
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-mcp-cache-'));
     fs.mkdirSync(path.join(testDir, 'src'));
@@ -60,6 +62,7 @@ struct CountDown {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     try { cg.close(); } catch { /* ignore */ }
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     delete process.env.HOMEGRAPH_MCP_CACHE;
@@ -91,9 +94,13 @@ struct CountDown {
     const first = await handler.execute('homegraph_explore', args);
     const second = await handler.execute('homegraph_explore', args);
     expect(first.content[0]?.text).toBe(second.content[0]?.text);
+    expect((second._meta?.homegraphQueryPlan as { cacheHit: boolean }).cacheHit).toBe(true);
 
     const queries = cg.getQueryBuilder();
-    const key = buildMcpQueryCacheKey('homegraph_explore', args, cg.getStats().fileCount);
+    const key = buildMcpQueryCacheKey('homegraph_explore', { ...args,
+      __homegraphQueryPlan: buildRuleQueryPlan(args.query),
+      __homegraphQueryIndexState: `${cg.getBuildPhase()}:${cg.getStats().nodeCount}:${cg.getLastIndexedAt() ?? 0}`,
+    }, cg.getStats().fileCount);
     const row = queries.getMcpQueryCache(key);
     expect(row).not.toBeNull();
     expect(row!.tool).toBe('explore');
@@ -142,7 +149,10 @@ struct CountDown {
 
     const queries = cg.getQueryBuilder();
     const index = getMcpQueryCacheIndex(cg.getProjectRoot());
-    const cacheKey = buildMcpQueryCacheKey('homegraph_explore', args, cg.getStats().fileCount);
+    const cacheKey = buildMcpQueryCacheKey('homegraph_explore', { ...args,
+      __homegraphQueryPlan: buildRuleQueryPlan(args.query),
+      __homegraphQueryIndexState: `${cg.getBuildPhase()}:${cg.getStats().nodeCount}:${cg.getLastIndexedAt() ?? 0}`,
+    }, cg.getStats().fileCount);
     expect(queries.getMcpQueryCache(cacheKey)).not.toBeNull();
     expect(index.has(cacheKey)).toBe(true);
 

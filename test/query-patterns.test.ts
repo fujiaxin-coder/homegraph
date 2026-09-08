@@ -17,6 +17,7 @@ import {
   queryAsOutOfRepoSdkCatalog,
   queryShouldDeferToBuiltinTools,
   homegraphDeferGuidance,
+  queryAsPathPinnedEdit,
   queryShouldPreferExploreOverSearch,
   queryHasNamedMemberFocus,
   queryAsNamedComponentAction,
@@ -137,6 +138,10 @@ describe('extractKitModuleNamesFromQuery', () => {
 });
 
 describe('extractMemberAccessFromQuery', () => {
+  it('does not treat source-file extensions as members', () => {
+    expect(extractMemberAccessFromQuery('OrderListPage.ets showSearchIcon')).toEqual([]);
+    expect(extractMemberAccessFromQuery('edit Foo.ts Bar.tsx')).toEqual([]);
+  });
   it('extracts receiver.method and leading-dot members', () => {
     const accesses = extractMemberAccessFromQuery(
       'pointer.setPointerStyle 和 .drawModifier 以及 locationManager.on()',
@@ -356,6 +361,18 @@ describe('shouldOmitSourceBodies', () => {
 });
 
 describe('queryShouldDeferToBuiltinTools', () => {
+  it('defers path-pinned single-file edits to Read', () => {
+    expect(
+      queryShouldDeferToBuiltinTools(
+        '移除订单列表搜索入口 features/order/src/main/ets/views/OrderListPage.ets',
+      ),
+    ).toBe('path-pinned-edit');
+    expect(queryAsPathPinnedEdit('修改 CartPage.ets 删除 recommendedProductSection')).toBe(true);
+    expect(
+      queryShouldDeferToBuiltinTools('删除购物车推荐商品 recommendedProductSection CartPage ShoppingCart'),
+    ).toBeNull();
+  });
+
   it('defers the explicit blacklist including kit feature catalogs', () => {
     // Feature/API catalogs need SDK docs — not a fake import inventory.
     expect(queryShouldDeferToBuiltinTools('@kit.SomeKit的foo模块有哪些功能')).toBe('sdk-catalog');
@@ -778,6 +795,33 @@ describe('shouldLimitToQueryNamedFile', () => {
   it('limits when one file anchor and no flow', () => {
     expect(shouldLimitToQueryNamedFile('ThemeHome.ets components', false, false)).toBe(true);
     expect(shouldLimitToQueryNamedFile('A to B flow Foo Bar', true, false)).toBe(false);
+  });
+
+  it('still limits when path prefix + basename-as-Type look like multi-anchor', () => {
+    const q =
+      '移除订单列表搜索入口 features/order/src/main/ets/views/OrderListPage.ets';
+    const multi = queryNamesMultipleExploreAnchors(q);
+    expect(shouldLimitToQueryNamedFile(q, false, multi)).toBe(true);
+  });
+
+  it('does not limit when a second distinct Type is named', () => {
+    const q = 'OrderListPage.ets ShoppingCart recommendedProductSection';
+    const multi = queryNamesMultipleExploreAnchors(q);
+    expect(shouldLimitToQueryNamedFile(q, false, multi)).toBe(false);
+  });
+});
+
+describe('queryNamesMultipleExploreAnchors', () => {
+  it('does not treat path scaffolding of one file as a second independent anchor', () => {
+    expect(
+      queryNamesMultipleExploreAnchors(
+        'edit features/order/src/main/ets/views/OrderListPage.ets',
+      ),
+    ).toBe(false);
+  });
+
+  it('detects two distinct Types as multi-anchor', () => {
+    expect(queryNamesMultipleExploreAnchors('CartPage ShoppingCart wiring')).toBe(true);
   });
 });
 
