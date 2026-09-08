@@ -85,7 +85,8 @@ export class OrderMgr {
     const text = res.content[0].text;
     expect(text).toMatch(/Event enum members|CREATED|PAID/i);
     expect(text).toMatch(/OrderMgr|handler/i);
-    expect(text).toMatch(/ANSWER NOW/);
+    // Soft-close is neutralized at the MCP textResult boundary (ANSWER NOW → evidence shown).
+    expect(text).toMatch(/use the evidence shown/);
     expect(text).not.toMatch(/0 event types \/ handlers indexed/);
   });
 

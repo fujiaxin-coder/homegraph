@@ -85,7 +85,7 @@ describe('bounded local literal evidence', () => {
     expect(local.roots).toEqual([]);
   });
 
-  it('skips ignored, hidden, secret-config and symlink escape files', () => {
+  it('skips ignored, hidden, and secret-config files', () => {
     write('.gitignore', 'private/\n');
     write('private/Hidden.ts', `const label = '酒店位置';`);
     write('.env', 'SECRET=酒店位置');
@@ -93,15 +93,33 @@ describe('bounded local literal evidence', () => {
     write('src/.gitignore', 'secret.ts\n');
     write('src/secret.ts', `const label = '酒店位置';`);
     write('public/Page.ets', `Text('酒店位置')`);
-    const outside = path.join(os.tmpdir(), `hg-literal-external-${process.pid}.ts`);
-    fs.writeFileSync(outside, `const external = '酒店位置';`);
-    try {
-      fs.symlinkSync(outside, path.join(dir, 'escaped.ts'));
-      const found = findLiteralEvidence(dir, { literalTexts: ['酒店位置'], files: ['escaped.ts', '../escape.ts'] });
-      expect(found.hits.map(hit => hit.filePath)).toEqual(['public/Page.ets']);
-      expect(JSON.stringify(found)).not.toContain('external');
-    } finally { fs.unlinkSync(outside); }
+    const found = findLiteralEvidence(dir, {
+      literalTexts: ['酒店位置'],
+      files: ['public/Page.ets', '../escape.ts'],
+    });
+    expect(found.hits.map(hit => hit.filePath)).toEqual(['public/Page.ets']);
   });
+
+  // Symlink creation needs Developer Mode / elevation on Windows (EPERM otherwise).
+  it.runIf(process.platform !== 'win32')(
+    'skips symlink escape files outside the project root',
+    () => {
+      write('public/Page.ets', `Text('酒店位置')`);
+      const outside = path.join(os.tmpdir(), `hg-literal-external-${process.pid}.ts`);
+      fs.writeFileSync(outside, `const external = '酒店位置';`);
+      try {
+        fs.symlinkSync(outside, path.join(dir, 'escaped.ts'));
+        const found = findLiteralEvidence(dir, {
+          literalTexts: ['酒店位置'],
+          files: ['escaped.ts', '../escape.ts'],
+        });
+        expect(found.hits.map(hit => hit.filePath)).toEqual(['public/Page.ets']);
+        expect(JSON.stringify(found)).not.toContain('external');
+      } finally {
+        fs.unlinkSync(outside);
+      }
+    },
+  );
 
   it('keeps literal matching literal and records bounded partial results', () => {
     write('a.ts', `const label = 'Size (A+B)?';`);

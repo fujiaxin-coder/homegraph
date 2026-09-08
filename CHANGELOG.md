@@ -9,6 +9,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- ArkTS indexing aligns with ArkAnalyzer `ClassCategory`: **object literals**, **type literals**, and **unions** are no longer stored as HomeGraph `class` nodes (they were inflating `graph_class` as `<Object$anon@N>` / `%AC*` under the file). Real classes — including true anonymous `ClassCategory.CLASS` — are unchanged. Re-index to refresh existing databases (Spec 0026).
+- Harmony multi-module ArkTS indexing: register **synthetic PROJECT modules** for ArkAnalyzer sources that sit outside `build-profile.json5` `srcPath` (e.g. ohrouter `HMRouterPlugin/**/*.ts`), so they enter the same `analyseByModule` pipeline instead of being skipped by both AA and tree-sitter. Incremental dirty mapping can target those synthetic roots. AA-persisted files now get truthful `files`/`nodes.language` by extension (`.ets`→`arkts`, `.ts`/`.d.ts`→`typescript`) instead of hard-coding `arkts` (Spec 0025).
+
 ### Improvements
 
 - MCP `initialize` instructions: **single-file path-pinned edits → Read + edit, skip `homegraph_*`**; explore only when locate/cross-file is needed.
