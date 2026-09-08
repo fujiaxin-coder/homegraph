@@ -408,6 +408,12 @@ describe('MCP Input Validation', () => {
     }));
     const fakeCg = {
       searchNodes: () => many,
+      // executeReadTool phase-gates before search; incomplete fakes must look "ready".
+      getBuildPhase: () => 'full' as const,
+      getStats: () => ({ fileCount: 1, nodeCount: many.length, edgeCount: 0 }),
+      getProjectRoot: () => process.cwd(),
+      getFile: () => undefined,
+      reopenIfReplaced: () => false,
     };
     const fakeHandler = new ToolHandler(fakeCg as unknown as HomeGraph);
 

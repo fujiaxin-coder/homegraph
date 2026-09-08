@@ -97,7 +97,8 @@ export class NotifySubscribeManager {
     });
     const text = res.content[0].text;
     expect(text).toMatch(/@ohos\.notificationSubscribe|notificationSubscribe/);
-    expect(text).toMatch(/ANSWER NOW/);
+    // Soft-close is neutralized at the MCP textResult boundary (ANSWER NOW → evidence shown).
+    expect(text).toMatch(/use the evidence shown/);
     expect(text).not.toMatch(/%AM\d+/);
   });
 

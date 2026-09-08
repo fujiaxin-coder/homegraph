@@ -136,7 +136,8 @@ describe('MCP stale-slice guard (#1474)', () => {
     });
     const text = getText(result);
     expect(result.isError).toBeFalsy();
-    expect(text).toContain('full CURRENT source');
+    // Guidance softens the Read-parity banner, but the drifted file's current bytes remain.
+    expect(text).toMatch(/as of the last index sync|displayed source ranges are available as evidence/);
     expect(text).toContain('new first line');
     expect(text).toContain('smallTarget');
   });

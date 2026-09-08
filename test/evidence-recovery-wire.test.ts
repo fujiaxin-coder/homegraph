@@ -101,18 +101,26 @@ describe('evidence recovery at the MCP receipt boundary', () => {
     expect(handler.shouldRefuseRepeatedEvidence({ ...decision, reason: 'hard-cap' }, root)).toBe(true);
   });
 
-  it('does not claim unchanged evidence for deleted, oversized or escaped files', () => {
+  it('does not claim unchanged evidence for deleted or oversized files', () => {
     const { root, file, decision, handler } = fingerprintFixture();
     fs.rmSync(file);
     expect(handler.shouldRefuseRepeatedEvidence(decision, root)).toBe(false);
     fs.writeFileSync(file, Buffer.alloc(1024 * 1024 + 1));
     expect(handler.shouldRefuseRepeatedEvidence(decision, root)).toBe(false);
-    fs.rmSync(file);
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-repeat-outside-'));
-    temporaryDirs.push(outside);
-    const target = path.join(outside, 'outside.ts');
-    fs.writeFileSync(target, 'export function play() { return "before"; }\n');
-    fs.symlinkSync(target, file);
-    expect(handler.shouldRefuseRepeatedEvidence(decision, root)).toBe(false);
   });
+
+  // Symlink creation needs Developer Mode / elevation on Windows (EPERM otherwise).
+  it.runIf(process.platform !== 'win32')(
+    'does not claim unchanged evidence for symlink-escaped files',
+    () => {
+      const { root, file, decision, handler } = fingerprintFixture();
+      fs.rmSync(file);
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-repeat-outside-'));
+      temporaryDirs.push(outside);
+      const target = path.join(outside, 'outside.ts');
+      fs.writeFileSync(target, 'export function play() { return "before"; }\n');
+      fs.symlinkSync(target, file);
+      expect(handler.shouldRefuseRepeatedEvidence(decision, root)).toBe(false);
+    },
+  );
 });
