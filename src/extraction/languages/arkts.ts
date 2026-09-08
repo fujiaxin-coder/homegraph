@@ -321,6 +321,134 @@ export function listHarmonyProjectModules(rootDir: string): HarmonyModuleRef[] {
   return out;
 }
 
+/**
+ * Absolute path for ArkAnalyzer module registration (realpath when available).
+ * Must match how incremental target matching resolves `srcPath`.
+ */
+function resolveArkModuleAbsPath(rootDir: string, relSrcPath: string): string {
+  const resolved = path.resolve(rootDir, relSrcPath);
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/**
+ * Nearest package-like directory for an orphan Ark source, or the first path
+ * segment. Never returns the project root (registering `.` would re-scan every
+ * Harmony module). Lone files directly under the root return null.
+ */
+export function findSyntheticArkModuleRoot(rootDir: string, relFile: string): string | null {
+  const file = normIndexPath(relFile);
+  if (!file || file.startsWith('@')) return null;
+  let dir = path.posix.dirname(file);
+  if (dir === '.' || dir === '') return null;
+
+  const rootAbs = path.resolve(rootDir);
+  let curAbs = path.resolve(rootDir, dir);
+  for (;;) {
+    const relFromRoot = path.relative(rootAbs, curAbs);
+    if (!relFromRoot || relFromRoot.startsWith('..') || path.isAbsolute(relFromRoot)) break;
+    const rel = relFromRoot.replace(/\\/g, '/');
+    if (
+      fs.existsSync(path.join(curAbs, 'package.json')) ||
+      fs.existsSync(path.join(curAbs, 'oh-package.json5'))
+    ) {
+      return normalizeHarmonyModuleSrcPath(rel);
+    }
+    const parent = path.dirname(curAbs);
+    if (parent === curAbs) break;
+    curAbs = parent;
+  }
+
+  const first = file.split('/')[0];
+  if (!first || first === file) return null;
+  return normalizeHarmonyModuleSrcPath(first);
+}
+
+/**
+ * ArkAnalyzer sources under `scannedFiles` that are not inside any
+ * build-profile PROJECT module `srcPath`.
+ */
+export function listOrphanArkAnalyzerSources(
+  scannedFiles: Iterable<string>,
+  harmonyModules: HarmonyModuleRef[]
+): string[] {
+  const orphans: string[] = [];
+  for (const raw of scannedFiles) {
+    const f = normIndexPath(raw);
+    if (!f || !isArkAnalyzerSourcePath(f) || f.startsWith('@')) continue;
+    if (findLongestHarmonyModule(f, harmonyModules)) continue;
+    orphans.push(f);
+  }
+  orphans.sort();
+  return orphans;
+}
+
+/**
+ * Cluster orphan `.ets`/`.ts`/`.d.ts` into synthetic PROJECT module roots
+ * (e.g. `HMRouterPlugin` for a Node hvigor plugin living beside HAP modules).
+ */
+export function listSyntheticArkModuleRoots(
+  rootDir: string,
+  scannedFiles: Iterable<string>,
+  harmonyModules?: HarmonyModuleRef[]
+): HarmonyModuleRef[] {
+  const modules = harmonyModules ?? listHarmonyProjectModules(rootDir);
+  const orphans = listOrphanArkAnalyzerSources(scannedFiles, modules);
+  const bySrc = new Map<string, HarmonyModuleRef>();
+  for (const f of orphans) {
+    const srcPath = findSyntheticArkModuleRoot(rootDir, f);
+    if (!srcPath) continue;
+    // Never shadow a real Harmony module path.
+    if (modules.some((m) => m.srcPath === srcPath)) continue;
+    if (bySrc.has(srcPath)) continue;
+    const abs = path.resolve(rootDir, srcPath);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) continue;
+    bySrc.set(srcPath, {
+      name: `synthetic:${path.basename(srcPath)}`,
+      srcPath,
+    });
+  }
+  return [...bySrc.values()].sort((a, b) => a.srcPath.localeCompare(b.srcPath));
+}
+
+/**
+ * Register orphan trees as PROJECT modules before dependency analysis so they
+ * enter `analyseByModule` topo order. No `oh-package.json5` → empty dep edges
+ * (npm-only deps stay unresolved); that is expected for Node plugins.
+ */
+function registerSyntheticArkModules(
+  builder: ModuleBuilder,
+  rootDir: string,
+  scannedFiles: Iterable<string>,
+  harmonyModules: HarmonyModuleRef[]
+): HarmonyModuleRef[] {
+  const synthetics = listSyntheticArkModuleRoots(rootDir, scannedFiles, harmonyModules);
+  for (const syn of synthetics) {
+    const abs = resolveArkModuleAbsPath(rootDir, syn.srcPath);
+    builder.registerModule(abs, syn.name);
+  }
+  return synthetics;
+}
+
+/** Prep PROJECT + oh_modules, inject synthetic orphan modules, then build the dep graph. */
+function prepareArkModulesWithSynthetics(
+  scene: Scene,
+  rootDir: string,
+  scannedFiles: Iterable<string>
+): HarmonyModuleRef[] {
+  if (scene.isModulesRegistered()) return [];
+  const builder = new ModuleBuilder(scene);
+  builder.prepareModules();
+  const harmonyModules = listHarmonyProjectModules(rootDir);
+  const synthetics = registerSyntheticArkModules(builder, rootDir, scannedFiles, harmonyModules);
+  builder.analyzeModuleDependencies();
+  scene.setModulesRegistered(true);
+  return synthetics;
+}
+
 function findLongestHarmonyModule(
   fileRel: string,
   modules: HarmonyModuleRef[]
@@ -343,8 +471,9 @@ export type DirtyHarmonyModuleResolution =
 
 /**
  * Map changed/removed paths to Harmony modules for incremental ArkTS sync.
- * Structural project files (`build-profile.json5`, root `oh-package.json5`) or
- * ArkAnalyzer sources outside every module force a full rebuild.
+ * Structural project files (`build-profile.json5`, root `oh-package.json5`)
+ * force a full rebuild. Orphan trees covered by synthetic PROJECT modules
+ * (e.g. `HMRouterPlugin`) map to those module srcPaths instead of full rebuild.
  */
 export function resolveDirtyHarmonyModules(
   rootDir: string,
@@ -370,17 +499,24 @@ export function resolveDirtyHarmonyModules(
     }
   }
 
+  // Synthetic roots for orphans among the changed set (cheap; no full scan).
+  const synthetics = listSyntheticArkModuleRoots(rootDir, changed, modules);
+  const allModules = [...modules, ...synthetics];
+
   const dirty = new Set<string>();
   const unmatched: string[] = [];
   for (const f of changed) {
     // Virtual ArkAnalyzer paths are batch artifacts, not Harmony module sources.
     if (f.startsWith('@')) continue;
 
-    const isModuleMeta = f.endsWith('/module.json5') || f.endsWith('/oh-package.json5');
+    const isModuleMeta =
+      f.endsWith('/module.json5') ||
+      f.endsWith('/oh-package.json5') ||
+      f.endsWith('/package.json');
     const isArkSrc = isArkAnalyzerSourcePath(f);
     if (!isArkSrc && !isModuleMeta) continue;
 
-    const match = findLongestHarmonyModule(f, modules);
+    const match = findLongestHarmonyModule(f, allModules);
     if (match) dirty.add(match.srcPath);
     else if (isArkSrc) unmatched.push(f);
   }
@@ -412,6 +548,20 @@ export function isArkAnalyzerSourcePath(filePath: string): boolean {
   const base = path.basename(filePath);
   // `.d.ts` ends with `.ts` (Node extname) — one `.ts` suffix covers both.
   return base.endsWith('.ets') || base.endsWith('.ts');
+}
+
+/**
+ * Graph `language` tag for an ArkAnalyzer-indexed path. Extraction still uses AA;
+ * the tag must match the source kind so status / language filters stay truthful.
+ */
+export function languageForArkAnalyzerPath(filePath: string): Language {
+  const base = path.basename(filePath).toLowerCase();
+  if (base.endsWith('.d.ets') || base.endsWith('.ets')) return 'arkts';
+  if (base.endsWith('.d.ts') || base.endsWith('.ts') || base.endsWith('.mts') || base.endsWith('.cts')) {
+    return 'typescript';
+  }
+  if (base.endsWith('.js') || base.endsWith('.mjs') || base.endsWith('.cjs')) return 'javascript';
+  return 'arkts';
 }
 
 function isEtsFileName(name: string): boolean {
@@ -661,7 +811,7 @@ function persistFileResult(
       .map((ref) => ({
         ...ref,
         filePath: ref.filePath ?? filePath,
-        language: ref.language ?? ('arkts' as Language),
+        language: ref.language ?? languageForArkAnalyzerPath(filePath),
       }));
     if (refsWithContext.length > 0) {
       queries.insertUnresolvedRefsBatch(refsWithContext);
@@ -671,7 +821,7 @@ function persistFileResult(
   const fileRecord: FileRecord = {
     path: filePath,
     contentHash,
-    language: 'arkts',
+    language: languageForArkAnalyzerPath(filePath),
     size: stats.size,
     modifiedAt: stats.mtimeMs,
     indexedAt: Date.now(),
@@ -3401,7 +3551,7 @@ class ArkTSAdapter {
     let result = this.fileResults.get(relativePath);
     if (!result) {
       result = {
-        nodes: [makeFileNode(relativePath, 'arkts', lineCount)],
+        nodes: [makeFileNode(relativePath, languageForArkAnalyzerPath(relativePath), lineCount)],
         edges: [],
         unresolvedReferences: [],
         errors: [],
@@ -3421,7 +3571,7 @@ class ArkTSAdapter {
 
   private indexFile(arkFile: ArkFile): void {
     const relativePath = this.normalizeRelPath(arkFile.getFilePath());
-    const language: Language = 'arkts';
+    const language: Language = languageForArkAnalyzerPath(relativePath);
     let lineCount = 1;
     try {
       lineCount = arkFile.getCode()?.split('\n').length ?? 1;
@@ -4045,7 +4195,7 @@ class ArkTSAdapter {
     const classId = this.resolveClassNodeId(cls);
     if (classId) return classId;
     const fileId = `file:${relativePath}`;
-    this.indexClass(relativePath, 'arkts', result, cls, fileId);
+    this.indexClass(relativePath, languageForArkAnalyzerPath(relativePath), result, cls, fileId);
     return this.resolveClassNodeId(cls) ?? fileId;
   }
 
@@ -4085,7 +4235,7 @@ class ArkTSAdapter {
     const parentId = this.resolveMethodParentId(method, relativePath, result);
     const cls = method.getDeclaringArkClass();
     const kind: NodeKind = cls.isDefaultArkClass() ? 'function' : 'method';
-    this.indexMethod(relativePath, 'arkts', result, method, parentId, kind, displayName);
+    this.indexMethod(relativePath, languageForArkAnalyzerPath(relativePath), result, method, parentId, kind, displayName);
     return this.methodToId.get(method) ?? null;
   }
 
@@ -4143,7 +4293,7 @@ class ArkTSAdapter {
 
     const cls = method.getDeclaringArkClass();
     const kind: NodeKind = cls.isDefaultArkClass() ? 'function' : 'method';
-    this.indexMethod(relativePath, 'arkts', result, method, parentId, kind, displayName);
+    this.indexMethod(relativePath, languageForArkAnalyzerPath(relativePath), result, method, parentId, kind, displayName);
     return this.methodToId.get(method) ?? null;
   }
 
@@ -4399,6 +4549,17 @@ function buildArkTSIndexByModuleInner(
   try {
     scene.config(sceneConfig);
 
+    // Register build-profile modules + orphan trees (no oh-package) before the
+    // dep graph is frozen — otherwise analyseByModule never sees HMRouterPlugin-style .ts.
+    const synthetics = prepareArkModulesWithSynthetics(scene, rootDir, scannedList);
+    if (synthetics.length > 0) {
+      process.stderr.write(
+        `\n\x1b[33m    ArkTS: synthetic PROJECT modules (${synthetics.length}, no oh-package deps): ${synthetics
+          .map((s) => s.srcPath)
+          .join(', ')}...\x1b[0m\n`
+      );
+    }
+
     const config = new ModuleAnalysisConfig();
     config.setLoadLevel(ModuleDepthLevel.BODIES);
     // SIGNATURES is enough for ViewTree stubs / types; BODIES on deps caused
@@ -4406,17 +4567,8 @@ function buildArkTSIndexByModuleInner(
     config.setDependencyLoadLevel(ModuleDepthLevel.SIGNATURES);
 
     if (targetSrcSet) {
-      // Prep + SDK only (no PROJECT targets) so we can resolve ModuleIDs.
-      scene.analyseByModule(() => {}, new ModuleAnalysisConfig());
       const wantAbs = new Set(
-        [...targetSrcSet].map((src) => {
-          const resolved = path.resolve(rootDir, src);
-          try {
-            return fs.realpathSync(resolved).toLowerCase();
-          } catch {
-            return resolved.toLowerCase();
-          }
-        })
+        [...targetSrcSet].map((src) => resolveArkModuleAbsPath(rootDir, src).toLowerCase())
       );
       const ids: number[] = [];
       for (const mod of scene.getModules()) {
