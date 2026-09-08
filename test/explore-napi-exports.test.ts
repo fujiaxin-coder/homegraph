@@ -53,7 +53,8 @@ static napi_value Init(napi_env env, napi_value exports) {
     expect(text).toMatch(/NAPI|native export/i);
     expect(text).toMatch(/\bdraw\b/);
     expect(text).toMatch(/finishDraw/);
-    expect(text).toMatch(/ANSWER NOW/);
+    // Soft-close is neutralized at the MCP textResult boundary (ANSWER NOW → evidence shown).
+    expect(text).toMatch(/use the evidence shown/);
     expect(text).not.toMatch(/Init\/Export shells only/);
   });
 });
