@@ -83,18 +83,19 @@ describe('specialized explore routing', () => {
       expect(definition, name).toBeDefined();
       expect(definition!.annotations?.readOnlyHint).toBe(true);
       expect(definition!.annotations?.title, name).toBeTruthy();
-      expect(definition!.description, name).toMatch(/^PRIMARY first tool/);
+      expect(definition!.description, name).toMatch(/^Optional focused tool/);
       expect(definition!.description, name).toContain('instead of homegraph_explore');
       expect(definition!.inputSchema.required).toContain('query');
     }
   });
 
-  it('presents one exclusive first-tool decision in indexed and no-root guidance', () => {
+  it('keeps focused relation tools discoverable without a compulsory first call', () => {
     for (const instructions of [SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX]) {
       expect(instructions).toContain('homegraph_usages');
       expect(instructions).toContain('homegraph_modules');
       expect(instructions).toContain('homegraph_native');
-      expect(instructions).toMatch(/exactly (?:ONE|one) first tool/);
+      expect(instructions).toContain('HomeGraph is optional');
+      expect(instructions).toContain('ordinary bash/search/read tools first');
       expect(instructions).toContain('Do not call explore after a focused');
       expect(instructions).not.toMatch(/Must explore-first:[^\n]*(?:usages|deps\/cycles|NAPI)/i);
     }

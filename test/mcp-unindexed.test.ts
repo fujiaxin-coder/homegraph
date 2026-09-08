@@ -123,7 +123,7 @@ describe('No-root-index session policy', () => {
     // It steers the agent to target a project explicitly via projectPath...
     expect(instructions).toMatch(/projectPath/);
     expect(instructions).toMatch(/homegraph_explore/);
-    expect(instructions).toMatch(/homegraph init/);
+    expect(instructions).toMatch(/indexing is managed by the host/);
     // ...but it is NOT the full single-project playbook (that's sent only when
     // the root itself is indexed — keeps the common case tight).
     expect(instructions).not.toMatch(/## How to query/);
@@ -180,7 +180,7 @@ describe('No-root-index session policy', () => {
     // Playbook wording drifts (`Use` / `open` / section title) — pin the
     // structural cue that this is the full indexed-workspace guide.
     expect(instructions).toMatch(
-      /When to call \(path-first\)|Call first|Call HomeGraph first|open `homegraph_explore`|Use `homegraph_explore`/i
+      /When to call \(path-first, bash-first\)/i
     );
     expect(instructions).not.toMatch(/inactive/i);
 

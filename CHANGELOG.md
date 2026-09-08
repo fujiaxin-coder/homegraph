@@ -16,6 +16,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- Prefer ordinary bash/search/read for source localization and use graph tools only for an unresolved relation. Remove mandatory explore-first guidance in both MCP initialization and tool descriptions; retain indexing, query schemas and validation requirements (Spec 0028).
+- Preserve the action and constraints in explore queries, use repository-relative paths, and optionally label node source excerpts with a content identity for trace analysis (`HOMEGRAPH_SOURCE_RECEIPTS=1`, Spec 0027).
+
 - MCP `initialize` instructions: **single-file path-pinned edits → Read + edit, skip `homegraph_*`**; explore only when locate/cross-file is needed.
 - Explore **defers** (`Skip HomeGraph`, kind `path-pinned-edit`) when the query names one `…/File.ext` and is a code-change shape — avoids explore context tax on 082-style tasks.
 - Path scaffolding (`features/.../Foo.ets` + basename-as-Type) no longer counts as multi-anchor; `.ets`/`.ts`/… are not parsed as member access.

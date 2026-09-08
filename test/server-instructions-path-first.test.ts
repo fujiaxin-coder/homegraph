@@ -8,7 +8,14 @@ describe('SERVER_INSTRUCTIONS path-first', () => {
     expect(SERVER_INSTRUCTIONS).not.toMatch(/do not Grep\/Glob\/Read first/i);
   });
 
-  it('keeps the no-root variant aligned', () => {
-    expect(SERVER_INSTRUCTIONS_NO_ROOT_INDEX).toMatch(/Skip HomeGraph/i);
+  it('keeps indexed and no-root guidance bash-first without a compulsory graph turn', () => {
+    for (const text of [SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX]) {
+      expect(text).toMatch(/Skip HomeGraph/);
+      expect(text).toMatch(/bash-first/);
+      expect(text).toContain('concrete unresolved relationship');
+      expect(text).toContain('difficult implementation tasks');
+      expect(text).toContain('ceilings, never a required sequence');
+      expect(text).not.toMatch(/CALL FIRST|GENERAL PRIMARY|exactly ONE first tool|call `homegraph_explore` \*\*once\*\*/i);
+    }
   });
 });

@@ -7,6 +7,7 @@
 import type HomeGraph from '../index';
 import type { QueryPool } from './query-pool';
 import { resolveToolDeadlineMs } from './query-pool';
+import { sourceSliceIdentity } from './source-slice-identity';
 import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLine } from './evidence-rendering';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
 import { shouldSkipCatchUpSync } from './memory-budget';
@@ -860,7 +861,7 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_search',
     description:
       'LAST RESORT spelling lookup — locations only, no source. Required: `query` (e.g. "signIn"). ' +
-      'Prefer explore/callers/node when names are known. ' +
+      'Use ordinary scoped search/read when names or paths are known; use graph tools only for missing structural evidence. ' +
       'DO NOT call for topic file-lists, concept compares, or SDK/@kit feature catalogs (those return Skip guidance). ' +
       'Also skip literal string/pattern greps — use Grep instead. ' +
       'Bare-name search may return a compact explore result instead of locations.',
@@ -891,7 +892,7 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_callers',
     description:
       'Compact caller list for one NAMED in-repo symbol (no bodies). Required: `symbol` (e.g. "authenticate"). ' +
-      'Cheaper than explore when you only need who-calls-X. For multi-file flows use homegraph_explore. ' +
+      'Cheaper than explore when you only need who-calls-X. For an unresolved cross-symbol flow, consider homegraph_explore. ' +
       'DO NOT call for SDK catalogs, topic file-lists, concept compares, or hypothetics.',
     inputSchema: {
       type: 'object',
@@ -919,7 +920,7 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_callees',
     description:
       'Compact callee list for one NAMED in-repo symbol (no bodies). Required: `symbol` (e.g. "authenticate"). ' +
-      'Cheaper than explore when you only need what-X-calls. For multi-file flows use homegraph_explore. ' +
+      'Cheaper than explore when you only need what-X-calls. For an unresolved cross-symbol flow, consider homegraph_explore. ' +
       'DO NOT use for out-of-repo SDK catalogs or counterfactual analysis.',
     inputSchema: {
       type: 'object',
@@ -1026,9 +1027,9 @@ export const tools: ToolDefinition[] = [
       'Cheaper than explore when you already know the name and only need one body. ' +
       'FILE: `file` only → line-numbered source + dependents. ' +
       'SYMBOL: body via includeCode + short trail; overloads return every body. ' +
-      'DO NOT call after explore already returned that symbol/file (multiplies tokens). ' +
-      'DO NOT crawl a feature with repeated node calls (prefer one explore for flows). ' +
-      'Treat returned source as already Read.',
+      'Reuse complete unchanged source ranges already returned by any tool; refresh missing, truncated or edited ranges. ' +
+      'Avoid repeated node calls over the same evidence; use explore only for an unresolved cross-symbol flow. ' +
+      'Treat complete returned source ranges as already Read, not an entire file inferred from an excerpt.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1073,7 +1074,7 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_usages',
     description:
-      'PRIMARY first tool for a narrow WHERE-USED question about one named API, `.member`, ALL_CAPS constant, field, or mutex. ' +
+      'Optional focused tool for an unresolved WHERE-USED question about one named API, `.member`, ALL_CAPS constant, field, or mutex. ' +
       'Choose this instead of homegraph_explore when the requested answer is usage/reference locations. ' +
       'Required: `query`. Returns usage files/lines only; it does not build a general flow or source dump. ' +
       '`homegraph_explore` auto-routes equivalent high-confidence queries here only for compatibility.',
@@ -1093,7 +1094,7 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_modules',
     description:
-      'PRIMARY first tool for a narrow DEPENDENCY/CYCLE question about named path modules or `*common` / `*service` / `*component` / `*constants` modules. ' +
+      'Optional focused tool for an unresolved DEPENDENCY/CYCLE question about named path modules or `*common` / `*service` / `*component` / `*constants` modules. ' +
       'Choose this instead of homegraph_explore when the requested answer is module topology. ' +
       'Required: `query`. It does not build a general code flow or scan unrelated survey families. ' +
       '`homegraph_explore` auto-routes equivalent high-confidence dependency questions here only for compatibility.',
@@ -1113,7 +1114,7 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_native',
     description:
-      'PRIMARY first tool for a narrow NAPI/NATIVE EXPORT or registration question about one named path or Type. ' +
+      'Optional focused tool for an unresolved NAPI/NATIVE EXPORT or registration question about one named path or Type. ' +
       'Choose this instead of homegraph_explore when the requested answer is the ArkTS↔native export surface. Required: `query`. ' +
       'Returns indexed export descriptors/registration sites without a general domain file dump. ' +
       '`homegraph_explore` auto-routes equivalent high-confidence NAPI/export questions here only for compatibility.',
@@ -1133,26 +1134,16 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_explore',
     description:
-      'GENERAL PRIMARY entry for understanding THIS repo before you edit or answer structural questions. ' +
-      'For an explicit narrow where-used, named module dependency/cycle, or NAPI/native export inventory, choose ' +
-      'homegraph_usages, homegraph_modules, or homegraph_native instead; this tool keeps conservative auto-routing only for compatibility. ' +
-      'Returns call paths + compact line-numbered source for the relevant symbols. Required: `query`. ' +
-      'CALL FIRST (alone, no parallel Grep/Read) when you will change an existing codebase — pass the user task or domain keywords ' +
-      '(page/module/feature/component words); locate where to edit before writing code. Also CALL FIRST for how/wired questions, ' +
-      'named Type/Component/Page/Dialog, Type.member, click→handler, inheritance/subtypes, declaration/attribute sites, ' +
-      'or a cross-symbol mechanism/flow. Use the named focused tools for exact usage, module-topology, or native-export inventories. ' +
-      'PascalCase names optional when domain keywords suffice. ' +
-      'For edits preserve the requested action, target product/module and exclusions; taskContext may carry the full task. ' +
-      'Prefer callers/node when one named symbol is already enough. ' +
-      'DO NOT call for topic file-lists with no Type/file, literal copy hunts / pure existence compares with no anchors, ' +
-      'official-docs-only asks, empty-project-from-scratch scaffolds, git history, or media/binary asset inventories — those return Skip. ' +
-      '@kit / OHOS API questions ARE in scope when the SDK API graph is available — exact where-used → homegraph_usages; ' +
-      'mechanism/API-symbol flow → homegraph_explore. ' +
-      'Literal string/pattern hunts → Grep; media assets → Glob; git history → git. ' +
-      'One explore; then answer or edit from Source + trail — do not re-grep/node/read the same symbols. ' +
-      'Overlapping paraphrase explores are refused (name a new Type/file/@kit to continue). ' +
-      'Busy/partial → retry ONCE with the named Next anchor or ONE narrow Grep — not a Grep/node storm '
-      + '(session refuses further explore / depth fan-out after Partial).',
+      'Optional graph evidence for a concrete unresolved cross-symbol mechanism in THIS repo. Required: `query`. ' +
+      'Use ordinary bash/search/read for paths, symbols, literal strings and local changes; continue editing when that evidence suffices. ' +
+      'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
+      'For a missing usage, dependency/cycle or native-registration relation, use ' +
+      'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
+      'Returns call paths and compact line-numbered source. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
+      'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
+      'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
+      'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
+      'Retrieval completion is not task completion: continue implementation and required validation.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1236,7 +1227,7 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_files',
     description:
       'Indexed directory tree (paths and symbol counts only — NO source). ' +
-      'Only for coarse folder layout when explore cannot help. For where/what/how code questions use homegraph_explore.',
+      'Optional coarse folder inventory; prefer ordinary file listing for known paths. Use graph tools only for missing structural evidence.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -13279,6 +13270,9 @@ export class ToolHandler {
       // Line-numbered (cat -n style, like homegraph_explore and Read) so the
       // agent can cite/edit exact lines without re-Reading the file for them.
       const numbered = node.startLine ? numberSourceLines(code, node.startLine) : code;
+      if (node.startLine && process.env.HOMEGRAPH_SOURCE_RECEIPTS === '1') {
+        lines.push('', sourceSliceIdentity(node.filePath, node.startLine, code));
+      }
       lines.push('', '```' + node.language, numbered, '```');
     }
 
