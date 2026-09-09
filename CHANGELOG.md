@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.5.7] - 2026-09-09
+
 ### Fixes
 
 - ArkTS indexing aligns with ArkAnalyzer `ClassCategory`: **object literals**, **type literals**, and **unions** are no longer stored as HomeGraph `class` nodes (they were inflating `graph_class` as `<Object$anon@N>` / `%AC*` under the file). Real classes — including true anonymous `ClassCategory.CLASS` — are unchanged. Re-index to refresh existing databases (Spec 0026).
@@ -215,3 +218,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.5.0]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.0
 [1.4.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.4.1
 [1.5.6]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.6
+[1.5.7]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.7
