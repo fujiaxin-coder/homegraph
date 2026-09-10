@@ -1714,7 +1714,6 @@ export class ToolHandler {
 
     try {
       const stats = this.cg.getStats();
-      const budget = getExploreBudget(stats.fileCount);
 
       // Tiny-repo tool gating: on projects under TINY_REPO_FILE_THRESHOLD
       // files, only expose the core trio (search, node, explore) — one
@@ -1757,7 +1756,7 @@ export class ToolHandler {
         if (tool.name === 'homegraph_explore') {
           return {
             ...tool,
-            description: `${tool.description} Budget: make at most ${budget} calls for this project (${stats.fileCount.toLocaleString()} files indexed).`,
+            description: `${tool.description} ${this.exploreSuffix(stats.fileCount)}`,
           };
         }
         return tool;
@@ -1765,6 +1764,45 @@ export class ToolHandler {
     } catch {
       return visible;
     }
+  }
+
+  /**
+   * Per-repo suffix appended to homegraph_explore's description (Spec 0027).
+   *
+   * fileCount === 0 must not read as "this project is empty": hosts snapshot
+   * tools/list once at connect (#964), and an auto-init that is still building
+   * reports 0 at that instant. Field evidence (DevEco Code bench, 3 sessions,
+   * zero homegraph calls): agents read "make at most 1 calls for this project
+   * (0 files indexed)" as terminal — "homegraph isn't indexed for this
+   * project" — and permanently fell back to Read/Grep even though the index
+   * completed seconds later. Mirror maybeDeepToolPhaseGate's success-shaped
+   * guidance so the frozen description and the live call-time response tell
+   * the same story: failed build → say so (indexing is the user's call, so
+   * the agent relays it); still building → point at homegraph_project and
+   * retry; genuinely empty → honest empty note. Only fileCount > 0 carries a
+   * call budget — there is nothing to budget over an unbuilt index.
+   */
+  private exploreSuffix(fileCount: number): string {
+    if (fileCount > 0) {
+      return `Budget: make at most ${getExploreBudget(fileCount)} calls for this project (${fileCount.toLocaleString()} files indexed).`;
+    }
+    const cg = this.cg;
+    if (cg) {
+      try {
+        // Failed check comes first: a failed full build rolls build_phase back
+        // to 'fast' (startInProcessFullIndex catch), so the building branch
+        // below would otherwise mask the failure.
+        if (cg.getQueryBuilder().getMetadata('index_state') === 'failed') {
+          return 'The last full index build for this project failed, so results will be empty. Tell the user to re-run `homegraph index`.';
+        }
+        if (cg.getBuildPhase() !== 'full') {
+          return "HomeGraph is still building this project's index. A call right now returns build-progress guidance; use `homegraph_project` for the module/file map, then retry once indexing finishes.";
+        }
+      } catch {
+        /* metadata is advisory — fall through to the empty note */
+      }
+    }
+    return 'No files are indexed for this project; results will be empty until an index is built.';
   }
 
   /**
