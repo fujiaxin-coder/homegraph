@@ -242,7 +242,10 @@ export class MCPSession {
       // Kick off engine init in the background. If another session in the
       // same daemon already opened the project, `ensureInitialized` is a
       // ~free no-op — N concurrent clients pay exactly one open.
-      this.resolvePromise = this.engine.ensureInitialized(explicitPath);
+      // explicitPath is a DECLARED root (rootUri / workspaceFolders / --path),
+      // so it also bounds the walk-up (spec 0028): a stray ancestor .homegraph
+      // must not hijack the session.
+      this.resolvePromise = this.engine.ensureInitialized(explicitPath, explicitPath);
     }
   }
 
@@ -325,9 +328,10 @@ export class MCPSession {
     }
 
     // Last resort: walk from the best candidate (sync open). Picks up
-    // projects that appeared after the server started.
+    // projects that appeared after the server started. The hint (server
+    // --path) is a declaration → floor; bare cwd is not.
     const candidate = hint ?? process.cwd();
-    this.engine.retryInitializeSync(candidate);
+    this.engine.retryInitializeSync(candidate, hint ?? undefined);
   }
 
   /**
@@ -336,11 +340,15 @@ export class MCPSession {
    */
   private async initFromRoots(): Promise<void> {
     let target = process.cwd();
+    // Only a real roots/list answer is a client DECLARATION of the workspace
+    // root — the cwd fallbacks are not, and keep the git-style walk-up.
+    let declared = false;
     try {
       const result = await this.transport.request('roots/list', undefined, ROOTS_LIST_TIMEOUT_MS);
       const rootPath = firstRootPath(result);
       if (rootPath) {
         target = rootPath;
+        declared = true;
       } else {
         process.stderr.write('[HomeGraph MCP] Client returned no workspace roots; falling back to process cwd.\n');
       }
@@ -348,6 +356,6 @@ export class MCPSession {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[HomeGraph MCP] roots/list request failed (${msg}); falling back to process cwd.\n`);
     }
-    await this.engine.ensureInitialized(target);
+    await this.engine.ensureInitialized(target, declared ? target : undefined);
   }
 }

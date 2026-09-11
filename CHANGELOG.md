@@ -11,6 +11,14 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- An MCP host's explicit project declaration (`--path`, or the client's `rootUri`/`workspaceFolders`) is now a **floor** for root resolution: a stray ancestor `.homegraph/` above it is never adopted. Previously a nested server walked up unbounded and could latch onto an unrelated ancestor index — observed live as a DevEco evaluation session creating `.homegraph` at a benchmark harness root, after which every nested project's daemon tried to index the entire result tree (OOM at 3.5GB in 48s) while its server was SIGKILL'd by the 60s liveness watchdog with every tool call hanging as `Connection closed`. Bare `serve mcp` and CLI commands keep the git-style unbounded walk-up; tool-level `projectPath` resolution is unchanged (Spec 0028).
+- `homegraph_explore`'s description no longer reports `Budget: make at most 1 calls for this project (0 files indexed)` while auto-init is still building. Hosts snapshot `tools/list` once at connect, so that transient "0 files" read as terminal and agents abandoned HomeGraph for the whole session even though the index completed seconds later. The 0-file description now matches what a call actually returns: a failed build asks the agent to relay `homegraph index` to the user, an in-flight build points at `homegraph_project` and says to retry once indexing finishes, and a genuinely empty project says so honestly. Indexed repos keep the usual call-budget note unchanged (Spec 0027).
+
+
+## [1.5.7] - 2026-09-09
+
+### Fixes
+
 - ArkTS indexing aligns with ArkAnalyzer `ClassCategory`: **object literals**, **type literals**, and **unions** are no longer stored as HomeGraph `class` nodes (they were inflating `graph_class` as `<Object$anon@N>` / `%AC*` under the file). Real classes — including true anonymous `ClassCategory.CLASS` — are unchanged. Re-index to refresh existing databases (Spec 0026).
 - Harmony multi-module ArkTS indexing: register **synthetic PROJECT modules** for ArkAnalyzer sources that sit outside `build-profile.json5` `srcPath` (e.g. ohrouter `HMRouterPlugin/**/*.ts`), so they enter the same `analyseByModule` pipeline instead of being skipped by both AA and tree-sitter. Incremental dirty mapping can target those synthetic roots. AA-persisted files now get truthful `files`/`nodes.language` by extension (`.ets`→`arkts`, `.ts`/`.d.ts`→`typescript`) instead of hard-coding `arkts` (Spec 0025).
 
@@ -220,3 +228,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.5.0]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.5.0
 [1.4.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.4.1
 [1.5.6]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.6
+[1.5.7]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.7
