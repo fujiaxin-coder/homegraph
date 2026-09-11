@@ -1531,7 +1531,12 @@ async function runServeMcp(options: {
   sources?: string;
   autoInit?: boolean;
 }): Promise<void> {
-  const projectPath = options.path ? resolveProjectPath(options.path) : undefined;
+  // An MCP host's --path is a DECLARATION of the project root, not a search
+  // hint: resolve it literally and never walk up past it (spec 0028). A stray
+  // ancestor .homegraph above the declared root otherwise hijacks the session
+  // (observed as a harness-root index poisoning every nested bench project).
+  // resolveProjectPath keeps its subdir walk-up for the human CLI subcommands.
+  const projectPath = options.path ? path.resolve(options.path) : undefined;
 
   // Commander sets watch=false when --no-watch is passed. Route it through
   // the same env-var chokepoint the watcher and MCP server already honor.

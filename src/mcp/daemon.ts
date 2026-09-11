@@ -193,7 +193,7 @@ export class Daemon {
     // serialize and starve the MCP transport (clients time out). Direct mode
     // (one stdio client) leaves the pool off; `CODEGRAPH_QUERY_POOL_SIZE=0`
     // disables it here too.
-    this.engine = new MCPEngine({ queryPool: true });
+    this.engine = new MCPEngine({ queryPool: true, rootFloor: projectRoot });
     this.engine.setProjectPathHint(projectRoot);
   }
 
