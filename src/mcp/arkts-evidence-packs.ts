@@ -6,23 +6,30 @@ import { isConfigLeafNode, validatePathWithinRoot } from '../utils';
 import { canonicalSourceDeclarations } from './evidence-rendering';
 import { fileFingerprint, mergeRanges } from './explore-dedup';
 import type { ExploreEmission, ExploreFileEmission } from './explore-session-state';
+import { evidenceEdgeKey, type EvidencePathSearch } from '../graph/evidence-paths';
 
 export type EvidenceGapReason = 'budget' | 'unavailable' | 'stale' | 'invalid_range'
-  | 'scope_limit' | 'unindexed_connection' | 'registration_source';
+  | 'scope_limit' | 'unindexed_connection' | 'registration_source' | 'ambiguous_anchor';
 export interface EvidenceGap { target: string; reason: EvidenceGapReason; nextAnchor: string }
 interface SourceUnit {
   id: string; node: Node; start: number; end: number; source: string; fingerprint: string;
 }
+interface RelationEvidence {
+  source: string; target: string; kind: Edge['kind']; provenance?: Edge['provenance']; via?: string; site?: string;
+}
 interface EvidencePack {
   id: string; label: string; sources: string[]; priority: number; gaps: EvidenceGap[];
-  relation?: { source: string; target: string; kind: Edge['kind']; provenance?: Edge['provenance']; via?: string; site?: string };
+  relation?: RelationEvidence;
+  path?: { id: string; nodeIds: string[]; relations: RelationEvidence[] };
 }
 export interface ArktsEvidenceResult {
   text: string;
   emission: ExploreEmission;
   metadata: {
-    version: 1; scope: 'bounded_static_evidence'; status: 'complete' | 'partial' | 'empty';
+    version: 1 | 2; scope: 'bounded_static_evidence'; status: 'complete' | 'partial' | 'empty';
     selectedPacks: string[]; gaps: EvidenceGap[]; relations: NonNullable<EvidencePack['relation']>[];
+    pathSearch?: { goal: EvidencePathSearch['goal']; stopReason: string; limitsHit: string[]; stats: EvidencePathSearch['stats'];
+      paths: Array<{ id: string; nodeIds: string[]; cost: number; evidence: 'provided' | 'partial' }> };
   };
 }
 
@@ -42,14 +49,17 @@ const artifact = (n: Node): boolean => n.filePath.includes('@dummy') || n.name.s
 /** Consume already-located nodes. No text search, new planner call or recursive retrieval. */
 export function buildArktsEvidencePacks(
   graph: Pick<HomeGraph, 'getNode' | 'getNodesInFile' | 'getFile' | 'getOutgoingEdges' | 'getIncomingEdges'>,
-  options: { projectRoot: string; query: string; nodes: Node[]; focusIds: Set<string>; maxChars: number; maxFiles?: number },
+  options: { projectRoot: string; query: string; nodes: Node[]; focusIds: Set<string>; maxChars: number; maxFiles?: number; pathSearch?: EvidencePathSearch },
 ): ArktsEvidenceResult | null {
   if (!options.nodes.some(n => local(n) && /\.ets$/i.test(n.filePath) && DECLARATIONS.has(n.kind))) return null;
-  const all = canonicalSourceDeclarations(options.nodes.filter(n => DECLARATIONS.has(n.kind) && local(n) && !artifact(n)));
+  const search = options.pathSearch;
+  const requiredIds = search ? new Set([...search.goal.anchorIds, ...search.paths.flatMap(p => p.nodeIds)]) : options.focusIds;
+  const inputNodes = search && requiredIds.size ? [...requiredIds].flatMap(id => { const n = graph.getNode(id); return n ? [n] : []; }) : options.nodes;
+  const all = canonicalSourceDeclarations(inputNodes.filter(n => DECLARATIONS.has(n.kind) && local(n) && !artifact(n)));
   if (!all.length) return null;
-  const candidates = all.sort((a, b) => Number(options.focusIds.has(b.id)) - Number(options.focusIds.has(a.id))
+  const candidates = all.sort((a, b) => Number(requiredIds.has(b.id)) - Number(requiredIds.has(a.id))
     || a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine).slice(0, LIMITS.nodes);
-  const focus = candidates.filter(n => options.focusIds.has(n.id));
+  const focus = candidates.filter(n => requiredIds.has(n.id));
   // A named owning type provides scope for its named members, not another
   // callable endpoint. Do not invent a missing Type→method call obligation.
   const relationFocus = focus.filter(n => !CONTAINERS.has(n.kind) || !focus.some(child => child.id !== n.id
@@ -132,7 +142,7 @@ export function buildArktsEvidencePacks(
 
   // Read focused declarations before peripheral endpoints spend the file-read allowance.
   for (const n of candidates) packs.push({ id: `source:${n.id}`, label: label(n),
-    priority: options.focusIds.has(n.id) ? 80 : 20, ...dependencies([n]) });
+    priority: requiredIds.has(n.id) ? 80 : 20, ...dependencies([n]) });
   if (all.length > candidates.length) globalGaps.push({ target: `${all.length - candidates.length} additional candidates`,
     reason: 'scope_limit', nextAnchor: location(all[candidates.length]!) });
 
@@ -140,7 +150,7 @@ export function buildArktsEvidencePacks(
   const edges: Edge[] = [];
   const edgeKeys = new Set<string>();
   let edgesLimited = false;
-  for (const n of (relationFocus.length ? relationFocus : candidates).slice(0, LIMITS.expand)) {
+  for (const n of search ? [] : (relationFocus.length ? relationFocus : candidates).slice(0, LIMITS.expand)) {
     const adjacent = [...graph.getOutgoingEdges(n.id), ...graph.getIncomingEdges(n.id)];
     for (const edge of adjacent) {
       if (!RELATIONS.has(edge.kind)) continue;
@@ -153,10 +163,32 @@ export function buildArktsEvidencePacks(
       edges.push(edge);
     }
   }
-  if (edgesLimited || relationFocus.length > LIMITS.expand) globalGaps.push({ target: 'additional graph neighbors', reason: 'scope_limit',
+  if (search) {
+    const fallbackNeighbors = search.missing.length || search.goal.anchorIds.length < 2 ? search.neighbors : [];
+    for (const edge of [...search.paths.flatMap(p => p.edges), ...fallbackNeighbors]) {
+      const key = evidenceEdgeKey(edge);
+      if (!edgeKeys.has(key)) { edgeKeys.add(key); edges.push(edge); }
+    }
+    for (const pair of search.missing) {
+      const from = graph.getNode(pair.from); const to = graph.getNode(pair.to);
+      globalGaps.push({ target: `${search.goal.kind} path: ${from ? label(from) : pair.from} → ${to ? label(to) : pair.to}`,
+        reason: search.stopReason === 'budget_exhausted' ? 'scope_limit' : 'unindexed_connection', nextAnchor: to ? location(to) : pair.to });
+    }
+    for (const name of search.goal.ambiguous) globalGaps.push({ target: `qualify the symbol with its owning type or file: ${name}`,
+      reason: 'ambiguous_anchor', nextAnchor: name });
+    if (search.goal.limited || (search.goal.anchorIds.length < 2 && search.stopReason === 'budget_exhausted')) {
+      globalGaps.push({ target: `query path search limit: ${search.limitsHit.join(', ')}`, reason: 'scope_limit', nextAnchor: location(candidates[0]!) });
+    }
+    if (!search.missing.length && !search.goal.ambiguous.length && (search.stopReason === 'no_path_in_scope'
+      || (!search.paths.length && !search.neighbors.length))) {
+      globalGaps.push({ target: `no ${search.goal.kind} relation in the bounded scope`, reason: 'unindexed_connection', nextAnchor: location(candidates[0]!) });
+    }
+  }
+  if (!search && (edgesLimited || relationFocus.length > LIMITS.expand)) globalGaps.push({ target: 'additional graph neighbors', reason: 'scope_limit',
     nextAnchor: location(relationFocus[0] ?? candidates[0]!) });
 
   const connected = new Set<string>();
+  const relationPacks = new Map<string, EvidencePack>();
   edges.sort((a, b) => Number(candidateIds.has(b.source) && candidateIds.has(b.target))
     - Number(candidateIds.has(a.source) && candidateIds.has(a.target)));
   for (const [i, edge] of edges.entries()) {
@@ -194,11 +226,21 @@ export function buildArktsEvidencePacks(
       priority: candidateIds.has(from.id) && candidateIds.has(to.id) ? 100 : 60,
       sources: deps.sources, gaps: [...deps.gaps, ...gaps],
       relation: { source: from.id, target: to.id, kind: edge.kind, provenance: edge.provenance, ...(via ? { via } : {}), ...(site ? { site } : {}) } });
+    relationPacks.set(evidenceEdgeKey(edge), packs[packs.length - 1]!);
   }
-  for (const n of relationFocus) if (!connected.has(n.id)) globalGaps.push({ target: `call/use connection for ${label(n)}`,
+  for (const path of search?.paths ?? []) {
+    const members = path.edges.map(e => relationPacks.get(evidenceEdgeKey(e)));
+    const missing = members.some(p => !p);
+    const target = path.nodeIds.map(id => { const n = graph.getNode(id); return n ? label(n) : id; }).join(' → ');
+    packs.push({ id: path.id, label: `directed ${search!.goal.kind} path: ${target}`, priority: 160,
+      sources: [...new Set(members.flatMap(p => p?.sources ?? []))],
+      gaps: missing ? [{ target, reason: 'unavailable', nextAnchor: target }] : members.flatMap(p => p!.gaps),
+      path: { id: path.id, nodeIds: path.nodeIds, relations: members.flatMap(p => p?.relation ? [p.relation] : []) } });
+  }
+  for (const n of search ? [] : relationFocus) if (!connected.has(n.id)) globalGaps.push({ target: `call/use connection for ${label(n)}`,
     reason: 'unindexed_connection', nextAnchor: location(n) });
   // Individual neighbors do not prove that two requested anchors are connected.
-  if (relationFocus.length > 1) {
+  if (!search && relationFocus.length > 1) {
     const reached = new Set([relationFocus[0]!.id]);
     for (let i = 0; i < edges.length; i++) {
       let changed = false;
@@ -227,12 +269,22 @@ export function buildArktsEvidencePacks(
     return units.filter(s => !units.some(other => other.id !== s.id && other.node.filePath === s.node.filePath
       && other.start <= s.start && other.end >= s.end)).sort((a, b) => a.node.filePath.localeCompare(b.node.filePath) || a.start - b.start);
   };
+  const relationsFor = (chosen: EvidencePack[]): RelationEvidence[] => [...new Map(chosen.flatMap(p => p.path?.relations ?? (p.relation ? [p.relation] : []))
+    .map(r => [JSON.stringify(r), r])).values()];
+  const stopFor = (chosen: EvidencePack[]): string => search?.stopReason === 'supported'
+    && search.paths.some(p => !chosen.some(c => c.path?.id === p.id)) ? 'source_incomplete' : search?.stopReason ?? '';
   const render = (chosen: EvidencePack[]): string => {
     const gaps = gapsFor(chosen);
     const lines = ['**ArkTS evidence packs**', gaps.length ? '> **Partial locator** — explicit gaps below.' : '> Bounded evidence supplied for the selected declarations and static links.',
       'Complete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.'];
-    const relations = chosen.filter(p => p.relation);
-    if (relations.length) lines.push('**Static relations (with source dependencies)**', ...relations.map(p => `- ${inline(p.label)} [${p.relation!.provenance ?? 'indexed'}${p.relation!.via ? `; ${inline(p.relation!.via!)}` : ''}${p.relation!.site ? `; site ${inline(p.relation!.site!)}` : ''}]`));
+    if (search) lines.push(`Path goal: ${search.goal.kind}; search direction: ${search.goal.direction}; stop: ${stopFor(chosen)}. Static paths do not prove runtime behavior.`);
+    const chosenPaths = chosen.filter(p => p.path);
+    if (chosenPaths.length) lines.push('**Directed paths (all source dependencies provided)**', ...chosenPaths.map(p => `- ${inline(p.label)}`));
+    const relations = relationsFor(chosen);
+    if (relations.length) lines.push('**Static relations (with source dependencies)**', ...relations.map(r => {
+      const from = graph.getNode(r.source); const to = graph.getNode(r.target);
+      return `- ${inline(from ? label(from) : r.source)} → ${r.kind} → ${inline(to ? label(to) : r.target)} [${r.provenance ?? 'indexed'}${r.via ? `; ${inline(r.via)}` : ''}${r.site ? `; site ${inline(r.site)}` : ''}]`;
+    }));
     for (const unit of unitsFor(chosen)) {
       // Fence longer than any source backtick run: source-like guidance cannot escape.
       const fence = '`'.repeat(Math.max(3, ...Array.from(unit.source.matchAll(/`+/g), m => m[0].length + 1)));
@@ -272,6 +324,8 @@ export function buildArktsEvidencePacks(
     sourceBytes: files.reduce((sum, f) => sum + f.bytes, 0), responseBytes: text.length, locatedNodes,
     evidenceStatus: status, partial: status !== 'complete', coveredObligations: selected.map(p => p.label),
     uncoveredObligations: gaps.map(g => `${g.reason}: ${g.target}`), nextAnchor: gaps[0]?.nextAnchor },
-    metadata: { version: 1, scope: 'bounded_static_evidence', status, selectedPacks: selected.map(p => p.id), gaps,
-      relations: selected.flatMap(p => p.relation ? [p.relation] : []) } };
+    metadata: { version: search ? 2 : 1, scope: 'bounded_static_evidence', status, selectedPacks: selected.map(p => p.id), gaps,
+      relations: relationsFor(selected), ...(search ? { pathSearch: { goal: search.goal, stopReason: stopFor(selected),
+        limitsHit: search.limitsHit, stats: search.stats, paths: search.paths.map(p => ({ id: p.id, nodeIds: p.nodeIds, cost: p.cost,
+          evidence: selected.some(c => c.path?.id === p.id) ? 'provided' as const : 'partial' as const })) } } : {}) } };
 }

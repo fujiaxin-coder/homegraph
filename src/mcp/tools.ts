@@ -10,6 +10,7 @@ import { resolveToolDeadlineMs } from './query-pool';
 import { sourceSliceIdentity } from './source-slice-identity';
 import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLine } from './evidence-rendering';
 import { buildArktsEvidencePacks } from './arkts-evidence-packs';
+import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidencePaths } from '../graph/evidence-paths';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
 import { shouldSkipCatchUpSync } from './memory-budget';
 import { findNearestHomeGraphRoot } from '../directory';
@@ -1140,7 +1141,7 @@ export const tools: ToolDefinition[] = [
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
       'For a missing usage, dependency/cycle or native-registration relation, use ' +
       'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
-      'Returns call paths and compact line-numbered source. ArkTS symbol evidence uses complete declarations and static relation dependencies within budget; explicit Gaps name omitted or unverified evidence. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
+      'Returns call paths and compact line-numbered source. ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
       'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
@@ -6464,12 +6465,19 @@ export class ToolHandler {
 
   /** Pack already-located ArkTS evidence before legacy windowing can cut it. */
   private tryArktsEvidenceExplore(cg: HomeGraph, query: string, projectRoot: string,
-    nodes: Node[], focusIds: Set<string>, maxChars?: number, maxFiles?: number): ToolResult | null {
+    nodes: Node[], focusIds: Set<string>, maxChars?: number, maxFiles?: number, plan?: QueryPlan): ToolResult | null {
     if (process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0') return null;
     if (!nodes.some(n => /\.ets$/i.test(n.filePath) && !n.filePath.startsWith('ohos-sdk:'))) return null;
     const budget = getExploreOutputBudget(cg.getStats().fileCount);
+    const queryPaths = process.env.HOMEGRAPH_ARKTS_QUERY_PATHS !== '0';
+    if (queryPaths) nodes = completeEvidencePathCandidates(query, nodes,
+      (name, limit) => cg.getQueryBuilder().getNodesByQualifiedNameExact(name, limit), plan);
+    const pathSearch = !queryPaths ? undefined : searchEvidencePaths({
+      getNode: id => cg.getNode(id),
+      getEdges: (id, direction, kinds, limit, preferred) => cg.getQueryBuilder().getEvidenceEdges(id, direction, kinds, limit, preferred),
+    }, resolveEvidencePathGoal(query, nodes, focusIds, plan));
     const result = buildArktsEvidencePacks(cg, { projectRoot, query, nodes, focusIds,
-      maxChars: Math.min(budget.maxOutputChars, maxChars ?? budget.maxOutputChars), maxFiles });
+      maxChars: Math.min(budget.maxOutputChars, maxChars ?? budget.maxOutputChars), maxFiles, pathSearch });
     if (!result) return null;
     // The pack renderer already supplies neutral guidance and exact source bytes.
     return { content: [{ type: 'text', text: result.text }], [EXPLORE_EMISSION_KEY]: result.emission,
@@ -6675,7 +6683,7 @@ export class ToolHandler {
 
     const evidence = this.tryArktsEvidenceExplore(cg, query, projectRoot,
       [...fileNodes.values()].flat().concat([...flow.pathNodeIds].flatMap(id => { const n = cg.getNode(id); return n ? [n] : []; })),
-      new Set([...seedIds, ...flow.pathNodeIds]), evidenceMaxChars);
+      new Set([...seedIds, ...flow.pathNodeIds]), evidenceMaxChars, undefined, plan);
     if (evidence) return evidence;
 
     const managerSection = this.formatDomainRoleInventory(managerHits.length > 0
@@ -7340,7 +7348,7 @@ export class ToolHandler {
     if (seedIds.size === 0) return null;
 
     const evidence = this.tryArktsEvidenceExplore(cg, query, projectRoot,
-      [...fileNodes.values()].flat(), seedIds, evidenceMaxChars);
+      [...fileNodes.values()].flat(), seedIds, evidenceMaxChars, undefined, plan);
     if (evidence) return evidence;
 
     const pathAffinity = (seedPath: string, otherPath: string): boolean => {
@@ -10463,7 +10471,7 @@ export class ToolHandler {
       const evidence = this.tryArktsEvidenceExplore(cg, query, projectRoot,
         [...subgraph.nodes.values()].concat([...flow.pathNodeIds].flatMap(id => { const n = cg.getNode(id); return n ? [n] : []; })),
         new Set([...subgraph.roots, ...flow.namedNodeIds, ...flow.pathNodeIds]),
-        args._hgEvidenceMaxChars as number | undefined, explicitMaxFiles ? maxFiles : undefined);
+        args._hgEvidenceMaxChars as number | undefined, explicitMaxFiles ? maxFiles : undefined, plan);
       if (evidence) return evidence;
     }
     budget = tightenExploreBudgetForQuery(budget, query, { hasFlowPath });

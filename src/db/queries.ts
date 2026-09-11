@@ -1088,7 +1088,12 @@ export class QueryBuilder {
   /**
    * Get nodes by exact qualified name match (uses idx_nodes_qualified_name index)
    */
-  getNodesByQualifiedNameExact(qualifiedName: string): Node[] {
+  getNodesByQualifiedNameExact(qualifiedName: string, limit?: number): Node[] {
+    if (limit !== undefined) {
+      const cap = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 25;
+      return (this.db.prepare('SELECT * FROM nodes WHERE qualified_name = ? LIMIT ?')
+        .all(qualifiedName, cap) as NodeRow[]).map(rowToNode);
+    }
     if (!this.stmts.getNodesByQualifiedNameExact) {
       this.stmts.getNodesByQualifiedNameExact = this.db.prepare(
         'SELECT * FROM nodes WHERE qualified_name = ?'
@@ -1818,6 +1823,31 @@ export class QueryBuilder {
       this.stmts.getEdgesByTarget = this.db.prepare('SELECT * FROM edges WHERE target = ?');
     }
     const rows = this.stmts.getEdgesByTarget.all(targetId) as EdgeRow[];
+    return rows.map(rowToEdge);
+  }
+
+  /** Bounded local adjacency for evidence search; never load a whole hub into JS.
+   * Known endpoints get a small indexed lookup before the bounded neighbor scan.
+   */
+  getEvidenceEdges(nodeId: string, direction: 'outgoing' | 'incoming', kinds: EdgeKind[],
+    limit: number, preferredIds: string[] = []): Edge[] {
+    if (!kinds.length) return [];
+    const cap = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 25;
+    const column = direction === 'incoming' ? 'target' : 'source';
+    const opposite = direction === 'incoming' ? 'source' : 'target';
+    const kindsSql = kinds.map(() => '?').join(',');
+    const preferred = [...new Set(preferredIds)].slice(0, 4);
+    const base = `SELECT * FROM edges WHERE ${column} = ? AND kind IN (${kindsSql})`;
+    const rows: EdgeRow[] = [];
+    if (preferred.length) {
+      rows.push(...this.db.prepare(`${base} AND ${opposite} IN (${preferred.map(() => '?').join(',')}) LIMIT ?`)
+        .all(nodeId, ...kinds, ...preferred, cap) as EdgeRow[]);
+    }
+    if (rows.length < cap) {
+      const omitPreferred = preferred.length ? ` AND ${opposite} NOT IN (${preferred.map(() => '?').join(',')})` : '';
+      rows.push(...this.db.prepare(`${base}${omitPreferred} LIMIT ?`)
+        .all(nodeId, ...kinds, ...preferred, cap - rows.length) as EdgeRow[]);
+    }
     return rows.map(rowToEdge);
   }
 

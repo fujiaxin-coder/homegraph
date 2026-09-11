@@ -29,7 +29,7 @@ function defaultExploreMaxFiles(fileCount: number): number {
 }
 
 /** Bump when cache-key normalization or cached payload shape changes. */
-export const QUERY_CACHE_FORMAT_VERSION = 4;
+export const QUERY_CACHE_FORMAT_VERSION = 5;
 
 const METADATA_INDEX_STAMP = 'query_cache_index_stamp';
 const METADATA_FORMAT_VERSION = 'query_cache_format_version';
@@ -161,7 +161,8 @@ function exploreEnvFingerprint(): string {
   const rankMultiterm = process.env.HOMEGRAPH_RANK_NO_MULTITERM === '1' ? '0' : '1';
   const fullSource = process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE === '1' ? '1' : '0';
   const evidencePacks = process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0' ? '0' : '1';
-  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}|arktsEvidence:${evidencePacks}`;
+  const queryPaths = process.env.HOMEGRAPH_ARKTS_QUERY_PATHS === '0' ? '0' : '1';
+  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}|arktsEvidence:${evidencePacks}|arktsPaths:${queryPaths}`;
 }
 
 function normalizeString(value: unknown): string | undefined {

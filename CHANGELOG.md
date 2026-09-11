@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- ArkTS exploration now finds bounded directed paths between named anchors, selecting intermediate declarations and registration sources together. Typed state/event goals, exact qualified-name recovery, ambiguity gaps and explicit stop reasons reduce missing connections without treating shared callees as a path. `HOMEGRAPH_ARKTS_QUERY_PATHS=0` restores the first-batch evidence strategy for comparison; indexing and external tool interfaces are unchanged (Spec 0030).
 - ArkTS symbol/flow exploration now selects complete source declarations and the dependencies of static relation evidence together. Explicit gaps identify omitted, stale and unindexed evidence; output and planner budgets no longer cut these packs mid-body. Virtual ArkAnalyzer entries are excluded, cache hits validate source fingerprints, and `HOMEGRAPH_ARKTS_EVIDENCE_PACKS=0` restores legacy rendering for comparison (Spec 0029). Literal/resource and focused usages/modules/native routes retain their existing behavior.
 
 ### Fixes

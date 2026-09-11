@@ -5,6 +5,7 @@
 
 const SOURCE_AND_VALIDATION = `
 - ArkTS evidence packs keep complete declarations and the source dependencies of displayed static relations together. Gaps identify omitted, stale or unindexed evidence; inspect only a gap relevant to the task. A static link does not prove runtime ordering or value propagation, and a complete declaration does not prove its enclosing call conditions.
+- ArkTS path evidence follows typed, directed relations between named anchors within a bounded search. A provided path includes intermediate declarations and registration sites. Check its goal and stop reason; no path in scope does not prove no relationship. Qualify ambiguous symbols with their owning type or file.
 - Reuse complete, unchanged, line-numbered source ranges already visible. An outline, path list, truncated body or SDK declaration cannot replace missing implementation evidence. A slice hash identifies that excerpt, not the whole file. Refresh affected ranges after edits.
 - An empty edge set means the relation may be unindexed, not absent. For partial, stale or irrelevant results, inspect the exact missing source with scoped search/read. After a query adds no evidence, change the method or scope rather than paraphrasing the same explore.
 - Retrieval completion is not task completion. Continue the requested edits and validation; check the original task's behavior and preservation constraints. Build success alone does not establish functional correctness.

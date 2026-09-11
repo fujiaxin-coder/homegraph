@@ -68,6 +68,14 @@ describe('Structured query-plan cache identity', () => {
       .not.toBe(key({ ...plan(), taskContext: 'Remove wearable, keep the phone entry' }));
   });
 
+  it('isolates query-path ablation for both explore and search routing', () => {
+    const enabled = key(plan());
+    const search = buildMcpQueryCacheKey('homegraph_search', { query: 'Page.onTap' }, 100);
+    vi.stubEnv('HOMEGRAPH_ARKTS_QUERY_PATHS', '0');
+    expect(key(plan())).not.toBe(enabled);
+    expect(buildMcpQueryCacheKey('homegraph_search', { query: 'Page.onTap' }, 100)).not.toBe(search);
+  });
+
   it('keys each typed retrieval field at both plan and step scope', () => {
     const base = plan();
     for (const change of [

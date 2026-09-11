@@ -16,13 +16,14 @@ def main():
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, default=Path("validation/evidence-smoke.json"))
+    parser.add_argument("--result-key", default="packs")
     parser.add_argument("--output", type=Path, default=Path("validation/headroom-compatibility.json"))
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location("headroom_adapter", args.adapter)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     record = json.loads(args.evidence.read_text())
-    source = record["results"]["packs"]["content"][0]["text"]
+    source = record["results"][args.result_key]["content"][0]["text"]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     worker = module.Worker(args.python, args.tokenizer, args.output.parent / "headroom-worker.stderr.log")
     try:
