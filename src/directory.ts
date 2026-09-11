@@ -147,17 +147,41 @@ export function unsafeIndexRootReason(projectRoot: string): string | null {
   return null;
 }
 
-export function findNearestHomeGraphRoot(startPath: string): string | null {
+export function findNearestHomeGraphRoot(startPath: string, floor?: string): string | null {
+  // A floor (an MCP host's explicit --path / rootUri) bounds the walk: an
+  // ancestor .homegraph above it must not be adopted — a stray ancestor index
+  // hijacks every nested server, whose daemon then indexes the wrong (often
+  // huge) tree and OOMs (spec 0028). Only honored when it contains the start;
+  // a misconfigured floor must not break discovery.
+  const resolveBestEffort = (p: string): string => {
+    try {
+      return fs.realpathSync(path.resolve(p));
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  // Walk the literal chain (returned to the caller in ITS coordinate system);
+  // track the realpath chain in parallel only for the boundary comparison, so
+  // a symlinked prefix (macOS /var vs /private/var) cannot desync the floor.
   let current = path.resolve(startPath);
+  let currentReal = resolveBestEffort(current);
   const root = path.parse(current).root;
+  const floorDir = floor ? resolveBestEffort(floor) : null;
+  const clamped =
+    floorDir !== null &&
+    (currentReal === floorDir || currentReal.startsWith(floorDir + path.sep));
 
   while (current !== root) {
     if (isInitialized(current)) {
       return current;
     }
+    if (clamped && currentReal === floorDir) {
+      return null; // the floor itself has no index — stop, never look above
+    }
     const parent = path.dirname(current);
     if (parent === current) break; // Reached filesystem root
     current = parent;
+    currentReal = path.dirname(currentReal);
   }
 
   // Check root as well

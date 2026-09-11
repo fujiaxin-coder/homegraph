@@ -117,8 +117,12 @@ function daemonInternalSet(): boolean {
  * fail to share the daemon.
  */
 function resolveDaemonRoot(explicitPath: string | null): string | null {
-  const candidate = explicitPath ?? process.cwd();
-  const root = findNearestHomeGraphRoot(candidate);
+  // An explicit host path is also the walk-up floor (spec 0028): a stray
+  // ancestor .homegraph must not redirect the daemon to the wrong tree.
+  const root = findNearestHomeGraphRoot(
+    explicitPath ?? process.cwd(),
+    explicitPath ?? undefined,
+  );
   if (!root) return null;
   try { return fs.realpathSync(root); } catch { return root; }
 }
@@ -326,7 +330,7 @@ export class MCPServer {
     // is a second V8 isolate + a second open of the project DB, and on large
     // indexes (hundreds of MB) that alone pushed process-tree RSS to ~5GB.
     // Soft deadlines + compact-before-pool still run on the warm main connection.
-    this.engine = new MCPEngine({ queryPool: false });
+    this.engine = new MCPEngine({ queryPool: false, rootFloor: this.projectPath ?? undefined });
     const transport = new StdioTransport();
     this.session = new MCPSession(transport, this.engine, {
       explicitProjectPath: this.projectPath,
@@ -456,7 +460,7 @@ export class MCPServer {
       getDaemonSocket,
       // Daemon-unavailable fallback is one client — same as direct mode: no
       // pool. Duplicating the DB open here blew RSS on large indexes.
-      makeEngine: () => new MCPEngine({ queryPool: false }),
+      makeEngine: () => new MCPEngine({ queryPool: false, rootFloor: root ?? undefined }),
       root,
     });
   }

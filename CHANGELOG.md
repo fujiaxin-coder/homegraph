@@ -9,6 +9,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- An MCP host's explicit project declaration (`--path`, or the client's `rootUri`/`workspaceFolders`) is now a **floor** for root resolution: a stray ancestor `.homegraph/` above it is never adopted. Previously a nested server walked up unbounded and could latch onto an unrelated ancestor index — observed live as a DevEco evaluation session creating `.homegraph` at a benchmark harness root, after which every nested project's daemon tried to index the entire result tree (OOM at 3.5GB in 48s) while its server was SIGKILL'd by the 60s liveness watchdog with every tool call hanging as `Connection closed`. Bare `serve mcp` and CLI commands keep the git-style unbounded walk-up; tool-level `projectPath` resolution is unchanged (Spec 0028).
+- `homegraph_explore`'s description no longer reports `Budget: make at most 1 calls for this project (0 files indexed)` while auto-init is still building. Hosts snapshot `tools/list` once at connect, so that transient "0 files" read as terminal and agents abandoned HomeGraph for the whole session even though the index completed seconds later. The 0-file description now matches what a call actually returns: a failed build asks the agent to relay `homegraph index` to the user, an in-flight build points at `homegraph_project` and says to retry once indexing finishes, and a genuinely empty project says so honestly. Indexed repos keep the usual call-budget note unchanged (Spec 0027).
+
 
 ## [1.5.7] - 2026-09-09
 

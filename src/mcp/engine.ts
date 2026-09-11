@@ -47,6 +47,13 @@ export interface MCPEngineOptions {
    * mode too.
    */
   queryPool?: boolean;
+  /**
+   * Upper bound for root resolution: an ancestor `.homegraph/` above this
+   * directory is never adopted. Set from the MCP host's explicit `--path`
+   * (CLI flag / client rootUri) — a stray ancestor index otherwise hijacks
+   * every nested server (spec 0028). Absent → unbounded git-style walk-up.
+   */
+  rootFloor?: string | null;
 }
 
 /**
@@ -72,7 +79,7 @@ export class MCPEngine {
   private queryPool: QueryPool | null = null;
 
   constructor(opts: MCPEngineOptions = {}) {
-    this.opts = { watch: opts.watch ?? true, queryPool: opts.queryPool ?? false };
+    this.opts = { watch: opts.watch ?? true, queryPool: opts.queryPool ?? false, rootFloor: opts.rootFloor ?? null };
     this.toolHandler = new ToolHandler(null);
   }
 
@@ -135,7 +142,7 @@ export class MCPEngine {
    * subsequent-tool-call semantics; we preserve them by NOT throwing when the
    * search misses (just leaves `cg` null so the next call can retry).
    */
-  async ensureInitialized(searchFrom: string): Promise<void> {
+  async ensureInitialized(searchFrom: string, floor?: string): Promise<void> {
     if (this.closed) return;
     if (this.toolHandler.hasDefaultHomeGraph()) return;
     if (this.initPromise) {
@@ -143,7 +150,7 @@ export class MCPEngine {
       return;
     }
 
-    this.initPromise = this.doInitialize(searchFrom).finally(() => {
+    this.initPromise = this.doInitialize(searchFrom, floor).finally(() => {
       this.initPromise = null;
     });
     try {
@@ -159,11 +166,11 @@ export class MCPEngine {
    * background `ensureInitialized` already finished (or failed) and we need
    * to pick up a project that appeared *after* the engine started.
    */
-  retryInitializeSync(searchFrom: string): void {
+  retryInitializeSync(searchFrom: string, floor?: string): void {
     if (this.closed) return;
     if (this.toolHandler.hasDefaultHomeGraph()) return;
     this.toolHandler.setDefaultProjectHint(searchFrom);
-    const resolvedRoot = findNearestHomeGraphRoot(searchFrom);
+    const resolvedRoot = findNearestHomeGraphRoot(searchFrom, floor ?? this.opts.rootFloor ?? undefined);
     if (!resolvedRoot) return;
     try {
       const mode = resolveGraphSources();
@@ -205,10 +212,10 @@ export class MCPEngine {
     }
   }
 
-  private async doInitialize(searchFrom: string): Promise<void> {
+  private async doInitialize(searchFrom: string, floor?: string): Promise<void> {
     this.toolHandler.setDefaultProjectHint(searchFrom);
 
-    let resolvedRoot = findNearestHomeGraphRoot(searchFrom);
+    let resolvedRoot = findNearestHomeGraphRoot(searchFrom, floor ?? this.opts.rootFloor ?? undefined);
     if (!resolvedRoot && autoInitEnabled()) {
       const created = await this.tryAutoInit(searchFrom);
       if (created) return; // cg + watch + background index already running
