@@ -136,8 +136,10 @@ describe('languages/arkts state dependency graph', () => {
       });
       const text = res.content[0]!.text as string;
 
-      expect(text).toContain('**Dynamic-dispatch links among your symbols**');
-      expect(text).toMatch(/count → count.*state: @Prop one-way/);
+      expect(text).toContain('**Static relations (with source dependencies)**');
+      expect(text).toMatch(/count[^\n]*→ references →[^\n]*count[^\n]*state: @Prop one-way/);
+      expect(text).toContain('@State');
+      expect(text).toContain('@Prop');
     } finally {
       cg.close();
     }

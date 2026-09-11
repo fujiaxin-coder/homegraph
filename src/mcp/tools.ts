@@ -9,6 +9,7 @@ import type { QueryPool } from './query-pool';
 import { resolveToolDeadlineMs } from './query-pool';
 import { sourceSliceIdentity } from './source-slice-identity';
 import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLine } from './evidence-rendering';
+import { buildArktsEvidencePacks } from './arkts-evidence-packs';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
 import { shouldSkipCatchUpSync } from './memory-budget';
 import { findNearestHomeGraphRoot } from '../directory';
@@ -1139,7 +1140,7 @@ export const tools: ToolDefinition[] = [
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
       'For a missing usage, dependency/cycle or native-registration relation, use ' +
       'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
-      'Returns call paths and compact line-numbered source. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
+      'Returns call paths and compact line-numbered source. ArkTS symbol evidence uses complete declarations and static relation dependencies within budget; explicit Gaps name omitted or unverified evidence. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
       'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
@@ -2211,7 +2212,7 @@ export class ToolHandler {
   ): Promise<ToolResult> {
     const requestStartedAt = Date.now();
     args = { ...args };
-    for (const key of [QUERY_PLAN_ARG, QUERY_DEADLINE_ARG, QUERY_STARTED_ARG, QUERY_INDEX_STATE_ARG, QUERY_FAST_ATTEMPTED_ARG]) delete args[key];
+    for (const key of [QUERY_PLAN_ARG, QUERY_DEADLINE_ARG, QUERY_STARTED_ARG, QUERY_INDEX_STATE_ARG, QUERY_FAST_ATTEMPTED_ARG, '_hgEvidenceMaxChars']) delete args[key];
     try {
       // Block the first tool call on the engine's post-open reconcile so we
       // never serve rows for files deleted/edited while no MCP server was
@@ -2323,7 +2324,10 @@ export class ToolHandler {
           }
           cacheKey = buildMcpQueryCacheKey(toolName, args, fileCount);
           const cached = cacheIndex.getEntry(cacheQueries, cacheKey);
-          if (cached) {
+          const packMeta = cached?._meta?.homegraphEvidencePacks as { status?: string } | undefined;
+          const cachedFiles = (cached?._meta?.homegraphEvidence as { files?: ExploreFileEmission[] } | undefined)?.files;
+          if (cached && (!packMeta || (packMeta.status === 'complete'
+            && this.areEvidenceFilesCurrent(cachedFiles ?? [], cacheCg.getProjectRoot())))) {
             const diagnosed = this.withQueryPlanDiagnostics(cached, args, true);
             const withWorktree = this.withWorktreeNotice(diagnosed, projectPath);
             return this.withStalenessNotice(withWorktree, projectPath);
@@ -2382,10 +2386,10 @@ export class ToolHandler {
               // Fast explore must still file Partial/ANSWER meta into the session
               // so explore + depth fuses see it (textResult-only paths used to skip).
               let served = fast;
-              if (toolName === 'homegraph_explore' && sessionState) {
+              if ((toolName === 'homegraph_explore' && sessionState) || fast._meta?.homegraphEvidencePacks) {
                 served = this.takeExploreEmission(
                   this.ensureExploreEmission(fast, rootFast, q),
-                  sessionState,
+                  toolName === 'homegraph_explore' ? sessionState : undefined,
                 );
               }
               served = this.withQueryPlanDiagnostics(served, args);
@@ -2509,6 +2513,11 @@ export class ToolHandler {
     // Source changes do not reset the total retrieval budget.
     if (decision.reason !== 'overlap') return true;
     const files = decision.matched?.files.filter((file) => file.bytes > 0 && file.ranges.length > 0) ?? [];
+    return this.areEvidenceFilesCurrent(files, projectRoot);
+  }
+
+  /** Same bounded fingerprint check for repeat protection and cached source packs. */
+  private areEvidenceFilesCurrent(files: ExploreFileEmission[], projectRoot: string): boolean {
     if (files.length === 0 || files.length > 24) return false;
     let remainingBytes = 2 * 1024 * 1024;
     for (const file of files) {
@@ -5546,7 +5555,7 @@ export class ToolHandler {
   }
 
   /** Select once; legacy section builders consume the same canonical query/features. */
-  private tryPlannedFastPath(cg: HomeGraph, plan: QueryPlan, root: string): ToolResult | null {
+  private tryPlannedFastPath(cg: HomeGraph, plan: QueryPlan, root: string, evidenceMaxChars?: number): ToolResult | null {
     const query = plan.canonicalQuery;
     if (plan.route === 'usages' || plan.route === 'modules' || plan.route === 'native') {
       return this.runSpecializedExploreRoute(plan.route, cg, query, root, plan);
@@ -5556,8 +5565,8 @@ export class ToolHandler {
     // rule/default and specialized routes retain their existing fast behavior.
     if (plan.source === 'llm' && (plan.intent === 'general' || plan.intent === 'flow')) return null;
     return this.tryFastInventoryExplore(cg, query, root, plan)
-      ?? this.tryLightMechanismExplore(cg, query, root, plan)
-      ?? this.tryCompactLocalSymbolExplore(cg, query, root, plan);
+      ?? this.tryLightMechanismExplore(cg, query, root, plan, evidenceMaxChars)
+      ?? this.tryCompactLocalSymbolExplore(cg, query, root, plan, evidenceMaxChars);
   }
 
   /** Internal execution only: no recursive MCP calls, model requests or new deadline. */
@@ -5589,7 +5598,7 @@ export class ToolHandler {
       return served;
     }
     const fast = args[QUERY_FAST_ATTEMPTED_ARG] === true && plan.source === 'rules'
-      ? null : this.tryPlannedFastPath(cg, plan, cg.getProjectRoot());
+      ? null : this.tryPlannedFastPath(cg, plan, cg.getProjectRoot(), args._hgEvidenceMaxChars as number | undefined);
     if (fast) return fast;
     return this.handleExplore({ ...args, query, [QUERY_PLAN_ARG]: plan });
   }
@@ -5652,7 +5661,10 @@ export class ToolHandler {
       }
       seenQueries.add(`${compiled.intent}:${compiled.canonicalQuery}`);
       try {
-        const result = await this.executePlannedStep({ ...args, [QUERY_DEADLINE_ARG]: deadline }, compiled);
+        const stepCap = Math.max(0, Math.floor((outputBudget - used) / Math.max(1, plan.steps.length - diagnostics.length + 1)) - 100);
+        const result = await this.executePlannedStep({ ...args, [QUERY_DEADLINE_ARG]: deadline,
+          ...(multi ? { _hgEvidenceMaxChars: Math.max(0, stepCap - Math.min(1600, Math.floor(stepCap / 2)) - 2) } : {}),
+        }, compiled);
         const body = result.content.map((part) => part.text).join('\n');
         const candidates = result.isError ? [] : this.locatedPlanBindings(cg, result, resolved);
         const childEmission = result[EXPLORE_EMISSION_KEY];
@@ -5690,7 +5702,16 @@ export class ToolHandler {
         bindings.set(step.id, visibleBindings);
         const bodyCap = Math.max(0, cap - receipt.length - 2);
         const trimmed = neutralBody.length > bodyCap;
-        const kept = trimEvidenceAtLine(neutralBody, bodyCap);
+        const atomic = !!result._meta?.homegraphEvidencePacks;
+        const kept = atomic && trimmed
+          ? '[Partial source: complete evidence pack omitted by the shared output budget.]'.slice(0, bodyCap)
+          : atomic ? neutralBody : trimEvidenceAtLine(neutralBody, bodyCap);
+        if (atomic && trimmed) {
+          receipt = '';
+          diagnostic.locatedNodes = [];
+          diagnostic.resolvedAnchors = [];
+          bindings.set(step.id, []);
+        }
         if (trimmed) diagnostic.status = 'partial';
         else files.push(...(result[EXPLORE_EMISSION_KEY]?.files ?? []));
         const piece = `**Step ${step.id}: ${step.intent}** (${diagnostic.status})\n${receipt}\n${kept}`;
@@ -6441,9 +6462,21 @@ export class ToolHandler {
     return finishCompact('Inventory sections above are complete for this query. **ANSWER NOW.**');
   }
 
-  /**
-   * Render a compact symbol-bounded slice of one file (lightweight mechanism path).
-   */
+  /** Pack already-located ArkTS evidence before legacy windowing can cut it. */
+  private tryArktsEvidenceExplore(cg: HomeGraph, query: string, projectRoot: string,
+    nodes: Node[], focusIds: Set<string>, maxChars?: number, maxFiles?: number): ToolResult | null {
+    if (process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0') return null;
+    if (!nodes.some(n => /\.ets$/i.test(n.filePath) && !n.filePath.startsWith('ohos-sdk:'))) return null;
+    const budget = getExploreOutputBudget(cg.getStats().fileCount);
+    const result = buildArktsEvidencePacks(cg, { projectRoot, query, nodes, focusIds,
+      maxChars: Math.min(budget.maxOutputChars, maxChars ?? budget.maxOutputChars), maxFiles });
+    if (!result) return null;
+    // The pack renderer already supplies neutral guidance and exact source bytes.
+    return { content: [{ type: 'text', text: result.text }], [EXPLORE_EMISSION_KEY]: result.emission,
+      _meta: { homegraphEvidencePacks: result.metadata } };
+  }
+
+  /** Render a compact symbol-bounded slice on the legacy mechanism path. */
   private renderLightMechanismSource(
     projectRoot: string,
     filePath: string,
@@ -6485,7 +6518,7 @@ export class ToolHandler {
    * findRelevantContext. Fast enough for MCP budget; complete enough to avoid
    * agent grep/read loops (token savings).
    */
-  private tryLightMechanismExplore(cg: HomeGraph, query: string, projectRoot: string, plan?: QueryPlan): ToolResult | null {
+  private tryLightMechanismExplore(cg: HomeGraph, query: string, projectRoot: string, plan?: QueryPlan, evidenceMaxChars?: number): ToolResult | null {
     if (!planFeature(plan, 'shouldTryLightMechanismExplore', query, shouldTryLightMechanismExplore)) return null;
 
     const STRUCTURE_KINDS = new Set(['class', 'struct', 'interface', 'component', 'method', 'function']);
@@ -6639,6 +6672,11 @@ export class ToolHandler {
     const seeds = extractMechanismEntrySeeds(query);
     const flow = this.buildFlowFromNamedSymbols(cg, `${query} ${seeds.join(' ')}`);
     const hasFlowPath = flow.pathNodeIds.size > 1;
+
+    const evidence = this.tryArktsEvidenceExplore(cg, query, projectRoot,
+      [...fileNodes.values()].flat().concat([...flow.pathNodeIds].flatMap(id => { const n = cg.getNode(id); return n ? [n] : []; })),
+      new Set([...seedIds, ...flow.pathNodeIds]), evidenceMaxChars);
+    if (evidence) return evidence;
 
     const managerSection = this.formatDomainRoleInventory(managerHits.length > 0
       ? managerHits
@@ -7105,7 +7143,7 @@ export class ToolHandler {
    * Compact explore for local-symbol behavior questions — skips findRelevantContext
    * and caps to 1–2 defining files (avoids the ~24K related-file dump).
    */
-  private tryCompactLocalSymbolExplore(cg: HomeGraph, query: string, projectRoot: string, plan?: QueryPlan): ToolResult | null {
+  private tryCompactLocalSymbolExplore(cg: HomeGraph, query: string, projectRoot: string, plan?: QueryPlan, evidenceMaxChars?: number): ToolResult | null {
     // Inventory runs *before* this on the call sites. Do not refuse compact
     // merely because inventory *intent* matched — empty inventory must fall
     // through here (bare callbacks like OnSurfaceChangedCB).
@@ -7300,6 +7338,10 @@ export class ToolHandler {
     }
 
     if (seedIds.size === 0) return null;
+
+    const evidence = this.tryArktsEvidenceExplore(cg, query, projectRoot,
+      [...fileNodes.values()].flat(), seedIds, evidenceMaxChars);
+    if (evidence) return evidence;
 
     const pathAffinity = (seedPath: string, otherPath: string): boolean => {
       const a = seedPath.replace(/\\/g, '/').split('/');
@@ -10415,6 +10457,15 @@ export class ToolHandler {
     }
     const flow = this.buildFlowFromNamedSymbols(cg, flowQuery);
     const hasFlowPath = flow.pathNodeIds.size > 0;
+    // Keep literal/resource and specialized inventory rendering intact. This
+    // first batch changes symbol-grounded structural evidence only.
+    if ((hasFlowPath || flow.text.length > 0 || plan?.intent === 'flow') && !subgraph.literalEvidence?.hits.length) {
+      const evidence = this.tryArktsEvidenceExplore(cg, query, projectRoot,
+        [...subgraph.nodes.values()].concat([...flow.pathNodeIds].flatMap(id => { const n = cg.getNode(id); return n ? [n] : []; })),
+        new Set([...subgraph.roots, ...flow.namedNodeIds, ...flow.pathNodeIds]),
+        args._hgEvidenceMaxChars as number | undefined, explicitMaxFiles ? maxFiles : undefined);
+      if (evidence) return evidence;
+    }
     budget = tightenExploreBudgetForQuery(budget, query, { hasFlowPath });
     // Honor an explicit maxFiles from the caller — budget.defaultMaxFiles is only
     // a default when the agent didn't ask for more (adaptive sibling tests pass 12).

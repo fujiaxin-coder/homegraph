@@ -162,7 +162,11 @@ describe('languages/arkts viewtree flow', () => {
     });
     const text = res.content[0]!.text as string;
 
-    expect(text).toContain('**Flow (call path among the symbols you queried)**');
+    expect(text).toContain('**Static relations (with source dependencies)**');
+    expect(text).toMatch(/aboutToAppear[^\n]*→ calls →[^\n]*build/);
+    expect(text).toMatch(/build[^\n]*→ calls →[^\n]*handleClick/);
+    expect(text).toContain('.onClick(this.handleClick)');
+    expect(text).not.toContain('@dummyFile');
     expect(text).toMatch(/aboutToAppear/);
     expect(text).toMatch(/build/);
     expect(text).toMatch(/handleClick/);

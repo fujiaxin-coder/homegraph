@@ -29,7 +29,7 @@ function defaultExploreMaxFiles(fileCount: number): number {
 }
 
 /** Bump when cache-key normalization or cached payload shape changes. */
-export const QUERY_CACHE_FORMAT_VERSION = 3;
+export const QUERY_CACHE_FORMAT_VERSION = 4;
 
 const METADATA_INDEX_STAMP = 'query_cache_index_stamp';
 const METADATA_FORMAT_VERSION = 'query_cache_format_version';
@@ -160,7 +160,8 @@ function exploreEnvFingerprint(): string {
       : '1';
   const rankMultiterm = process.env.HOMEGRAPH_RANK_NO_MULTITERM === '1' ? '0' : '1';
   const fullSource = process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE === '1' ? '1' : '0';
-  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}`;
+  const evidencePacks = process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0' ? '0' : '1';
+  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}|arktsEvidence:${evidencePacks}`;
 }
 
 function normalizeString(value: unknown): string | undefined {
@@ -272,6 +273,8 @@ export function buildMcpQueryCacheFingerprint(
 
     case 'homegraph_search': {
       parts.push(`query:${(normalizeString(args.query) ?? '').toLowerCase()}`);
+      // Search can reuse the compact ArkTS renderer as an existing fast path.
+      parts.push(exploreEnvFingerprint());
       if (args.kind != null) {
         const kind = args.kind === 'type' ? 'type_alias' : String(args.kind);
         parts.push(`kind:${kind}`);

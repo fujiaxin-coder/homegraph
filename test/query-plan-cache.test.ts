@@ -55,6 +55,14 @@ describe('Structured query-plan cache identity', () => {
     expect(key(base)).not.toBe(key({ ...base, steps: [{ ...base.steps[0]!, dependsOn: ['prior'] }] }));
   });
 
+  it('isolates the ArkTS evidence pack ablation in cached explore responses', () => {
+    const enabled = key(plan());
+    const search = buildMcpQueryCacheKey('homegraph_search', { query: 'Page.onTap' }, 100);
+    vi.stubEnv('HOMEGRAPH_ARKTS_EVIDENCE_PACKS', '0');
+    expect(key(plan())).not.toBe(enabled);
+    expect(buildMcpQueryCacheKey('homegraph_search', { query: 'Page.onTap' }, 100)).not.toBe(search);
+  });
+
   it('isolates original task context even for identical lookup terms', () => {
     expect(key({ ...plan(), taskContext: 'Remove the phone entry, keep wearable' }))
       .not.toBe(key({ ...plan(), taskContext: 'Remove wearable, keep the phone entry' }));

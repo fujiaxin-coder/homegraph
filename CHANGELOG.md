@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- ArkTS symbol/flow exploration now selects complete source declarations and the dependencies of static relation evidence together. Explicit gaps identify omitted, stale and unindexed evidence; output and planner budgets no longer cut these packs mid-body. Virtual ArkAnalyzer entries are excluded, cache hits validate source fingerprints, and `HOMEGRAPH_ARKTS_EVIDENCE_PACKS=0` restores legacy rendering for comparison (Spec 0029). Literal/resource and focused usages/modules/native routes retain their existing behavior.
+
 ### Fixes
 
 - An MCP host's explicit project declaration (`--path`, or the client's `rootUri`/`workspaceFolders`) is now a **floor** for root resolution: a stray ancestor `.homegraph/` above it is never adopted. Previously a nested server walked up unbounded and could latch onto an unrelated ancestor index — observed live as a DevEco evaluation session creating `.homegraph` at a benchmark harness root, after which every nested project's daemon tried to index the entire result tree (OOM at 3.5GB in 48s) while its server was SIGKILL'd by the 60s liveness watchdog with every tool call hanging as `Connection closed`. Bare `serve mcp` and CLI commands keep the git-style unbounded walk-up; tool-level `projectPath` resolution is unchanged (Spec 0028).
