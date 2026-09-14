@@ -265,13 +265,8 @@ export async function initGrammars(): Promise<void> {
  * primary constructors natively. Terraform: tree-sitter-wasms does not ship
  * HCL/Terraform at all, so we vendor the prebuilt tree-sitter-terraform.wasm
  * from @tree-sitter-grammars/tree-sitter-hcl 1.2.0 (Apache-2.0) —
- * byte-identical to the npm package's artifact. ArkTS: tree-sitter-wasms
- * doesn't ship it either; we vendor the prebuilt tree-sitter-arkts.wasm from
- * the tree-sitter-arkts 0.2.0 npm package (harmony-contrib/tree-sitter-arkts,
- * MIT) — byte-identical to the npm tarball's artifact. It extends the
- * tree-sitter-javascript grammar the same way tree-sitter-typescript does,
- * adding `struct_declaration` and the `arkui_component_expression` build()
- * DSL. Nix: tree-sitter-wasms doesn't ship it; we vendor a wasm built from
+ * byte-identical to the npm package's artifact. Nix: tree-sitter-wasms doesn't
+ * ship it; we vendor a wasm built from
  * nix-community/tree-sitter-nix @ 3d0173d (MIT) with tree-sitter-cli 0.25.10
  * (`generate` + `build --wasm`, ABI 15 — upstream's checked-in parser.c is
  * still ABI 13; all 54 upstream corpus tests pass on the regenerated parser).
