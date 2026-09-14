@@ -9,6 +9,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- ArkTS exploration now finds bounded directed paths between named anchors, selecting intermediate declarations and registration sources together. Typed state/event goals, exact qualified-name recovery, ambiguity gaps and explicit stop reasons reduce missing connections without treating shared callees as a path. `HOMEGRAPH_ARKTS_QUERY_PATHS=0` restores the first-batch evidence strategy for comparison; indexing and external tool interfaces are unchanged (Spec 0030).
+- ArkTS symbol/flow exploration now selects complete source declarations and the dependencies of static relation evidence together. Explicit gaps identify omitted, stale and unindexed evidence; output and planner budgets no longer cut these packs mid-body. Virtual ArkAnalyzer entries are excluded, cache hits validate source fingerprints, and `HOMEGRAPH_ARKTS_EVIDENCE_PACKS=0` restores legacy rendering for comparison (Spec 0029). Literal/resource and focused usages/modules/native routes retain their existing behavior.
+
 ### Fixes
 
 - An MCP host's explicit project declaration (`--path`, or the client's `rootUri`/`workspaceFolders`) is now a **floor** for root resolution: a stray ancestor `.homegraph/` above it is never adopted. Previously a nested server walked up unbounded and could latch onto an unrelated ancestor index — observed live as a DevEco evaluation session creating `.homegraph` at a benchmark harness root, after which every nested project's daemon tried to index the entire result tree (OOM at 3.5GB in 48s) while its server was SIGKILL'd by the 60s liveness watchdog with every tool call hanging as `Connection closed`. Bare `serve mcp` and CLI commands keep the git-style unbounded walk-up; tool-level `projectPath` resolution is unchanged (Spec 0028).
@@ -24,11 +29,16 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- Prefer ordinary bash/search/read for source localization and use graph tools only for an unresolved relation. Remove mandatory explore-first guidance in both MCP initialization and tool descriptions; retain indexing, query schemas and validation requirements (Spec 0028).
+- Preserve the action and constraints in explore queries, use repository-relative paths, and optionally label node source excerpts with a content identity for trace analysis (`HOMEGRAPH_SOURCE_RECEIPTS=1`, Spec 0027).
+
 - MCP `initialize` instructions: **single-file path-pinned edits → Read + edit, skip `homegraph_*`**; explore only when locate/cross-file is needed.
 - Explore **defers** (`Skip HomeGraph`, kind `path-pinned-edit`) when the query names one `…/File.ext` and is a code-change shape — avoids explore context tax on 082-style tasks.
 - Path scaffolding (`features/.../Foo.ets` + basename-as-Type) no longer counts as multi-anchor; `.ets`/`.ts`/… are not parsed as member access.
 
 ### New Features
+
+- Standard-library Python retrieval debugger with an original-source Spatial Upscale demo, interactive steps, rules/LLM comparison, and persistent MCP/Planner evidence and error records (Spec 0025).
 
 - Experimental structured query planning for explore (Spec 0022): shared local routing features; optional, explicitly configured one-call model intent/decomposition/rephrase; bounded dependent retrieval with a shared deadline/output budget, validated anchors, worker propagation, context hints and direction-aware cache keys. Model failures fall back locally; compact diagnostic metadata includes planning usage/time and per-step coverage. No remote model calls by default.
 

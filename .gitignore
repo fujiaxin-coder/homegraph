@@ -69,3 +69,6 @@ tmux-web/
 *.pyc
 
 .kommandr/
+
+# Local retrieval debug source copies and transcripts
+.homegraph-debug/
