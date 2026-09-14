@@ -410,6 +410,9 @@ describe('MCP Input Validation', () => {
       searchNodes: () => many,
       // executeReadTool phase-gates before search; incomplete fakes must look "ready".
       getBuildPhase: () => 'full' as const,
+      // Spec 0032: resolveProductIndexState calls these on `full`; missing → catch → syncing.
+      isWriteLockedByOther: () => false,
+      isIndexing: () => false,
       getStats: () => ({ fileCount: 1, nodeCount: many.length, edgeCount: 0 }),
       getProjectRoot: () => process.cwd(),
       getFile: () => undefined,

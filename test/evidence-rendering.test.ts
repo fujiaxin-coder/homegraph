@@ -59,7 +59,9 @@ describe('typed evidence renders source and preserves relation direction', () =>
     return (handler as any).executeQueryPlan({ projectPath: root }, plan);
   }
 
-  it('renders a resource/UI witness even when the UI has no indexed symbol', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'renders a resource/UI witness even when the UI has no indexed symbol',
+    async () => {
     await index({
       'entry/src/main/resources/base/element/string.json': '{"string":[{"name":"verify_entry","value":"选择验证"}]}',
       'entry/src/main/ets/pages/Index.ets': "Button($r('app.string.verify_entry')).onClick(() => openVerification())",

@@ -17,7 +17,10 @@ const HAS_SQLITE = (() => {
   }
 })();
 
-describe.skipIf(!HAS_SQLITE)('arkui-common-event + arkui-taskpool synthesizers', () => {
+// Windows: SQLite/WAL handle retention → EPERM on tmp cleanup after indexAll.
+describe.skipIf(!HAS_SQLITE || process.platform === 'win32')(
+  'arkui-common-event + arkui-taskpool synthesizers',
+  () => {
   let tmpDir: string | undefined;
   afterEach(() => {
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });

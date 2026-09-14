@@ -613,7 +613,11 @@ program
   .option('-f, --force', 'Index even if the path looks like your home directory or a filesystem root')
   .option('-q, --quiet', 'Suppress progress output')
   .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-  .action(async (pathArg: string | undefined, options: { force?: boolean; quiet?: boolean; verbose?: boolean }) => {
+  .option(
+    '--inplace',
+    'Index into the existing database without recreating it (MCP auto-init; DB may already be open by the parent)',
+  )
+  .action(async (pathArg: string | undefined, options: { force?: boolean; quiet?: boolean; verbose?: boolean; inplace?: boolean }) => {
     const projectPath = resolveProjectPath(pathArg);
 
     try {
@@ -632,16 +636,13 @@ program
       }
 
       const { default: HomeGraph } = await loadHomeGraph();
-      // `index` is a FULL re-index — identical to a fresh `init`. RECREATE the
-      // database from scratch (discard .homegraph/homegraph.db + its WAL) rather
-      // than opening the old graph and DELETE-ing every row. The clear-then-index
-      // approach reported "0 nodes" without the clear (#874); the recreate keeps
-      // that fixed AND avoids the failure mode where, on a large or pre-fix
-      // poisoned index, the per-row FTS delete churn wedged the main thread long
-      // enough to trip the liveness watchdog before scanning even began (#1067).
-      // recreate() hands back a fresh, empty instance — no clear() needed. For
-      // fast incremental updates use `sync`.
-      const cg = await HomeGraph.recreate(projectPath);
+      // Default `index` is a FULL re-index via recreate(). MCP auto-init already
+      // created an empty DB and keeps it open in the parent — recreate() cannot
+      // unlink the file on Windows (EPERM) and the detached child exits with 0
+      // files (Spec 0032). `--inplace` opens the existing DB and indexAll()s.
+      const cg = options.inplace
+        ? await HomeGraph.open(projectPath, { sources: 'both' })
+        : await HomeGraph.recreate(projectPath);
 
       // Supervise the indexer: self-terminate if orphaned (parent shim killed)
       // or if the main thread wedges — neither was guarded on this path (#999).

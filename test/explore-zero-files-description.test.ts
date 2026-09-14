@@ -56,7 +56,7 @@ describe('homegraph_explore description at fileCount === 0 (Spec 0027)', () => {
 
   it('failed full build says so and relays to the user, even though build_phase rolled back', async () => {
     cg = await HomeGraph.init(tempDir, { index: false });
-    // startInProcessFullIndex's catch rolls build_phase back to 'fast' on
+    // startBackgroundFullBuild's catch rolls build_phase back to 'fast' on
     // failure — the failed note must win over the building note here.
     cg.setBuildPhase('fast');
     cg.getQueryBuilder().setMetadata('index_state', 'failed');
@@ -77,12 +77,12 @@ describe('homegraph_explore description at fileCount === 0 (Spec 0027)', () => {
     expect(d).not.toContain('(0 files indexed)');
   });
 
-  it('phase=none (no build pipeline yet) reads as building, matching the call-time gate', async () => {
+  it('phase=none (no build pipeline yet) reads as empty status (Spec 0032)', async () => {
     cg = await HomeGraph.init(tempDir, { index: false });
     // getBuildPhase falls back to 'none' on an empty db.
     expect(cg.getBuildPhase()).toBe('none');
     const d = exploreOf(cg).description;
-    expect(d).toMatch(/still building/i);
+    expect(d).toContain('status=empty');
     expect(d).not.toContain('files indexed');
   });
 

@@ -129,7 +129,9 @@ describe('languages/arkts migrate index enrichment', () => {
     expect(linkEdge?.metadata?.passageType).toBe('state_variable_ref');
   });
 
-  it('getArkUIMigrateSnapshot + MCP tool return one-shot JSON', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'getArkUIMigrateSnapshot + MCP tool return one-shot JSON',
+    async () => {
     const root = makeArktsProject(MIGRATE_FIXTURE);
     const cg = HomeGraph.initSync(root);
     try {

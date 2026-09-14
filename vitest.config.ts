@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // ArkTS/AA indexAll fixtures routinely exceed Vitest's 5s default under load.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
     // Cap both ends: Vitest 2 defaults minWorkers≈maxWorkers≈os.availableParallelism()
     // (28 here). Uncapped forks OOM with `Fatal process out of memory: Zone` on
     // Node 24/Windows; `--maxWorkers=N` alone leaves minWorkers high → Tinypool

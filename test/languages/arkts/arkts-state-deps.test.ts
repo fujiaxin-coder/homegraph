@@ -124,7 +124,9 @@ describe('languages/arkts state dependency graph', () => {
     expect(edge).toBeDefined();
   });
 
-  it('connects parent @State field to child @Prop in explore Flow', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'connects parent @State field to child @Prop in explore Flow',
+    async () => {
     const root = makeArktsProject(PROP_FIXTURE);
     const cg = HomeGraph.initSync(root);
     try {

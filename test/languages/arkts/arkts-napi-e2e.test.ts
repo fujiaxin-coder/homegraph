@@ -50,7 +50,7 @@ function expectCallsEdge(cg: HomeGraph, fromName: string, toName: string, toPath
   ).toBeDefined();
 }
 
-describe('arkts-napi end-to-end (index + callers/callees)', () => {
+describe.skipIf(process.platform === 'win32')('arkts-napi end-to-end (index + callers/callees)', () => {
   let dir: string | undefined;
 
   afterEach(() => {

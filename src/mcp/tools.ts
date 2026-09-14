@@ -13,6 +13,11 @@ import { buildArktsEvidencePacks } from './arkts-evidence-packs';
 import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidencePaths } from '../graph/evidence-paths';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
 import { shouldSkipCatchUpSync } from './memory-budget';
+import {
+  isSqliteBusyMessage,
+  productIndexGuidance,
+  resolveProductIndexState,
+} from './index-availability';
 import { findNearestHomeGraphRoot } from '../directory';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
@@ -1783,13 +1788,21 @@ export class ToolHandler {
     if (cg) {
       try {
         // Failed check comes first: a failed full build rolls build_phase back
-        // to 'fast' (startInProcessFullIndex catch), so the building branch
+        // to 'fast' (startBackgroundFullBuild catch), so the building branch
         // below would otherwise mask the failure.
         if (cg.getQueryBuilder().getMetadata('index_state') === 'failed') {
           return 'The last full index build for this project failed, so results will be empty. Tell the user to re-run `homegraph index`.';
         }
-        if (cg.getBuildPhase() !== 'full') {
-          return "HomeGraph is still building this project's index. A call right now returns build-progress guidance; use `homegraph_project` for the module/file map, then retry once indexing finishes.";
+        const state = resolveProductIndexState(cg);
+        if (state === 'empty') {
+          return productIndexGuidance('empty');
+        }
+        if (state === 'fast' || state === 'syncing') {
+          // Keep the Spec 0027 "still building → homegraph_project" story for
+          // frozen tools/list descriptions (hosts snapshot once at connect).
+          return state === 'syncing'
+            ? productIndexGuidance('syncing')
+            : "HomeGraph is still building this project's index. A call right now returns build-progress guidance; use `homegraph_project` for the module/file map, then retry once indexing finishes.";
         }
       } catch {
         /* metadata is advisory — fall through to the empty note */
@@ -2445,8 +2458,12 @@ export class ToolHandler {
       if (err instanceof PathRefusalError) {
         return this.errorResult(err.message);
       }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isSqliteBusyMessage(msg)) {
+        return this.textResult(productIndexGuidance('syncing'));
+      }
       return this.errorResult(
-        `Tool execution failed: ${err instanceof Error ? err.message : String(err)}. ` +
+        `Tool execution failed: ${msg}. ` +
         'This is an internal homegraph error — retry the call once; if it persists, ' +
         'continue without homegraph for this task.'
       );
@@ -2724,8 +2741,12 @@ export class ToolHandler {
       if (err instanceof PathRefusalError) {
         return this.errorResult(err.message);
       }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isSqliteBusyMessage(msg)) {
+        return this.textResult(productIndexGuidance('syncing'));
+      }
       return this.errorResult(
-        `Tool execution failed: ${err instanceof Error ? err.message : String(err)}. ` +
+        `Tool execution failed: ${msg}. ` +
         'This is an internal homegraph error — retry the call once; if it persists, ' +
         'continue without homegraph for this task.'
       );
@@ -2772,35 +2793,28 @@ export class ToolHandler {
   }
 
   /**
-   * Gate symbol/graph tools while auto-init is still on the fast map or
-   * background full index (and no nodes exist yet). Success-shaped guidance —
-   * never isError — so agents keep using HomeGraph.
+   * Gate symbol/graph tools by product index state (Spec 0032).
+   * Success-shaped guidance — never isError — so agents keep using HomeGraph.
    */
   private maybeDeepToolPhaseGate(cg: HomeGraph, _toolName: string): ToolResult | null {
-    const phase = cg.getBuildPhase();
-    if (phase === 'full') return null;
+    const state = resolveProductIndexState(cg);
+    if (state === 'full') return null;
+    if (state === 'syncing') {
+      return this.textResult(productIndexGuidance('syncing'));
+    }
+    if (state === 'empty') {
+      return this.textResult(productIndexGuidance('empty'));
+    }
+    // fast: allow deep tools once some symbols exist (partial index).
     try {
       if (cg.getStats().nodeCount > 0) return null;
-    } catch {
-      /* ignore */
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isSqliteBusyMessage(msg)) {
+        return this.textResult(productIndexGuidance('syncing'));
+      }
     }
-    if (phase === 'fast' || phase === 'indexing') {
-      return this.textResult(
-        [
-          `Full symbol index is still building (phase=${phase}).`,
-          'Use `homegraph_project` for the module/file map now, then retry this tool once indexing finishes.',
-        ].join('\n')
-      );
-    }
-    if (phase === 'building_fast' || phase === 'none') {
-      return this.textResult(
-        [
-          'HomeGraph is still preparing the project map.',
-          'Retry in a few seconds, or call `homegraph_project` once the fast build completes.',
-        ].join('\n')
-      );
-    }
-    return null;
+    return this.textResult(productIndexGuidance('fast'));
   }
 
   private async handleSearch(args: Record<string, unknown>): Promise<ToolResult> {
@@ -12324,12 +12338,27 @@ export class ToolHandler {
    */
   private async handleProject(args: Record<string, unknown>): Promise<ToolResult> {
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
-    const phase = cg.getBuildPhase();
-    if (phase === 'building_fast') {
-      return this.textResult(
-        'Fast project map is still building — retry in a few seconds.'
-      );
+    const state = resolveProductIndexState(cg);
+    if (state === 'empty') {
+      return this.textResult(productIndexGuidance('empty'));
     }
+    if (state === 'syncing') {
+      // Prefer returning the map when readable; only hard-stop if phase has no map.
+      try {
+        const peek = cg.getProjectMap({ includeFiles: false });
+        if (peek.modules.length === 0) {
+          return this.textResult(productIndexGuidance('syncing'));
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (isSqliteBusyMessage(msg)) {
+          return this.textResult(productIndexGuidance('syncing'));
+        }
+        return this.textResult(productIndexGuidance('syncing'));
+      }
+    }
+
+    const phase = cg.getBuildPhase();
 
     let map = cg.getProjectMap({
       module: typeof args.module === 'string' ? args.module : undefined,
@@ -12349,6 +12378,9 @@ export class ToolHandler {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (isSqliteBusyMessage(message)) {
+          return this.textResult(productIndexGuidance('syncing'));
+        }
         return this.textResult(`Failed to build project map: ${message}`);
       }
     }
@@ -12358,16 +12390,20 @@ export class ToolHandler {
     }
 
     const FILE_CAP = 80;
+    const productState = resolveProductIndexState(cg);
     const lines: string[] = [
-      `**Project map** (phase=${map.phase})`,
+      `**Project map** (status=${productState}, phase=${map.phase})`,
       `modules: ${map.modules.length} · files: ${map.fileCount}`,
       '',
     ];
-    if (map.phase === 'fast' || map.phase === 'indexing') {
+    if (productState === 'fast' || map.phase === 'fast' || map.phase === 'indexing') {
       lines.push(
         '_Full symbol index still building — this map has modules/files only (no call graph)._',
         ''
       );
+    }
+    if (productState === 'syncing') {
+      lines.push('_Index write in progress — map may be briefly stale._', '');
     }
 
     for (const m of map.modules) {
