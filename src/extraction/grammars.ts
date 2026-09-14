@@ -276,6 +276,11 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   'cobol', 'vbnet', 'erlang', 'terraform', 'nix',
 ]);
 
+/** Filenames copy-assets must ship under dist/extraction/wasm/ (Spec 0031). */
+export function vendoredWasmFilenames(): string[] {
+  return [...new Set([...VENDORED_WASM_LANGS].map((lang) => WASM_GRAMMAR_FILES[lang]))].sort();
+}
+
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */
 function resolveWasmPath(lang: GrammarLanguage): string {
   const wasmFile = WASM_GRAMMAR_FILES[lang];

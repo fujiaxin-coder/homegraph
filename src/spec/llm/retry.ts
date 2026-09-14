@@ -8,7 +8,7 @@
  * @module spec/llm/retry
  */
 
-import OpenAI from 'openai';
+import { tryLoadOpenAI } from './openai-sdk';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,19 +61,21 @@ export function classifyError(err: unknown): RetryDecision {
     return { retryable: false };
   }
 
+  const OpenAI = tryLoadOpenAI();
+
   // 1. RateLimitError (429)
-  if (err instanceof OpenAI.RateLimitError) {
+  if (OpenAI && err instanceof OpenAI.RateLimitError) {
     const retryAfterMs = parseRetryAfter(err.headers);
     return { retryable: true, retryAfterMs };
   }
 
   // 2. InternalServerError (500)
-  if (err instanceof OpenAI.InternalServerError) {
+  if (OpenAI && err instanceof OpenAI.InternalServerError) {
     return { retryable: true };
   }
 
   // 3. Other APIError with known transient status
-  if (err instanceof OpenAI.APIError) {
+  if (OpenAI && err instanceof OpenAI.APIError) {
     if (err.status !== undefined && RETRYABLE_STATUSES.has(err.status)) {
       return { retryable: true };
     }
@@ -83,8 +85,9 @@ export function classifyError(err: unknown): RetryDecision {
 
   // 4. Connection-level errors
   if (
-    err instanceof OpenAI.APIConnectionError ||
-    err instanceof OpenAI.APIConnectionTimeoutError
+    OpenAI &&
+    (err instanceof OpenAI.APIConnectionError ||
+      err instanceof OpenAI.APIConnectionTimeoutError)
   ) {
     return { retryable: true };
   }

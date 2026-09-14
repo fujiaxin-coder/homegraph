@@ -8,10 +8,11 @@
  *
  * @module spec/llm/client
  */
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import { LLMConfig } from '../config';
 import { logDebug } from '../../errors';
 import { classifyError, computeDelay, sleep } from './retry';
+import { loadOpenAI } from './openai-sdk';
 
 // =============================================================================
 // Interface
@@ -111,6 +112,7 @@ export class OpenAiLlmClient implements LlmClient {
    * we handle retries ourselves with proper visibility).
    */
   private buildClient(): OpenAI {
+    const OpenAI = loadOpenAI();
     return new OpenAI({
       apiKey: this.config.apiKey,
       baseURL: this.resolveBaseURL(),

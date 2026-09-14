@@ -102,8 +102,8 @@ These are exact, fragile wiring — match the existing style precisely:
    - `WASM_GRAMMAR_FILES`: `<lang>: 'tree-sitter-<lang>.wasm',`
    - `EXTENSION_MAP`: each file extension → `'<lang>'` (e.g. `'.lua': 'lua',`)
    - `getLanguageDisplayName`: `<lang>: '<Display Name>',`
-   - **vendored only**: add `<lang>` to the
-     `(lang === 'pascal' || lang === 'scala' || …)` wasm-path branch.
+   - **vendored only**: add `<lang>` to `VENDORED_WASM_LANGS` and add the
+     wasm filename to `src/extraction/vendored-wasm-files.json`.
 3. **`src/extraction/languages/<lang>.ts`** — new file exporting
    `export const <lang>Extractor: LanguageExtractor = { … }`. Map the node types
    from Step 3. Required fields: `functionTypes`, `classTypes`, `methodTypes`,
@@ -127,7 +127,7 @@ is a *call*) are handled in the extractor's `visitNode` hook instead.
 ### Step 5 — Build + verify loop
 
 ```bash
-npm run build            # tsc + copy-assets (copies any vendored *.wasm into dist/)
+npm run build            # tsc + copy-assets (listed vendored *.wasm into dist/)
 ```
 Index a small sample repo and check extraction:
 ```bash
@@ -211,7 +211,7 @@ releases go through the GitHub Actions Release workflow.
 - The A/B spawns real **paid** `claude -p` runs (opus, `--max-budget-usd`),
   2 arms × 3 repos. The corpus dir `/tmp/homegraph-corpus` is shared with
   `/agent-eval`, so clones are reused across runs.
-- Any new `*.wasm` must live in `src/extraction/wasm/` — `copy-assets` (run by
+- Any new vendored `*.wasm` must live in `src/extraction/wasm/` **and** be listed in `src/extraction/vendored-wasm-files.json` (keep in sync with `VENDORED_WASM_LANGS` in `grammars.ts`) — `copy-assets` (run by
   `npm run build`) ships it; otherwise it won't be in `dist/`.
 - An index must be served by the **same** binary that built it. Step 8 builds +
   links the dev build first, so this holds.

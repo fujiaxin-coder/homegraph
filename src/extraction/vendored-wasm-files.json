@@ -1,0 +1,16 @@
+[
+  "tree-sitter-c_sharp.wasm",
+  "tree-sitter-cfml.wasm",
+  "tree-sitter-cfquery.wasm",
+  "tree-sitter-cfscript.wasm",
+  "tree-sitter-cobol.wasm",
+  "tree-sitter-erlang.wasm",
+  "tree-sitter-lua.wasm",
+  "tree-sitter-luau.wasm",
+  "tree-sitter-nix.wasm",
+  "tree-sitter-pascal.wasm",
+  "tree-sitter-r.wasm",
+  "tree-sitter-scala.wasm",
+  "tree-sitter-terraform.wasm",
+  "tree-sitter-vbnet.wasm"
+]

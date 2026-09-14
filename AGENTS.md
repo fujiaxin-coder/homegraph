@@ -13,7 +13,7 @@ Development workflow (SDD: write specs under `docs/specs/` first, commit convent
 ## Build, Test, Run
 
 ```bash
-npm run build           # tsc + copy schema.sql and *.wasm into dist/; chmods dist/bin/homegraph.js
+npm run build           # tsc + copy-assets (schema.sql, vendored wasm list, strip maps); chmod dist/bin/homegraph.js
 npm run dev             # tsc --watch
 npm run clean           # rm -rf dist
 
@@ -29,7 +29,7 @@ npx vitest run test/installer-targets.test.ts
 npx vitest run test/extraction.test.ts -t "TypeScript"
 ```
 
-`copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
+`copy-assets` (called from `build`) copies `src/db/schema.sql`, `src/spec/db/schema.sql`, and the vendored grammars listed in `src/extraction/vendored-wasm-files.json` into `dist/`, then removes `*.js.map` / `*.d.ts.map`. **A new vendored grammar must be on that list (and in `VENDORED_WASM_LANGS`) or it won't ship.** `tree-sitter-wasms` grammars are loaded from the npm package at runtime, not copied into dist.
 
 Node engines: `>=22`. There is a hard exit below 22 (see `src/bin/node-version-check.ts`). Node ≥22 WASM Zone OOM is mitigated with `--liftoff-only` relaunch (`src/extraction/wasm-runtime-flags.ts`), including Node 25+.
 
