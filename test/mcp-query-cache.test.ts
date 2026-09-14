@@ -21,16 +21,17 @@ import {
 function hasSqliteBindings(): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    require('better-sqlite3');
+    const { DatabaseSync } = require('node:sqlite');
+    if (typeof DatabaseSync === 'function') return true;
+  } catch {
+    /* fall through */
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('node-sqlite3-wasm');
     return true;
   } catch {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('node-sqlite3-wasm');
-      return true;
-    } catch {
-      return false;
-    }
+    return false;
   }
 }
 

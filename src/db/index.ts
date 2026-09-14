@@ -17,7 +17,6 @@ export {
   WASM_FALLBACK_FIX_RECIPE,
   isNodeSqliteAvailable,
   isNodeSqliteFts5Available,
-  isNativeSqliteAvailable,
 } from './sqlite-adapter';
 
 /**
@@ -30,9 +29,9 @@ export {
  * the lock instead of throwing "database is locked" immediately. See issue #238.
  *
  * The 5s window (was 120s) rides out a normal incremental sync; the old
- * 2-minute wait presented as a frozen, hung agent. With WAL (node:sqlite or
- * better-sqlite3), reads never block on a writer, so this timeout only governs
- * cross-process write contention. The WASM fallback remaps WAL → DELETE.
+ * 2-minute wait presented as a frozen, hung agent. With WAL (node:sqlite),
+ * reads never block on a writer, so this timeout only governs cross-process
+ * write contention. The WASM fallback remaps WAL → DELETE.
  */
 function configureConnection(db: SqliteDatabase): void {
   db.pragma('busy_timeout = 5000');      // MUST be first — see above
@@ -607,9 +606,8 @@ export class DatabaseConnection {
         return null;
       }
     }
-    // WASM has no real WAL; mixing node:sqlite with a better-sqlite3 main
-    // connection (e.g. Node 23 where node:sqlite lacks FTS5) corrupts WAL state.
-    if (this.backend !== 'node-sqlite' && this.backend !== 'native') {
+    // WASM has no real WAL — only checkpoint node:sqlite connections.
+    if (this.backend !== 'node-sqlite') {
       return null;
     }
     try {
@@ -619,14 +617,8 @@ export class DatabaseConnection {
         let row = null;
         let err = null;
         try {
-          let db = null;
-          if (workerData.backend === 'native') {
-            const Database = require('better-sqlite3');
-            db = new Database(workerData.dbPath);
-          } else {
-            const { DatabaseSync } = require('node:sqlite');
-            db = new DatabaseSync(workerData.dbPath);
-          }
+          const { DatabaseSync } = require('node:sqlite');
+          const db = new DatabaseSync(workerData.dbPath);
           const mode = workerData.mode === 'TRUNCATE' ? 'TRUNCATE' : 'PASSIVE';
           try {
             if (mode === 'TRUNCATE') db.exec('PRAGMA busy_timeout = 2000');
@@ -646,7 +638,7 @@ export class DatabaseConnection {
         try {
           const worker = new Worker(workerSource, {
             eval: true,
-            workerData: { dbPath: this.dbPath, mode, backend: this.backend },
+            workerData: { dbPath: this.dbPath, mode },
           });
           worker.once('message', (m: { row?: Record<string, number> | null; err?: string | null }) => {
             if (m?.err && process.env.HOMEGRAPH_WAL_VALVE_DEBUG) {
@@ -731,14 +723,8 @@ export class DatabaseConnection {
       const workerSource = `
         const { workerData, parentPort } = require('node:worker_threads');
         try {
-          let db = null;
-          try {
-            const { DatabaseSync } = require('node:sqlite');
-            db = new DatabaseSync(workerData.dbPath);
-          } catch {
-            const Database = require('better-sqlite3');
-            db = new Database(workerData.dbPath);
-          }
+          const { DatabaseSync } = require('node:sqlite');
+          const db = new DatabaseSync(workerData.dbPath);
           for (const p of workerData.pragmas) { try { db.exec(p); } catch {} }
           try { db.close(); } catch {}
         } catch {}

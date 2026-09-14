@@ -1235,7 +1235,7 @@ export class HomeGraph {
   }
 
   /**
-   * Active SQLite backend (`native` = better-sqlite3, or `wasm` fallback).
+   * Active SQLite backend (`node-sqlite` or `wasm` fallback).
    * Surfaced via `homegraph status` / `homegraph_status` with journal mode.
    */
   getBackend(): import('./db').SqliteBackend {

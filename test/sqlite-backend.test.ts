@@ -1,5 +1,5 @@
 /**
- * SQLite backend: node:sqlite → better-sqlite3 → wasm.
+ * SQLite backend: node:sqlite → wasm.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -10,7 +10,6 @@ import {
   buildWasmFallbackBanner,
   WASM_FALLBACK_FIX_RECIPE,
   createDatabase,
-  isNativeSqliteAvailable,
   isNodeSqliteAvailable,
   isNodeSqliteFts5Available,
 } from '../src/db/sqlite-adapter';
@@ -19,19 +18,17 @@ import { HomeGraph } from '../src';
 import { removeTempDir } from './helpers/fs';
 
 describe('buildWasmFallbackBanner — fix-recipe content', () => {
-  it('includes Node 22.5+ and better-sqlite3 recovery paths', () => {
+  it('includes Node 22.5+ recovery path', () => {
     const banner = buildWasmFallbackBanner();
     expect(banner).toContain('WASM SQLite fallback active');
     expect(banner).toContain('Node.js 22.5');
-    expect(banner).toContain('xcode-select --install');
-    expect(banner).toContain('apt install build-essential');
-    expect(banner).toContain('npm rebuild better-sqlite3');
     expect(banner).toContain('homegraph status');
+    expect(banner).not.toContain('better-sqlite3');
   });
 
   it('appends prior load errors when provided', () => {
-    const banner = buildWasmFallbackBanner("Cannot find module 'better-sqlite3'");
-    expect(banner).toContain("Prior load errors: Cannot find module 'better-sqlite3'");
+    const banner = buildWasmFallbackBanner('node:sqlite is not available');
+    expect(banner).toContain('Prior load errors: node:sqlite is not available');
   });
 
   it('omits the load-error block when none is supplied', () => {
@@ -41,9 +38,9 @@ describe('buildWasmFallbackBanner — fix-recipe content', () => {
 });
 
 describe('WASM_FALLBACK_FIX_RECIPE', () => {
-  it('mentions Node upgrade and better-sqlite3 rebuild', () => {
+  it('mentions Node upgrade only', () => {
     expect(WASM_FALLBACK_FIX_RECIPE).toContain('22.5');
-    expect(WASM_FALLBACK_FIX_RECIPE).toContain('npm rebuild better-sqlite3');
+    expect(WASM_FALLBACK_FIX_RECIPE).not.toContain('better-sqlite3');
   });
 });
 
@@ -64,8 +61,8 @@ describe('DatabaseConnection — backend reporting', () => {
 
   it('reports a known backend for an initialized DB', () => {
     const conn = DatabaseConnection.initialize(path.join(dir, 'test.db'));
-    expect(['node-sqlite', 'native', 'wasm']).toContain(conn.getBackend());
-    if (conn.getBackend() === 'node-sqlite' || conn.getBackend() === 'native') {
+    expect(['node-sqlite', 'wasm']).toContain(conn.getBackend());
+    if (conn.getBackend() === 'node-sqlite') {
       expect(conn.getJournalMode()).toBe('wal');
     }
     conn.close();
@@ -78,27 +75,32 @@ describe('DatabaseConnection — backend reporting', () => {
     conn.close();
   });
 
-  it('falls through when node:sqlite lacks FTS5', () => {
+  it('falls through to wasm when node:sqlite lacks FTS5', () => {
     if (!isNodeSqliteAvailable() || isNodeSqliteFts5Available()) return;
-    // Node 23.x (and similar): DatabaseSync exists but schema init needs FTS5.
     const conn = DatabaseConnection.initialize(path.join(dir, 'no-fts5.db'));
-    expect(conn.getBackend()).not.toBe('node-sqlite');
-    expect(['native', 'wasm']).toContain(conn.getBackend());
+    expect(conn.getBackend()).toBe('wasm');
     conn.close();
   });
 
   it('selected auto backend can create FTS5 virtual tables', () => {
     const { db, backend } = createDatabase(path.join(dir, 'fts-probe.db'));
-    expect(['node-sqlite', 'native', 'wasm']).toContain(backend);
+    expect(['node-sqlite', 'wasm']).toContain(backend);
     expect(() => db.exec('CREATE VIRTUAL TABLE t USING fts5(content)')).not.toThrow();
     db.close();
   });
 
-  it('prefers better-sqlite3 when forced and the native binding is available', () => {
-    if (!isNativeSqliteAvailable()) return;
+  it('ignores legacy HOMEGRAPH_SQLITE_BACKEND=native', () => {
     process.env.HOMEGRAPH_SQLITE_BACKEND = 'native';
-    const conn = DatabaseConnection.initialize(path.join(dir, 'pref-native.db'));
-    expect(conn.getBackend()).toBe('native');
+    const conn = DatabaseConnection.initialize(path.join(dir, 'legacy-native.db'));
+    expect(['node-sqlite', 'wasm']).toContain(conn.getBackend());
+    expect(conn.getBackend()).not.toBe('native' as never);
+    conn.close();
+  });
+
+  it('can force wasm via HOMEGRAPH_SQLITE_BACKEND', () => {
+    process.env.HOMEGRAPH_SQLITE_BACKEND = 'wasm';
+    const conn = DatabaseConnection.initialize(path.join(dir, 'force-wasm.db'));
+    expect(conn.getBackend()).toBe('wasm');
     conn.close();
   });
 
@@ -106,7 +108,7 @@ describe('DatabaseConnection — backend reporting', () => {
     fs.writeFileSync(path.join(dir, 'x.ts'), `export function x(): void {}\n`);
     const cg = await HomeGraph.init(dir, { index: true });
     try {
-      expect(['node-sqlite', 'native', 'wasm']).toContain(cg.getBackend());
+      expect(['node-sqlite', 'wasm']).toContain(cg.getBackend());
     } finally {
       cg.destroy();
     }

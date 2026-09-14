@@ -870,12 +870,11 @@ program
           warn('The write-ahead log is larger than the database — killed sessions left it behind. It is reclaimed automatically on open; if it persists across runs, another live HomeGraph process is holding it.');
         }
       }
-      // Prefer node:sqlite → better-sqlite3; wasm is last-resort (no WAL).
+      // Prefer node:sqlite; wasm is last-resort (no WAL).
       const backendLabel =
         backend === 'node-sqlite' ? chalk.green('node-sqlite')
-        : backend === 'native' ? chalk.green('native (better-sqlite3)')
         : chalk.yellow(
-            `wasm ${getGlyphs().dash} slower fallback; use Node 22.5+ or \`npm rebuild better-sqlite3\``
+            `wasm ${getGlyphs().dash} slower fallback; use Node 22.5+ for built-in node:sqlite`
           );
       console.log(`  Backend:   ${backendLabel}`);
       const journalLabel = journalMode === 'wal'

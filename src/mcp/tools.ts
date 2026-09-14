@@ -12256,12 +12256,10 @@ export class ToolHandler {
       `**Graph sources:** ${cg.getGraphSources()}`,
     );
 
-    // Surface the active SQLite backend: node:sqlite → better-sqlite3 → wasm.
+    // Surface the active SQLite backend: node:sqlite → wasm.
     const backend = cg.getBackend();
     if (backend === 'node-sqlite') {
       lines.push(`**Backend:** node-sqlite (built-in)`);
-    } else if (backend === 'native') {
-      lines.push(`**Backend:** native (better-sqlite3)`);
     } else {
       lines.push(
         `**Backend:** ⚠ wasm (no WAL backend available) — ` +
@@ -12270,8 +12268,8 @@ export class ToolHandler {
     }
 
     // Effective journal mode. 'wal' ⇒ concurrent reads never block on a writer;
-    // anything else ⇒ they can ("database is locked"). node:sqlite / native
-    // support WAL; wasm remaps to DELETE.
+    // anything else ⇒ they can ("database is locked"). node:sqlite supports WAL;
+    // wasm remaps to DELETE.
     const journalMode = cg.getJournalMode();
     if (journalMode === 'wal') {
       lines.push(`**Journal mode:** wal (concurrent reads safe)`);
