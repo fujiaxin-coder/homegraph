@@ -49,6 +49,27 @@ describe('project map / homegraph_project', () => {
     expect(built.files.some((f) => f.path === 'orphan.ts')).toBe(true);
   });
 
+  it('scans Harmony modules when build-profile uses single quotes (incl. 2in1)', () => {
+    fs.writeFileSync(
+      path.join(tmp, 'build-profile.json5'),
+      `{
+  app: {
+    products: [{ name: 'default', deviceTypes: ['phone', '2in1'], }],
+  },
+  modules: [
+    { name: 'entry', srcPath: './entry', },
+  ],
+}
+`
+    );
+    fs.mkdirSync(path.join(tmp, 'entry', 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'entry', 'src', 'Index.ets'), 'export struct Index {}\n');
+
+    const built = buildProjectMapScan(tmp);
+    expect(built.modules.some((m) => m.name === 'entry' && m.kind === 'harmony')).toBe(true);
+    expect(built.files.some((f) => f.path.startsWith('entry/'))).toBe(true);
+  });
+
   it('persists map and homegraph_project returns it before full index', async () => {
     fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
     fs.writeFileSync(path.join(tmp, 'src', 'a.ts'), 'export const a = 1;\n');

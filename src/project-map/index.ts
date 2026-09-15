@@ -11,8 +11,6 @@ import { scanDirectory } from '../extraction';
 import { detectLanguage } from '../extraction/grammars';
 import {
   listHarmonyProjectModules,
-  normalizeHarmonyModuleSrcPath,
-  type HarmonyModuleRef,
 } from '../extraction/languages/arkts';
 import { loadExtensionOverrides } from '../project-config';
 import { loadWorkspacePackages } from '../resolution/workspace-packages';
@@ -101,7 +99,8 @@ function discoverModules(projectRoot: string): ProjectModuleDraft[] {
     kind: 'root',
   });
 
-  const harmony = listHarmonyProjectModulesLoose(projectRoot);
+  // Same parser as ArkTS dirty-module mapping (Spec 0034): bare keys + single quotes.
+  const harmony = listHarmonyProjectModules(projectRoot);
   if (harmony.length > 0) {
     for (const m of harmony) {
       ensure({
@@ -132,41 +131,6 @@ function discoverModules(projectRoot: string): ProjectModuleDraft[] {
   }
 
   return [...byId.values()];
-}
-
-function listHarmonyProjectModulesLoose(projectRoot: string): HarmonyModuleRef[] {
-  const strict = listHarmonyProjectModules(projectRoot);
-  if (strict.length > 0) return strict;
-
-  // Real DevEco `build-profile.json5` often uses unquoted keys; the strict
-  // parser only strips comments/trailing commas. Quote bare keys and retry.
-  const profilePath = path.join(projectRoot, 'build-profile.json5');
-  if (!fs.existsSync(profilePath)) return [];
-  let raw: unknown;
-  try {
-    const text = fs.readFileSync(profilePath, 'utf-8');
-    const stripped = text
-      .replace(/\/\/.*$/gm, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/,(\s*[}\]])/g, '$1')
-      .replace(/([{,]\s*)([A-Za-z_][\w]*)\s*:/g, '$1"$2":');
-    raw = JSON.parse(stripped);
-  } catch {
-    return [];
-  }
-  if (!raw || typeof raw !== 'object') return [];
-  const modules = (raw as { modules?: unknown }).modules;
-  if (!Array.isArray(modules)) return [];
-  const out: HarmonyModuleRef[] = [];
-  for (const entry of modules) {
-    if (!entry || typeof entry !== 'object') continue;
-    const rec = entry as { name?: unknown; srcPath?: unknown };
-    if (typeof rec.name !== 'string' || typeof rec.srcPath !== 'string') continue;
-    const srcPath = normalizeHarmonyModuleSrcPath(rec.srcPath);
-    if (!srcPath) continue;
-    out.push({ name: rec.name, srcPath });
-  }
-  return out;
 }
 
 function discoverOhpmPackages(projectRoot: string): ProjectModuleDraft[] {

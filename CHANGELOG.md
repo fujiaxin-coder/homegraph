@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- Harmony `build-profile.json5` files that use single-quoted strings (e.g. `'2in1'`) and bare keys now parse correctly, so multi-module ArkTS dirty sync can map changed `.ets` files to PROJECT modules instead of always falling back to a full rebuild (Spec 0034).
 
 ## [1.5.8] - 2026-09-15
 

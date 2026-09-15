@@ -75,6 +75,45 @@ describe('languages/arkts module incremental — mapping', () => {
     ]);
   });
 
+  it('lists PROJECT modules when build-profile uses bare keys and single quotes (incl. 2in1)', () => {
+    const root = makeArktsProject({
+      'build-profile.json5': `{
+  app: {
+    products: [
+      {
+        name: 'default',
+        // DevEco often writes device type ids in single quotes
+        deviceTypes: [
+          'phone',
+          '2in1',
+        ],
+      },
+    ],
+  },
+  modules: [
+    {
+      name: 'entry',
+      srcPath: './entry',
+    },
+    {
+      name: 'library',
+      srcPath: './library',
+    },
+  ],
+}
+`,
+      'entry/src/main/ets/Index.ets': `export function main(): string { return 'entry'; }\n`,
+      'library/src/main/ets/Util.ets': `export function helper(): string { return 'v1'; }\n`,
+    });
+    expect(listHarmonyProjectModules(root)).toEqual([
+      { name: 'entry', srcPath: 'entry' },
+      { name: 'library', srcPath: 'library' },
+    ]);
+    expect(
+      resolveDirtyHarmonyModules(root, ['library/src/main/ets/Util.ets'])
+    ).toEqual({ mode: 'modules', moduleSrcPaths: ['library'] });
+  });
+
   it('maps dirty .ets files to their Harmony modules', () => {
     const root = makeTwoModuleProject();
     const res = resolveDirtyHarmonyModules(root, [
