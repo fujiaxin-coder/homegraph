@@ -1,7 +1,7 @@
 /**
- * Product index states + cold-start (Spec 0032).
+ * Product index states + cold-start (Spec 0032) and five-state status footer (Spec 0035).
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -10,10 +10,14 @@ import { HomeGraph } from '../src';
 import { getHomeGraphDir } from '../src/directory';
 import { ToolHandler } from '../src/mcp/tools';
 import {
+  PRODUCT_STATUS_GLOSSARY,
+  formatProductStatusLine,
   productIndexGuidance,
   resolveProductIndexState,
   isSqliteBusyMessage,
+  textAlreadyHasProductStatus,
 } from '../src/mcp/index-availability';
+import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions';
 
 async function holdLockWithChild(lockPath: string): Promise<{ pid: number; kill: () => void }> {
   const holder = spawn(
@@ -35,12 +39,12 @@ async function holdLockWithChild(lockPath: string): Promise<{ pid: number; kill:
   };
 }
 
-describe('product index states (Spec 0032)', () => {
+describe('product index states (Spec 0032 / 0035)', () => {
   let tempDir: string;
   let cg: HomeGraph | null;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-0031-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-0035-'));
     cg = null;
   });
 
@@ -67,9 +71,14 @@ describe('product index states (Spec 0032)', () => {
     expect(resolveProductIndexState(cg)).toBe('full');
   });
 
-  it('full + foreign write lock → syncing', async () => {
+  it('full + pending files → dirty; write lock still → syncing', async () => {
     cg = await HomeGraph.init(tempDir, { index: false });
     cg.setBuildPhase('full');
+    vi.spyOn(cg, 'getPendingFiles').mockReturnValue([
+      { path: 'entry/src/main/ets/Index.ets', firstSeenMs: Date.now(), lastSeenMs: Date.now(), indexing: false },
+    ]);
+    expect(resolveProductIndexState(cg)).toBe('dirty');
+
     const lockPath = path.join(getHomeGraphDir(tempDir), 'homegraph.lock');
     const holder = await holdLockWithChild(lockPath);
     try {
@@ -80,20 +89,19 @@ describe('product index states (Spec 0032)', () => {
     }
   });
 
-  it('deep tools return status=empty / fast / syncing guidance (success-shaped)', async () => {
+  it('deep tools return short status=empty / fast / syncing guidance', async () => {
     cg = await HomeGraph.init(tempDir, { index: false });
     cg.setBuildPhase('building_fast');
     const handler = new ToolHandler(cg);
 
     const empty = await handler.execute('homegraph_explore', { query: 'Foo' });
     expect(empty.isError).toBeFalsy();
-    expect(empty.content[0]).toMatchObject({ type: 'text' });
-    expect((empty.content[0] as { text: string }).text).toContain('status=empty');
+    expect((empty.content[0] as { text: string }).text).toBe(productIndexGuidance('empty'));
 
     cg.setBuildPhase('fast');
     const fast = await handler.execute('homegraph_explore', { query: 'Foo' });
     expect(fast.isError).toBeFalsy();
-    expect((fast.content[0] as { text: string }).text).toContain('status=fast');
+    expect((fast.content[0] as { text: string }).text).toBe(productIndexGuidance('fast'));
     expect((fast.content[0] as { text: string }).text).toContain('homegraph_project');
 
     cg.setBuildPhase('full');
@@ -102,7 +110,7 @@ describe('product index states (Spec 0032)', () => {
     try {
       const syncing = await handler.execute('homegraph_explore', { query: 'Foo' });
       expect(syncing.isError).toBeFalsy();
-      expect((syncing.content[0] as { text: string }).text).toContain('status=syncing');
+      expect((syncing.content[0] as { text: string }).text).toBe(productIndexGuidance('syncing'));
     } finally {
       holder.kill();
     }
@@ -117,16 +125,80 @@ describe('product index states (Spec 0032)', () => {
     expect((res.content[0] as { text: string }).text).toContain('status=empty');
   });
 
+  it('homegraph_project map ends with status=fast footer (no long prose)', async () => {
+    fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'src', 'a.ts'), 'export const a = 1;\n');
+    fs.writeFileSync(path.join(tempDir, 'package.json'), '{"name":"demo"}\n');
+
+    cg = await HomeGraph.init(tempDir, { index: false });
+    cg.buildProjectMap();
+    cg.setBuildPhase('fast');
+    const handler = new ToolHandler(cg);
+    const res = await handler.execute('homegraph_project', {});
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toContain('Project map');
+    expect(text).toMatch(/HomeGraph status=fast — map only/);
+    expect(text).not.toMatch(/Full symbol index still building/);
+  });
+
+  it('successful tool body keeps content and appends status=full footer', async () => {
+    fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'src', 'a.ts'), 'export const a = 1;\n');
+    cg = await HomeGraph.init(tempDir, { index: false });
+    await cg.indexAll();
+    cg.setBuildPhase('full');
+    const handler = new ToolHandler(cg);
+    const res = await handler.execute('homegraph_search', { query: 'a' });
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toMatch(/HomeGraph status=full — complete and up to date\.\s*$/);
+  });
+
+  it('dirty footer lists pending paths without long ⚠️ banner', async () => {
+    fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'src', 'a.ts'), 'export const a = 1;\n');
+    cg = await HomeGraph.init(tempDir, { index: false });
+    await cg.indexAll();
+    cg.setBuildPhase('full');
+    vi.spyOn(cg, 'getPendingFiles').mockReturnValue([
+      { path: 'src/a.ts', firstSeenMs: Date.now(), lastSeenMs: Date.now(), indexing: false },
+    ]);
+    const handler = new ToolHandler(cg);
+    const res = await handler.execute('homegraph_search', { query: 'a' });
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toContain('HomeGraph status=dirty — outdated: src/a.ts');
+    expect(text).not.toContain('⚠️ Some files referenced');
+  });
+
   it('isSqliteBusyMessage matches lock contention errors', () => {
     expect(isSqliteBusyMessage('SQLITE_BUSY: database is locked')).toBe(true);
     expect(isSqliteBusyMessage('database is locked')).toBe(true);
     expect(isSqliteBusyMessage('no such table')).toBe(false);
   });
 
-  it('productIndexGuidance always names status=', () => {
+  it('productIndexGuidance / formatProductStatusLine stay one line', () => {
     for (const s of ['empty', 'fast', 'syncing'] as const) {
-      expect(productIndexGuidance(s)).toContain(`status=${s}`);
+      const g = productIndexGuidance(s);
+      expect(g).toContain(`status=${s}`);
+      expect(g.includes('\n')).toBe(false);
     }
+    expect(formatProductStatusLine('full')).toBe(
+      'HomeGraph status=full — complete and up to date.'
+    );
+    expect(formatProductStatusLine('dirty', { pendingPaths: ['a.ts', 'b.ts'] })).toBe(
+      'HomeGraph status=dirty — outdated: a.ts, b.ts'
+    );
+    expect(
+      formatProductStatusLine('dirty', {
+        pendingPaths: ['1.ts', '2.ts', '3.ts', '4.ts', '5.ts', '6.ts'],
+      })
+    ).toContain('…+1');
+  });
+
+  it('glossary is short and embedded in server instructions', () => {
+    expect(PRODUCT_STATUS_GLOSSARY.length).toBeLessThan(200);
+    expect(SERVER_INSTRUCTIONS).toContain(PRODUCT_STATUS_GLOSSARY);
+    expect(textAlreadyHasProductStatus('HomeGraph status=full — ok')).toBe(true);
+    expect(textAlreadyHasProductStatus('no status here')).toBe(false);
   });
 });
 
@@ -134,7 +206,7 @@ describe('cold-start init lock (Spec 0032)', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-0031-init-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-0035-init-'));
   });
 
   afterEach(() => {

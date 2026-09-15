@@ -95,6 +95,6 @@ describe('project map / homegraph_project', () => {
 
     const explore = await handler.execute('homegraph_explore', { query: 'a' });
     const exploreText = explore.content.map((c) => ('text' in c ? c.text : '')).join('');
-    expect(exploreText).toMatch(/still building|homegraph_project/i);
+    expect(exploreText).toMatch(/status=fast|homegraph_project/i);
   });
 });

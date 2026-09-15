@@ -13,6 +13,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Harmony `build-profile.json5` files that use single-quoted strings (e.g. `'2in1'`) and bare keys now parse correctly, so multi-module ArkTS dirty sync can map changed `.ets` files to PROJECT modules instead of always falling back to a full rebuild (Spec 0034).
 
+### Improvements
+
+- MCP product index readiness is now five short states (`empty` / `fast` / `full` / `dirty` / `syncing`): tool replies use a one-line `HomeGraph status=…` footer (or that line alone when the tool cannot answer yet). Pending edits surface as `dirty` with path list instead of the long stale banner; write locks stay `syncing`. MCP initialize includes a one-line status glossary (Spec 0035).
+
 ## [1.5.8] - 2026-09-15
 
 ### Improvements

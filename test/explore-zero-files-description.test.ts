@@ -47,9 +47,8 @@ describe('homegraph_explore description at fileCount === 0 (Spec 0027)', () => {
     cg = await HomeGraph.init(tempDir, { index: false });
     cg.setBuildPhase('indexing');
     const d = exploreOf(cg).description;
-    expect(d).toMatch(/still building/i);
+    expect(d).toContain('status=fast');
     expect(d).toContain('homegraph_project');
-    expect(d).toMatch(/retry once indexing finishes/);
     expect(d).not.toContain('files indexed');
     expect(d).not.toMatch(/Budget: make at most/);
   });

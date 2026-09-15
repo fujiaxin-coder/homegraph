@@ -1,50 +1,67 @@
 /**
- * Product-facing index availability for MCP tool results (Spec 0032).
+ * Product-facing index availability for MCP tool results (Spec 0032 + 0035).
  *
- * Internal `build_phase` stays as-is; this layer maps it (+ write-lock / busy)
- * to the four states hosts and agents should see in tool text.
+ * Internal `build_phase` stays as-is; this layer maps it (+ write-lock / busy /
+ * pending dirty files) to the five states hosts and agents should see.
  */
 
 import type HomeGraph from '../index';
 import type { BuildPhase } from '../project-map';
 
 /** Agent-visible index readiness (tool return copy — not tools/list gating). */
-export type ProductIndexState = 'empty' | 'fast' | 'full' | 'syncing';
+export type ProductIndexState = 'empty' | 'fast' | 'full' | 'dirty' | 'syncing';
 
-const EMPTY_LINES = [
-  'HomeGraph status=empty — project map is not ready yet.',
-  'Retry in a few seconds (or call `homegraph_project` once the fast build completes).',
-];
+/** One-line glossary for MCP initialize / tool surface (Spec 0035). */
+export const PRODUCT_STATUS_GLOSSARY =
+  'status: empty=not ready · fast=map only (homegraph_project) · full=fresh · dirty=usable but listed paths outdated · syncing=write lock, retry';
 
-const FAST_LINES = [
-  'HomeGraph status=fast — module/file map is ready; full symbol index is still building.',
-  'Use `homegraph_project` for the module/file map now, then retry this tool once indexing finishes.',
-];
+const MAX_DIRTY_PATHS = 5;
 
-const SYNCING_LINES = [
-  'HomeGraph status=syncing — the index is being written (lock held or local index/sync in progress).',
-  'Retry this tool shortly; do not busy-loop.',
-];
-
-export function productIndexGuidance(state: Exclude<ProductIndexState, 'full'>): string {
+/** Whole-response guidance when the tool cannot usefully answer yet. */
+export function productIndexGuidance(
+  state: Extract<ProductIndexState, 'empty' | 'fast' | 'syncing'>
+): string {
   switch (state) {
     case 'empty':
-      return EMPTY_LINES.join('\n');
+      return 'HomeGraph status=empty — not ready; retry shortly.';
     case 'fast':
-      return FAST_LINES.join('\n');
+      return 'HomeGraph status=fast — map only; use homegraph_project; retry other tools later.';
     case 'syncing':
-      return SYNCING_LINES.join('\n');
+      return 'HomeGraph status=syncing — locked; retry shortly, do not loop.';
+  }
+}
+
+/**
+ * Single status line for tool footers (and for guidance-only replies).
+ * `pendingPaths` only used when `state === 'dirty'`.
+ */
+export function formatProductStatusLine(
+  state: ProductIndexState,
+  opts?: { pendingPaths?: string[] }
+): string {
+  switch (state) {
+    case 'empty':
+    case 'fast':
+    case 'syncing':
+      return productIndexGuidance(state);
+    case 'full':
+      return 'HomeGraph status=full — complete and up to date.';
+    case 'dirty': {
+      const paths = opts?.pendingPaths ?? [];
+      if (paths.length === 0) {
+        return 'HomeGraph status=dirty — outdated: pending files';
+      }
+      const shown = paths.slice(0, MAX_DIRTY_PATHS);
+      const more = paths.length > MAX_DIRTY_PATHS ? `, …+${paths.length - MAX_DIRTY_PATHS}` : '';
+      return `HomeGraph status=dirty — outdated: ${shown.join(', ')}${more}`;
+    }
   }
 }
 
 /**
  * Resolve the product state from a live HomeGraph handle.
  *
- * - empty: fast map not ready (`none` / `building_fast`)
- * - fast: map ready, full index not done (`fast` / `indexing`)
- * - full: symbol index ready
- * - syncing: full (or empty-while-contended-init) and a writer holds the lock /
- *   this process is indexing — reads may fail or see a moving target
+ * Priority: syncing > empty > fast > dirty > full
  */
 export function resolveProductIndexState(cg: HomeGraph): ProductIndexState {
   let phase: BuildPhase;
@@ -73,10 +90,23 @@ export function resolveProductIndexState(cg: HomeGraph): ProductIndexState {
   } catch {
     return 'syncing';
   }
+
+  let pendingCount = 0;
+  try {
+    pendingCount = cg.getPendingFiles?.()?.length ?? 0;
+  } catch {
+    pendingCount = 0;
+  }
+  if (pendingCount > 0) return 'dirty';
   return 'full';
 }
 
 /** True when an error message indicates SQLite writer contention. */
 export function isSqliteBusyMessage(message: string): boolean {
   return /SQLITE_BUSY|database is locked/i.test(message);
+}
+
+/** True when text is already a pure (or leading) HomeGraph status line. */
+export function textAlreadyHasProductStatus(text: string): boolean {
+  return /^\s*HomeGraph status=/m.test(text);
 }

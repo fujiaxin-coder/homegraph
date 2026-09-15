@@ -1,3 +1,7 @@
+import {
+  PRODUCT_STATUS_GLOSSARY,
+} from './index-availability';
+
 /**
  * MCP initialize 中的统一工具指引；工具描述必须遵守相同的按需策略。
  * 仅调整检索选择，不改变索引、查询语义或编码任务的验收要求。
@@ -34,10 +38,16 @@ Write one focused sentence: requested action + target + known anchors + unresolv
 A project map is navigation, not proof of a located feature. Preserve requested product/module scope and verify each candidate before editing. Start with one focused graph request; recover only a named missing body/relation. Budget: ≤2 \`homegraph_explore\` attempts per project, ≤1 focused depth recovery; existing runtime budgets may be tighter. These are ceilings, never a required sequence. If evidence is still missing, use targeted bash/search/read and continue implementation. Do not expand into unrelated files merely to exhaust a budget.
 `;
 
+const INDEX_STATUS = `## Index status
+
+Tool replies end with \`HomeGraph status=…\`. ${PRODUCT_STATUS_GLOSSARY}.
+`;
+
 export const SERVER_INSTRUCTIONS = `# HomeGraph — optional structural evidence for this repo
 
 ${ON_DEMAND}
 ${QUERY}
+${INDEX_STATUS}
 ${SOURCE_AND_VALIDATION}
 No index → use ordinary tools; indexing is managed by the host. Do not run HomeGraph initialization as part of solving the task.
 `;
@@ -48,5 +58,6 @@ Pass \`projectPath\` to an already indexed folder with \`.homegraph/\`. No index
 
 ${ON_DEMAND}
 ${QUERY}
+${INDEX_STATUS}
 ${SOURCE_AND_VALIDATION}
 `;

@@ -12,11 +12,12 @@ import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLi
 import { buildArktsEvidencePacks } from './arkts-evidence-packs';
 import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidencePaths } from '../graph/evidence-paths';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
-import { shouldSkipCatchUpSync } from './memory-budget';
 import {
+  formatProductStatusLine,
   isSqliteBusyMessage,
   productIndexGuidance,
   resolveProductIndexState,
+  textAlreadyHasProductStatus,
 } from './index-availability';
 import { findNearestHomeGraphRoot } from '../directory';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
@@ -1797,12 +1798,11 @@ export class ToolHandler {
         if (state === 'empty') {
           return productIndexGuidance('empty');
         }
-        if (state === 'fast' || state === 'syncing') {
-          // Keep the Spec 0027 "still building → homegraph_project" story for
-          // frozen tools/list descriptions (hosts snapshot once at connect).
-          return state === 'syncing'
-            ? productIndexGuidance('syncing')
-            : "HomeGraph is still building this project's index. A call right now returns build-progress guidance; use `homegraph_project` for the module/file map, then retry once indexing finishes.";
+        if (state === 'fast') {
+          return productIndexGuidance('fast');
+        }
+        if (state === 'syncing') {
+          return productIndexGuidance('syncing');
         }
       } catch {
         /* metadata is advisory — fall through to the empty note */
@@ -2165,52 +2165,59 @@ export class ToolHandler {
       return { ...result, content: [{ type: 'text', text: composed }, ...tail] };
     }
 
-    // Defensive: some test fakes inject a partial HomeGraph stub without the
-    // newer pending-files API. Treat missing/throwing as "no pending files."
-    let pending: PendingFile[] = [];
+    // Spec 0035: pending/dirty is a one-line status footer (withProductStatusFooter),
+    // not the long ⚠️ stale banner. Keep formatStaleBanner helpers for tests /
+    // status tool; do not prepend them on every read tool.
+    return result;
+  }
+
+  /**
+   * Append a one-line product index status footer (Spec 0035).
+   * Guidance-only replies that already start with `HomeGraph status=` are left alone.
+   */
+  private withProductStatusFooter(result: ToolResult, projectPath?: string): ToolResult {
+    if (result.isError) return result;
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (textAlreadyHasProductStatus(first.text)) return result;
+
+    let cg: HomeGraph;
     try {
-      pending = cg.getPendingFiles?.() ?? [];
+      cg = this.getHomeGraph(projectPath);
     } catch {
       return result;
     }
-    if (pending.length === 0) return result;
-
-    const [first, ...rest] = result.content;
-    if (!first || first.type !== 'text') return result;
-
-    const text = first.text;
-    const inResponse: PendingFile[] = [];
-    const elsewhere: PendingFile[] = [];
-    for (const p of pending) {
-      // Substring match against the project-relative POSIX path — that's
-      // exactly the format both the watcher and every homegraph response
-      // emit, so a plain includes() is sufficient and avoids regex pitfalls.
-      if (text.includes(p.path)) inResponse.push(p);
-      else elsewhere.push(p);
-    }
-
-    let banner = '';
-    if (inResponse.length > 0) {
-      let dbPath: string | null = null;
+    if (this.cg && cg !== this.cg) {
       try {
-        // Large indexes skip catch-up — soft banner so agents don't abandon HG for Read.
-        const root = cg.getProjectRoot();
-        dbPath = resolvePath(root, '.homegraph', 'homegraph.db');
+        const sameProject =
+          resolvePath(this.cg.getProjectRoot()) === resolvePath(cg.getProjectRoot());
+        if (sameProject) cg = this.cg;
       } catch {
-        dbPath = null;
+        /* leave cg */
       }
-      banner = formatStaleBanner(inResponse, {
-        catchUpDeferred: shouldSkipCatchUpSync(dbPath),
-      });
     }
-    let footer = '';
-    if (elsewhere.length > 0) {
-      footer = formatStaleFooter(elsewhere);
-    }
-    if (!banner && !footer) return result;
 
-    const composed = [banner, text, footer].filter(Boolean).join('\n\n');
-    return { ...result, content: [{ type: 'text', text: composed }, ...rest] };
+    let state;
+    try {
+      state = resolveProductIndexState(cg);
+    } catch {
+      return result;
+    }
+
+    let pendingPaths: string[] | undefined;
+    if (state === 'dirty') {
+      try {
+        pendingPaths = (cg.getPendingFiles?.() ?? []).map((p) => p.path);
+      } catch {
+        pendingPaths = [];
+      }
+    }
+
+    const line = formatProductStatusLine(state, { pendingPaths });
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${first.text}\n\n${line}` }, ...rest],
+    };
   }
 
   /**
@@ -2344,7 +2351,10 @@ export class ToolHandler {
             && this.areEvidenceFilesCurrent(cachedFiles ?? [], cacheCg.getProjectRoot())))) {
             const diagnosed = this.withQueryPlanDiagnostics(cached, args, true);
             const withWorktree = this.withWorktreeNotice(diagnosed, projectPath);
-            return this.withStalenessNotice(withWorktree, projectPath);
+            return this.withProductStatusFooter(
+              this.withStalenessNotice(withWorktree, projectPath),
+              projectPath,
+            );
           }
         } catch {
           // No indexed project — fall through; handler returns guidance.
@@ -2411,7 +2421,10 @@ export class ToolHandler {
                 cacheIndex.setEntry(cacheQueries, cacheKey, toolName, served);
               }
               const withWorktree = this.withWorktreeNotice(served, projectPath);
-              return this.withStalenessNotice(withWorktree, projectPath);
+              return this.withProductStatusFooter(
+                this.withStalenessNotice(withWorktree, projectPath),
+                projectPath,
+              );
             }
             if (requestPlan) args[QUERY_FAST_ATTEMPTED_ARG] = true;
           } catch {
@@ -2443,7 +2456,10 @@ export class ToolHandler {
         cacheIndex.setEntry(cacheQueries, cacheKey, toolName, result);
       }
       const withWorktree = this.withWorktreeNotice(result, projectPath);
-      return this.withStalenessNotice(withWorktree, projectPath);
+      return this.withProductStatusFooter(
+        this.withStalenessNotice(withWorktree, projectPath),
+        projectPath,
+      );
     } catch (err) {
       // Expected condition, not a malfunction: answer as a SUCCESS so the
       // agent keeps trusting the toolset for projects that ARE indexed.
@@ -2798,7 +2814,7 @@ export class ToolHandler {
    */
   private maybeDeepToolPhaseGate(cg: HomeGraph, _toolName: string): ToolResult | null {
     const state = resolveProductIndexState(cg);
-    if (state === 'full') return null;
+    if (state === 'full' || state === 'dirty') return null;
     if (state === 'syncing') {
       return this.textResult(productIndexGuidance('syncing'));
     }
@@ -12388,21 +12404,11 @@ export class ToolHandler {
     }
 
     const FILE_CAP = 80;
-    const productState = resolveProductIndexState(cg);
     const lines: string[] = [
-      `**Project map** (status=${productState}, phase=${map.phase})`,
+      `**Project map** (phase=${map.phase})`,
       `modules: ${map.modules.length} · files: ${map.fileCount}`,
       '',
     ];
-    if (productState === 'fast' || map.phase === 'fast' || map.phase === 'indexing') {
-      lines.push(
-        '_Full symbol index still building — this map has modules/files only (no call graph)._',
-        ''
-      );
-    }
-    if (productState === 'syncing') {
-      lines.push('_Index write in progress — map may be briefly stale._', '');
-    }
 
     for (const m of map.modules) {
       const rootLabel = m.rootPath || '.';
