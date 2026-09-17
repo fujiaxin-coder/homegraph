@@ -4,6 +4,7 @@
 
 | 你想… | 去读 |
 | --- | --- |
+| 053：原文目标、页面消歧和控件行为证据 | [arkts-accuracy-contracts.md](./arkts-accuracy-contracts.md) |
 | Spec、commit、PR、拉代码 | 仓库根 [DEVELOPMENT.md](../DEVELOPMENT.md) |
 | Python 逐步调试 Planner / MCP，Spatial Upscale 演示 | [debug-retrieval-demo.md](./debug-retrieval-demo.md) |
 | 本地 build / CLI / Cursor MCP | [local-dev-guide.md](./local-dev-guide.md) |

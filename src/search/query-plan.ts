@@ -1,7 +1,8 @@
 /** Versioned retrieval intent, not a replacement for the user's question or graph evidence. */
 import * as shape from './query-utils';
+import { ruleRequestContract, contractLiteralTexts, accuracyTargetsEnabled, type RequestContract } from './request-contract';
 
-export const QUERY_PLAN_VERSION = 2 as const;
+export const QUERY_PLAN_VERSION = 3 as const;
 export type QueryIntent = 'general' | 'usages' | 'modules' | 'native' | 'flow' | 'overview';
 export type QueryRoute = 'general' | 'usages' | 'modules' | 'native' | 'inventory' | 'mechanism' | 'compact' | 'project';
 export const QUERY_RELATIONS = ['incoming_references', 'registration_sites', 'outgoing_calls', 'module_imports', 'module_cycles'] as const;
@@ -44,6 +45,7 @@ export interface QueryPlanBinding {
 export interface QueryPlan {
   version: typeof QUERY_PLAN_VERSION;
   originalQuery: string;
+  requestContract?: RequestContract;
   /** Bounded user-supplied task constraints; never repository evidence. */
   taskContext?: string;
   canonicalQuery: string;
@@ -208,6 +210,7 @@ export function buildRuleQueryPlan(query: string, originalTaskContext?: string):
   return {
     version: QUERY_PLAN_VERSION,
     originalQuery: query,
+    requestContract: ruleRequestContract(canonicalQuery, literalTexts),
     ...(taskContext ? { taskContext } : {}),
     canonicalQuery,
     intent,
@@ -306,7 +309,9 @@ export function compileQueryPlanStep(plan: QueryPlan, step: QueryPlanStep, resol
   const relation = step.relation;
   const stepIntent = intentForQueryRelation(downgradedOverview ? 'general' : step.intent, relation);
   const query = downgradedOverview ? plan.originalQuery : step.query;
-  const literalTexts = step.literalTexts ?? (plan.steps.length === 1 ? plan.literalTexts : undefined) ?? [];
+  const literalTexts = [...new Set([...(step.literalTexts ?? (plan.steps.length === 1 ? plan.literalTexts : undefined) ?? []),
+    // Independent discovery keeps user labels; dependent helpers retain identity without global UI seeds.
+    ...(!step.dependsOn.length ? [...(plan.literalTexts ?? []), ...(accuracyTargetsEnabled() ? contractLiteralTexts(plan.requestContract) : [])] : [])])].slice(0, 8);
   const sourceScope = step.sourceScope ?? plan.sourceScope;
   // Scope and negations remain losslessly in originalQuery/taskContext for the
   // executor and cache. Repeating that prose here erases the step's focus.

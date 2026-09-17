@@ -144,7 +144,7 @@ export function findLiteralEvidence(projectRoot: string, options: LiteralEvidenc
   const append = (file: string, content: string, offset: number, literal: string,
     resource?: LiteralEvidenceHit['resource']): void => {
     const line = content.slice(0, offset).split('\n').length;
-    if (result.hits.some(hit => hit.filePath === file && hit.line === line)) return;
+    if (result.hits.some(hit => hit.filePath === file && hit.line === line && hit.literal === literal)) return;
     if (result.hits.length >= maxHits) { mark('hits'); return; }
     const lines = content.split('\n');
     // Grow a contiguous range around the matching line. Never spend the whole
@@ -199,8 +199,14 @@ export function findLiteralEvidence(projectRoot: string, options: LiteralEvidenc
     }
     for (const literal of texts) {
       // Exact text witnesses do not reinterpret regex metacharacters or tokenize labels.
-      const offset = content.toLocaleLowerCase().indexOf(literal.toLocaleLowerCase());
-      if (offset >= 0) append(file, content, offset, literal);
+      const haystack = content.toLocaleLowerCase(); const needle = literal.toLocaleLowerCase();
+      let offset = -1;
+      // A leading comment/string example must not hide a later UI occurrence.
+      // Keep the global hit/time budget and a small per-file occurrence cap.
+      for (let occurrence = 0; occurrence < 3 && !timedOut(); occurrence++) {
+        offset = haystack.indexOf(needle, offset + 1); if (offset < 0) break;
+        append(file, content, offset, literal);
+      }
     }
     const reference = /\$r\s*\(\s*(['"])(?:app|[A-Za-z_]\w*)\.string\.([A-Za-z_]\w*)\1\s*\)/g;
     let match: RegExpExecArray | null;

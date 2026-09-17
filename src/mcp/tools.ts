@@ -1,3 +1,4 @@
+import { accuracyTargetsEnabled, accuracyCoverageEnabled, contractLiteralTexts } from '../search/request-contract';
 /**
  * MCP Tool Definitions
  *
@@ -2306,6 +2307,7 @@ export class ToolHandler {
       const skipCacheForSession = toolName === 'homegraph_explore' && !!sessionState;
       const requestPlan = readQueryPlan(args);
       const cacheEnabled = !skipCacheForSession && requestPlan?.source !== 'llm'
+        && !(requestPlan?.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled()))
         && !requestPlan?.telemetry.fallbackReason && isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
       let cacheKey: string | undefined;
       let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
@@ -5535,7 +5537,7 @@ export class ToolHandler {
       ...prior, version: plan.version, source: plan.source, intent: plan.intent, route: plan.route,
       confidence: plan.confidence,
       plannerSeeds: { anchors: plan.anchors, searchTerms: plan.searchTerms, literalTexts: plan.literalTexts,
-        sourceScope: plan.sourceScope, relation: plan.relation },
+        sourceScope: plan.sourceScope, relation: plan.relation, requestContract: plan.requestContract },
       hasTaskContext: !!plan.taskContext,
       matchedFeatures: Object.entries(plan.features).filter(([, matched]) => matched).map(([name]) => name).slice(0, 12),
       planningMs: plan.telemetry.durationMs, durationMs: Math.max(plan.telemetry.durationMs, Date.now() - started),
@@ -5561,6 +5563,9 @@ export class ToolHandler {
     if (plan.route === 'usages' || plan.route === 'modules' || plan.route === 'native') {
       return this.runSpecializedExploreRoute(plan.route, cg, query, root, plan);
     }
+    // Constrained ArkTS retrieval needs the full, verified-source renderer.
+    if (plan.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled())
+      && plan.sourceScope !== 'sdk' && cg.getFiles().some(f => /\.ets$/i.test(f.path))) return null;
     // These legacy paths re-extract seeds from text and cannot consume bound
     // node identity / step hints. Model general/flow plans use full explore;
     // rule/default and specialized routes retain their existing fast behavior.
@@ -6469,7 +6474,8 @@ export class ToolHandler {
     if (process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0') return null;
     if (!nodes.some(n => /\.ets$/i.test(n.filePath) && !n.filePath.startsWith('ohos-sdk:'))) return null;
     const budget = getExploreOutputBudget(cg.getStats().fileCount);
-    const queryPaths = process.env.HOMEGRAPH_ARKTS_QUERY_PATHS !== '0';
+    const constrained = !!plan?.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled());
+    const queryPaths = (!constrained || plan?.intent === 'flow' || !!plan?.bindings?.length) && process.env.HOMEGRAPH_ARKTS_QUERY_PATHS !== '0';
     if (queryPaths) nodes = completeEvidencePathCandidates(query, nodes,
       (name, limit) => cg.getQueryBuilder().getNodesByQualifiedNameExact(name, limit), plan);
     const pathSearch = !queryPaths ? undefined : searchEvidencePaths({
@@ -6477,7 +6483,7 @@ export class ToolHandler {
       getEdges: (id, direction, kinds, limit, preferred) => cg.getQueryBuilder().getEvidenceEdges(id, direction, kinds, limit, preferred),
     }, resolveEvidencePathGoal(query, nodes, focusIds, plan));
     const result = buildArktsEvidencePacks(cg, { projectRoot, query, nodes, focusIds,
-      maxChars: Math.min(budget.maxOutputChars, maxChars ?? budget.maxOutputChars), maxFiles, pathSearch });
+      maxChars: Math.min(budget.maxOutputChars, maxChars ?? budget.maxOutputChars), maxFiles, pathSearch, requestContract: plan?.requestContract });
     if (!result) return null;
     // The pack renderer already supplies neutral guidance and exact source bytes.
     return { content: [{ type: 'text', text: result.text }], [EXPLORE_EMISSION_KEY]: result.emission,
@@ -9730,10 +9736,11 @@ export class ToolHandler {
         : query;
     const subgraph = await cg.findRelevantContext(contextQuery, {
       ...contextOpts,
-      ...(plan && (plan.source === 'llm' || plan.literalTexts?.length) ? { retrievalHints: {
+      ...(plan && (plan.source === 'llm' || plan.literalTexts?.length || plan.requestContract) ? { retrievalHints: {
         symbols: plan.anchors.filter((anchor) => !(plan.bindings ?? []).some((node) =>
           anchor === node.name || anchor === node.qualifiedName)),
-        searchTerms: plan.searchTerms, literalTexts: plan.literalTexts, sourceScope: plan.sourceScope, nodeIds: (plan.bindings ?? []).map((node) => node.id),
+        searchTerms: plan.searchTerms, literalTexts: [...new Set([...(plan.literalTexts ?? []),
+          ...(accuracyTargetsEnabled() && !plan.bindings?.length ? contractLiteralTexts(plan.requestContract) : [])])].slice(0, 8), sourceScope: plan.sourceScope, nodeIds: (plan.bindings ?? []).map((node) => node.id),
       } } : {}),
     });
 
@@ -9759,6 +9766,25 @@ export class ToolHandler {
     }
 
 
+    if (plan?.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled()) && plan.sourceScope !== 'sdk'
+      // Resource values need the existing resource + reference renderer; a bare
+      // declaration would silently drop the value-to-key witness.
+      && !subgraph.literalEvidence?.hits.some(hit => hit.kind === 'resource_reference')) {
+      // One existing retrieval pass; raw literal hits affect candidate order only.
+      // Actual target evidence is checked against hash-verified source in the packer.
+      const hits = subgraph.literalEvidence?.hits ?? [];
+      const fileHits = new Map<string, Set<string>>();
+      for (const hit of hits) {
+        const labels = fileHits.get(hit.filePath) ?? new Set<string>(); labels.add(hit.literal); fileHits.set(hit.filePath, labels);
+      }
+      const candidates = [...subgraph.nodes.values()];
+      if (accuracyTargetsEnabled()) candidates.sort((a, b) =>
+        (fileHits.get(b.filePath)?.size ?? 0) - (fileHits.get(a.filePath)?.size ?? 0));
+      const packed = this.tryArktsEvidenceExplore(cg, query, projectRoot, candidates,
+        new Set(plan.bindings?.length ? plan.bindings.map(b => b.id) : subgraph.roots),
+        args._hgEvidenceMaxChars as number | undefined, maxFiles, plan);
+      if (packed) return packed;
+    }
     const literalSource = this.renderLiteralSource(cg, subgraph);
     if (subgraph.nodes.size === 0) {
       const text = literalSource.text || `No relevant code found for "${query}"`;
@@ -11712,7 +11738,10 @@ export class ToolHandler {
     const nodes: QueryPlanBinding[] = [];
     const seen = new Set<string>();
     let chars = 0;
-    for (const hit of subgraph.literalEvidence?.hits ?? []) {
+    // Preserve value-to-key provenance when a plain label in the same file
+    // would otherwise consume its single source-witness slot first.
+    const literalHits = [...(subgraph.literalEvidence?.hits ?? [])].sort((a, b) => Number(!!b.resource) - Number(!!a.resource));
+    for (const hit of literalHits) {
       if (files.length >= 2 || seen.has(hit.filePath)) continue;
       const absolute = validatePathWithinRoot(cg.getProjectRoot(), hit.filePath);
       if (!absolute) continue;

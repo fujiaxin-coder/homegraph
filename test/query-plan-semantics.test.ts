@@ -453,7 +453,7 @@ describe('grounded planner retrieval contract', () => {
     expect(system).toContain('at most three words');
     expect(system).toContain('literalTexts');
     expect(system).toContain('registration_sites');
-    expect(request).toMatchObject({ temperature: 0, max_tokens: 900, stream: false });
+    expect(request).toMatchObject({ temperature: 0, max_tokens: 1500, stream: false });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });

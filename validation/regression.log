@@ -1,0 +1,34 @@
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+
+ RUN  v2.1.9 <repository>
+
+ ✓ test/query-plan.test.ts (43 tests) 560ms
+ ✓ test/query-plan-semantics.test.ts (62 tests) 899ms
+ ✓ test/request-evidence-integration.test.ts (9 tests) 392ms
+ ✓ test/arkts-evidence-packs.test.ts (18 tests) 517ms
+ ✓ test/arkts-query-paths.test.ts (14 tests) 519ms
+ ✓ test/literal-evidence.test.ts (7 tests) 1077ms
+   ✓ bounded local literal evidence > selects an indexed local text owner rather than a dense native implementation 449ms
+ ✓ test/evidence-rendering.test.ts (8 tests) 1440ms
+   ✓ typed evidence renders source and preserves relation direction > renders a resource/UI witness even when the UI has no indexed symbol 944ms
+ ✓ test/evidence-recovery-wire.test.ts (7 tests) 29ms
+ ✓ test/query-plan-cache.test.ts (11 tests) 12ms
+ ✓ test/query-plan-source-receipts.test.ts (3 tests) 656ms
+   ✓ query-plan source receipts match source actually rendered > does not bind signatures dropped by a signature-only skeleton 364ms
+ ✓ test/request-evidence.test.ts (18 tests) 10ms
+ ✓ test/query-plan-integration.test.ts (22 tests) 4526ms
+   ✓ structured query planning at the MCP boundary > serves existing symbol evidence while a background reindex is in progress 414ms
+   ✓ structured query planning at the MCP boundary > transfers one plan through the real worker without a second model request 517ms
+ ✓ test/request-contract.test.ts (13 tests) 48ms
+ ✓ test/mcp-query-cache.test.ts (8 tests) 7652ms
+   ✓ MCP query cache > normalizes explore queries to an order-independent symbol bag 729ms
+   ✓ MCP query cache > produces stable SHA-256 cache keys from fingerprints 319ms
+   ✓ MCP query cache > returns cached explore responses on the second identical call 417ms
+   ✓ MCP query cache > clears cache and memory index when index stamp changes 331ms
+   ✓ MCP query cache > does not cache homegraph_status 5333ms
+ ✓ test/server-instructions-path-first.test.ts (2 tests) 1ms
+
+ Test Files  15 passed (15)
+      Tests  245 passed (245)
+   Start at  16:26:26
+   Duration  11.48s (transform 1.88s, setup 0ms, collect 9.50s, tests 18.34s, environment 2ms, prepare 1.12s)

@@ -1,3 +1,5 @@
+import { accuracyTargetsEnabled, accuracyCoverageEnabled, type RequestContract } from '../search/request-contract';
+import { createRequestEvidenceInspector, renderRequestEvidence, type RequestEvidence, type RequestSource } from './request-evidence';
 import { createHash } from 'node:crypto';
 import { closeSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import type HomeGraph from '../index';
@@ -27,6 +29,7 @@ export interface ArktsEvidenceResult {
   emission: ExploreEmission;
   metadata: {
     version: 1 | 2; scope: 'bounded_static_evidence'; status: 'complete' | 'partial' | 'empty';
+    requestEvidence?: RequestEvidence;
     selectedPacks: string[]; gaps: EvidenceGap[]; relations: NonNullable<EvidencePack['relation']>[];
     pathSearch?: { goal: EvidencePathSearch['goal']; stopReason: string; limitsHit: string[]; stats: EvidencePathSearch['stats'];
       paths: Array<{ id: string; nodeIds: string[]; cost: number; evidence: 'provided' | 'partial' }> };
@@ -49,16 +52,26 @@ const artifact = (n: Node): boolean => n.filePath.includes('@dummy') || n.name.s
 /** Consume already-located nodes. No text search, new planner call or recursive retrieval. */
 export function buildArktsEvidencePacks(
   graph: Pick<HomeGraph, 'getNode' | 'getNodesInFile' | 'getFile' | 'getOutgoingEdges' | 'getIncomingEdges'>,
-  options: { projectRoot: string; query: string; nodes: Node[]; focusIds: Set<string>; maxChars: number; maxFiles?: number; pathSearch?: EvidencePathSearch },
+  options: { projectRoot: string; query: string; nodes: Node[]; focusIds: Set<string>; maxChars: number; maxFiles?: number; pathSearch?: EvidencePathSearch; requestContract?: RequestContract },
 ): ArktsEvidenceResult | null {
   if (!options.nodes.some(n => local(n) && /\.ets$/i.test(n.filePath) && DECLARATIONS.has(n.kind))) return null;
   const search = options.pathSearch;
+  const targetChecks = accuracyTargetsEnabled(); const behaviorChecks = accuracyCoverageEnabled();
+  const inspector = options.requestContract && (targetChecks || behaviorChecks)
+    ? createRequestEvidenceInspector(options.requestContract) : undefined;
+  const requestSources = new Map<SourceUnit, RequestSource>();
+  const requestUnit = (s: SourceUnit): RequestSource => {
+    let unit = requestSources.get(s);
+    if (!unit) { unit = { filePath: s.node.filePath, start: s.start, source: s.source }; requestSources.set(s, unit); }
+    return unit;
+  };
   const requiredIds = search ? new Set([...search.goal.anchorIds, ...search.paths.flatMap(p => p.nodeIds)]) : options.focusIds;
   const inputNodes = search && requiredIds.size ? [...requiredIds].flatMap(id => { const n = graph.getNode(id); return n ? [n] : []; }) : options.nodes;
   const all = canonicalSourceDeclarations(inputNodes.filter(n => DECLARATIONS.has(n.kind) && local(n) && !artifact(n)));
   if (!all.length) return null;
+  const inputOrder = new Map(all.map((node, index) => [node.id, index]));
   const candidates = all.sort((a, b) => Number(requiredIds.has(b.id)) - Number(requiredIds.has(a.id))
-    || a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine).slice(0, LIMITS.nodes);
+    || (inspector && targetChecks ? inputOrder.get(a.id)! - inputOrder.get(b.id)! : a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)).slice(0, LIMITS.nodes);
   const focus = candidates.filter(n => requiredIds.has(n.id));
   // A named owning type provides scope for its named members, not another
   // callable endpoint. Do not invent a missing Type→method call obligation.
@@ -255,6 +268,17 @@ export function buildArktsEvidencePacks(
       reason: 'unindexed_connection', nextAnchor: location(disconnected[0]!) });
   }
 
+  // Rank already-read, hash-verified declarations by joint targets in the same file.
+  // Never discard a dependent helper merely because it has no UI label.
+  if (inspector && targetChecks) {
+    const byFile = new Map<string, RequestSource[]>();
+    for (const unit of sources.values()) {
+      const list = byFile.get(unit.node.filePath) ?? [];
+      list.push(requestUnit(unit)); byFile.set(unit.node.filePath, list);
+    }
+    const scores = new Map([...byFile].map(([file, units]) => [file, inspector.score(units)]));
+    for (const pack of packs) pack.priority += 30 * Math.max(0, ...pack.sources.map(id => scores.get(sources.get(id)!.node.filePath) ?? 0));
+  }
   const selected: EvidencePack[] = [];
   const rejectedGap = (p: EvidencePack): EvidenceGap[] => p.gaps.length ? p.gaps : [{ target: p.label, reason: 'budget',
     nextAnchor: sources.get(p.sources[0] ?? '') ? location(sources.get(p.sources[0]!)!.node) : p.label }];
@@ -278,6 +302,7 @@ export function buildArktsEvidencePacks(
     const lines = ['**ArkTS evidence packs**', gaps.length ? '> **Partial locator** — explicit gaps below.' : '> Bounded evidence supplied for the selected declarations and static links.',
       'Complete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.'];
     if (search) lines.push(`Path goal: ${search.goal.kind}; search direction: ${search.goal.direction}; stop: ${stopFor(chosen)}. Static paths do not prove runtime behavior.`);
+    if (inspector) lines.push(...renderRequestEvidence(inspector.inspect(unitsFor(chosen).map(requestUnit)), targetChecks, behaviorChecks));
     const chosenPaths = chosen.filter(p => p.path);
     if (chosenPaths.length) lines.push('**Directed paths (all source dependencies provided)**', ...chosenPaths.map(p => `- ${inline(p.label)}`));
     const relations = relationsFor(chosen);
@@ -320,11 +345,14 @@ export function buildArktsEvidencePacks(
   const locatedNodes = candidates.filter(n => units.some(s => s.node.filePath === n.filePath && s.start <= n.startLine && s.end >= n.endLine))
     .map(n => ({ id: n.id, name: n.name, qualifiedName: n.qualifiedName, filePath: n.filePath, startLine: n.startLine }));
   const status = !units.length ? 'empty' : gaps.length ? 'partial' : 'complete';
+  const checkedRequest = inspector?.inspect(units.map(requestUnit));
+  const requestEvidence = checkedRequest ? { ...checkedRequest, targets: targetChecks ? checkedRequest.targets : [],
+    behaviors: behaviorChecks ? checkedRequest.behaviors : [] } : undefined;
   return { text, emission: { projectRoot: options.projectRoot, query: options.query, files,
     sourceBytes: files.reduce((sum, f) => sum + f.bytes, 0), responseBytes: text.length, locatedNodes,
     evidenceStatus: status, partial: status !== 'complete', coveredObligations: selected.map(p => p.label),
     uncoveredObligations: gaps.map(g => `${g.reason}: ${g.target}`), nextAnchor: gaps[0]?.nextAnchor },
-    metadata: { version: search ? 2 : 1, scope: 'bounded_static_evidence', status, selectedPacks: selected.map(p => p.id), gaps,
+    metadata: { ...(requestEvidence ? { requestEvidence } : {}), version: search ? 2 : 1, scope: 'bounded_static_evidence', status, selectedPacks: selected.map(p => p.id), gaps,
       relations: relationsFor(selected), ...(search ? { pathSearch: { goal: search.goal, stopReason: stopFor(selected),
         limitsHit: search.limitsHit, stats: search.stats, paths: search.paths.map(p => ({ id: p.id, nodeIds: p.nodeIds, cost: p.cost,
           evidence: selected.some(c => c.path?.id === p.id) ? 'provided' as const : 'partial' as const })) } } : {}) } };

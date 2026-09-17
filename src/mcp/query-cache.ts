@@ -1,3 +1,4 @@
+import { validateRequestContract } from '../search/request-contract';
 /**
  * MCP query cache — memory key index + serialized tool responses in homegraph.db.
  *
@@ -29,7 +30,7 @@ function defaultExploreMaxFiles(fileCount: number): number {
 }
 
 /** Bump when cache-key normalization or cached payload shape changes. */
-export const QUERY_CACHE_FORMAT_VERSION = 5;
+export const QUERY_CACHE_FORMAT_VERSION = 6;
 
 const METADATA_INDEX_STAMP = 'query_cache_index_stamp';
 const METADATA_FORMAT_VERSION = 'query_cache_format_version';
@@ -162,7 +163,7 @@ function exploreEnvFingerprint(): string {
   const fullSource = process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE === '1' ? '1' : '0';
   const evidencePacks = process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0' ? '0' : '1';
   const queryPaths = process.env.HOMEGRAPH_ARKTS_QUERY_PATHS === '0' ? '0' : '1';
-  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}|arktsEvidence:${evidencePacks}|arktsPaths:${queryPaths}`;
+  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}|arktsEvidence:${evidencePacks}|arktsPaths:${queryPaths}|accuracyTargets:${process.env.HOMEGRAPH_ACCURACY_TARGETS === '0' ? '0' : '1'}|accuracyCoverage:${process.env.HOMEGRAPH_ACCURACY_COVERAGE === '0' ? '0' : '1'}`;
 }
 
 function normalizeString(value: unknown): string | undefined {
@@ -227,7 +228,11 @@ function queryPlanFingerprint(value: unknown): string | undefined {
   const features = record(plan.features);
   if (!features || Object.keys(features).length > 64
       || !Object.values(features).every(v => typeof v === 'boolean')) return undefined;
+  let requestContract;
+  try { requestContract = validateRequestContract(plan.requestContract, originalQuery + '\n' + (query(plan.taskContext) ?? '')); }
+  catch { return undefined; }
   return stableJson({
+    requestContract,
     version: plan.version, originalQuery, canonicalQuery, intent, route,
     taskContext: query(plan.taskContext),
     anchors, searchTerms, steps, features,
