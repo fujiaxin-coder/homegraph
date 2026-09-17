@@ -770,7 +770,7 @@ export class QueryBuilder {
     if (misses.length === 0) return out;
 
     // Chunk under SQLite's parameter limit (default 999, raised to 32766
-    // in better-sqlite3 builds — chunk at 500 for safety across both
+    // across node:sqlite / wasm builds — chunk at 500 for safety across both
     // backends and to keep the query plan simple).
     for (let i = 0; i < misses.length; i += SQLITE_PARAM_CHUNK_SIZE) {
       const chunk = misses.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);

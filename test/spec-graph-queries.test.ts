@@ -5,7 +5,7 @@
  * in spec/graph/queries.ts: getSpecContext, searchAndGetContext, getSpecStats,
  * and findSpecsByFragmentPath.
  *
- * Uses in-memory SQLite via createDatabase (better-sqlite3, or wasm fallback).
+ * Uses in-memory SQLite via createDatabase (node:sqlite, or wasm fallback).
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';

@@ -45,12 +45,12 @@ function cleanupTempDir(dir: string): void {
   }
 }
 
-// Check if any SQLite backend is available (better-sqlite3 or wasm)
+// Check if any SQLite backend is available (node:sqlite or wasm)
 function hasSqliteBindings(): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require('better-sqlite3');
-    const db = new Database(':memory:');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(':memory:');
     db.close();
     return true;
   } catch {
@@ -228,7 +228,7 @@ export const fetchData = async () => {
 
 // =============================================================================
 // Graph Traversal 'both' Direction Fix
-// (requires better-sqlite3 - will use HomeGraph integration)
+// (requires a SQLite backend — uses HomeGraph integration)
 // =============================================================================
 
 describe('Graph Traversal Both Direction', () => {

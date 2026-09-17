@@ -330,22 +330,42 @@ export class HomeGraph {
       throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
     }
 
-    // Create directory structure
+    // Create .homegraph/ first so the lock file has a home (Spec 0032).
     createDirectory(resolvedRoot);
 
-    // Initialize database
-    const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.initialize(dbPath);
-    const queries = new QueryBuilder(db.getDb());
-
-    const instance = new HomeGraph(db, queries, resolvedRoot);
-
-    // Run initial indexing if requested
-    if (options.index) {
-      await instance.indexAll({ onProgress: options.onProgress });
+    const bootLock = new FileLock(
+      path.join(getHomeGraphDir(resolvedRoot), 'homegraph.lock')
+    );
+    try {
+      bootLock.acquire();
+    } catch {
+      throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
     }
 
-    return instance;
+    try {
+      // Winner may have finished between createDirectory and acquire.
+      if (isInitialized(resolvedRoot)) {
+        throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
+      }
+
+      // Initialize database
+      const dbPath = getDatabasePath(resolvedRoot);
+      const db = DatabaseConnection.initialize(dbPath);
+      const queries = new QueryBuilder(db.getDb());
+
+      const instance = new HomeGraph(db, queries, resolvedRoot);
+      // Release before optional indexAll — that path acquires instance.fileLock
+      // on the same path (same PID would otherwise look like a foreign holder).
+      bootLock.release();
+
+      if (options.index) {
+        await instance.indexAll({ onProgress: options.onProgress });
+      }
+
+      return instance;
+    } finally {
+      bootLock.release();
+    }
   }
 
   /**
@@ -359,15 +379,30 @@ export class HomeGraph {
       throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
     }
 
-    // Create directory structure
     createDirectory(resolvedRoot);
 
-    // Initialize database
-    const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.initialize(dbPath);
-    const queries = new QueryBuilder(db.getDb());
+    const bootLock = new FileLock(
+      path.join(getHomeGraphDir(resolvedRoot), 'homegraph.lock')
+    );
+    try {
+      bootLock.acquire();
+    } catch {
+      throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
+    }
 
-    return new HomeGraph(db, queries, resolvedRoot);
+    try {
+      if (isInitialized(resolvedRoot)) {
+        throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
+      }
+
+      const dbPath = getDatabasePath(resolvedRoot);
+      const db = DatabaseConnection.initialize(dbPath);
+      const queries = new QueryBuilder(db.getDb());
+
+      return new HomeGraph(db, queries, resolvedRoot);
+    } finally {
+      bootLock.release();
+    }
   }
 
   /**
@@ -931,6 +966,14 @@ export class HomeGraph {
     return this.indexMutex.isLocked();
   }
 
+  /**
+   * True when another live process holds `.homegraph/homegraph.lock` (Spec 0032).
+   * Used by MCP product-state gating — does not acquire the lock.
+   */
+  isWriteLockedByOther(): boolean {
+    return this.fileLock.isHeldByOther();
+  }
+
   // ===========================================================================
   // File Watching
   // ===========================================================================
@@ -1192,7 +1235,7 @@ export class HomeGraph {
   }
 
   /**
-   * Active SQLite backend (`native` = better-sqlite3, or `wasm` fallback).
+   * Active SQLite backend (`node-sqlite` or `wasm` fallback).
    * Surfaced via `homegraph status` / `homegraph_status` with journal mode.
    */
   getBackend(): import('./db').SqliteBackend {

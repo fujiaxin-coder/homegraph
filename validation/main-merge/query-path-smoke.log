@@ -1,0 +1,121 @@
+{
+  "output": "<repository>/validation/main-merge/query-path-smoke.json",
+  "names": [
+    "PipelineStart.start",
+    "NormalizeInput.clean",
+    "ClampInput.clamp",
+    "ValueStore.apply"
+  ],
+  "summary": {
+    "batch1": {
+      "chars": 1459,
+      "evidence": {
+        "version": 1,
+        "scope": "bounded_static_evidence",
+        "status": "partial",
+        "selectedPacks": [
+          "source:class:94a2e9668e5419f74d508d317e734439",
+          "source:class:f4b9f8c1214b0de6914eb18130d8c0c6",
+          "source:method:7e98789c3182cb9d7c1b8bc12999d287",
+          "relation:0"
+        ],
+        "gaps": [
+          {
+            "target": "call/use connection for PipelineStart @ PipelineStart.ets:3",
+            "reason": "unindexed_connection",
+            "nextAnchor": "PipelineStart.ets:3"
+          },
+          {
+            "target": "connecting path in the bounded graph slice: PipelineStart @ PipelineStart.ets:3 → ValueStore::apply @ ValueStore.ets:2",
+            "reason": "unindexed_connection",
+            "nextAnchor": "ValueStore.ets:2"
+          }
+        ],
+        "relations": [
+          {
+            "source": "method:1a6002c4f19fcf837256d3974af07e04",
+            "target": "method:7e98789c3182cb9d7c1b8bc12999d287",
+            "kind": "calls",
+            "provenance": "heuristic",
+            "via": "arkanalyzer"
+          }
+        ]
+      }
+    },
+    "batch2": {
+      "chars": 1936,
+      "evidence": {
+        "version": 2,
+        "scope": "bounded_static_evidence",
+        "status": "complete",
+        "selectedPacks": [
+          "path:1",
+          "relation:0",
+          "relation:1",
+          "relation:2",
+          "source:method:1a6002c4f19fcf837256d3974af07e04",
+          "source:method:2d839a568a77df7f6690c133f2019190",
+          "source:method:7e98789c3182cb9d7c1b8bc12999d287",
+          "source:method:f8bc16babd4a2f6434e38575459320f8"
+        ],
+        "gaps": [],
+        "relations": [
+          {
+            "source": "method:2d839a568a77df7f6690c133f2019190",
+            "target": "method:f8bc16babd4a2f6434e38575459320f8",
+            "kind": "calls",
+            "provenance": "heuristic",
+            "via": "arkanalyzer"
+          },
+          {
+            "source": "method:f8bc16babd4a2f6434e38575459320f8",
+            "target": "method:1a6002c4f19fcf837256d3974af07e04",
+            "kind": "calls",
+            "provenance": "heuristic",
+            "via": "arkanalyzer"
+          },
+          {
+            "source": "method:1a6002c4f19fcf837256d3974af07e04",
+            "target": "method:7e98789c3182cb9d7c1b8bc12999d287",
+            "kind": "calls",
+            "provenance": "heuristic",
+            "via": "arkanalyzer"
+          }
+        ],
+        "pathSearch": {
+          "goal": {
+            "kind": "calls",
+            "direction": "either",
+            "anchorIds": [
+              "method:2d839a568a77df7f6690c133f2019190",
+              "method:7e98789c3182cb9d7c1b8bc12999d287"
+            ],
+            "ambiguous": [],
+            "limited": false
+          },
+          "stopReason": "supported",
+          "limitsHit": [],
+          "stats": {
+            "adjacencyReads": 9,
+            "rowsRead": 9,
+            "nodesVisited": 8,
+            "durationMs": 1
+          },
+          "paths": [
+            {
+              "id": "path:1",
+              "nodeIds": [
+                "method:2d839a568a77df7f6690c133f2019190",
+                "method:f8bc16babd4a2f6434e38575459320f8",
+                "method:1a6002c4f19fcf837256d3974af07e04",
+                "method:7e98789c3182cb9d7c1b8bc12999d287"
+              ],
+              "cost": 5.25,
+              "evidence": "provided"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,5 @@
 /**
- * WAL backends (node:sqlite or better-sqlite3) — real index + queries.
+ * WAL backend (node:sqlite) — real index + queries.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -7,10 +7,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import HomeGraph from '../src';
-import { isNativeSqliteAvailable, isNodeSqliteFts5Available } from '../src/db/sqlite-adapter';
+import { isNodeSqliteFts5Available } from '../src/db/sqlite-adapter';
 import { removeTempDir } from './helpers/fs';
 
-const hasWalBackend = isNodeSqliteFts5Available() || isNativeSqliteAvailable();
+const hasWalBackend = isNodeSqliteFts5Available();
 
 describe.skipIf(!hasWalBackend)('WAL SQLite backend — real index + queries', () => {
   let dir: string;
@@ -31,8 +31,8 @@ describe.skipIf(!hasWalBackend)('WAL SQLite backend — real index + queries', (
     removeTempDir(dir);
   });
 
-  it('uses a WAL-capable backend', () => {
-    expect(['node-sqlite', 'native']).toContain(cg.getBackend());
+  it('uses node:sqlite', () => {
+    expect(cg.getBackend()).toBe('node-sqlite');
   });
 
   it('runs in WAL mode', () => {

@@ -59,7 +59,9 @@ describe('languages/arkts entry tracing', () => {
     expect(calls.some((e) => e.target === aboutToAppear!.id)).toBe(true);
   });
 
-  it('extracts module.json5 page routes and links them to the @Entry component', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'extracts module.json5 page routes and links them to the @Entry component',
+    async () => {
     const root = makeArktsProject(ENTRY_FIXTURE);
     const cg = HomeGraph.initSync(root);
     await cg.indexAll();
@@ -81,7 +83,9 @@ describe('languages/arkts entry tracing', () => {
     cg.close();
   });
 
-  it('traces startup from onWindowStageCreate through first-screen lifecycle to build', async () => {
+  it.runIf(process.platform !== 'win32')(
+    'traces startup from onWindowStageCreate through first-screen lifecycle to build',
+    async () => {
     const root = makeArktsProject(ENTRY_FIXTURE);
     const cg = HomeGraph.initSync(root);
     await cg.indexAll();

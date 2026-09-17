@@ -2,7 +2,7 @@
  * Query worker thread — issue: concurrent MCP tool calls starve the daemon.
  *
  * The shared daemon serves every session on ONE event loop with synchronous
- * SQLite (better-sqlite3 / wasm). `codegraph_explore` is CPU-heavy (FTS + RWR/personalized-
+ * SQLite (node:sqlite / wasm). `codegraph_explore` is CPU-heavy (FTS + RWR/personalized-
  * PageRank + impact + output building) stitched together by microtask `await`s,
  * so N concurrent explores keep the microtask queue continuously full and
  * starve the macrotask phases — timers AND socket I/O. The transport freezes:

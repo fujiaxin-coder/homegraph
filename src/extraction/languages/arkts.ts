@@ -5233,13 +5233,82 @@ export function isOhosApiFilePath(filePath: string): boolean {
   return filePath.startsWith(OHOS_API_FILE_PREFIX);
 }
 
-/** Strip json5 comments/trailing commas enough for compileSdkVersion extraction. */
+/**
+ * DevEco / Harmony JSON5 subset → JSON.parse.
+ * Supports: line/block comments, trailing commas, bare keys, single-quoted strings
+ * (e.g. deviceTypes: ['phone', '2in1']). Not a full JSON5 implementation.
+ */
 export function parseJson5Minimal(text: string): unknown {
-  const stripped = text
+  let s = text
     .replace(/\/\/.*$/gm, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/,(\s*[}\]])/g, '$1');
-  return JSON.parse(stripped);
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  // Quote bare keys before touching string quotes.
+  s = s.replace(/([{,]\s*)([A-Za-z_][\w]*)\s*:/g, '$1"$2":');
+  s = convertJson5SingleQuotedStrings(s);
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+  return JSON.parse(s);
+}
+
+/** Convert `'…'` string literals to JSON `"…"` outside existing double-quoted strings. */
+function convertJson5SingleQuotedStrings(input: string): string {
+  let out = '';
+  let i = 0;
+  while (i < input.length) {
+    const c = input[i];
+    if (c === '"') {
+      out += c;
+      i++;
+      while (i < input.length) {
+        const ch = input[i];
+        out += ch;
+        i++;
+        if (ch === '\\' && i < input.length) {
+          out += input[i];
+          i++;
+          continue;
+        }
+        if (ch === '"') break;
+      }
+      continue;
+    }
+    if (c === "'") {
+      out += '"';
+      i++;
+      while (i < input.length) {
+        const ch = input[i];
+        if (ch === '\\' && i + 1 < input.length) {
+          const next = input[i + 1];
+          i += 2;
+          if (next === "'") {
+            out += "'";
+          } else if (next === '"') {
+            out += '\\"';
+          } else if (next === '\\') {
+            out += '\\\\';
+          } else {
+            out += '\\' + next;
+          }
+          continue;
+        }
+        if (ch === "'") {
+          out += '"';
+          i++;
+          break;
+        }
+        if (ch === '"') {
+          out += '\\"';
+          i++;
+          continue;
+        }
+        out += ch;
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
 }
 
 /** Normalize compileSdkVersion values like "6.0.1(21)" → "6.0.1". */

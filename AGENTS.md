@@ -13,7 +13,7 @@ Development workflow (SDD: write specs under `docs/specs/` first, commit convent
 ## Build, Test, Run
 
 ```bash
-npm run build           # tsc + copy schema.sql and *.wasm into dist/; chmods dist/bin/homegraph.js
+npm run build           # tsc + copy-assets (schema.sql, vendored wasm list, strip maps); chmod dist/bin/homegraph.js
 npm run dev             # tsc --watch
 npm run clean           # rm -rf dist
 
@@ -29,7 +29,7 @@ npx vitest run test/installer-targets.test.ts
 npx vitest run test/extraction.test.ts -t "TypeScript"
 ```
 
-`copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
+`copy-assets` (called from `build`) copies `src/db/schema.sql`, `src/spec/db/schema.sql`, and the vendored grammars listed in `src/extraction/vendored-wasm-files.json` into `dist/`, then removes `*.js.map` / `*.d.ts.map`. **A new vendored grammar must be on that list (and in `VENDORED_WASM_LANGS`) or it won't ship.** `tree-sitter-wasms` grammars are loaded from the npm package at runtime, not copied into dist.
 
 Node engines: `>=22`. There is a hard exit below 22 (see `src/bin/node-version-check.ts`). Node ≥22 WASM Zone OOM is mitigated with `--liftoff-only` relaunch (`src/extraction/wasm-runtime-flags.ts`), including Node 25+.
 
@@ -52,7 +52,7 @@ The public API surface is `src/index.ts` — the `HomeGraph` class wires all the
 ### Module layout
 
 - `src/index.ts` — `HomeGraph` class: `init`/`open`/`close`, `indexAll`, `sync`, `searchNodes`, `getCallers`/`getCallees`, `getImpactRadius`, `buildContext`, `watch`/`unwatch`.
-- `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`, `sqlite-adapter.ts`. Three-tier SQLite: **`node:sqlite`** (Node ≥22.5 **with FTS5**; builds without FTS5 such as Node 23.x are skipped) → **better-sqlite3** (optionalDependency) → **node-sqlite3-wasm** (last resort, no WAL). `homegraph status` reports `node-sqlite`, `native`, or `wasm`. Override with `HOMEGRAPH_SQLITE_BACKEND`.
+- `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`, `sqlite-adapter.ts`. Two-tier SQLite: **`node:sqlite`** (Node ≥22.5 **with FTS5**; builds without FTS5 such as Node 23.x are skipped) → **`node-sqlite3-wasm`** (fallback, no WAL). `homegraph status` reports `node-sqlite` or `wasm`. Override with `HOMEGRAPH_SQLITE_BACKEND`.
 - `src/extraction/` — `ExtractionOrchestrator`, tree-sitter wrappers, per-language extractors under `languages/` (one file per language), plus standalone extractors for non-tree-sitter formats (`svelte-extractor.ts`, `vue-extractor.ts`, `liquid-extractor.ts`, `dfm-extractor.ts` for Delphi). `parse-worker.ts` runs heavy parsing off the main thread.
 - `src/resolution/` — `ReferenceResolver` orchestrates `import-resolver.ts` (with `path-aliases.ts` for tsconfig path aliases + cargo workspace member globs), `name-matcher.ts`, and `frameworks/` (Express, Laravel, Rails, FastAPI, Django, Flask, Spring, Gin, Axum, ASP.NET, Vapor, React Router, SvelteKit, Vue/Nuxt, Cargo workspaces). Frameworks emit `route` nodes and `references` edges.
 - `src/graph/` — `GraphTraverser` (BFS/DFS, impact radius, path finding) and `GraphQueryManager` (high-level queries).
@@ -165,7 +165,7 @@ Tests live in `test/` and mirror the module they cover. Notable ones beyond the 
 
 - `installer-targets.test.ts` — parameterized contract suite across all 4 agent targets (see installer notes above).
 - `evaluation/` — `runner.ts` + `test-cases.ts` exercise homegraph against synthetic projects and score the results; run via `npm run eval` (builds first). Not part of `npm test`.
-- `sqlite-backend.test.ts` / `native-sqlite-backend.test.ts` — pin backend preference (`node-sqlite` → `native` → `wasm`) and that WAL backends come up with working FTS/graph queries.
+- `sqlite-backend.test.ts` / `native-sqlite-backend.test.ts` — pin backend preference (`node-sqlite` → `wasm`) and that WAL `node:sqlite` comes up with working FTS/graph queries.
 - `pr19-improvements.test.ts`, `frameworks-integration.test.ts` — regression coverage for specific past PRs/incidents; don't rename these, the names anchor to git history.
 
 Tests create temp dirs with `fs.mkdtempSync` and clean up in `afterEach`. They write real files and exercise real SQLite — there is no DB mocking.

@@ -154,6 +154,32 @@ describe('languages/arkts ohos-sdk-pack', () => {
     expect(parsed.a).toBe(1);
   });
 
+  it('parses bare keys and single-quoted strings (DevEco build-profile subset)', () => {
+    const parsed = parseJson5Minimal(`{
+  // deviceTypes often use single quotes in real profiles
+  app: {
+    products: [{ name: 'default', deviceTypes: ['phone', '2in1'], }],
+  },
+  modules: [
+    { name: 'entry', srcPath: './entry', },
+    { name: 'library', srcPath: './library', },
+  ],
+}`) as {
+      app: { products: Array<{ name: string; deviceTypes: string[] }> };
+      modules: Array<{ name: string; srcPath: string }>;
+    };
+    expect(parsed.app.products[0].deviceTypes).toEqual(['phone', '2in1']);
+    expect(parsed.modules).toEqual([
+      { name: 'entry', srcPath: './entry' },
+      { name: 'library', srcPath: './library' },
+    ]);
+  });
+
+  it('parses single-quoted strings that contain double quotes', () => {
+    const parsed = parseJson5Minimal(`{ label: 'say "hi"', }`) as { label: string };
+    expect(parsed.label).toBe('say "hi"');
+  });
+
   it('indexes SDK API declarations into a standalone database', async () => {
     const { sdkHome } = makeToolsTree('6.1.1.290', { fixtureName: '@ohos.fixture.d.ets' });
     const dbPath = path.join(path.dirname(sdkHome), 'ohos-api-test.db');

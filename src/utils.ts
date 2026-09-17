@@ -296,6 +296,26 @@ export class FileLock {
   }
 
   /**
+   * True when another live process holds this lock file (Spec 0032).
+   * Does not acquire; stale/dead locks count as not held.
+   */
+  isHeldByOther(): boolean {
+    if (this.held) return false;
+    if (!fs.existsSync(this.lockPath)) return false;
+    try {
+      const content = fs.readFileSync(this.lockPath, 'utf-8').trim();
+      const pid = parseInt(content, 10);
+      const stat = fs.statSync(this.lockPath);
+      const lockAge = Date.now() - stat.mtimeMs;
+      if (lockAge >= FileLock.STALE_TIMEOUT_MS || isNaN(pid)) return false;
+      if (pid === process.pid) return false;
+      return this.isProcessAlive(pid);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Execute a function while holding the lock
    */
   withLock<T>(fn: () => T): T {

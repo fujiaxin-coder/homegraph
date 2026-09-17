@@ -1,7 +1,7 @@
 /**
  * Issue #238 — "database is locked" on concurrent MCP tool calls.
  *
- * With better-sqlite3 (real WAL) as the preferred backend, the fixes that remain
+ * With node:sqlite (real WAL) as the preferred backend, the fixes that remain
  * relevant:
  *  1. busy_timeout is a bounded few-second wait (not a 2-minute hang) and WAL is
  *     active — so a reader never blocks on a concurrent writer.
@@ -9,7 +9,7 @@
  *     projectPath pointing at the default project, instead of opening a SECOND
  *     connection to the same DB.
  * The WASM fallback has no WAL; WAL-specific assertions below skip when the
- * active backend is not native.
+ * active backend is wasm.
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';

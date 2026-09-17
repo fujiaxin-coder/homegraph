@@ -1,23 +1,12 @@
 /**
- * Per-file staleness banner on MCP tool responses (issue #403).
+ * Per-file freshness on MCP tool responses (issue #403 → Spec 0035).
  *
- * The watcher tracks every file event since the last successful sync; the
- * tool dispatcher intersects "files referenced in this response" with that
- * pending set and prepends a banner ("⚠️ Some files referenced below were
- * edited since the last index sync…") plus an optional footer ("(Note: N
- * file(s) elsewhere in this project are pending index sync…)").
- *
- * No auto-flush, no static wait — the response is instant and the agent
- * decides whether to Read the specific stale file. These tests exercise
- * the full real path: real HomeGraph index + real ToolHandler.execute().
+ * Pending edits used to prepend a long ⚠️ banner. Spec 0035 folds that into a
+ * one-line `HomeGraph status=dirty — outdated: …` footer (body unchanged).
+ * Whole-index watcher degradation (#876) still uses the degraded banner.
  *
  * **Event delivery uses a synthetic seam** (`__emitWatchEventForTests`): the
- * real native fs.watch (FSEvents/inotify) delivery is non-deterministic under
- * parallel vitest execution and produced a consistent ~30% failure rate on
- * these tests when run inside the full suite. The seam drives the watcher's
- * pending-set pipeline directly so the tests synthesize file events
- * deterministically. The watcher's actual debounce timer (real setTimeout) is
- * left untouched.
+ * real native fs.watch delivery is non-deterministic under parallel vitest.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -40,7 +29,7 @@ function waitFor(condition: () => boolean, timeoutMs = 2000, intervalMs = 25): P
   });
 }
 
-describe('MCP staleness banner', () => {
+describe('MCP status=dirty footer (Spec 0035)', () => {
   let testDir: string;
   let cg: HomeGraph;
   let handler: ToolHandler;
@@ -48,10 +37,6 @@ describe('MCP staleness banner', () => {
   beforeEach(async () => {
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-stale-banner-'));
     fs.mkdirSync(path.join(testDir, 'src'));
-    // Three isolated files with no cross-references — keeps each test's
-    // "which path does the response mention?" assertion unambiguous. If the
-    // files shared imports/calls, homegraph_search responses would surface
-    // multiple file paths and the banner-vs-footer split would be racy.
     fs.writeFileSync(
       path.join(testDir, 'src', 'alpha-only.ts'),
       'export function alphaOnly() { return 1; }\n',
@@ -67,68 +52,52 @@ describe('MCP staleness banner', () => {
 
     cg = HomeGraph.initSync(testDir, { config: { include: ['**/*.ts'], exclude: [] } });
     await cg.indexAll();
+    cg.setBuildPhase('full');
     handler = new ToolHandler(cg);
   });
 
   afterEach(() => {
-    __setFsWatchForTests(null); // reset the injected fs.watch seam
+    __setFsWatchForTests(null);
     try { cg.unwatch(); } catch { /* ignore */ }
     try { cg.close(); } catch { /* ignore */ }
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
   });
 
-  // Force watch-resource exhaustion at startup so the real watcher degrades
-  // deterministically on any platform (recursive or per-directory strategy).
   const degradeWatcher = () => {
     __setFsWatchForTests(() => {
       const err = new Error('too many open files') as NodeJS.ErrnoException;
       err.code = 'EMFILE';
       throw err;
     });
-    const started = cg.watch({ debounceMs: 1000 }); // real (non-inert) watcher
+    const started = cg.watch({ debounceMs: 1000 });
     expect(started).toBe(false);
     expect(cg.isWatcherDegraded()).toBe(true);
   };
 
-  it('prepends a stale banner when the response references a pending file', async () => {
-    // Long debounce so the edit lingers in pendingFiles while we query.
+  it('appends status=dirty with pending path (no long ⚠️ banner)', async () => {
     cg.watch({ debounceMs: 4000, inertForTests: true });
     await cg.waitUntilWatcherReady();
 
-    // Real disk write so a later sync (if it fires) sees the new content,
-    // plus a synthesized chokidar event so the watcher's pendingFiles set
-    // updates immediately without waiting on OS-level event delivery.
     fs.writeFileSync(
       path.join(testDir, 'src', 'alpha-only.ts'),
       'export function alphaOnly() { return 99; }\n',
     );
     __emitWatchEventForTests(testDir, 'src/alpha-only.ts');
-
-    // With mocked chokidar this is synchronous — keep the wait just to
-    // exercise the realistic shape (the watcher's `chokidarReady` gate
-    // and the small window before the pending-file Map is populated).
     await waitFor(() => cg.getPendingFiles().some((p) => p.path === 'src/alpha-only.ts'));
 
     const res = await handler.execute('homegraph_search', { query: 'alphaOnly' });
     expect(res.isError).toBeFalsy();
     const text = res.content[0].text;
 
-    // Banner shape: warning glyph + filename + actionable instruction.
-    expect(text.startsWith('⚠️')).toBe(true);
-    expect(text).toContain('src/alpha-only.ts');
-    expect(text).toMatch(/edited \d+ms ago/);
-    expect(text).toMatch(/Read them directly/);
-    // The actual result must still follow the banner.
+    expect(text.startsWith('⚠️')).toBe(false);
     expect(text).toMatch(/alphaOnly/);
+    expect(text).toContain('HomeGraph status=dirty — outdated: src/alpha-only.ts');
   });
 
-  it('uses the footer (not the banner) when pending files are not referenced', async () => {
+  it('lists unreferenced pending paths in the same dirty footer', async () => {
     cg.watch({ debounceMs: 4000, inertForTests: true });
     await cg.waitUntilWatcherReady();
 
-    // Edit bravo-only.ts but search for the alphaOnly symbol, whose hit is
-    // only in alpha-only.ts. The two files share no imports/calls so the
-    // response text won't mention bravo-only.ts.
     fs.writeFileSync(
       path.join(testDir, 'src', 'bravo-only.ts'),
       'export function bravoOnly() { return 22; }\n',
@@ -140,11 +109,11 @@ describe('MCP staleness banner', () => {
     const text = res.content[0].text;
 
     expect(text.startsWith('⚠️')).toBe(false);
-    expect(text).toMatch(/elsewhere in this project are pending index sync/);
-    expect(text).toContain('src/bravo-only.ts');
+    expect(text).not.toMatch(/elsewhere in this project are pending index sync/);
+    expect(text).toContain('HomeGraph status=dirty — outdated: src/bravo-only.ts');
   });
 
-  it('drops the banner once the sync completes and clears the pending entry', async () => {
+  it('uses status=full once sync clears pending', async () => {
     cg.watch({ debounceMs: 200, inertForTests: true });
     await cg.waitUntilWatcherReady();
 
@@ -153,13 +122,12 @@ describe('MCP staleness banner', () => {
       'export function alphaOnly() { return 7; }\n',
     );
     __emitWatchEventForTests(testDir, 'src/alpha-only.ts');
-    // Wait through debounce (200ms) + sync; pendingFiles drains back to empty.
     await waitFor(() => cg.getPendingFiles().length === 0, 3000);
 
     const res = await handler.execute('homegraph_search', { query: 'alphaOnly' });
     const text = res.content[0].text;
     expect(text.startsWith('⚠️')).toBe(false);
-    expect(text).not.toMatch(/elsewhere in this project are pending index sync/);
+    expect(text).toMatch(/HomeGraph status=full — complete and up to date\.\s*$/);
   });
 
   it('lists pending files under "Pending sync" in homegraph_status', async () => {
@@ -177,7 +145,6 @@ describe('MCP staleness banner', () => {
     const text = res.content[0].text;
     expect(text).toContain('**Pending sync:');
     expect(text).toContain('src/charlie-only.ts');
-    // Status embeds the info first-class, so the auto-banner is suppressed.
     expect(text.startsWith('⚠️')).toBe(false);
   });
 
@@ -195,8 +162,8 @@ describe('MCP staleness banner', () => {
     expect(text.startsWith('⚠️')).toBe(true);
     expect(text).toMatch(/auto-sync is DISABLED/i);
     expect(text).toMatch(/Read files directly/i);
-    expect(text).toContain('OS watch/file limit exhausted'); // the degrade reason
-    expect(text).toMatch(/alphaOnly/); // the real result still follows the banner
+    expect(text).toContain('OS watch/file limit exhausted');
+    expect(text).toMatch(/alphaOnly/);
   });
 
   it('surfaces the degraded state as its own section in homegraph_status (#876)', async () => {
@@ -206,7 +173,6 @@ describe('MCP staleness banner', () => {
     const text = res.content[0].text;
     expect(text).toContain('**Auto-sync disabled:');
     expect(text).toContain('OS watch/file limit exhausted');
-    // status renders the notice inline, so the auto-banner is not also prepended.
     expect(text.startsWith('⚠️')).toBe(false);
   });
 });

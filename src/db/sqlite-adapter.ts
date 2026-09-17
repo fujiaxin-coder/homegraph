@@ -1,16 +1,12 @@
 /**
  * SQLite Adapter
  *
- * Three-tier selection (first success wins):
+ * Two-tier selection (first success wins):
  *   1. `node:sqlite` (`DatabaseSync`) — real SQLite + WAL + FTS5, Node ≥22.5
  *      (skipped when the build lacks FTS5 — e.g. some Node 23.x official builds)
- *   2. `better-sqlite3` — native addon (optionalDependency)
- *   3. `node-sqlite3-wasm` — last-resort fallback (no WAL; slower / lock-prone)
+ *   2. `node-sqlite3-wasm` — cross-platform fallback (no WAL; slower / lock-prone)
  *
- * Library hosts on Node 22.0–22.4 land on (2) or (3). Node ≥22.5 prefers (1) when
- * FTS5 is present and skips the native build. Override with
- * `HOMEGRAPH_SQLITE_BACKEND=node-sqlite|native|wasm`.
- * optionalDependency `better-sqlite3` is 12.x (Node 22+); wasm remains the last resort.
+ * Override with `HOMEGRAPH_SQLITE_BACKEND=node-sqlite|wasm`.
  */
 
 export interface SqliteStatement {
@@ -35,15 +31,13 @@ export interface SqliteDatabase {
 }
 
 /** Active SQLite backend after {@link createDatabase}. */
-export type SqliteBackend = 'node-sqlite' | 'native' | 'wasm';
+export type SqliteBackend = 'node-sqlite' | 'wasm';
 
 /**
  * One-line recovery hint when WASM is active (no WAL — slower / lock-prone).
  */
 export const WASM_FALLBACK_FIX_RECIPE =
-  'upgrade to Node.js 22.5+ (uses built-in node:sqlite), or ' +
-  '`xcode-select --install` (macOS) / `apt install build-essential` (Debian/Ubuntu) ' +
-  'then `npm rebuild better-sqlite3`.';
+  'upgrade to Node.js 22.5+ (uses built-in node:sqlite with FTS5), then restart homegraph';
 
 /**
  * Banner shown to stderr when falling back to WASM.
@@ -52,20 +46,15 @@ export function buildWasmFallbackBanner(priorErrors?: string): string {
   const sep = '─'.repeat(72);
   const lines = [
     sep,
-    '[HomeGraph] WASM SQLite fallback active (node:sqlite + better-sqlite3 unavailable)',
+    '[HomeGraph] WASM SQLite fallback active (node:sqlite unavailable or lacks FTS5)',
     sep,
     'Indexing and sync will be 5-10x slower than a WAL backend, and concurrent',
-    'reads can hit "database is locked". Prefer Node 22.5+ or better-sqlite3.',
+    'reads can hit "database is locked". Prefer Node.js 22.5 or newer.',
     '',
-    'Fix — use built-in SQLite (best when you can):',
+    'Fix — use built-in SQLite:',
     '  Use Node.js 22.5 or newer, then restart homegraph',
     '',
-    'Fix — native better-sqlite3:',
-    '  macOS:  xcode-select --install && npm rebuild better-sqlite3',
-    '  Linux:  sudo apt install build-essential python3 make && npm rebuild better-sqlite3',
-    '  Any:    npm install better-sqlite3 --save',
-    '',
-    'Verify after fix: `homegraph status` should show Backend: node-sqlite or native.',
+    'Verify after fix: `homegraph status` should show Backend: node-sqlite.',
   ];
   if (priorErrors) {
     lines.push('', `Prior load errors: ${priorErrors}`);
@@ -176,20 +165,9 @@ export function isNodeSqliteFts5Available(): boolean {
   return cachedNodeSqliteFts5!;
 }
 
-/** True when `require('better-sqlite3')` succeeds. */
-export function isNativeSqliteAvailable(): boolean {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    require('better-sqlite3');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Wraps Node's built-in `node:sqlite` (`DatabaseSync`) to match the
- * better-sqlite3 interface the rest of the code expects.
+ * statement/database interface the rest of the code expects.
  */
 class NodeSqliteAdapter implements SqliteDatabase {
   private _db: any;
@@ -400,10 +378,11 @@ class WasmDatabaseAdapter implements SqliteDatabase {
 
 function resolveBackendOrder(): SqliteBackend[] {
   const raw = process.env.HOMEGRAPH_SQLITE_BACKEND?.trim().toLowerCase();
-  if (raw === 'node-sqlite' || raw === 'native' || raw === 'wasm') {
+  if (raw === 'node-sqlite' || raw === 'wasm') {
     return [raw];
   }
-  return ['node-sqlite', 'native', 'wasm'];
+  // Unknown values (including legacy `native`) fall through to the default order.
+  return ['node-sqlite', 'wasm'];
 }
 
 function tryOpenBackend(
@@ -422,12 +401,6 @@ function tryOpenBackend(
       }
       return { db: new NodeSqliteAdapter(dbPath, opts), backend: 'node-sqlite' };
     }
-    if (backend === 'native') {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const Database = require('better-sqlite3');
-      const db = opts?.readOnly ? new Database(dbPath, { readonly: true }) : new Database(dbPath);
-      return { db: db as SqliteDatabase, backend: 'native' };
-    }
     return { db: new WasmDatabaseAdapter(dbPath, opts), backend: 'wasm' };
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
@@ -436,7 +409,7 @@ function tryOpenBackend(
 
 /**
  * Create a database connection.
- * Order: node:sqlite (with FTS5) → better-sqlite3 → node-sqlite3-wasm (unless overridden).
+ * Order: node:sqlite (with FTS5) → node-sqlite3-wasm (unless overridden).
  */
 export function createDatabase(
   dbPath: string,

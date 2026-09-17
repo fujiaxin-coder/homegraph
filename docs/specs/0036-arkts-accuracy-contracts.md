@@ -1,8 +1,8 @@
-# 0031 ArkTS request constraints and behavioral evidence
+# 0036 ArkTS request constraints and behavioral evidence
 
 - Date: 2026-09-17
 - Status: Completed (local implementation and validation; inference accuracy not measured)
-- Base: fe81141 (052). Isolated directory, fixed baseline for attribution; no upstream merge in this experimental variant.
+- Base: fe81141 (052). Initial implementation used an isolated, fixed baseline. Before develop publication, merged origin/main at 2ebe761 as explicitly requested by the user.
 
 ## Scope
 
@@ -34,4 +34,11 @@ Strengthen the existing query planner and explore, without modifying codingeval,
 - External Headroom 0.37.0: entire explore response byte-preserved; synthetic repeated build log passes lossless roundtrip (`validation/headroom-accuracy-compatibility.json`).
 - Precise usage routes and resource-value/reference output retained. Resource indirection and unsupported controls have no new positive behavioral certification.
 - `git diff --check`: passed. 052 source unchanged; all implementation writes are in 053; codingeval untouched.
-- Implementation boundaries and optional switches: `docs/arkts-accuracy-contracts.md`. No real inference, remote push or publication in this change.
+- Implementation boundaries and optional switches: `docs/arkts-accuracy-contracts.md`. No real inference experiment or package release; develop publication follows the user-authorized main merge.
+
+## Main integration
+
+- Merged upstream `main` at `2ebe761` (1.5.8 plus index-status and JSON5 mapping updates).
+- Renumbered the accuracy spec from 0031 to 0036 because upstream now owns spec numbers 0031–0035.
+- Retained upstream index readiness, asset packaging and SQLite backend changes; retained 053 target/behavior evidence and Headroom compatibility.
+- Integration validation: build passed; 304 distinct related tests verified (302 initial passes plus affected-suite rerun after two status-copy assertion updates); accuracy/path real-index smokes and Headroom compatibility passed. Records: `validation/main-merge/REPORT.md`.

@@ -9,9 +9,22 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- Harmony `build-profile.json5` files that use single-quoted strings (e.g. `'2in1'`) and bare keys now parse correctly, so multi-module ArkTS dirty sync can map changed `.ets` files to PROJECT modules instead of always falling back to a full rebuild (Spec 0034).
+
 ### Improvements
 
-- ArkTS explore can retain grounded page/literal/object targets and report request evidence separately from source completeness. Verified joint targets improve candidate ordering; a scoped enabled-binding check distinguishes actual modifiers from appearance-only controls while keeping runtime behavior unverified. Results honor source fingerprints and pack budgets, with independent target/behavior switches. Existing precise relationship and resource routes remain available (Spec 0031).
+- ArkTS explore can retain grounded page/literal/object targets and report request evidence separately from source completeness. Verified joint targets improve candidate ordering; a scoped enabled-binding check distinguishes actual modifiers from appearance-only controls while keeping runtime behavior unverified. Results honor source fingerprints and pack budgets, with independent target/behavior switches. Existing precise relationship and resource routes remain available (Spec 0036).
+- MCP product index readiness is now five short states (`empty` / `fast` / `full` / `dirty` / `syncing`): tool replies use a one-line `HomeGraph status=…` footer (or that line alone when the tool cannot answer yet). Pending edits surface as `dirty` with path list instead of the long stale banner; write locks stay `syncing`. MCP initialize includes a one-line status glossary (Spec 0035).
+
+## [1.5.8] - 2026-09-15
+
+### Improvements
+
+- SQLite no longer depends on optional `better-sqlite3`. Backends are **`node:sqlite`** (Node ≥22.5 with FTS5) then **`node-sqlite3-wasm`**. Install trees drop ~10 MiB of unused native-addon source when vendor/offline packaging skips `prebuild-install`. `HOMEGRAPH_SQLITE_BACKEND=native` is ignored (use `node-sqlite` or `wasm`). Prefer Node 22.5+ for WAL (Spec 0033).
+- Published `dist/` no longer includes source maps; vendored tree-sitter grammars are copied from an explicit list (unlisted files such as leftover wasm are not shipped). The `openai` package is an optional dependency used only by spec LLM commands — install it when running `homegraph spec` against an API (`npm install openai`). MCP `serve mcp` does not require it (Spec 0031).
+- MCP product hosts get a unified **four-state** index readiness in tool results (`empty` / `fast` / `full` / `syncing`): deep tools and `homegraph_project` return success-shaped guidance with `status=…` instead of ambiguous phase prose; `tools/list` stays fully exposed. Auto-init cold start sets `building_fast` immediately after creating the empty DB, serializes empty-DB creation with `homegraph.lock`, and opens an existing index when a concurrent init wins. **Fast build** runs in-process; **full build** continues in the same MCP/daemon process in the background (`indexAll` yields between batches — no sibling `homegraph index` CLI, so there is no second writer to lock against). SQLite busy / write-lock contention maps to `syncing` rather than `isError`. The file watcher starts after the full build finishes (Spec 0032).
 - ArkTS exploration now finds bounded directed paths between named anchors, selecting intermediate declarations and registration sources together. Typed state/event goals, exact qualified-name recovery, ambiguity gaps and explicit stop reasons reduce missing connections without treating shared callees as a path. `HOMEGRAPH_ARKTS_QUERY_PATHS=0` restores the first-batch evidence strategy for comparison; indexing and external tool interfaces are unchanged (Spec 0030).
 - ArkTS symbol/flow exploration now selects complete source declarations and the dependencies of static relation evidence together. Explicit gaps identify omitted, stale and unindexed evidence; output and planner budgets no longer cut these packs mid-body. Virtual ArkAnalyzer entries are excluded, cache hits validate source fingerprints, and `HOMEGRAPH_ARKTS_EVIDENCE_PACKS=0` restores legacy rendering for comparison (Spec 0029). Literal/resource and focused usages/modules/native routes retain their existing behavior.
 
@@ -19,7 +32,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - An MCP host's explicit project declaration (`--path`, or the client's `rootUri`/`workspaceFolders`) is now a **floor** for root resolution: a stray ancestor `.homegraph/` above it is never adopted. Previously a nested server walked up unbounded and could latch onto an unrelated ancestor index — observed live as a DevEco evaluation session creating `.homegraph` at a benchmark harness root, after which every nested project's daemon tried to index the entire result tree (OOM at 3.5GB in 48s) while its server was SIGKILL'd by the 60s liveness watchdog with every tool call hanging as `Connection closed`. Bare `serve mcp` and CLI commands keep the git-style unbounded walk-up; tool-level `projectPath` resolution is unchanged (Spec 0028).
 - `homegraph_explore`'s description no longer reports `Budget: make at most 1 calls for this project (0 files indexed)` while auto-init is still building. Hosts snapshot `tools/list` once at connect, so that transient "0 files" read as terminal and agents abandoned HomeGraph for the whole session even though the index completed seconds later. The 0-file description now matches what a call actually returns: a failed build asks the agent to relay `homegraph index` to the user, an in-flight build points at `homegraph_project` and says to retry once indexing finishes, and a genuinely empty project says so honestly. Indexed repos keep the usual call-budget note unchanged (Spec 0027).
-
 
 ## [1.5.7] - 2026-09-09
 
@@ -235,3 +247,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.4.1]: https://gitcode.com/ProgramAnalysis/homegraph/tags/v1.4.1
 [1.5.6]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.6
 [1.5.7]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.7
+[1.5.8]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.8
