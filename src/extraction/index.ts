@@ -40,6 +40,7 @@ import type { ResolutionContext } from '../resolution/types';
 import { setArkTSBatchProgressCallback, isArktsBatchRunning } from './context';
 import {
   isArkTSBatchPersisted,
+  preferHarmonySerialIndexing,
   primeArkTSBatch,
   resetArkTSBatch,
   shrinkArkTSBatchPostParse,
@@ -1626,11 +1627,16 @@ export class ExtractionOrchestrator {
     if (useWorker) {
       // CODEGRAPH_PARSE_WORKERS: explicit worker count; 1 = the old single-worker
       // behaviour (the conservative rollback). Unset → clamp(cores-1, 1, 8).
+      // Harmony modular repos default to 1 worker (Spec 0037) unless overridden.
       let poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.cpus().length);
-      if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim() && remainingToParse < 500) {
-        poolSize = Math.min(poolSize, 2);
-      } else if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim() && remainingToParse < 2000) {
-        poolSize = Math.min(poolSize, 4);
+      if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim()) {
+        if (preferHarmonySerialIndexing(this.rootDir)) {
+          poolSize = 1;
+        } else if (remainingToParse < 500) {
+          poolSize = Math.min(poolSize, 2);
+        } else if (remainingToParse < 2000) {
+          poolSize = Math.min(poolSize, 4);
+        }
       }
       pool = new ParseWorkerPool({
         languages: neededLanguages,

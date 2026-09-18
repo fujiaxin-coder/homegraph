@@ -281,6 +281,22 @@ function shouldUseModularArkTSBuild(rootDir: string): boolean {
   return fs.existsSync(path.join(rootDir, 'build-profile.json5'));
 }
 
+/**
+ * Default to serial parse + no resolve worker pool on Harmony modular repos.
+ * analyseByModule dominates wall clock; worker pools mainly spike peak RSS after
+ * Scene release (Spec 0037). Explicit CODEGRAPH_PARSE_WORKERS still wins when set.
+ *
+ * - unset: true iff root `build-profile.json5` exists
+ * - `HOMEGRAPH_HARMONY_SERIAL=0`/`false`: never
+ * - `HOMEGRAPH_HARMONY_SERIAL=1`/`true`: always
+ */
+export function preferHarmonySerialIndexing(rootDir: string): boolean {
+  const mode = process.env.HOMEGRAPH_HARMONY_SERIAL?.trim();
+  if (mode === '0' || mode === 'false') return false;
+  if (mode === '1' || mode === 'true') return true;
+  return fs.existsSync(path.join(rootDir, 'build-profile.json5'));
+}
+
 /** One PROJECT module from root `build-profile.json5`. */
 export interface HarmonyModuleRef {
   name: string;

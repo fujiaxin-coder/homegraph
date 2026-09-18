@@ -18,6 +18,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- Harmony projects with a root `build-profile.json5` now default to **serial indexing** after ArkAnalyzer: one parse worker and no resolve/synthesis worker pool. On SceneBoard-scale repos this cut peak process-tree PrivateMemory from ~8.5GB to ~3.8GB with only ~6% more wall clock. Opt out with `HOMEGRAPH_HARMONY_SERIAL=0`; force on with `=1`. Explicit `CODEGRAPH_PARSE_WORKERS` still overrides parse concurrency (Spec 0037).
 - MCP product index readiness is now five short states (`empty` / `fast` / `full` / `dirty` / `syncing`): tool replies use a one-line `HomeGraph status=…` footer (or that line alone when the tool cannot answer yet). Pending edits surface as `dirty` with path list instead of the long stale banner; write locks stay `syncing`. MCP initialize includes a one-line status glossary (Spec 0035).
 
 ## [1.5.8] - 2026-09-15

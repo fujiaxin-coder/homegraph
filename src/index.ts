@@ -47,6 +47,7 @@ import {
   attachExistingOhosApiDbForProject,
   restoreOhosApiDbAttach,
   ohosApiDbPackageName,
+  preferHarmonySerialIndexing,
   resetArkTSBatch,
   type OhosApiDbBinding,
   OHOS_API_DB_PATH_META,
@@ -1186,18 +1187,28 @@ export class HomeGraph {
     onSynthesisProgress?: (done: number, total: number) => void,
     backpressure?: () => Promise<void> | null
   ): Promise<ResolutionResult> {
-    return this.resolver.resolveAndPersistBatched(onProgress, undefined, onSynthesisProgress, {
-      dbPath: this.db.getPath(),
-      bulkEdgeLoad: {
-        begin: () => this.db.beginBulkEdgeLoad(),
-        end: () => this.db.endBulkEdgeLoad(),
-      },
-      refIndexLoad: {
-        begin: () => this.db.beginBulkRefLoad(),
-        end: () => this.db.endBulkRefLoad(),
-      },
-      backpressure,
-    });
+    // Harmony modular repos: skip ResolverPool (Spec 0037). Synthesis then runs
+    // on the main thread with concurrency 1 — same peak profile as Plan D.
+    const parallel = preferHarmonySerialIndexing(this.projectRoot)
+      ? undefined
+      : {
+          dbPath: this.db.getPath(),
+          bulkEdgeLoad: {
+            begin: () => this.db.beginBulkEdgeLoad(),
+            end: () => this.db.endBulkEdgeLoad(),
+          },
+          refIndexLoad: {
+            begin: () => this.db.beginBulkRefLoad(),
+            end: () => this.db.endBulkRefLoad(),
+          },
+          backpressure,
+        };
+    return this.resolver.resolveAndPersistBatched(
+      onProgress,
+      undefined,
+      onSynthesisProgress,
+      parallel
+    );
   }
 
   /**
