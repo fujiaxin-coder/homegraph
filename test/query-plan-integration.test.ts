@@ -190,7 +190,8 @@ describe('structured query planning at the MCP boundary', () => {
       ]) {
         expect(result.isError).toBeFalsy();
         expect(output(result)).toContain('homegraph_project');
-        expect(output(result)).toMatch(/still building|preparing/i);
+        // Spec 0035: fast/indexing → one-line status=fast (no "still building" prose).
+        expect(output(result)).toMatch(/HomeGraph status=fast/i);
         expect(output(result)).not.toContain('ANSWER NOW');
       }
       expect(fetchMock).not.toHaveBeenCalled();

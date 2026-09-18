@@ -341,7 +341,8 @@ describe('homegraph_diff_impact MCP tool', () => {
     if (res.isError) {
       throw new Error(`unexpected isError: ${res.content[0]?.text}`);
     }
-    const body = JSON.parse(res.content[0]!.text) as {
+    // Spec 0035 appends a `HomeGraph status=` footer after the JSON body.
+    const body = JSON.parse(res.content[0]!.text.replace(/\n\nHomeGraph status=[\s\S]*$/, '')) as {
       changedSymbols: Array<{ name: string }>;
       callers: Array<{ symbol: string; callerName: string }>;
     };
@@ -371,7 +372,7 @@ describe('homegraph_diff_impact MCP tool', () => {
 
     const res = await handler.execute('homegraph_diff_impact', { diff });
     expect(res.isError).toBeFalsy();
-    const body = JSON.parse(res.content[0]!.text) as {
+    const body = JSON.parse(res.content[0]!.text.replace(/\n\nHomeGraph status=[\s\S]*$/, '')) as {
       changedFiles: string[];
       changedSymbols: Array<{ name: string }>;
     };
