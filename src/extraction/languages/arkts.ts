@@ -335,36 +335,74 @@ function resolveArkModuleAbsPath(rootDir: string, relSrcPath: string): string {
 }
 
 /**
- * Nearest package-like directory for an orphan Ark source, or the first path
- * segment. Never returns the project root (registering `.` would re-scan every
- * Harmony module). Lone files directly under the root return null.
+ * True when registering `srcPath` as a synthetic PROJECT would re-load real
+ * Harmony modules: exact path collision, or a parent of existing `srcPath`s
+ * (e.g. synthetic `feature/` swallowing `feature/appcenter`).
  */
-export function findSyntheticArkModuleRoot(rootDir: string, relFile: string): string | null {
+export function syntheticRootConflictsWithHarmonyModules(
+  srcPath: string,
+  modules: readonly HarmonyModuleRef[]
+): boolean {
+  const src = normalizeHarmonyModuleSrcPath(srcPath);
+  if (!src || src === '.' || src === '') return true;
+  for (const m of modules) {
+    const mod = m.srcPath;
+    if (mod === src || mod.startsWith(`${src}/`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Nearest **Node** `package.json` directory for an orphan Ark/TS source.
+ * Never returns the project root (registering `.` would re-scan every Harmony
+ * module). Lone files directly under the root return null.
+ *
+ * Only `package.json` counts — not `oh-package.json5`. Forgotten Harmony HARs
+ * left out of root `build-profile.json5` (scene_board `feature/visionglass`
+ * etc.) often declare heavy `file:`/`../` deps on modules already indexed as
+ * real PROJECT modules; registering them as synthetic PROJECT→BODIES reloads
+ * those deps into ModuleCache and spikes wall time + RSS for almost no unique
+ * coverage. Those orphans fall through to tree-sitter instead.
+ *
+ * When `harmonyModules` is provided, skips roots that would swallow those
+ * modules (e.g. a plugin under `feature/intelligent` must not become
+ * `synthetic:feature/` and re-BODIES the whole `feature/` tree).
+ */
+export function findSyntheticArkModuleRoot(
+  rootDir: string,
+  relFile: string,
+  harmonyModules: readonly HarmonyModuleRef[] = []
+): string | null {
   const file = normIndexPath(relFile);
   if (!file || file.startsWith('@')) return null;
-  let dir = path.posix.dirname(file);
+  const dir = path.posix.dirname(file);
   if (dir === '.' || dir === '') return null;
 
   const rootAbs = path.resolve(rootDir);
+  const candidates: string[] = [];
   let curAbs = path.resolve(rootDir, dir);
   for (;;) {
     const relFromRoot = path.relative(rootAbs, curAbs);
     if (!relFromRoot || relFromRoot.startsWith('..') || path.isAbsolute(relFromRoot)) break;
-    const rel = relFromRoot.replace(/\\/g, '/');
-    if (
-      fs.existsSync(path.join(curAbs, 'package.json')) ||
-      fs.existsSync(path.join(curAbs, 'oh-package.json5'))
-    ) {
-      return normalizeHarmonyModuleSrcPath(rel);
-    }
+    const rel = normalizeHarmonyModuleSrcPath(relFromRoot.replace(/\\/g, '/'));
+    if (rel && rel !== '.') candidates.push(rel);
     const parent = path.dirname(curAbs);
     if (parent === curAbs) break;
     curAbs = parent;
   }
+  if (candidates.length === 0) return null;
 
-  const first = file.split('/')[0];
-  if (!first || first === file) return null;
-  return normalizeHarmonyModuleSrcPath(first);
+  const safe = (rel: string) => !syntheticRootConflictsWithHarmonyModules(rel, harmonyModules);
+
+  // Nearest package.json that does not swallow Harmony modules (Node plugins).
+  for (const rel of candidates) {
+    if (!safe(rel)) continue;
+    const abs = path.resolve(rootDir, rel);
+    if (fs.existsSync(path.join(abs, 'package.json'))) {
+      return rel;
+    }
+  }
+  return null;
 }
 
 /**
@@ -387,8 +425,10 @@ export function listOrphanArkAnalyzerSources(
 }
 
 /**
- * Cluster orphan `.ets`/`.ts`/`.d.ts` into synthetic PROJECT module roots
- * (e.g. `HMRouterPlugin` for a Node hvigor plugin living beside HAP modules).
+ * Cluster orphan `.ets`/`.ts`/`.d.ts` into synthetic PROJECT module roots for
+ * Node-style packages only (`package.json`, e.g. HMRouterPlugin). Harmony
+ * `oh-package.json5` trees omitted from build-profile are not registered —
+ * analyseByModule would re-SIGNATURES their monorepo deps at high RSS cost.
  */
 export function listSyntheticArkModuleRoots(
   rootDir: string,
@@ -399,10 +439,10 @@ export function listSyntheticArkModuleRoots(
   const orphans = listOrphanArkAnalyzerSources(scannedFiles, modules);
   const bySrc = new Map<string, HarmonyModuleRef>();
   for (const f of orphans) {
-    const srcPath = findSyntheticArkModuleRoot(rootDir, f);
+    const srcPath = findSyntheticArkModuleRoot(rootDir, f, modules);
     if (!srcPath) continue;
-    // Never shadow a real Harmony module path.
-    if (modules.some((m) => m.srcPath === srcPath)) continue;
+    // Belt-and-suspenders with findSyntheticArkModuleRoot's conflict check.
+    if (syntheticRootConflictsWithHarmonyModules(srcPath, modules)) continue;
     if (bySrc.has(srcPath)) continue;
     const abs = path.resolve(rootDir, srcPath);
     if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) continue;
@@ -990,14 +1030,30 @@ function tryForceGc(): void {
   }
 }
 
+/** Compact stderr phase/heartbeat lines for ArkTS index stalls (scene_board-scale). */
+function arktsPhaseLog(msg: string): void {
+  const mu = process.memoryUsage();
+  const heap = (mu.heapUsed / 1024 / 1024).toFixed(0);
+  const rss = (mu.rss / 1024 / 1024).toFixed(0);
+  process.stderr.write(
+    `\x1b[36m    ArkTS[${new Date().toISOString()}] ${msg} (heap=${heap}MB rss=${rss}MB)\x1b[0m\n`
+  );
+}
+
 /**
  * Unload every module's IR then dispose Scene globals. Plain `scene.dispose()`
  * only clears SDK helpers / moduleCache — project ArkFiles stay reachable and
  * pin multi-GB RSS into Parsing/Resolving.
  */
 function releaseArkAnalyzerScene(scene: Scene): void {
+  const t0 = Date.now();
+  let n = 0;
+  let total = -1;
   try {
-    for (const mod of scene.getModules()) {
+    const mods = [...scene.getModules()];
+    total = mods.length;
+    arktsPhaseLog(`releaseScene: disposing ${total} module(s)…`);
+    for (const mod of mods) {
       try {
         scene.disposeModule(mod);
         mod.setFileDepGraph(undefined);
@@ -1006,16 +1062,22 @@ function releaseArkAnalyzerScene(scene: Scene): void {
       } catch {
         // per-module best-effort
       }
+      n++;
+      if (n === 1 || n === total || n % 25 === 0) {
+        arktsPhaseLog(`releaseScene: disposed ${n}/${total}`);
+      }
     }
   } catch {
     // ignore
   }
   try {
+    arktsPhaseLog('releaseScene: scene.dispose()…');
     scene.dispose();
   } catch {
     // ignore
   }
   tryForceGc();
+  arktsPhaseLog(`releaseScene: done in ${Date.now() - t0}ms (disposed ${n}/${total})`);
 }
 
 /**
@@ -1251,20 +1313,20 @@ function runArkTSBatch(rootDir: string, queries: QueryBuilder, triggerFile: stri
   }
 
   // indexAll releases the in-memory payload after SQLite persist. A later
-  // ArkTSExtractor hit must NOT rebuild the entire Scene (looks like a restart).
-  if (
-    batchBuildCommitted &&
-    persistedBatch &&
-    persistedBatch.rootDir === rootDir &&
-    batchPersistedPaths.has(normalizedTrigger)
-  ) {
+  // ArkTSExtractor hit must NOT rebuild the entire Scene (looks like a restart
+  // after "127/127 … releaseScene done"). That includes orphans that were never
+  // in a PROJECT module — they are meant to fall through to tree-sitter, not
+  // trigger a second analyseByModule without streamPersist.
+  if (batchBuildCommitted && persistedBatch && persistedBatch.rootDir === rootDir) {
     return {
       fileResults: new Map(),
       crossFileEdges: [],
       nodeIds: new Set(),
       errors: [
         {
-          message: 'ArkTS batch already persisted this run; in-memory payload released',
+          message: batchPersistedPaths.has(normalizedTrigger)
+            ? 'ArkTS batch already persisted this run; in-memory payload released'
+            : 'ArkTS batch already finished this run; file was outside PROJECT modules (tree-sitter fallback)',
           severity: 'warning',
         },
       ],
@@ -4573,7 +4635,7 @@ function buildArkTSIndexByModuleInner(
   try {
     scene.config(sceneConfig);
 
-    // Register build-profile modules + orphan trees (no oh-package) before the
+    // Register build-profile modules + Node package.json orphan plugins before the
     // dep graph is frozen — otherwise analyseByModule never sees HMRouterPlugin-style .ts.
     const synthetics = prepareArkModulesWithSynthetics(scene, rootDir, scannedList);
     if (synthetics.length > 0) {
@@ -4625,75 +4687,131 @@ function buildArkTSIndexByModuleInner(
       );
     }
 
-    scene.analyseByModule((module, scn) => {
-      const moduleFileRels = [...module.getFilesMap().values()]
-        .map((f) => adapter.normalizeRelPath(f.getFilePath()))
-        .filter((p) => p && isArkAnalyzerSourcePath(p))
-        .map(normIndexPath);
-
-      adapter.indexModule(module, scn);
-      // HomeGraph already captured this module's symbols/edges. Hollow every
-      // currently-loaded module still above INDEX (target + oh_modules /
-      // SIGNATURES deps left in ModuleCache). Topo order means PROJECT deps of
-      // the current target are often already INDEX from their own callback, so
-      // BFS-from-self alone left depHollowed=0; sweeping the cache catches the
-      // fat non-target SIGNATURES that memoryLimitMB rarely evicts under a large
-      // soft budget. INDEX keeps export-reachable shells; loadModule upgrades
-      // when a later target needs SIGNATURES/BODIES.
-      let depHollowed = 0;
-      try {
-        const builder = new ModuleBuilder(scn);
-        const selfId = scn.getModuleId(module);
-        hollowModuleToIndex(builder, selfId);
-
-        const cache = scn.getModuleCache();
-        if (cache) {
-          for (const modId of cache.getLoadedModules()) {
-            if (modId === selfId) continue;
-            const depMod = builder.getModule(modId);
-            if (!depMod || depMod.getLoadState() <= ModuleLoadState.INDEX) continue;
-            hollowModuleToIndex(builder, modId);
-            depHollowed++;
-          }
-        }
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        errors.push({
-          message: `ArkTS post-index INDEX hollow failed for ${module.getModuleName() || module.getModulePath()}: ${message}`,
-          severity: 'warning',
-        });
+    let projectModuleCount = 0;
+    try {
+      for (const mod of scene.getModules()) {
+        if (mod.getModuleType() === ModuleType.PROJECT) projectModuleCount++;
       }
+    } catch {
+      projectModuleCount = -1;
+    }
 
-      if (streamQueries) {
-        // Persist this module's file bodies now; keep @dummyFile until finalize.
-        const slicePaths = moduleFileRels.filter((p) => p !== ARKANALYZER_DUMMY_FILE);
-        const slice = adapter.takeFileResults(slicePaths);
-        try {
-          persistAndDropModuleSlice(
-            rootDir,
-            streamQueries,
-            slice,
-            streamedPersistedPaths,
-            persistOrdinal
+    // Heartbeat: analyseByModule is native between callbacks — without this the
+    // CLI looks frozen after the last `indexed module` line (scene_board ~127).
+    let lastCallbackAt = Date.now();
+    let lastCallbackName = '(none)';
+    let inCallback = false;
+    const analyseStartedAt = Date.now();
+    const heartbeat = setInterval(() => {
+      const idleSec = ((Date.now() - lastCallbackAt) / 1000).toFixed(1);
+      arktsPhaseLog(
+        `heartbeat: analyseByModule still running — modulesDone=${modulesIndexed}/${projectModuleCount} ` +
+          `last=${lastCallbackName} inCallback=${inCallback} idleSinceCallback=${idleSec}s ` +
+          `elapsed=${((Date.now() - analyseStartedAt) / 1000).toFixed(0)}s`
+      );
+    }, 10_000);
+    // Don't keep the process alive solely for the heartbeat if AA finishes.
+    heartbeat.unref?.();
+
+    arktsPhaseLog(
+      `analyseByModule: ENTER expectedProjectModules=${projectModuleCount} scannedFiles=${scannedList.length}`
+    );
+    try {
+      scene.analyseByModule((module, scn) => {
+        inCallback = true;
+        const callbackStarted = Date.now();
+        const name = module.getModuleName() || path.basename(module.getModulePath());
+        const gapSec = ((callbackStarted - lastCallbackAt) / 1000).toFixed(1);
+        if (modulesIndexed > 0 && callbackStarted - lastCallbackAt >= 15_000) {
+          arktsPhaseLog(
+            `analyseByModule: gap before "${name}" — ${gapSec}s native since module ${modulesIndexed}`
           );
+        }
+
+        const moduleFileRels = [...module.getFilesMap().values()]
+          .map((f) => adapter.normalizeRelPath(f.getFilePath()))
+          .filter((p) => p && isArkAnalyzerSourcePath(p))
+          .map(normIndexPath);
+
+        const tIndex = Date.now();
+        adapter.indexModule(module, scn);
+        const indexMs = Date.now() - tIndex;
+        // HomeGraph already captured this module's symbols/edges. Hollow every
+        // currently-loaded module still above INDEX (target + oh_modules /
+        // SIGNATURES deps left in ModuleCache). Topo order means PROJECT deps of
+        // the current target are often already INDEX from their own callback, so
+        // BFS-from-self alone left depHollowed=0; sweeping the cache catches the
+        // fat non-target SIGNATURES that memoryLimitMB rarely evicts under a large
+        // soft budget. INDEX keeps export-reachable shells; loadModule upgrades
+        // when a later target needs SIGNATURES/BODIES.
+        let depHollowed = 0;
+        const tHollow = Date.now();
+        try {
+          const builder = new ModuleBuilder(scn);
+          const selfId = scn.getModuleId(module);
+          hollowModuleToIndex(builder, selfId);
+
+          const cache = scn.getModuleCache();
+          if (cache) {
+            for (const modId of cache.getLoadedModules()) {
+              if (modId === selfId) continue;
+              const depMod = builder.getModule(modId);
+              if (!depMod || depMod.getLoadState() <= ModuleLoadState.INDEX) continue;
+              hollowModuleToIndex(builder, modId);
+              depHollowed++;
+            }
+          }
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
           errors.push({
-            message: `ArkTS stream persist failed for ${module.getModuleName() || module.getModulePath()}: ${message}`,
-            severity: 'error',
+            message: `ArkTS post-index INDEX hollow failed for ${module.getModuleName() || module.getModulePath()}: ${message}`,
+            severity: 'warning',
           });
-          throw e;
         }
-      }
+        const hollowMs = Date.now() - tHollow;
 
-      modulesIndexed++;
-      const name = module.getModuleName() || path.basename(module.getModulePath());
-      const st = ModuleLoadState[module.getLoadState()] ?? String(module.getLoadState());
-      const depNote = depHollowed > 0 ? `, hollowed ${depHollowed} deps` : '';
-      process.stderr.write(
-        `\x1b[33m    ArkTS: indexed module ${modulesIndexed}: ${name} → ${st}${depNote}${streamQueries ? ` (streamed ${moduleFileRels.length} files)` : ''}\x1b[0m\n`
-      );
-    }, config);
+        let persistMs = 0;
+        if (streamQueries) {
+          // Persist this module's file bodies now; keep @dummyFile until finalize.
+          const slicePaths = moduleFileRels.filter((p) => p !== ARKANALYZER_DUMMY_FILE);
+          const slice = adapter.takeFileResults(slicePaths);
+          const tPersist = Date.now();
+          try {
+            persistAndDropModuleSlice(
+              rootDir,
+              streamQueries,
+              slice,
+              streamedPersistedPaths,
+              persistOrdinal
+            );
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            errors.push({
+              message: `ArkTS stream persist failed for ${module.getModuleName() || module.getModulePath()}: ${message}`,
+              severity: 'error',
+            });
+            throw e;
+          }
+          persistMs = Date.now() - tPersist;
+        }
+
+        modulesIndexed++;
+        lastCallbackAt = Date.now();
+        lastCallbackName = name;
+        inCallback = false;
+        const st = ModuleLoadState[module.getLoadState()] ?? String(module.getLoadState());
+        const depNote = depHollowed > 0 ? `, hollowed ${depHollowed} deps` : '';
+        const timingNote = ` [gap=${gapSec}s idx=${indexMs}ms hollow=${hollowMs}ms persist=${persistMs}ms total=${Date.now() - callbackStarted}ms]`;
+        process.stderr.write(
+          `\x1b[33m    ArkTS: indexed module ${modulesIndexed}/${projectModuleCount}: ${name} → ${st}${depNote}${streamQueries ? ` (streamed ${moduleFileRels.length} files)` : ''}${timingNote}\x1b[0m\n`
+        );
+      }, config);
+    } finally {
+      clearInterval(heartbeat);
+    }
+    arktsPhaseLog(
+      `analyseByModule: RETURNED modulesIndexed=${modulesIndexed}/${projectModuleCount} in ${Date.now() - analyseStartedAt}ms`
+    );
 
     if (process.env.HOMEGRAPH_ARKTS_DIAG === '1') {
       const sceneDiag = scene as Scene & { getModuleEvictionStats?: () => unknown };
@@ -4719,16 +4837,22 @@ function buildArkTSIndexByModuleInner(
     }
 
     try {
+      const tFin = Date.now();
+      arktsPhaseLog('finalizeCallGraph: ENTER');
       adapter.finalizeCallGraph(scene);
+      arktsPhaseLog(`finalizeCallGraph: DONE in ${Date.now() - tFin}ms`);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       errors.push({
         message: `ArkTS modular leftover RTA skipped: ${message}`,
         severity: 'warning',
       });
+      arktsPhaseLog(`finalizeCallGraph: SKIPPED (${message})`);
     }
 
     if (streamQueries) {
+      const tLeft = Date.now();
+      arktsPhaseLog('leftoverPersist: ENTER');
       const leftover = adapter.takeFileResults(adapter.fileResultPaths());
       persistAndDropModuleSlice(
         rootDir,
@@ -4736,6 +4860,9 @@ function buildArkTSIndexByModuleInner(
         leftover,
         streamedPersistedPaths,
         persistOrdinal
+      );
+      arktsPhaseLog(
+        `leftoverPersist: DONE in ${Date.now() - tLeft}ms leftoverFiles=${leftover.size} streamedTotal=${streamedPersistedPaths.size}`
       );
     }
 
@@ -4750,6 +4877,7 @@ function buildArkTSIndexByModuleInner(
       });
       return emptyArkTSBatchIndex(errors);
     }
+    arktsPhaseLog('buildArkTSIndexByModuleInner: returning index (finally will releaseScene)');
     return index;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -4757,6 +4885,7 @@ function buildArkTSIndexByModuleInner(
       message: `ArkTS analyseByModule failed: ${message}; falling back to full Scene build`,
       severity: 'warning',
     });
+    arktsPhaseLog(`analyseByModule: FAILED — ${message}`);
     return emptyArkTSBatchIndex(errors);
   } finally {
     try {

@@ -11,6 +11,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- ArkTS synthetic PROJECT modules are limited to Node `package.json` trees (e.g. hvigor plugins). Forgotten Harmony HARs that only have `oh-package.json5` / loose `.ets` outside root `build-profile.json5` are no longer registered for `analyseByModule` BODIES — on SceneBoard-scale repos that was reloading already-indexed monorepo deps into ModuleCache and inflating wall time and peak RSS. Those orphans are indexed via tree-sitter instead. Parent-dir swallow of real Harmony modules (e.g. `synthetic:feature/`) remains blocked (Spec 0036).
+- After a streamed ArkTS modular batch finishes and releases the Scene, orphan `.ets` files that were never PROJECT-persisted no longer trigger a second full `analyseByModule` (the “127/127 done → starts again at 1/127” loop). They use the TypeScript tree-sitter fallback instead (Spec 0036).
+- `homegraph init`/`index` reported duration now covers the full wall clock (extract + FTS rebuild + resolve/link + maintenance), not only the extraction orchestrator phase (Spec 0036).
 - Harmony `build-profile.json5` files that use single-quoted strings (e.g. `'2in1'`) and bare keys now parse correctly, so multi-module ArkTS dirty sync can map changed `.ets` files to PROJECT modules instead of always falling back to a full rebuild (Spec 0034).
 
 ### Improvements

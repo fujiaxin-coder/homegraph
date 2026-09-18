@@ -574,6 +574,11 @@ export class HomeGraph {
       } catch {
         return { success: false, filesIndexed: 0, filesSkipped: 0, filesErrored: 0, nodesCreated: 0, edgesCreated: 0, errors: [{ message: 'Could not acquire file lock - another process may be indexing', severity: 'error' as const }], durationMs: 0 };
       }
+      // Wall clock for the whole indexAll critical section (extract + FTS rebuild
+      // + resolve/link + maintenance + optional ohos API bind). Orchestrator
+      // durationMs only covers extract/store — printing that alone under-reports
+      // large Harmony repos where resolving dominates the remaining minutes.
+      const wallStartedAt = Date.now();
       const freshDb = this.queries.getNodeAndEdgeCount().nodes === 0;
       const fastInit = process.env.HOMEGRAPH_NO_FAST_INIT !== '1' && freshDb;
       if (fastInit) {
@@ -735,6 +740,7 @@ export class HomeGraph {
           }
         } catch { /* metadata is advisory — never fail an index over it */ }
 
+        result.durationMs = Date.now() - wallStartedAt;
         return result;
       } finally {
         if (walValve) { walValve.stop(); await walValve.drain(); }
