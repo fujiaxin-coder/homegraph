@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.5.10] - 2026-09-20
+
 ### Fixes
 
 - ArkTS synthetic PROJECT modules are limited to Node `package.json` trees (e.g. hvigor plugins). Forgotten Harmony HARs that only have `oh-package.json5` / loose `.ets` outside root `build-profile.json5` are no longer registered for `analyseByModule` BODIES — on SceneBoard-scale repos that was reloading already-indexed monorepo deps into ModuleCache and inflating wall time and peak RSS. Those orphans are indexed via tree-sitter instead. Parent-dir swallow of real Harmony modules (e.g. `synthetic:feature/`) remains blocked (Spec 0036).
@@ -252,3 +255,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.5.6]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.6
 [1.5.7]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.7
 [1.5.8]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.8
+[1.5.10]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.10
