@@ -128,6 +128,21 @@ export class MCPEngine {
     return this.toolHandler;
   }
 
+  /**
+   * Spec 0047: true while auto-init / full symbol build is in flight.
+   * Used by the daemon idle timer — never idle-exit mid-build when clients=0.
+   * Does not include routine watch/sync increments.
+   */
+  isIndexBuildInProgress(): boolean {
+    if (!this.cg) return false;
+    try {
+      const phase = this.cg.getBuildPhase();
+      return phase === 'building_fast' || phase === 'indexing';
+    } catch {
+      return false;
+    }
+  }
+
   /** Whether the default project's HomeGraph is open. */
   hasDefaultHomeGraph(): boolean {
     return this.toolHandler.hasDefaultHomeGraph();

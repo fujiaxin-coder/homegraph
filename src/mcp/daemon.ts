@@ -20,9 +20,12 @@
  *     so a SIGKILL'd host still reaps its proxy promptly; the proxy's socket
  *     close then decrements the daemon's refcount.
  *   - When the last client disconnects the daemon lingers for
- *     `HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS` (default 300s) so back-to-back agent
- *     runs in the same project don't repay startup, then exits cleanly. This is
- *     what keeps a single-agent session from leaking a daemon forever (#277).
+ *     `HOMEGRAPH_DAEMON_IDLE_TIMEOUT_MS` (default **60s**, Spec 0047) so a
+ *     quick reconnect does not repay startup — but **only after** any in-flight
+ *     auto-init/full index finishes (`building_fast` / `indexing`). While a
+ *     client is connected (refcount > 0) the daemon never idle-exits. This is
+ *     what keeps a single-agent session from leaking a daemon forever (#277)
+ *     without killing a half-built graph when the IDE just closed.
  *
  * What this file owns:
  *   - Listening on the daemon socket and spawning per-connection sessions.
@@ -57,8 +60,37 @@ import {
 import { HomeGraphPackageVersion } from './version';
 import { registerDaemon, deregisterDaemon } from './daemon-registry';
 
-/** Default idle linger after the last client disconnects. */
-const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
+/** How often to re-check build phase while deferring idle exit (Spec 0047). */
+const BUILD_IDLE_POLL_MS = 2_000;
+
+/** Default idle linger after the last client disconnects (Spec 0047: 60s). */
+const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Spec 0047: phases that block daemon idle-exit when clients=0.
+ * Routine watch/sync is NOT included.
+ */
+export function isBuildPhaseBlockingIdle(phase: string | null | undefined): boolean {
+  return phase === 'building_fast' || phase === 'indexing';
+}
+
+/**
+ * Decide idle-timer action when the linger timer fires (refcount already 0).
+ * Pure helper for unit tests.
+ */
+export function decideIdleExitAction(opts: {
+  clientCount: number;
+  buildBlocking: boolean;
+}): 'exit' | 'rearm-idle' | 'poll-build' {
+  if (opts.clientCount > 0) return 'rearm-idle';
+  if (opts.buildBlocking) return 'poll-build';
+  return 'exit';
+}
+
+/** Default idle linger after last client (exported for tests). */
+export function defaultDaemonIdleTimeoutMs(): number {
+  return DEFAULT_IDLE_TIMEOUT_MS;
+}
 
 /**
  * Hard ceiling on how long the daemon stays up with clients connected but no
@@ -385,13 +417,38 @@ export class Daemon {
   private armIdleTimer(): void {
     if (this.idleTimer || this.stopping) return;
     if (this.idleTimeoutMs <= 0) return; // 0 = never idle-exit
+
+    // Spec 0047: if the last window closed mid-index, wait for build to finish
+    // before starting the idle linger — never exit while clients>0 either.
+    if (this.clients.size === 0 && this.engine.isIndexBuildInProgress()) {
+      this.idleTimer = setTimeout(() => {
+        this.idleTimer = null;
+        if (this.clients.size > 0) return; // reconnect disarmed the need
+        if (this.engine.isIndexBuildInProgress()) {
+          this.armIdleTimer(); // keep polling until build settles
+          return;
+        }
+        this.armIdleTimer(); // build done → arm full idle linger
+      }, BUILD_IDLE_POLL_MS);
+      this.idleTimer.unref?.();
+      return;
+    }
+
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       // Last-second sanity check: if a connection landed between the timer
       // firing and now, don't exit. (setImmediate-ordering is the only way
       // this races; cheap to defend against.)
-      if (this.clients.size > 0) {
+      const action = decideIdleExitAction({
+        clientCount: this.clients.size,
+        buildBlocking: this.engine.isIndexBuildInProgress(),
+      });
+      if (action === 'rearm-idle') {
         this.armIdleTimer();
+        return;
+      }
+      if (action === 'poll-build') {
+        this.armIdleTimer(); // switches to build-poll branch above
         return;
       }
       void this.stop('idle timeout');

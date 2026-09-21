@@ -27,15 +27,34 @@ describe('config parsing', () => {
   });
 });
 
-describe('installMainThreadWatchdog opt-out', () => {
-  it('returns null (spawns nothing) when HOMEGRAPH_NO_WATCHDOG is set', () => {
-    const prev = process.env.HOMEGRAPH_NO_WATCHDOG;
+describe('installMainThreadWatchdog opt-in (Spec 0047)', () => {
+  it('returns null by default (watchdog off)', () => {
+    const prevW = process.env.HOMEGRAPH_WATCHDOG;
+    const prevN = process.env.HOMEGRAPH_NO_WATCHDOG;
+    delete process.env.HOMEGRAPH_WATCHDOG;
+    delete process.env.HOMEGRAPH_NO_WATCHDOG;
+    try {
+      expect(installMainThreadWatchdog()).toBeNull();
+    } finally {
+      if (prevW === undefined) delete process.env.HOMEGRAPH_WATCHDOG;
+      else process.env.HOMEGRAPH_WATCHDOG = prevW;
+      if (prevN === undefined) delete process.env.HOMEGRAPH_NO_WATCHDOG;
+      else process.env.HOMEGRAPH_NO_WATCHDOG = prevN;
+    }
+  });
+
+  it('returns null when HOMEGRAPH_NO_WATCHDOG is set even if WATCHDOG=1', () => {
+    const prevW = process.env.HOMEGRAPH_WATCHDOG;
+    const prevN = process.env.HOMEGRAPH_NO_WATCHDOG;
+    process.env.HOMEGRAPH_WATCHDOG = '1';
     process.env.HOMEGRAPH_NO_WATCHDOG = '1';
     try {
       expect(installMainThreadWatchdog()).toBeNull();
     } finally {
-      if (prev === undefined) delete process.env.HOMEGRAPH_NO_WATCHDOG;
-      else process.env.HOMEGRAPH_NO_WATCHDOG = prev;
+      if (prevW === undefined) delete process.env.HOMEGRAPH_WATCHDOG;
+      else process.env.HOMEGRAPH_WATCHDOG = prevW;
+      if (prevN === undefined) delete process.env.HOMEGRAPH_NO_WATCHDOG;
+      else process.env.HOMEGRAPH_NO_WATCHDOG = prevN;
     }
   });
 });
@@ -80,7 +99,8 @@ describe('liveness watchdog (spawned, real watchdog process)', () => {
       ${body}
     `;
     const child = spawn(process.execPath, ['-e', src], {
-      env: { ...process.env, ...env },
+      // Spec 0047: watchdog is opt-in; these spawn tests exercise the armed path.
+      env: { ...process.env, HOMEGRAPH_WATCHDOG: '1', ...env },
       stdio: ['ignore', 'ignore', 'ignore'],
     });
     return new Promise((resolve) => {
