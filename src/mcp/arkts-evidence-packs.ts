@@ -44,6 +44,7 @@ const local = (n: Node): boolean => !n.filePath.startsWith('ohos-sdk:') && !/\.d
 // ArkAnalyzer's virtual entry/implicit constructor has no declaration on disk.
 // Explicit constructors with a real range remain available through the normal renderer.
 const artifact = (n: Node): boolean => n.filePath.includes('@dummy') || n.name.startsWith('@dummy')
+  || /^%AM\d+/i.test(n.name)
   || (n.name === 'constructor' && n.startLine === 1 && n.endLine === 1);
 
 /** Consume already-located nodes. No text search, new planner call or recursive retrieval. */

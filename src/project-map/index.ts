@@ -332,3 +332,184 @@ export function readModuleOhPackageName(
   const abs = path.join(projectRoot, moduleRootPath || '.', OHPM_MANIFEST);
   return readOhpmName(abs);
 }
+
+/** Spec 0042 B — path-only Harmony resource inventory (no parse, no edges). */
+export interface HarmonyResourceInventory {
+  stringJson: string[];
+  rawfiles: string[];
+  mediaDirs: Array<{ dir: string; countsByExt: Record<string, number> }>;
+  unindexedDirs: Array<{ path: string; reason: string }>;
+  truncated: boolean;
+}
+
+const RESOURCE_WALK_MAX_DEPTH = 14;
+const RESOURCE_DIR_BUDGET = 4000;
+const RESOURCE_STRING_CAP = 24;
+const RESOURCE_RAWFILE_CAP = 40;
+const RESOURCE_MEDIA_DIR_CAP = 24;
+const RESOURCE_UNINDEXED_CAP = 16;
+const RESOURCE_CONFIG_BASENAMES = new Set([
+  'shortcuts_config.json',
+  'form_config.json',
+]);
+
+/**
+ * Bounded walk: whitelist paths under `resources/…` plus package dirs with zero
+ * indexed sources. Does not read JSON bodies or media bytes.
+ */
+export function scanHarmonyResourceInventory(
+  projectRoot: string,
+  options?: { indexedPaths?: Iterable<string> },
+): HarmonyResourceInventory {
+  const rootAbs = path.resolve(projectRoot);
+  const out: HarmonyResourceInventory = {
+    stringJson: [],
+    rawfiles: [],
+    mediaDirs: [],
+    unindexedDirs: [],
+    truncated: false,
+  };
+  if (!fs.existsSync(rootAbs)) return out;
+
+  const indexed = new Set<string>();
+  for (const p of options?.indexedPaths ?? []) {
+    indexed.add(p.replace(/\\/g, '/'));
+  }
+  const mediaCounts = new Map<string, Record<string, number>>();
+  const packageDirs = new Map<string, { hasOhpm: boolean; hasModule: boolean }>();
+
+  const queue: Array<{ abs: string; depth: number }> = [{ abs: rootAbs, depth: 0 }];
+  let visited = 0;
+  while (queue.length > 0) {
+    const { abs, depth } = queue.shift()!;
+    if (++visited > RESOURCE_DIR_BUDGET) {
+      out.truncated = true;
+      break;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const child = path.join(abs, e.name);
+      const rel = path.relative(rootAbs, child).replace(/\\/g, '/');
+      if (e.isDirectory()) {
+        if (depth >= RESOURCE_WALK_MAX_DEPTH) continue;
+        if (e.name.startsWith('.') || SKELETON_SKIP_DIRS.has(e.name)) continue;
+        queue.push({ abs: child, depth: depth + 1 });
+        continue;
+      }
+      if (!e.isFile() || !rel || rel.startsWith('..')) continue;
+
+      if (/(?:^|\/)resources\/(?:[^/]+\/)*element\/string\.json$/i.test(rel)) {
+        if (out.stringJson.length < RESOURCE_STRING_CAP) out.stringJson.push(rel);
+        else out.truncated = true;
+        continue;
+      }
+      if (/(?:^|\/)resources\/(?:[^/]+\/)*rawfile\//i.test(rel)) {
+        if (out.rawfiles.length < RESOURCE_RAWFILE_CAP) out.rawfiles.push(rel);
+        else out.truncated = true;
+        continue;
+      }
+      const mediaMatch = rel.match(/^(.*?\/resources\/(?:[^/]+\/)*(?:base\/)?media)\/[^/]+$/i);
+      if (mediaMatch) {
+        const dir = mediaMatch[1]!.replace(/\\/g, '/');
+        const ext = path.extname(rel).slice(1).toLowerCase() || 'bin';
+        const counts = mediaCounts.get(dir) ?? {};
+        counts[ext] = (counts[ext] ?? 0) + 1;
+        mediaCounts.set(dir, counts);
+        continue;
+      }
+      const base = rel.split('/').pop()?.toLowerCase() ?? '';
+      if (RESOURCE_CONFIG_BASENAMES.has(base) && out.rawfiles.length < RESOURCE_RAWFILE_CAP) {
+        // Surface optional Harmony config basenames alongside rawfile paths.
+        if (!out.rawfiles.includes(rel)) out.rawfiles.push(rel);
+      }
+      if (base === 'oh-package.json5' || base === 'module.json5') {
+        const dirRel = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+        const cur = packageDirs.get(dirRel) ?? { hasOhpm: false, hasModule: false };
+        if (base === 'oh-package.json5') cur.hasOhpm = true;
+        else cur.hasModule = true;
+        packageDirs.set(dirRel, cur);
+      }
+    }
+  }
+
+  for (const [dir, counts] of [...mediaCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (out.mediaDirs.length >= RESOURCE_MEDIA_DIR_CAP) {
+      out.truncated = true;
+      break;
+    }
+    out.mediaDirs.push({ dir, countsByExt: counts });
+  }
+  out.stringJson.sort((a, b) => a.localeCompare(b));
+  out.rawfiles.sort((a, b) => a.localeCompare(b));
+
+  // Unindexed package/module dirs: on disk but no indexed source under them.
+  for (const [dirRel, flags] of [...packageDirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (out.unindexedDirs.length >= RESOURCE_UNINDEXED_CAP) {
+      out.truncated = true;
+      break;
+    }
+    if (!dirRel) continue; // project root always "indexed" via map
+    const prefix = `${dirRel}/`;
+    const hasIndexed = [...indexed].some((p) => p === dirRel || p.startsWith(prefix));
+    if (hasIndexed) continue;
+    // Skip pure resource-only package markers under resources/ (not a module root).
+    if (/(?:^|\/)resources\//i.test(dirRel)) continue;
+    const reason = flags.hasOhpm
+      ? 'oh-package.json5 present; 0 indexed source files'
+      : 'module.json5 present; 0 indexed source files';
+    out.unindexedDirs.push({ path: dirRel, reason });
+  }
+
+  return out;
+}
+
+/** Markdown section for Spec 0042 B (empty string when nothing to show). */
+export function formatHarmonyResourceInventory(inv: HarmonyResourceInventory): string {
+  const lines: string[] = [];
+  const hasResources =
+    inv.stringJson.length > 0 || inv.rawfiles.length > 0 || inv.mediaDirs.length > 0;
+  if (hasResources) {
+    lines.push('### HarmonyOS resources');
+    if (inv.stringJson.length) {
+      const shown = inv.stringJson.slice(0, 12);
+      lines.push(
+        `- string.json (${inv.stringJson.length}): ${shown.map((p) => `\`${p}\``).join(', ')}`
+          + (inv.stringJson.length > shown.length ? `, +${inv.stringJson.length - shown.length} more` : ''),
+      );
+    }
+    if (inv.rawfiles.length) {
+      const shown = inv.rawfiles.slice(0, 12);
+      lines.push(
+        `- rawfile/config (${inv.rawfiles.length}): ${shown.map((p) => `\`${p}\``).join(', ')}`
+          + (inv.rawfiles.length > shown.length ? `, +${inv.rawfiles.length - shown.length} more` : ''),
+      );
+    }
+    for (const m of inv.mediaDirs.slice(0, 8)) {
+      const counts = Object.entries(m.countsByExt)
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([ext, n]) => `${ext}=${n}`)
+        .join(', ');
+      lines.push(`- media: \`${m.dir}\`${counts ? ` (${counts})` : ''}`);
+    }
+    if (inv.mediaDirs.length > 8) {
+      lines.push(`- media: … +${inv.mediaDirs.length - 8} more dirs`);
+    }
+  }
+  if (inv.unindexedDirs.length) {
+    if (lines.length) lines.push('');
+    lines.push('### On disk, not in graph');
+    for (const u of inv.unindexedDirs) {
+      lines.push(`- \`${u.path}/\` (${u.reason})`);
+    }
+  }
+  if (inv.truncated) {
+    lines.push('');
+    lines.push('_resource inventory truncated (bounded walk)_');
+  }
+  return lines.join('\n');
+}

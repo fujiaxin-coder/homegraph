@@ -116,12 +116,19 @@ describe('original task context', () => {
     expect(merged).toBe(original + '\nfix the crash');
     expect(mergeQueryPlanTaskContext(original, original)).toBe(original);
     expect(mergeQueryPlanTaskContext('x'.repeat(4000), 'extra')).toBe('x'.repeat(4000));
-    expect(buildRuleQueryPlan('locate initialization', merged).anchors).toContain('products/phone/EntryAbility.ets');
+    // Spec 0042: path anchors come from the retrieval query, not taskContext prose.
+    const fromQuery = buildRuleQueryPlan('Fix products/phone/EntryAbility.ets', merged);
+    expect(fromQuery.anchors).toContain('products/phone/EntryAbility.ets');
+    expect(fromQuery.taskContext).toBe(merged);
+    expect(buildRuleQueryPlan('locate initialization', merged).anchors)
+      .not.toContain('products/phone/EntryAbility.ets');
   });
 
   it('does not inject framework prose as lexical search seeds', () => {
     const plan = buildRuleQueryPlan('启动相机 CameraPicker', '显示相机选择入口');
-    expect(plan.canonicalQuery).toBe('启动相机 CameraPicker\n显示相机选择入口');
+    // Spec 0042: taskContext stays off the lexical string.
+    expect(plan.canonicalQuery).toBe('启动相机 CameraPicker');
+    expect(plan.taskContext).toBe('显示相机选择入口');
     expect(plan.searchTerms.map(term => term.toLowerCase())).not.toContain('code');
     const proposal = { ...overview(), intent: 'general', canonicalQuery: 'CameraPicker',
       steps: [{ id: '1', query: 'CameraPicker', intent: 'general', anchors: ['CameraPicker'], dependsOn: [] }] };
@@ -137,7 +144,9 @@ describe('original task context', () => {
     const plan = buildRuleQueryPlan(query, taskContext);
     expect(plan.originalQuery).toBe(query);
     expect(plan.taskContext).toBe(taskContext);
-    expect(plan.canonicalQuery).toContain(taskContext);
+    // Spec 0042: taskContext must not enter the lexical retrieval string.
+    expect(plan.canonicalQuery).toBe(query);
+    expect(plan.canonicalQuery).not.toContain(taskContext);
     expect(structuredClone(plan)).toEqual(plan);
     expect(buildRuleQueryPlan(query)).not.toHaveProperty('taskContext');
   });
@@ -151,10 +160,12 @@ describe('original task context', () => {
     expect(body.messages[0].content).toContain('not source evidence');
     expect(plan.originalQuery).toBe(query);
     expect(plan.taskContext).toBe(taskContext);
-    expect(plan.canonicalQuery).toContain(taskContext);
+    expect(plan.canonicalQuery).toBe(query);
+    expect(plan.canonicalQuery).not.toContain(taskContext);
     expect(plan.route).not.toBe('project');
     const compiled = compileQueryPlanStep(plan, plan.steps[0]!);
     expect(compiled.taskContext).toBe(taskContext);
+    expect(compiled.canonicalQuery).not.toContain(taskContext);
   });
 
   it('retains task constraints separately from each dependent retrieval focus', () => {
@@ -189,7 +200,8 @@ describe('original task context', () => {
     const plan = await planQuery(query, { ...options(), taskContext });
     expect(plan.source).toBe('rules');
     expect(plan.taskContext).toBe(taskContext);
-    expect(plan.canonicalQuery).toContain(taskContext);
+    expect(plan.canonicalQuery).toBe(query);
+    expect(plan.canonicalQuery).not.toContain(taskContext);
   });
 
   it('preserves quoted UI literals through provider failure using the original language', async () => {

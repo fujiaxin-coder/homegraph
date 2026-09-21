@@ -17,6 +17,8 @@ import {
   listHarmonyRouteProfilesUnderModule,
   readHarmonyAppBundleName,
   readModuleOhPackageName,
+  scanHarmonyResourceInventory,
+  formatHarmonyResourceInventory,
 } from '../project-map';
 import {
   formatProductStatusLine,
@@ -58,7 +60,7 @@ import {
   graphSourceFlags,
   graphSourcesDisabledGuidance,
 } from '../graph-sources';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, queryAsContainerCompositionSurvey, queryAsMemberUiConsequenceSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractInRepoLocateAnchors, resolveExploreSourceScope, isMcpNoiseNode, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, queryAsContainerCompositionSurvey, queryAsMemberUiConsequenceSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
 
 import {
   closeSync,
@@ -1310,10 +1312,11 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_project',
     description:
       'Shallow engineering map: modules + per-module files. On Harmony repos also prints skeleton pointers ' +
-      '(bundleName from app.json5, modules from build-profile.json5, per-module route_map/router_map/main_pages paths, oh-package name). ' +
-      'GIVES navigation only — NOT symbol bodies, call graphs, or route_map JSON contents (use homegraph_explore for route→page edges / Registration sources; Read to edit profiles). ' +
+      '(bundleName from app.json5, modules from build-profile.json5, per-module route_map/router_map/main_pages paths, oh-package name) ' +
+      'and a bounded HarmonyOS resources path inventory (string.json / rawfile / media dirs / on-disk modules not in the graph). ' +
+      'GIVES navigation only — NOT symbol bodies, call graphs, or JSON/file contents (use homegraph_explore for route→page / Resource hits; Read to edit). ' +
       'PRIMARY overview while the full index is still building; also useful after full index. ' +
-      'Optional `module` filters by name/path; `includeFiles` defaults true.',
+      'Optional `module` filters by name/path; `includeFiles` defaults true (resources section still prints when false).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -7798,11 +7801,13 @@ export class ToolHandler {
         if (callers.length === 0 && callees.length === 0) continue;
         trail.push(`- \`${seedNode.name}\` (${seedNode.kind}) — ${seedNode.filePath}:${seedNode.startLine}`);
         for (const c of callers) {
+          if (isMcpNoiseNode(c.node)) continue;
           const loc = c.node.startLine ? `:${c.node.startLine}` : '';
           trail.push(`  ← used by \`${c.node.name}\` (${c.node.kind}) — ${c.node.filePath}${loc}`);
           trailBullets++;
         }
         for (const c of callees) {
+          if (isMcpNoiseNode(c.node)) continue;
           const loc = c.node.startLine ? `:${c.node.startLine}` : '';
           trail.push(`  → calls \`${c.node.name}\` (${c.node.kind}) — ${c.node.filePath}${loc}`);
           trailBullets++;
@@ -9893,6 +9898,8 @@ export class ToolHandler {
     let maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
 
     const queryFileBasenames = extractFileBasenamesFromQuery(query);
+    const locateAnchors = extractInRepoLocateAnchors(query);
+    const exploreSourceScope = resolveExploreSourceScope(query, plan?.sourceScope);
     const interpretationQuery = feature('queryAsInterpretationSurvey', queryAsInterpretationSurvey);
     const testOnlyInterpretation = feature('queryAsTestOnlyInterpretation', queryAsTestOnlyInterpretation);
     const crossModuleFlow = feature('queryAsCrossModuleFlowSurvey', queryAsCrossModuleFlowSurvey) || plan?.intent === 'flow';
@@ -9905,21 +9912,30 @@ export class ToolHandler {
       ? `${queryFileBasenames[0]} ${query}`
       : queryFileBasenames.length === 1
         ? `${queryFileBasenames[0]} ${query}`
-        : query;
+        : locateAnchors.length === 1
+          ? `${locateAnchors[0]} ${query}`
+          : query;
+    const wantHints = !!(plan && (plan.source === 'llm' || plan.literalTexts?.length || plan.anchors?.length))
+      || exploreSourceScope !== 'all';
     const subgraph = await cg.findRelevantContext(contextQuery, {
       ...contextOpts,
-      ...(plan && (plan.source === 'llm' || plan.literalTexts?.length) ? { retrievalHints: {
-        symbols: plan.anchors.filter((anchor) => !(plan.bindings ?? []).some((node) =>
-          anchor === node.name || anchor === node.qualifiedName)),
-        searchTerms: plan.searchTerms, literalTexts: plan.literalTexts, sourceScope: plan.sourceScope, nodeIds: (plan.bindings ?? []).map((node) => node.id),
+      ...(wantHints ? { retrievalHints: {
+        symbols: [
+          ...(plan?.anchors ?? []).filter((anchor) => !(plan?.bindings ?? []).some((node) =>
+            anchor === node.name || anchor === node.qualifiedName)),
+          ...locateAnchors,
+        ].slice(0, 16),
+        searchTerms: plan?.searchTerms, literalTexts: plan?.literalTexts,
+        sourceScope: exploreSourceScope,
+        nodeIds: (plan?.bindings ?? []).map((node) => node.id),
       } } : {}),
     });
 
-    // Path-first: always seed nodes from an explicit `Foo.ets` basename so a
-    // CJK-only ask + path (or a shared prop like showSearchIcon) cannot leave
-    // the named file out of the subgraph / digests.
-    if (queryFileBasenames.length > 0 && plan?.sourceScope !== 'sdk') {
-      for (const base of queryFileBasenames.slice(0, 3)) {
+    // Path-first + Spec 0042 identifier seeding: Foo.ets and PascalCase ≥8 exact hits
+    // become roots so taskContext-polluted FTS cannot drop the named in-repo file.
+    if (exploreSourceScope !== 'sdk') {
+      const seedNames = [...new Set([...queryFileBasenames, ...locateAnchors])].slice(0, 6);
+      for (const base of seedNames) {
         let hits: SearchResult[] = [];
         try {
           hits = cg.searchNodes(base, { limit: 50 });
@@ -9927,7 +9943,14 @@ export class ToolHandler {
           continue;
         }
         for (const r of hits) {
-          if (!fileMatchesQueryBasename(r.node.filePath, [base])) continue;
+          if (isMcpNoiseNode(r.node)) continue;
+          const fp = r.node.filePath.replace(/\\/g, '/');
+          const stem = fp.split('/').pop()?.replace(/\.[^.]+$/, '') ?? '';
+          const exactFile = stem.toLowerCase() === base.toLowerCase()
+            || fileMatchesQueryBasename(r.node.filePath, [base]);
+          const exactSymbol = r.node.name === base
+            || (r.node.qualifiedName?.split(/::|\./).pop() === base);
+          if (!exactFile && !exactSymbol) continue;
           if (!subgraph.nodes.has(r.node.id)) {
             subgraph.nodes.set(r.node.id, r.node);
             subgraph.roots.push(r.node.id);
@@ -10097,7 +10120,7 @@ export class ToolHandler {
         const raw = isQual ? this.findAllSymbols(cg, t).nodes : cg.getNodesByName(t);
         let cands = raw
           .filter((n) => SEED_KINDS.has(n.kind) && !isTestPath(n.filePath)
-            && !(plan?.sourceScope === 'local' && isOhosApiFilePath(n.filePath)))
+            && !(exploreSourceScope === 'local' && isOhosApiFilePath(n.filePath)))
           .sort((a, b) => {
             // Prefer callables over types when both share a name, then body size.
             const ac = CALLABLE.has(a.kind) ? 1 : 0;
@@ -10496,7 +10519,7 @@ export class ToolHandler {
     const sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
-      if (plan?.sourceScope === 'local') {
+      if (exploreSourceScope === 'local') {
         const sdkOrder = Number(isOhosApiFilePath(a[0])) - Number(isOhosApiFilePath(b[0]));
         if (sdkOrder) return sdkOrder;
       }
@@ -12205,7 +12228,8 @@ export class ToolHandler {
     const nodes = cg.getNodesInFile(filePath)
       .filter((n) => n.kind !== 'file' && n.kind !== 'import' && n.kind !== 'export')
       .sort((a, b) => a.startLine - b.startLine);
-    const dependents = cg.getFileDependents(filePath);
+    const dependents = cg.getFileDependents(filePath)
+      .filter((p) => !p.includes('@dummy') && !p.replace(/\\/g, '/').split('/').pop()?.startsWith('@dummy'));
 
     // Compact, one-line blast radius (homegraph's value-add over a plain Read).
     const depSummary = dependents.length
@@ -12401,6 +12425,7 @@ export class ToolHandler {
       const out: Array<{ node: Node; edge: Edge }> = [];
       for (const e of edges) {
         if (seen.has(e.node.id)) continue;
+        if (isMcpNoiseNode(e.node)) continue;
         seen.add(e.node.id);
         out.push(e);
       }
@@ -12657,6 +12682,30 @@ export class ToolHandler {
         }
       }
       lines.push('');
+    }
+
+    // Spec 0042 B — path inventory (string/rawfile/media + unindexed package dirs).
+    // Skip when the caller filtered to a single non-Harmony module? Still useful
+    // project-wide; keep always on Harmony-shaped trees or whenever scan finds hits.
+    try {
+      const indexedPaths = map.modules.flatMap((m) => (m.files ?? []).map((f) => f.path));
+      // When includeFiles=false, files arrays are empty — fall back to full map paths.
+      let pathsForUnindexed = indexedPaths;
+      if (pathsForUnindexed.length === 0) {
+        try {
+          const full = cg.getProjectMap({ includeFiles: true });
+          pathsForUnindexed = full.modules.flatMap((m) => (m.files ?? []).map((f) => f.path));
+        } catch {
+          pathsForUnindexed = [];
+        }
+      }
+      const inv = scanHarmonyResourceInventory(projectRoot, { indexedPaths: pathsForUnindexed });
+      const section = formatHarmonyResourceInventory(inv);
+      if (section) {
+        lines.push(section);
+      }
+    } catch {
+      /* omit inventory on scan failure */
     }
 
     return this.textResult(lines.join('\n').trimEnd());

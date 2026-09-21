@@ -77,12 +77,6 @@ export function normalizeQueryPlanTaskContext(value?: string): string | undefine
   return typeof value === 'string' ? value.trim().slice(0, 4000) || undefined : undefined;
 }
 
-function withTaskContext(query: string, taskContext?: string): string {
-  // This string reaches lexical retrieval. Framework prose such as "code evidence"
-  // would become unrelated symbol seeds, so concatenate only the supplied data.
-  return taskContext && taskContext !== query ? `${query}\n${taskContext}` : query;
-}
-
 /** A host's original task cannot be replaced by an agent's abbreviated focus. */
 export function mergeQueryPlanTaskContext(original?: string, focus?: string): string | undefined {
   const parts = [normalizeQueryPlanTaskContext(original), normalizeQueryPlanTaskContext(focus)]
@@ -197,14 +191,19 @@ export function extractQueryPlanLiteralTexts(query: string): string[] {
 export function buildRuleQueryPlan(query: string, originalTaskContext?: string): QueryPlan {
   const started = Date.now();
   const taskContext = normalizeQueryPlanTaskContext(originalTaskContext);
-  const canonicalQuery = withTaskContext(query, taskContext);
+  // Spec 0042: retrieval string is the user query only — never append taskContext.
+  const canonicalQuery = query;
   const features = queryPlanFeatures(canonicalQuery);
   const route = localRoute(canonicalQuery, features);
   const intent: QueryIntent = route === 'usages' || route === 'modules' || route === 'native'
     ? route : features.queryAsCrossModuleFlowSurvey ? 'flow' : 'general';
-  const anchors = [...new Set([...extractQueryPlanAnchors(query),
-    ...extractQueryPlanAnchors(taskContext ?? '')])].slice(0, 16);
-  const literalTexts = extractQueryPlanLiteralTexts(canonicalQuery);
+  // Anchors for retrieval come from the query only (taskContext prose must not seed FTS).
+  const anchors = [...new Set(extractQueryPlanAnchors(query))].slice(0, 16);
+  const literalTexts = [...new Set([
+    ...extractQueryPlanLiteralTexts(query),
+    ...extractQueryPlanLiteralTexts(taskContext ?? ''),
+  ])].slice(0, 8);
+  const sourceScope = shape.resolveExploreSourceScope(query);
   return {
     version: QUERY_PLAN_VERSION,
     originalQuery: query,
@@ -215,8 +214,11 @@ export function buildRuleQueryPlan(query: string, originalTaskContext?: string):
     anchors,
     ...(literalTexts.length ? { literalTexts } : {}),
     searchTerms: shape.extractSearchTerms(canonicalQuery, { stems: false }).slice(0, 24),
+    ...(sourceScope !== 'all' ? { sourceScope } : {}),
     steps: [{ id: 's1', query, intent, anchors: [...anchors],
-      ...(literalTexts.length ? { literalTexts: [...literalTexts] } : {}), dependsOn: [] }],
+      ...(literalTexts.length ? { literalTexts: [...literalTexts] } : {}),
+      ...(sourceScope !== 'all' ? { sourceScope } : {}),
+      dependsOn: [] }],
     features,
     source: 'rules',
     confidence: route !== 'general' || anchors.length ? 1 : 0.5,
@@ -307,20 +309,18 @@ export function compileQueryPlanStep(plan: QueryPlan, step: QueryPlanStep, resol
   const stepIntent = intentForQueryRelation(downgradedOverview ? 'general' : step.intent, relation);
   const query = downgradedOverview ? plan.originalQuery : step.query;
   const literalTexts = step.literalTexts ?? (plan.steps.length === 1 ? plan.literalTexts : undefined) ?? [];
-  const sourceScope = step.sourceScope ?? plan.sourceScope;
-  // Scope and negations remain losslessly in originalQuery/taskContext for the
-  // executor and cache. Repeating that prose here erases the step's focus.
-  // A planner's English explanation is not source text. Only its typed slots
-  // become seeds; this prevents a verb such as "locate" matching an SDK method.
-  // Legacy/malformed seedless steps retain the USER's query, never planner prose.
+  // Spec 0042: non-LLM retrieval must not concatenate taskContext into the FTS string.
+  // Planner prose stays out of seeds; only typed slots (anchors/searchTerms/literalTexts) retrieve.
   const seeds = [...new Set([...anchors, ...(step.searchTerms ?? []), ...literalTexts])];
   const retrievalQuery = plan.source === 'llm'
-    ? seeds.join(' ') || plan.originalQuery : withTaskContext(query, plan.taskContext);
+    ? seeds.join(' ') || plan.originalQuery : query;
   const canonicalQuery = plan.source === 'rules' && stepIntent === 'general'
     ? retrievalQuery : adaptQueryPlanQuery(retrievalQuery, stepIntent, anchors, relation);
   const searchTerms = plan.source === 'llm' && seeds.length
     ? seeds.slice(0, 24) : [...new Set([...anchors, ...(step.searchTerms ?? []),
       ...shape.extractSearchTerms(retrievalQuery, { stems: false })])].slice(0, 24);
+  const resolvedScope = step.sourceScope ?? plan.sourceScope
+    ?? shape.resolveExploreSourceScope(plan.originalQuery);
   return {
     ...plan,
     canonicalQuery,
@@ -330,8 +330,9 @@ export function compileQueryPlanStep(plan: QueryPlan, step: QueryPlanStep, resol
     searchTerms,
     literalTexts,
     relation,
-    sourceScope,
-    steps: [{ ...step, intent: stepIntent, anchors, literalTexts, sourceScope, dependsOn: [] }],
+    sourceScope: resolvedScope === 'all' ? undefined : resolvedScope,
+    steps: [{ ...step, intent: stepIntent, anchors, literalTexts,
+      sourceScope: resolvedScope === 'all' ? undefined : resolvedScope, dependsOn: [] }],
     features: queryPlanFeatures(canonicalQuery),
   };
 }

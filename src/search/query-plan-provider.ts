@@ -72,7 +72,8 @@ export function validateModelQueryPlan(value: unknown, local: QueryPlan, options
   const v = value as Record<string, unknown>;
   const taskContext = normalizeQueryPlanTaskContext(options.taskContext ?? local.taskContext);
   const context = taskContext ? `\n${taskContext}` : '';
-  const originalConstraints = local.originalQuery + context;
+  // Spec 0042: taskContext is retained on the plan for planner/literals, but must
+  // not be concatenated into the lexical canonicalQuery / FTS string.
   const allowsOverview = queryExplicitlyRequestsProjectMap(local.originalQuery);
   const proposedRelation = relation(v.relation);
   const proposedSourceScope = sourceScope(v.sourceScope) ?? 'local';
@@ -139,7 +140,7 @@ export function validateModelQueryPlan(value: unknown, local: QueryPlan, options
   const retainedAnchors = normalized.anchors;
   searchTerms = [...new Set([...searchTerms, ...normalized.terms])].slice(0, 24);
   const canonicalQuery = adaptQueryPlanQuery(downgradedOverview
-    ? originalConstraints : `${originalConstraints}\n${rewrite}`, chosenIntent, retainedAnchors, proposedRelation);
+    ? local.originalQuery : `${local.originalQuery}\n${rewrite}`, chosenIntent, retainedAnchors, proposedRelation);
   if (canonicalQuery.length > 9000) throw new Error('input_too_long');
   // Every compiled step retains originalQuery/taskContext as constraints, not
   // repeated lexical seeds. Overview downgrade alone restores the original

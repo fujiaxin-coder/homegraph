@@ -54,6 +54,76 @@ export function extractFileBasenamesFromQuery(query: string): string[] {
 }
 
 /**
+ * Spec 0042 — PascalCase / CamelCase identifiers (≥8 chars) for in-repo locate seeding.
+ * Excludes short generic English tokens that pollute FTS when taken from taskContext-like prose.
+ */
+const IN_REPO_LOCATE_BLACKLIST = new Set([
+  'page', 'view', 'component', 'input', 'target', 'size', 'button', 'text', 'index',
+  'main', 'app', 'data', 'type', 'item', 'list', 'info', 'name', 'value', 'state',
+  'props', 'build', 'export', 'import', 'class', 'struct', 'method', 'function',
+  'object', 'string', 'number', 'boolean', 'result', 'error', 'event', 'option',
+  'config', 'manager', 'service', 'helper', 'utils', 'common', 'layout', 'style',
+]);
+
+export function extractInRepoLocateAnchors(query: string): string[] {
+  const out = new Set<string>();
+  for (const m of query.matchAll(/\b([A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*)\b/g)) {
+    const tok = m[1]!;
+    if (tok.length < 8) continue;
+    if (IN_REPO_LOCATE_BLACKLIST.has(tok.toLowerCase())) continue;
+    out.add(tok);
+  }
+  for (const base of extractFileBasenamesFromQuery(query)) {
+    if (base.length >= 2 && !IN_REPO_LOCATE_BLACKLIST.has(base.toLowerCase())) out.add(base);
+  }
+  return [...out].slice(0, 6);
+}
+
+/** Query explicitly asks for SDK / Kit / d.ts surface (must not force sourceScope=local). */
+export function queryExplicitlyRequestsSdkScope(query: string): boolean {
+  return (
+    /@kit\.|@ohos\./i.test(query)
+    || /\.d\.ts\b/i.test(query)
+    || /\b(?:HarmonyOS|OpenHarmony)\s+API\b/i.test(query)
+    || /\bSDK\s+(?:API|docs?|declaration|stub)s?\b/i.test(query)
+    || /\b(?:official\s+)?(?:API\s+)?reference\s+for\s+@/i.test(query)
+  );
+}
+
+/**
+ * Spec 0042 — default explore retrieval scope.
+ * `local` when the query has in-repo locate signals; never override an explicit SDK ask.
+ */
+export function resolveExploreSourceScope(
+  query: string,
+  planScope?: 'local' | 'sdk' | 'all',
+): 'local' | 'sdk' | 'all' {
+  if (planScope === 'sdk') return 'sdk';
+  if (queryExplicitlyRequestsSdkScope(query)) {
+    return planScope ?? 'all';
+  }
+  if (
+    extractFileBasenamesFromQuery(query).length > 0
+    || extractInRepoLocateAnchors(query).length > 0
+    || /[\u4e00-\u9fff]{2,}/.test(query)
+    || queryAsCodeChangeOrientation(query)
+  ) {
+    return 'local';
+  }
+  return planScope ?? 'all';
+}
+
+/** MCP-visible graph noise (ArkAnalyzer virtual entry / anonymous methods). */
+export function isMcpNoiseNode(node: { name: string; filePath: string }): boolean {
+  const fp = node.filePath.replace(/\\/g, '/');
+  return (
+    fp.includes('@dummy')
+    || node.name.startsWith('@dummy')
+    || /^%AM\d+/i.test(node.name)
+  );
+}
+
+/**
  * Path-shaped anchors from a query — `feature/foo`, `staticcommon/launchercommon`.
  */
 export function extractPathSegmentsFromQuery(query: string): string[] {

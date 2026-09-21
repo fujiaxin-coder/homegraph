@@ -22,13 +22,13 @@ Use ordinary bash/search/read tools first for repository paths, symbols, literal
 HomeGraph is optional. Use it only for a concrete unresolved relationship that benefits from graph evidence: cross-file state/event propagation, callers/callees, module dependencies or ArkTS-to-native registration. Name the missing relation and use anchors from the current task or source. There is no mandatory number of bash searches before a useful graph query.
 
 Choose the smallest available tool for that gap:
-- Engineering overview / which module owns a feature / where \`route_map.json\` lives → \`homegraph_project\` (module map + Harmony skeleton pointers: bundleName, build-profile modules, per-module route profile **paths**, oh-package names). It does **not** return symbol bodies, call graphs, or profile JSON contents.
+- Engineering overview / which module owns a feature / where \`route_map.json\` or resource dirs live → \`homegraph_project\` (module map + Harmony skeleton pointers + bounded resources path inventory: string.json / rawfile / media / on-disk modules not in the graph). It does **not** return symbol bodies, call graphs, or JSON/media contents.
 - Exact usage/reference locations → \`homegraph_usages\`; callers/callees → the corresponding tool.
 - Named module dependencies/cycles → \`homegraph_modules\`; native exports/registration → \`homegraph_native\`.
 - One missing symbol body → \`homegraph_node\`; prefer direct read if its path is already known.
 - An unresolved cross-symbol mechanism or route registration edges → \`homegraph_explore\` (may include Spec 0039 Registration sources for route_map; Spec 0041 Resource hits for \`element/string.json\` literals). Do not use it for routine pre-edit orientation, a literal search, or to re-confirm source already found with bash.
 - ArkUI migration analysis → \`homegraph_arkui_migrate\` when that analysis is needed; SDK contracts → project declarations or SDK documentation.
-- Harmony \`element/string.json\` key/value lookup is searchable via explore/search (Resource hits; no graph edges). Color/media and other resource files still need Grep/Read.
+- Harmony \`element/string.json\` key/value lookup is searchable via explore/search (Resource hits; no graph edges). Project lists resource **paths**; color/other non-allowlisted files still need Grep/Read.
 
 Do not call explore after a focused tool already answered the relation. Keep working directly once the edit location and affected behavior are sufficiently supported. Task difficulty and file count alone do not require graph use.
 `;
