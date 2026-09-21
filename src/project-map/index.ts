@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { scanDirectory } from '../extraction';
-import { detectLanguage } from '../extraction/grammars';
+import { detectLanguage, isHarmonyRouteProfileJson } from '../extraction/grammars';
 import {
   listHarmonyProjectModules,
 } from '../extraction/languages/arkts';
@@ -173,11 +173,18 @@ function discoverOhpmPackages(projectRoot: string): ProjectModuleDraft[] {
 
 function readOhpmName(manifestAbs: string): string | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const parsed = require('jsonc-parser').parse(fs.readFileSync(manifestAbs, 'utf-8')) as {
-      name?: unknown;
-    } | null;
-    return typeof parsed?.name === 'string' && parsed.name.trim() ? parsed.name.trim() : null;
+    const text = fs.readFileSync(manifestAbs, 'utf-8');
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const parsed = require('jsonc-parser').parse(text) as { name?: unknown } | null;
+      if (typeof parsed?.name === 'string' && parsed.name.trim()) return parsed.name.trim();
+    } catch {
+      /* regex */
+    }
+    const m =
+      text.match(/["']name["']\s*:\s*["']([^"']+)["']/) ||
+      text.match(/name\s*:\s*["']([^"']+)["']/);
+    return m?.[1]?.trim() || null;
   } catch {
     return null;
   }
@@ -213,4 +220,115 @@ export function parseBuildPhase(raw: string | null | undefined): BuildPhase | nu
     return raw;
   }
   return null;
+}
+
+const SKELETON_SKIP_DIRS = new Set([
+  'node_modules',
+  'oh_modules',
+  '.git',
+  '.homegraph',
+  '.hvigor',
+  '.preview',
+  'build',
+  'dist',
+  'out',
+  '.cxx',
+]);
+
+const ROUTE_PROFILE_WALK_MAX_DEPTH = 8;
+const ROUTE_PROFILE_DIR_BUDGET = 400;
+const ROUTE_PROFILE_CAP_PER_MODULE = 8;
+
+/**
+ * Spec 0040 — optional bundleName/name from app.json5 (AppScope or root).
+ * Best-effort; returns null on missing/parse failure.
+ */
+export function readHarmonyAppBundleName(projectRoot: string): string | null {
+  for (const rel of ['AppScope/app.json5', 'app.json5']) {
+    const abs = path.join(projectRoot, rel);
+    if (!fs.existsSync(abs)) continue;
+    try {
+      const text = fs.readFileSync(abs, 'utf-8');
+      let bundle: string | null = null;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const parsed = require('jsonc-parser').parse(text) as {
+          app?: { bundleName?: unknown };
+          bundleName?: unknown;
+          name?: unknown;
+        } | null;
+        if (parsed?.app && typeof parsed.app.bundleName === 'string' && parsed.app.bundleName.trim()) {
+          bundle = parsed.app.bundleName.trim();
+        } else if (typeof parsed?.bundleName === 'string' && parsed.bundleName.trim()) {
+          bundle = parsed.bundleName.trim();
+        } else if (typeof parsed?.name === 'string' && parsed.name.trim()) {
+          bundle = parsed.name.trim();
+        }
+      } catch {
+        /* regex fallback below */
+      }
+      if (!bundle) {
+        const m =
+          text.match(/["']bundleName["']\s*:\s*["']([^"']+)["']/) ||
+          text.match(/bundleName\s*:\s*["']([^"']+)["']/);
+        if (m?.[1]) bundle = m[1];
+      }
+      if (bundle) return bundle;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Spec 0040 — project-relative paths to Spec 0039 route profile JSON under a module root.
+ */
+export function listHarmonyRouteProfilesUnderModule(
+  projectRoot: string,
+  moduleRootPath: string,
+  cap = ROUTE_PROFILE_CAP_PER_MODULE,
+): string[] {
+  const rootAbs = path.resolve(projectRoot);
+  const modAbs = moduleRootPath
+    ? path.resolve(projectRoot, moduleRootPath)
+    : rootAbs;
+  if (!fs.existsSync(modAbs)) return [];
+
+  const found: string[] = [];
+  const queue: Array<{ abs: string; depth: number }> = [{ abs: modAbs, depth: 0 }];
+  let visited = 0;
+  while (queue.length > 0 && found.length < cap) {
+    const { abs, depth } = queue.shift()!;
+    if (++visited > ROUTE_PROFILE_DIR_BUDGET) break;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (found.length >= cap) break;
+      const child = path.join(abs, e.name);
+      if (e.isDirectory()) {
+        if (depth >= ROUTE_PROFILE_WALK_MAX_DEPTH) continue;
+        if (e.name.startsWith('.') || SKELETON_SKIP_DIRS.has(e.name)) continue;
+        queue.push({ abs: child, depth: depth + 1 });
+        continue;
+      }
+      if (!e.isFile()) continue;
+      const rel = path.relative(rootAbs, child).replace(/\\/g, '/');
+      if (isHarmonyRouteProfileJson(rel)) found.push(rel);
+    }
+  }
+  return found.sort();
+}
+
+/** Spec 0040 — oh-package name at module root, if any. */
+export function readModuleOhPackageName(
+  projectRoot: string,
+  moduleRootPath: string,
+): string | null {
+  const abs = path.join(projectRoot, moduleRootPath || '.', OHPM_MANIFEST);
+  return readOhpmName(abs);
 }

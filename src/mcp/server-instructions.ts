@@ -22,11 +22,13 @@ Use ordinary bash/search/read tools first for repository paths, symbols, literal
 HomeGraph is optional. Use it only for a concrete unresolved relationship that benefits from graph evidence: cross-file state/event propagation, callers/callees, module dependencies or ArkTS-to-native registration. Name the missing relation and use anchors from the current task or source. There is no mandatory number of bash searches before a useful graph query.
 
 Choose the smallest available tool for that gap:
+- Engineering overview / which module owns a feature / where \`route_map.json\` lives → \`homegraph_project\` (module map + Harmony skeleton pointers: bundleName, build-profile modules, per-module route profile **paths**, oh-package names). It does **not** return symbol bodies, call graphs, or profile JSON contents.
 - Exact usage/reference locations → \`homegraph_usages\`; callers/callees → the corresponding tool.
 - Named module dependencies/cycles → \`homegraph_modules\`; native exports/registration → \`homegraph_native\`.
 - One missing symbol body → \`homegraph_node\`; prefer direct read if its path is already known.
-- An unresolved cross-symbol mechanism → \`homegraph_explore\`. Do not use it for routine pre-edit orientation, a literal search, or to re-confirm source already found with bash.
+- An unresolved cross-symbol mechanism or route registration edges → \`homegraph_explore\` (may include Spec 0039 Registration sources for route_map). Do not use it for routine pre-edit orientation, a literal search, or to re-confirm source already found with bash.
 - ArkUI migration analysis → \`homegraph_arkui_migrate\` when that analysis is needed; SDK contracts → project declarations or SDK documentation.
+- Resource \`string.json\` / color / media key lookup is **not** a HomeGraph graph feature yet — use Grep/Read for those literals.
 
 Do not call explore after a focused tool already answered the relation. Keep working directly once the edit location and affected behavior are sufficiently supported. Task difficulty and file count alone do not require graph use.
 `;
@@ -35,7 +37,7 @@ const QUERY = `## Query and recovery
 
 Write one focused sentence: requested action + target + known anchors + unresolved relation + preservation constraints. Use the full public task as \`taskContext\` when needed. Keep UI labels verbatim; use exact symbols from the task or source instead of inventing names or piling up generic keywords. Tool replies may begin with \`HomeGraph project root: \`…\`\` — that absolute root is the join base for repo-relative paths below; pass those paths to Read/Grep as-is, or join as \`<root>/<relative>\` (use \`/\`). Do not invent experiment/result directory prefixes; a path refusal requires valid in-repo relocation, not broader permissions.
 
-A project map is navigation, not proof of a located feature. Preserve requested product/module scope and verify each candidate before editing. Start with one focused graph request; recover only a named missing body/relation. Budget: ≤2 \`homegraph_explore\` attempts per project, ≤1 focused depth recovery; existing runtime budgets may be tighter. These are ceilings, never a required sequence. If evidence is still missing, use targeted bash/search/read and continue implementation. Do not expand into unrelated files merely to exhaust a budget.
+A project map (\`homegraph_project\`) is navigation and Harmony skeleton pointers, not proof of a located feature and not a call graph. Preserve requested product/module scope and verify each candidate before editing. Start with one focused graph request; recover only a named missing body/relation. Budget: ≤2 \`homegraph_explore\` attempts per project, ≤1 focused depth recovery; existing runtime budgets may be tighter. These are ceilings, never a required sequence. If evidence is still missing, use targeted bash/search/read and continue implementation. Do not expand into unrelated files merely to exhaust a budget.
 `;
 
 const INDEX_STATUS = `## Index status

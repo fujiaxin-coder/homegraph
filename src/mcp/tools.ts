@@ -14,6 +14,11 @@ import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidence
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
 import { isHarmonyRouteProfileJson } from '../extraction/grammars';
 import {
+  listHarmonyRouteProfilesUnderModule,
+  readHarmonyAppBundleName,
+  readModuleOhPackageName,
+} from '../project-map';
+import {
   formatProductStatusLine,
   formatProjectRootPathHint,
   isSqliteBusyMessage,
@@ -1200,11 +1205,12 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_explore',
     description:
       'Optional graph evidence for a concrete unresolved cross-symbol mechanism in THIS repo. Required: `query`. ' +
+      'For module/route-profile **paths** and engineering overview use homegraph_project first (not this tool). ' +
       'Use ordinary bash/search/read for paths, symbols, literal strings and local changes; continue editing when that evidence suffices. ' +
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
       'For a missing usage, dependency/cycle or native-registration relation, use ' +
       'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
-      'Returns call paths and compact line-numbered source. ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
+      'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
       'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
@@ -1248,8 +1254,10 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_project',
     description:
-      'Shallow project map: modules + files per module (no symbols/call edges). ' +
-      'PRIMARY for engineering overview while the full index is still building; also useful after full index. ' +
+      'Shallow engineering map: modules + per-module files. On Harmony repos also prints skeleton pointers ' +
+      '(bundleName from app.json5, modules from build-profile.json5, per-module route_map/router_map/main_pages paths, oh-package name). ' +
+      'GIVES navigation only — NOT symbol bodies, call graphs, or route_map JSON contents (use homegraph_explore for route→page edges / Registration sources; Read to edit profiles). ' +
+      'PRIMARY overview while the full index is still building; also useful after full index. ' +
       'Optional `module` filters by name/path; `includeFiles` defaults true.',
     inputSchema: {
       type: 'object',
@@ -12518,15 +12526,45 @@ export class ToolHandler {
     }
 
     const FILE_CAP = 80;
+    const projectRoot = cg.getProjectRoot();
+    const hasHarmony = map.modules.some((m) => m.kind === 'harmony');
     const lines: string[] = [
       `**Project map** (phase=${map.phase})`,
       `modules: ${map.modules.length} · files: ${map.fileCount}`,
-      '',
     ];
+    // Spec 0040 — Harmony skeleton summary (navigation pointers, not call edges).
+    try {
+      const bundle = readHarmonyAppBundleName(projectRoot);
+      if (bundle) lines.push(`bundle: \`${bundle}\` (from app.json5)`);
+    } catch {
+      /* omit */
+    }
+    if (hasHarmony) {
+      lines.push(
+        'modules from `build-profile.json5` — skeleton map only (not call edges; use `homegraph_explore` for route_map → page)'
+      );
+    }
+    lines.push('');
 
     for (const m of map.modules) {
       const rootLabel = m.rootPath || '.';
       lines.push(`### ${m.name} (\`${rootLabel}\`) · ${m.kind} · ${m.fileCount} files`);
+      if (m.kind === 'harmony' || m.rootPath) {
+        try {
+          const profiles = listHarmonyRouteProfilesUnderModule(projectRoot, m.rootPath || '');
+          for (const p of profiles) {
+            lines.push(`- route profile: \`${p}\``);
+          }
+        } catch {
+          /* omit */
+        }
+        try {
+          const ohpm = readModuleOhPackageName(projectRoot, m.rootPath || '');
+          if (ohpm) lines.push(`- oh-package: \`${ohpm}\``);
+        } catch {
+          /* omit */
+        }
+      }
       if (m.files && m.files.length > 0) {
         const shown = m.files.slice(0, FILE_CAP);
         for (const f of shown) {
