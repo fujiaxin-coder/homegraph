@@ -93,7 +93,9 @@ describe('MCP stale-slice guard (#1474)', () => {
     hgOther = HomeGraph.initSync(otherDir, { config: { include: ['**/*.ts'], exclude: [] } });
     await hgOther.indexAll();
     __setLoadHomeGraphForTests(HomeGraph);
-    handler = new ToolHandler(hgOther);
+    // No default bound project: cross-project `projectPath` must still open the
+    // target index (Spec 0043 only soft-pins when a default HomeGraph is set).
+    handler = new ToolHandler(null);
   });
 
   afterEach(() => {
@@ -171,7 +173,7 @@ describe('MCP stale-slice guard (#1474)', () => {
   it('re-syncing the project restores normal output with no drift markers', async () => {
     shiftBigFile();
     await hgFixture.sync();
-    const freshHandler = new ToolHandler(hgOther);
+    const freshHandler = new ToolHandler(null);
     try {
       const result = await freshHandler.execute('homegraph_node', {
         symbol: 'orchestrate',

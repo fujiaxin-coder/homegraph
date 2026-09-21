@@ -130,3 +130,33 @@ export function formatProjectRootPathHint(absRoot: string): string {
 export function textAlreadyHasProjectRootHint(text: string): boolean {
   return text.includes(PROJECT_ROOT_HINT_MARKER);
 }
+
+/** Marker for Spec 0043 bound-root projectPath soft-pin notice (idempotent prepend). */
+export const BOUND_PROJECT_PATH_PIN_MARKER = 'This MCP session is bound to';
+
+/**
+ * English preamble when a tool `projectPath` resolves to a different index root
+ * than the MCP session's default bound root (Spec 0043). Success-shaped — not isError.
+ */
+export function formatBoundProjectPathPinNotice(opts: {
+  boundRoot: string;
+  requestedPath: string;
+  resolvedRoot: string | null;
+}): string {
+  const bound = opts.boundRoot.trim();
+  const requested = opts.requestedPath.trim();
+  const resolved =
+    opts.resolvedRoot === null
+      ? 'no .homegraph/ found walking up from it'
+      : `resolves to \`${opts.resolvedRoot.trim()}\``;
+  return (
+    `${BOUND_PROJECT_PATH_PIN_MARKER} \`${bound}\`.\n` +
+    `Ignoring projectPath=\`${requested}\` (${resolved}).\n` +
+    'Results below are from the bound project root only. Omit projectPath, or pass a path under that root.'
+  );
+}
+
+/** True when text already carries a Spec 0043 pin notice. */
+export function textAlreadyHasBoundProjectPathPinNotice(text: string): boolean {
+  return text.includes(BOUND_PROJECT_PATH_PIN_MARKER);
+}

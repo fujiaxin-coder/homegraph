@@ -21,11 +21,13 @@ import {
   formatHarmonyResourceInventory,
 } from '../project-map';
 import {
+  formatBoundProjectPathPinNotice,
   formatProductStatusLine,
   formatProjectRootPathHint,
   isSqliteBusyMessage,
   productIndexGuidance,
   resolveProductIndexState,
+  textAlreadyHasBoundProjectPathPinNotice,
   textAlreadyHasProductStatus,
   textAlreadyHasProjectRootHint,
 } from './index-availability';
@@ -1682,6 +1684,10 @@ export class ToolHandler {
   // The directory the server last searched for a default project. Surfaced in
   // the "not initialized" error so users can see why detection missed.
   private defaultProjectHint: string | null = null;
+  // Spec 0043: when a tool `projectPath` would open a different index root than
+  // the session's default bound project, we soft-pin to the default and stash
+  // an English notice to prepend on the success reply (consumed once).
+  private boundProjectPathPinNotice: string | null = null;
   // Per-start-path cache of the git worktree/index mismatch (issue #155). The
   // mismatch is a fixed property of (where the request came from → which
   // .homegraph/ it resolves to), so the up-to-two `git rev-parse` spawns run
@@ -1942,6 +1948,11 @@ export class ToolHandler {
    *
    * Walks up parent directories to find the nearest .homegraph/ folder,
    * similar to how git finds .git/ directories.
+   *
+   * Spec 0043: when a default project is already bound, a `projectPath` whose
+   * resolved index root differs from that bound root is soft-pinned back to
+   * the default (no DB switch) and a success-shaped English notice is stashed
+   * for the reply preamble.
    */
   private getHomeGraph(projectPath?: string): HomeGraph {
     const sourcesMode = resolveGraphSources();
@@ -1994,6 +2005,26 @@ export class ToolHandler {
     // below), so re-resolving costs only the stat walk, never a reopen.
     const resolvedRoot = findNearestHomeGraphRoot(projectPath);
 
+    // Spec 0043: with a bound default root, never switch the graph to a
+    // different index (sibling / parent / wrong absolute path). Soft-pin and
+    // stash a notice; security refusals above still win.
+    if (this.cg) {
+      const boundRoot = resolvePath(this.cg.getProjectRoot());
+      const resolvedAbs = resolvedRoot ? resolvePath(resolvedRoot) : null;
+      if (resolvedAbs === null || resolvedAbs !== boundRoot) {
+        this.boundProjectPathPinNotice = formatBoundProjectPathPinNotice({
+          boundRoot,
+          requestedPath: projectPath,
+          resolvedRoot: resolvedAbs,
+        });
+        return this.freshen(this.cg);
+      }
+      // Same index root (incl. nested path under the bound project) — reuse the
+      // default instance so we never open a second connection to the same DB
+      // (#238).
+      return this.freshen(this.cg);
+    }
+
     if (!resolvedRoot) {
       throw new NotIndexedError(
         `The project at ${projectPath} isn't indexed with homegraph (no .homegraph/ directory found ` +
@@ -2003,20 +2034,9 @@ export class ToolHandler {
       );
     }
 
-    // If the path resolves to the default project, reuse the already-open
-    // default instance rather than opening a SECOND connection to the same DB.
-    // A duplicate connection serializes reads against the watcher's auto-sync
-    // writes; when WAL isn't in effect (e.g. a filesystem without shared-memory
-    // support) that surfaces as intermittent
-    // "database is locked" on concurrent tool calls. See issue #238. The
-    // default instance is owned/closed by the server, so it's never cached.
-    if (this.cg && this.cg.getProjectRoot() === resolvedRoot) {
-      return this.freshen(this.cg);
-    }
-
-    // Cache the open DB connection by RESOLVED ROOT only — never by the input
-    // path. One key per instance means closeAll() closes each exactly once, and
-    // a changed resolution maps to a different entry instead of a stale hit.
+    // No default project — cross-project open (cached by resolved root).
+    // One key per instance means closeAll() closes each exactly once, and a
+    // changed resolution maps to a different entry instead of a stale hit.
     const cached = this.projectCache.get(resolvedRoot);
     if (cached) return this.freshen(cached);
 
@@ -2295,7 +2315,8 @@ export class ToolHandler {
   }
 
   /**
-   * Decorate successful tool text (Spec 0035 status footer + Spec 0038 project-root hint).
+   * Decorate successful tool text (Spec 0035 status footer + Spec 0038 project-root hint
+   * + Spec 0043 bound projectPath pin notice).
    * Prepends absolute project root + join guidance when known; appends status when missing.
    */
   private withProductStatusFooter(result: ToolResult, projectPath?: string): ToolResult {
@@ -2331,6 +2352,13 @@ export class ToolHandler {
       } catch {
         /* no root — skip hint */
       }
+    }
+
+    // Spec 0043: bound-root soft-pin notice at the very top (consume once).
+    const pinNotice = this.boundProjectPathPinNotice;
+    this.boundProjectPathPinNotice = null;
+    if (pinNotice && !textAlreadyHasBoundProjectPathPinNotice(text)) {
+      text = `${pinNotice}\n\n${text}`;
     }
 
     // Spec 0035: one-line product index status footer (skip if already present).
@@ -2379,6 +2407,9 @@ export class ToolHandler {
     args = { ...args };
     for (const key of [QUERY_PLAN_ARG, QUERY_DEADLINE_ARG, QUERY_STARTED_ARG, QUERY_INDEX_STATE_ARG, QUERY_FAST_ATTEMPTED_ARG, '_hgEvidenceMaxChars']) delete args[key];
     try {
+      // Spec 0043: drop any leftover pin notice from a prior call that exited
+      // before withProductStatusFooter (gate / defer / refuse).
+      this.boundProjectPathPinNotice = null;
       // Block the first tool call on the engine's post-open reconcile so we
       // never serve rows for files deleted/edited while no MCP server was
       // running. The wait is time-boxed (#905): a huge-repo reconcile takes
