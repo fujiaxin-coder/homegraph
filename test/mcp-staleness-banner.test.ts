@@ -159,8 +159,8 @@ describe('MCP status=dirty footer (Spec 0035)', () => {
     expect(res.isError).toBeFalsy();
     const text = res.content[0].text;
 
-    expect(text.startsWith('⚠️')).toBe(true);
-    expect(text).toMatch(/auto-sync is DISABLED/i);
+    // Spec 0038 may prepend the project-root hint above the degraded banner.
+    expect(text).toMatch(/⚠️[\s\S]*auto-sync is DISABLED/i);
     expect(text).toMatch(/Read files directly/i);
     expect(text).toContain('OS watch/file limit exhausted');
     expect(text).toMatch(/alphaOnly/);

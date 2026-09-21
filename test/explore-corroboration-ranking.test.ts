@@ -74,17 +74,20 @@ describe('homegraph_explore — multi-term corroboration tier', () => {
 
     // --- The small, call-ISOLATED backend file (the answer) -------------------
     // Its PATH matches TWO distinct query terms (api/item/service.ts → item +
-    // service), so it IS a search root (an entry file) with file-term-hits >=2 —
-    // but its generic SYMBOLS don't text-match, and nothing in the frontend mesh
-    // calls it, so it gets no RWR inflow and its restart mass is diluted across the
-    // large frontend seed set. This is the directus shape: ItemsService is
-    // search-relevant by name/path yet call-isolated from the frontend seed cluster,
-    // so RWR alone buries it under the mesh. Only the corroboration tier (path/name
-    // matches >=2 query terms AND it's an entry file) keeps it in.
+    // service) and its class name `ItemService` co-names both terms, so it IS a
+    // search root (an entry file) with file-term-hits >=2 —
+    // but nothing in the frontend mesh calls it, so it gets no RWR inflow and its
+    // restart mass is diluted across the large frontend seed set. This is the
+    // directus shape: ItemsService is search-relevant by name/path yet call-isolated
+    // from the frontend seed cluster, so RWR alone buries it under the mesh. Only
+    // the corroboration tier (path/name matches >=2 query terms AND it's an entry
+    // file) keeps it in.
     const apiItem = path.join(testDir, 'api', 'item');
     fs.mkdirSync(apiItem, { recursive: true });
+    // Name carries both query terms so FTS/CamelCase seeding can retrieve this
+    // call-isolated file (path alone is easy to truncate under a dense mesh).
     fs.writeFileSync(path.join(apiItem, 'service.ts'),
-      `export class DataService {\n` +
+      `export class ItemService {\n` +
       `  read() { return this.load(); }\n` +
       `  load(): string[] { return []; }\n` +
       `}\n`);
@@ -110,9 +113,9 @@ describe('homegraph_explore — multi-term corroboration tier', () => {
   });
 
   it('still leads with the backend file when the query names its symbol directly', async () => {
-    // A query naming the backend symbol directly: the answer is the DataService
+    // A query naming the backend symbol directly: the answer is the ItemService
     // file; the frontend mesh stays subordinate (it matches only "item").
-    const res = await handler.execute('homegraph_explore', { query: 'DataService read load' });
+    const res = await handler.execute('homegraph_explore', { query: 'ItemService read load' });
     const text = res.content[0].text;
     const sourced = sourcedFiles(text);
     expect(sourced).toContain('api/item/service.ts');

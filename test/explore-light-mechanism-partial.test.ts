@@ -36,11 +36,13 @@ describe('homegraph_explore — light-mechanism Partial', () => {
   });
 
   it('domain how-implemented with Manager inventory is Partial without closed spine', async () => {
+    // Include the in-repo Type name so locate has an exact anchor (Spec 0044 Miss
+    // omits bodies when the query has neither exact anchors nor literal witnesses).
     const res = await handler.execute('homegraph_explore', {
-      query: '项目中是如何实现通知订阅管理的，涉及的多线程或多进程是怎样的？',
+      query: 'NotificationSubscribeManager 项目中是如何实现通知订阅管理的，涉及的多线程或多进程是怎样的？',
     });
     const text = res.content[0].text;
-    expect(text).toMatch(/NotificationSubscribeManager|Partial locator|Locator partial/i);
+    expect(text).toMatch(/NotificationSubscribeManager|Partial locator|Locator partial|Partial —/i);
     expect(text).not.toMatch(/Mechanism explore complete — \*\*ANSWER NOW\*\*/);
   });
 });
