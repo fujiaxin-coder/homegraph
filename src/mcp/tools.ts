@@ -32,6 +32,7 @@ import {
   textAlreadyHasProjectRootHint,
 } from './index-availability';
 import { findNearestHomeGraphRoot } from '../directory';
+import { logLifecycle, logToolDebug } from '../runtime-log';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
 // schemas), but it must NOT drag in sqlite/query layers before the daemon binds;
@@ -2315,6 +2316,14 @@ export class ToolHandler {
       } catch {
         reason = null;
       }
+      try {
+        logLifecycle('watcher.degraded', {
+          projectRoot: cg.getProjectRoot(),
+          reason: reason ?? undefined,
+        });
+      } catch {
+        /* ignore */
+      }
       const composed = `${formatDegradedBanner(reason)}\n\n${head.text}`;
       return { ...result, content: [{ type: 'text', text: composed }, ...tail] };
     }
@@ -2415,6 +2424,50 @@ export class ToolHandler {
     sessionState?: ExploreSessionState,
   ): Promise<ToolResult> {
     const requestStartedAt = Date.now();
+    const result = await this.executeCore(toolName, args, sessionState, requestStartedAt);
+    this.traceToolCall(toolName, args, result, requestStartedAt);
+    return result;
+  }
+
+  /** Spec 0046: HOMEGRAPH_DEBUG tool summary → stderr + daemon.log. */
+  private traceToolCall(
+    toolName: string,
+    args: Record<string, unknown>,
+    result: ToolResult,
+    requestStartedAt: number,
+  ): void {
+    try {
+      let projectRoot: string | undefined;
+      try {
+        projectRoot = this.getHomeGraph(args.projectPath as string | undefined).getProjectRoot();
+      } catch {
+        projectRoot = typeof args.projectPath === 'string' ? args.projectPath : undefined;
+      }
+      const q = typeof args.query === 'string'
+        ? args.query
+        : typeof args.symbol === 'string'
+          ? args.symbol
+          : undefined;
+      const evidenceStatus = (result._meta?.homegraphEvidence as { status?: string } | undefined)?.status
+        ?? result[EXPLORE_EMISSION_KEY]?.evidenceStatus;
+      logToolDebug(toolName, {
+        projectRoot,
+        durationMs: Date.now() - requestStartedAt,
+        isError: !!result.isError,
+        evidenceStatus,
+        query: q,
+      });
+    } catch {
+      /* logging never fails the tool */
+    }
+  }
+
+  private async executeCore(
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionState: ExploreSessionState | undefined,
+    requestStartedAt: number,
+  ): Promise<ToolResult> {
     args = { ...args };
     for (const key of [QUERY_PLAN_ARG, QUERY_DEADLINE_ARG, QUERY_STARTED_ARG, QUERY_INDEX_STATE_ARG, QUERY_FAST_ATTEMPTED_ARG, '_hgEvidenceMaxChars']) delete args[key];
     try {

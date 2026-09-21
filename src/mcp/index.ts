@@ -38,6 +38,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn, StdioOptions } from 'child_process';
 import { findNearestHomeGraphRoot, getHomeGraphDir } from '../directory';
+import { logLifecycle, logLifecycleError } from '../runtime-log';
 import { StdioTransport } from './transport';
 import { MCPEngine } from './engine';
 import { MCPSession } from './session';
@@ -278,6 +279,7 @@ export class MCPServer {
       // Runs until the host disconnects; the proxy installs its own watchdog and
       // falls back to an in-process engine if the daemon never comes up.
       this.mode = 'proxy';
+      logLifecycle('mcp.start', { projectRoot: root, mode: 'proxy' });
       await this.runProxyWithLocalHandshake(root);
       return;
     } catch (err) {
@@ -285,6 +287,7 @@ export class MCPServer {
       // is still safe to recover from with a direct-mode session.
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[HomeGraph MCP] Proxy path failed (${msg}); falling back to direct mode.\n`);
+      logLifecycleError('mcp.proxy.fail', { projectRoot: root, msg });
       return this.startDirect('proxy path threw');
     }
   }
@@ -326,6 +329,11 @@ export class MCPServer {
     if (reason && process.env.HOMEGRAPH_MCP_DEBUG) {
       process.stderr.write(`[HomeGraph MCP] Direct mode: ${reason}.\n`);
     }
+    logLifecycle('mcp.start', {
+      projectRoot: this.projectPath ?? undefined,
+      mode: 'direct',
+      reason,
+    });
     // Direct mode = one client. Do NOT start a query-pool worker: each worker
     // is a second V8 isolate + a second open of the project DB, and on large
     // indexes (hundreds of MB) that alone pushed process-tree RSS to ~5GB.
@@ -379,6 +387,7 @@ export class MCPServer {
    */
   private async startDaemonProcess(): Promise<void> {
     const root = resolveDaemonRoot(this.projectPath) ?? this.projectPath ?? process.cwd();
+    logLifecycle('mcp.start', { projectRoot: root, mode: 'daemon' });
     for (let attempt = 0; attempt < TAKEOVER_MAX_RETRIES; attempt++) {
       const lock = tryAcquireDaemonLock(root);
 
