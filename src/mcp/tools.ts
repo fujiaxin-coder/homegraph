@@ -14,10 +14,12 @@ import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidence
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
 import {
   formatProductStatusLine,
+  formatProjectRootPathHint,
   isSqliteBusyMessage,
   productIndexGuidance,
   resolveProductIndexState,
   textAlreadyHasProductStatus,
+  textAlreadyHasProjectRootHint,
 } from './index-availability';
 import { findNearestHomeGraphRoot } from '../directory';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
@@ -2172,14 +2174,13 @@ export class ToolHandler {
   }
 
   /**
-   * Append a one-line product index status footer (Spec 0035).
-   * Guidance-only replies that already start with `HomeGraph status=` are left alone.
+   * Decorate successful tool text (Spec 0035 status footer + Spec 0038 project-root hint).
+   * Prepends absolute project root + join guidance when known; appends status when missing.
    */
   private withProductStatusFooter(result: ToolResult, projectPath?: string): ToolResult {
     if (result.isError) return result;
     const [first, ...rest] = result.content;
     if (!first || first.type !== 'text') return result;
-    if (textAlreadyHasProductStatus(first.text)) return result;
 
     let cg: HomeGraph;
     try {
@@ -2197,26 +2198,48 @@ export class ToolHandler {
       }
     }
 
-    let state;
-    try {
-      state = resolveProductIndexState(cg);
-    } catch {
-      return result;
-    }
+    let text = first.text;
 
-    let pendingPaths: string[] | undefined;
-    if (state === 'dirty') {
+    // Spec 0038: absolute project root + how to join repo-relative paths (idempotent).
+    if (!textAlreadyHasProjectRootHint(text)) {
       try {
-        pendingPaths = (cg.getPendingFiles?.() ?? []).map((p) => p.path);
+        const absRoot = resolvePath(cg.getProjectRoot());
+        if (absRoot) {
+          text = `${formatProjectRootPathHint(absRoot)}\n\n${text}`;
+        }
       } catch {
-        pendingPaths = [];
+        /* no root — skip hint */
       }
     }
 
-    const line = formatProductStatusLine(state, { pendingPaths });
+    // Spec 0035: one-line product index status footer (skip if already present).
+    if (!textAlreadyHasProductStatus(text)) {
+      let state;
+      try {
+        state = resolveProductIndexState(cg);
+      } catch {
+        return {
+          ...result,
+          content: [{ type: 'text', text }, ...rest],
+        };
+      }
+
+      let pendingPaths: string[] | undefined;
+      if (state === 'dirty') {
+        try {
+          pendingPaths = (cg.getPendingFiles?.() ?? []).map((p) => p.path);
+        } catch {
+          pendingPaths = [];
+        }
+      }
+
+      const line = formatProductStatusLine(state, { pendingPaths });
+      text = `${text}\n\n${line}`;
+    }
+
     return {
       ...result,
-      content: [{ type: 'text', text: `${first.text}\n\n${line}` }, ...rest],
+      content: [{ type: 'text', text }, ...rest],
     };
   }
 

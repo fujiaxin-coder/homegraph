@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- MCP tool replies that know the indexed project now begin with `HomeGraph project root: \`<absolute>\`` plus a one-line join rule: repo-relative paths below that root should be passed to Read/Grep as-is (or `<root>/<relative>` with `/`), without inventing experiment/result prefixes. MCP initialize instructions mention the same join base. Indexed path storage stays repo-relative (Spec 0038).
+
 
 ## [1.5.10] - 2026-09-20
 

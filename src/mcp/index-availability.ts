@@ -110,3 +110,23 @@ export function isSqliteBusyMessage(message: string): boolean {
 export function textAlreadyHasProductStatus(text: string): boolean {
   return /^\s*HomeGraph status=/m.test(text);
 }
+
+/** Marker line for Spec 0038 project-root path hint (idempotent prepend). */
+export const PROJECT_ROOT_HINT_MARKER = 'HomeGraph project root:';
+
+/**
+ * Short preamble: absolute project root + how to join repo-relative paths (Spec 0038).
+ * `absRoot` should already be resolved (platform-native absolute path).
+ */
+export function formatProjectRootPathHint(absRoot: string): string {
+  const root = absRoot.trim();
+  return (
+    `${PROJECT_ROOT_HINT_MARKER} \`${root}\`\n` +
+    'Paths below are repo-relative to that root. Pass them to Read/Grep as-is, or join as `<root>/<relative>` (use `/`). Do not invent experiment/result directory prefixes.'
+  );
+}
+
+/** True when text already carries a Spec 0038 project-root hint. */
+export function textAlreadyHasProjectRootHint(text: string): boolean {
+  return text.includes(PROJECT_ROOT_HINT_MARKER);
+}

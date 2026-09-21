@@ -1,5 +1,6 @@
 /**
- * Product index states + cold-start (Spec 0032) and five-state status footer (Spec 0035).
+ * Product index states + cold-start (Spec 0032), five-state status footer (Spec 0035),
+ * and MCP project-root path hint (Spec 0038).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn } from 'child_process';
@@ -11,11 +12,14 @@ import { getHomeGraphDir } from '../src/directory';
 import { ToolHandler } from '../src/mcp/tools';
 import {
   PRODUCT_STATUS_GLOSSARY,
+  PROJECT_ROOT_HINT_MARKER,
   formatProductStatusLine,
+  formatProjectRootPathHint,
   productIndexGuidance,
   resolveProductIndexState,
   isSqliteBusyMessage,
   textAlreadyHasProductStatus,
+  textAlreadyHasProjectRootHint,
 } from '../src/mcp/index-availability';
 import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions';
 
@@ -139,6 +143,9 @@ describe('product index states (Spec 0032 / 0035)', () => {
     expect(text).toContain('Project map');
     expect(text).toMatch(/HomeGraph status=fast — map only/);
     expect(text).not.toMatch(/Full symbol index still building/);
+    // Spec 0038: absolute root preamble when reply goes through status decoration
+    expect(text.startsWith(PROJECT_ROOT_HINT_MARKER)).toBe(true);
+    expect(text).toContain(path.resolve(tempDir));
   });
 
   it('successful tool body keeps content and appends status=full footer', async () => {
@@ -150,7 +157,12 @@ describe('product index states (Spec 0032 / 0035)', () => {
     const handler = new ToolHandler(cg);
     const res = await handler.execute('homegraph_search', { query: 'a' });
     const text = (res.content[0] as { text: string }).text;
+    expect(text.startsWith(PROJECT_ROOT_HINT_MARKER)).toBe(true);
+    expect(text).toContain(path.resolve(tempDir));
+    expect(text).toMatch(/Pass them to Read\/Grep as-is/);
     expect(text).toMatch(/HomeGraph status=full — complete and up to date\.\s*$/);
+    // Idempotent: marker appears once
+    expect(text.split(PROJECT_ROOT_HINT_MARKER).length - 1).toBe(1);
   });
 
   it('dirty footer lists pending paths without long ⚠️ banner', async () => {
@@ -165,6 +177,7 @@ describe('product index states (Spec 0032 / 0035)', () => {
     const handler = new ToolHandler(cg);
     const res = await handler.execute('homegraph_search', { query: 'a' });
     const text = (res.content[0] as { text: string }).text;
+    expect(text.startsWith(PROJECT_ROOT_HINT_MARKER)).toBe(true);
     expect(text).toContain('HomeGraph status=dirty — outdated: src/a.ts');
     expect(text).not.toContain('⚠️ Some files referenced');
   });
@@ -199,6 +212,25 @@ describe('product index states (Spec 0032 / 0035)', () => {
     expect(SERVER_INSTRUCTIONS).toContain(PRODUCT_STATUS_GLOSSARY);
     expect(textAlreadyHasProductStatus('HomeGraph status=full — ok')).toBe(true);
     expect(textAlreadyHasProductStatus('no status here')).toBe(false);
+  });
+
+  it('formatProjectRootPathHint is short, includes abs root and join rules (Spec 0038)', () => {
+    const root =
+      process.platform === 'win32' ? 'D:\\code\\demo' : '/tmp/demo';
+    const hint = formatProjectRootPathHint(root);
+    expect(hint.startsWith(PROJECT_ROOT_HINT_MARKER)).toBe(true);
+    expect(hint).toContain(root);
+    expect(hint).toMatch(/Read\/Grep as-is/);
+    expect(hint).toMatch(/<root>\/<relative>/);
+    expect(hint).toMatch(/experiment\/result/);
+    expect(hint.split('\n').length).toBeLessThanOrEqual(3);
+    expect(textAlreadyHasProjectRootHint(hint)).toBe(true);
+    expect(textAlreadyHasProjectRootHint('no root here')).toBe(false);
+  });
+
+  it('server-instructions mention project root join base (Spec 0038)', () => {
+    expect(SERVER_INSTRUCTIONS).toContain('HomeGraph project root:');
+    expect(SERVER_INSTRUCTIONS).toMatch(/<root>\/<relative>/);
   });
 });
 

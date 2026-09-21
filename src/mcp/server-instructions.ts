@@ -33,14 +33,14 @@ Do not call explore after a focused tool already answered the relation. Keep wor
 
 const QUERY = `## Query and recovery
 
-Write one focused sentence: requested action + target + known anchors + unresolved relation + preservation constraints. Use the full public task as \`taskContext\` when needed. Keep UI labels verbatim; use exact symbols from the task or source instead of inventing names or piling up generic keywords. Use returned repository-relative paths without reconstructing an experiment directory; a path refusal requires valid in-repo relocation, not broader permissions.
+Write one focused sentence: requested action + target + known anchors + unresolved relation + preservation constraints. Use the full public task as \`taskContext\` when needed. Keep UI labels verbatim; use exact symbols from the task or source instead of inventing names or piling up generic keywords. Tool replies may begin with \`HomeGraph project root: \`…\`\` — that absolute root is the join base for repo-relative paths below; pass those paths to Read/Grep as-is, or join as \`<root>/<relative>\` (use \`/\`). Do not invent experiment/result directory prefixes; a path refusal requires valid in-repo relocation, not broader permissions.
 
 A project map is navigation, not proof of a located feature. Preserve requested product/module scope and verify each candidate before editing. Start with one focused graph request; recover only a named missing body/relation. Budget: ≤2 \`homegraph_explore\` attempts per project, ≤1 focused depth recovery; existing runtime budgets may be tighter. These are ceilings, never a required sequence. If evidence is still missing, use targeted bash/search/read and continue implementation. Do not expand into unrelated files merely to exhaust a budget.
 `;
 
 const INDEX_STATUS = `## Index status
 
-Tool replies end with \`HomeGraph status=…\`. ${PRODUCT_STATUS_GLOSSARY}.
+Tool replies may start with \`HomeGraph project root: …\` (absolute join base for relative paths) and end with \`HomeGraph status=…\`. ${PRODUCT_STATUS_GLOSSARY}.
 `;
 
 export const SERVER_INSTRUCTIONS = `# HomeGraph — optional structural evidence for this repo
