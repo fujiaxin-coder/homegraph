@@ -113,6 +113,17 @@ import {
   pickBestDomainRoleAnchor,
   type ExploreRepeatDecision,
 } from './explore-repeat-guard';
+import {
+  formatFilenameDeclarationMismatch,
+  formatLocatedBanner,
+  formatMissBanner,
+  formatPartialBanner,
+  shouldDemoteLogToastSpine,
+  shouldExemptDepthFuseForLocatedSymbol,
+  shouldSuppressSynonymExpansion,
+  LOCATED_MARKER,
+  MISS_MARKER,
+} from './locate-contract';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import {
   buildMcpQueryCacheKey,
@@ -2699,18 +2710,21 @@ export class ToolHandler {
     try {
       const cg = this.getHomeGraph(args.projectPath as string | undefined);
       const root = cg.getProjectRoot();
-      const decision = decideDepthToolFuse(
-        sessionState.forProject(root),
-        sessionState.depthToolCount(root),
-        toolName,
-      );
-      if (!decision.refuse) return null;
-      const hint = typeof args.symbol === 'string'
+      const prior = sessionState.forProject(root);
+      const symbolHint = typeof args.symbol === 'string'
         ? args.symbol
         : typeof args.file === 'string'
           ? args.file
           : undefined;
-      return this.textResult(formatDepthToolRefuse(decision, toolName, hint));
+      // Spec 0044 §10.2: symbols already on the locate list bypass the Partial depth cap.
+      if (shouldExemptDepthFuseForLocatedSymbol(prior, symbolHint)) return null;
+      const decision = decideDepthToolFuse(
+        prior,
+        sessionState.depthToolCount(root),
+        toolName,
+      );
+      if (!decision.refuse) return null;
+      return this.textResult(formatDepthToolRefuse(decision, toolName, symbolHint));
     } catch {
       return null;
     }
@@ -2767,6 +2781,9 @@ export class ToolHandler {
       const prior = sessionState.forProject(root);
       const last = prior?.calls[prior.calls.length - 1];
       if (!last || inferExploreEvidenceStatus(last) === 'complete') return;
+      const symbolHint = typeof args.symbol === 'string' ? args.symbol : undefined;
+      // Spec 0044 §10.2: located-symbol drills do not consume the Partial depth budget.
+      if (shouldExemptDepthFuseForLocatedSymbol(prior, symbolHint)) return;
       sessionState.recordDepthTool(root);
     } catch { /* bookkeeping only */ }
   }
@@ -6745,7 +6762,13 @@ export class ToolHandler {
     const isTestPath = (p: string) => /(^|\/)(tests?|spec)\//i.test(p) || /\.(test|spec)\./i.test(p);
     const fileNodes = new Map<string, Node[]>();
     const seedIds = new Set<string>();
-    const domainPathTokens = mechanismDomainPathTokens(query);
+    const domainPathTokens = shouldSuppressSynonymExpansion({
+      hasExactAnchorHit: extractInRepoLocateAnchors(query).length > 0
+        || extractTypeNamesFromQuery(query).length > 0,
+      hasLiteralWitness: false,
+    })
+      ? []
+      : mechanismDomainPathTokens(query);
 
     const addNode = (n: Node): void => {
       if (isOhosApiFilePath(n.filePath)) return;
@@ -7201,9 +7224,8 @@ export class ToolHandler {
     query: string,
     domainTokens: string[],
   ): Node[] {
-    const tokens = domainTokens.length > 0
-      ? domainTokens
-      : mechanismDomainPathTokens(query);
+    // Spec 0044 §9: callers may pass [] to suppress CJK→ASCII synonym expansion.
+    const tokens = domainTokens;
     if (tokens.length === 0) return [];
 
     const byId = new Map<string, Node>();
@@ -7649,7 +7671,9 @@ export class ToolHandler {
         }
         if (!callersOnly) {
           for (const { node: c } of cg.getCallees(id).slice(0, 10)) {
-            // Skip log*/hilog helpers — Export→logInfo homonyms ballooned seeds.
+            if (shouldDemoteLogToastSpine(c.name, query)) {
+              continue;
+            }
             if (/^log(?:Info|Error|Warn|Debug|Fatal)?$/i.test(c.name) || /^hilog$/i.test(c.name)) {
               continue;
             }
@@ -9993,10 +10017,27 @@ export class ToolHandler {
 
     const literalSource = this.renderLiteralSource(cg, subgraph);
     if (subgraph.nodes.size === 0) {
-      const text = literalSource.text || `No relevant code found for "${query}"`;
-      return this.exploreResult(text, { projectRoot, query, files: literalSource.files,
-        sourceBytes: literalSource.files.reduce((sum, file) => sum + file.bytes, 0), responseBytes: text.length,
-        locatedNodes: literalSource.nodes, partial: true, evidenceStatus: literalSource.text ? 'partial' : 'empty' });
+      // Spec 0044 §9: empty exact evidence → Miss (paths only), not a source dump.
+      let fuzzyPaths: string[] = [];
+      try {
+        fuzzyPaths = [...new Set(
+          cg.searchNodes(query.slice(0, 64), { limit: 12 })
+            .map((r) => r.node.filePath.replace(/\\/g, '/'))
+            .filter((p) => p && !isOhosApiFilePath(p)),
+        )].slice(0, 8);
+      } catch { /* ignore */ }
+      const text = literalSource.text
+        || formatMissBanner(fuzzyPaths);
+      return this.exploreResult(text, {
+        projectRoot,
+        query,
+        files: literalSource.files,
+        sourceBytes: literalSource.files.reduce((sum, file) => sum + file.bytes, 0),
+        responseBytes: text.length,
+        locatedNodes: literalSource.nodes,
+        partial: true,
+        evidenceStatus: literalSource.text ? 'partial' : 'empty',
+      });
     }
 
     // Seed import nodes for @kit.* / *Kit names (and named symbols like taskpool).
@@ -10496,11 +10537,15 @@ export class ToolHandler {
     // dropped, so the budget never fills with incidental files. Guarded so it
     // never prunes below 2.
     if (maxGraph > 0) {
+      const litKeep = new Set(
+        (subgraph.literalEvidence?.hits ?? []).map((h) => h.filePath).filter(Boolean),
+      );
       const gated = relevantFiles.filter(([fp]) =>
         (fileGraphScore.get(fp) ?? 0) >= maxGraph * 0.06
         || centralFiles.has(fp)
         || entryFiles.has(fp)
         || changeSurfaceFiles.has(fp)
+        || litKeep.has(fp)
         || (fileTermHits.get(fp) ?? 0) >= 2,
       );
       if (gated.length >= 2) relevantFiles = gated;
@@ -10524,6 +10569,24 @@ export class ToolHandler {
     // buried-rescue pass) is the lexically-dissimilar answer; give it the named
     // tier so it isn't buried under files that merely share surface words (#1064).
     for (const fp of changeSurfaceFiles) namedSeedFiles.add(fp);
+
+    // Spec 0044 §7: literal witness files must stay in the pack and rank with named seeds.
+    {
+      const litPaths = [...new Set(
+        (subgraph.literalEvidence?.hits ?? []).map((h) => h.filePath).filter(Boolean),
+      )];
+      for (const fp of litPaths) {
+        entryFiles.add(fp);
+        namedSeedFiles.add(fp);
+        if (relevantFiles.some(([f]) => f === fp)) continue;
+        let group = fileGroups.get(fp);
+        if (!group) {
+          group = { nodes: [], score: 1000 };
+          fileGroups.set(fp, group);
+        }
+        relevantFiles.push([fp, group]);
+      }
+    }
 
     // Multi-term corroboration tier: a file that is BOTH (a) an entry/central file
     // (a search root, named seed, or graph-central hub — i.e. structurally part of
@@ -10557,6 +10620,16 @@ export class ToolHandler {
       const literalOrder = Number((subgraph.literalEvidence?.hits ?? []).some((hit) => hit.filePath === b[0]))
         - Number((subgraph.literalEvidence?.hits ?? []).some((hit) => hit.filePath === a[0]));
       if (literalOrder) return literalOrder;
+
+      // Spec 0044 §7: demote Logger/hilog/Toast-only files when query did not name them.
+      const logToastDemote = (fp: string): number => {
+        const group = fileGroups.get(fp);
+        if (!group?.nodes.length) return 0;
+        const allNoise = group.nodes.every((n) => shouldDemoteLogToastSpine(n.name, query));
+        return allNoise ? 1 : 0;
+      };
+      const logOrder = logToastDemote(a[0]) - logToastDemote(b[0]);
+      if (logOrder) return logOrder;
 
       // Query-named file (LocationController.ets in the question) before partial
       // substring matches (control.ets matching "Controller" inside LocationController).
@@ -11681,7 +11754,18 @@ export class ToolHandler {
       const headerSuffix = omittedCount > 0
         ? `${headerSymbols.join(', ')}, +${omittedCount} more`
         : headerSymbols.join(', ');
-      const fileHeader = fileSectionHeader(filePath, headerSuffix);
+      let fileHeader = fileSectionHeader(filePath, headerSuffix);
+      // Spec 0044 §10.1: warn when basename ≠ primary declaration.
+      {
+        const primary = group?.nodes.find((n) =>
+          ['class', 'struct', 'component', 'interface', 'enum'].includes(n.kind)
+          && !n.name.startsWith('%'),
+        ) ?? group?.nodes.find((n) =>
+          ['function', 'method'].includes(n.kind) && !n.name.startsWith('%'),
+        );
+        const mismatch = formatFilenameDeclarationMismatch(filePath, primary?.name);
+        if (mismatch) fileHeader = `${fileHeader}\n${mismatch}`;
+      }
 
       // The total cap bounds INCIDENTAL files only. A file that DEFINES a symbol
       // the agent named (or that's on the flow spine) renders even when the
@@ -12036,13 +12120,33 @@ export class ToolHandler {
    */
   private exploreResult(text: string, emission: ExploreEmission): ToolResult {
     const meta = inferExplorePartialMeta(text);
-    let result = this.textResult(text);
+    let evidenceStatus = emission.evidenceStatus
+      ?? (emission.sourceBytes > 0 ? (meta.partial ? 'partial' : 'complete') : 'partial');
+    let body = text;
+
+    // Spec 0044 §8: Located banner when complete exact evidence; soften Partial wording.
+    if (evidenceStatus === 'complete' && !body.includes(LOCATED_MARKER)) {
+      if (/\*\*Partial locator\*\*/i.test(body)) {
+        body = body.replace(/>\s*\*\*Partial locator\*\*[^\n]*/gi, formatLocatedBanner());
+      } else if (!/\*\*ANSWER NOW/i.test(body) && !body.includes(MISS_MARKER)) {
+        body = `${formatLocatedBanner()}\n\n${body}`;
+      }
+    } else if (
+      (evidenceStatus === 'partial' || meta.partial)
+      && /\*\*Partial locator\*\*/i.test(body)
+      && !body.includes(LOCATED_MARKER)
+    ) {
+      // Spec 0044 §8: Partial next-step → node/usages/search (not Grep same names).
+      body = body.replace(/>\s*\*\*Partial locator\*\*[^\n]*/gi, formatPartialBanner());
+    }
+
+    let result = this.textResult(body);
     result = this.prependHarmonyRegistrationSources(result, emission.projectRoot, emission.query);
     result = this.prependHarmonyResourceHits(result, emission.projectRoot, emission.query);
     result[EXPLORE_EMISSION_KEY] = {
       ...emission,
-      evidenceStatus: emission.evidenceStatus ?? (emission.sourceBytes > 0 ? (meta.partial ? 'partial' : 'complete') : 'partial'),
-      partial: emission.partial ?? (emission.evidenceStatus && emission.evidenceStatus !== 'complete' ? true : meta.partial),
+      evidenceStatus,
+      partial: emission.partial ?? (evidenceStatus !== 'complete' ? true : meta.partial),
       nextAnchor: emission.nextAnchor ?? meta.nextAnchor,
     };
     return result;
