@@ -12,6 +12,7 @@ import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLi
 import { buildArktsEvidencePacks } from './arkts-evidence-packs';
 import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidencePaths } from '../graph/evidence-paths';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
+import { isHarmonyRouteProfileJson } from '../extraction/grammars';
 import {
   formatProductStatusLine,
   formatProjectRootPathHint,
@@ -687,6 +688,60 @@ function fileSectionHeader(filePath: string, suffix: string): string {
   return suffix
     ? `${FILE_SECTION_PREFIX}${filePath}\`** — ${suffix}`
     : `${FILE_SECTION_PREFIX}${filePath}\`**`;
+}
+
+/**
+ * Spec 0039 — short Registration sources table from indexed Harmony profile routes.
+ * Returns null when nothing to show.
+ */
+export function formatHarmonyRegistrationSources(
+  cg: Pick<HomeGraph, 'getNodesByKind'>,
+  maxRows = 24,
+): string | null {
+  const routes = cg
+    .getNodesByKind('route')
+    .filter((n) => isHarmonyRouteProfileJson(n.filePath))
+    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine);
+  if (routes.length === 0) return null;
+
+  const byFile = new Map<string, typeof routes>();
+  for (const r of routes) {
+    const fp = r.filePath.replace(/\\/g, '/');
+    const list = byFile.get(fp) ?? [];
+    list.push(r);
+    byFile.set(fp, list);
+  }
+
+  const lines: string[] = [
+    '**Registration sources** (indexed Harmony route profiles — evidence from these files; do not re-Read unless editing)',
+  ];
+  let rows = 0;
+  for (const [fp, list] of byFile) {
+    lines.push(`- \`${fp}\``);
+    for (const r of list) {
+      if (rows >= maxRows) {
+        lines.push(`  - … +more routes`);
+        return lines.join('\n');
+      }
+      const page =
+        typeof r.signature === 'string'
+          ? /pageSourceFile=([^;]+)/.exec(r.signature)?.[1]?.trim()
+          : undefined;
+      const builder =
+        typeof r.signature === 'string'
+          ? /buildFunction=([^;]+)/.exec(r.signature)?.[1]?.trim()
+          : undefined;
+      if (page) {
+        lines.push(
+          `  - \`${r.name}\` → \`${page}\`${builder ? ` (${builder})` : ''} @${fp}:${r.startLine}`
+        );
+      } else {
+        lines.push(`  - \`${r.name}\` @${fp}:${r.startLine}`);
+      }
+      rows++;
+    }
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -3515,6 +3570,13 @@ export class ToolHandler {
       return {
         label: `function-pointer dispatch via ${via} (dynamic dispatch)`,
         compact: `dynamic: fn-pointer ${m.via ? String(m.via) : ''}${at}`,
+        registeredAt,
+      };
+    }
+    if (m?.synthesizedBy === 'arkts-route-map') {
+      return {
+        label: `Harmony route registration (config → page/builder)`,
+        compact: `route-map registration${at}`,
         registeredAt,
       };
     }
@@ -11799,13 +11861,41 @@ export class ToolHandler {
   }
 
   /**
+   * Spec 0039: when the query names Harmony route profiles, lead with a short
+   * Registration sources table so agents see JSON was indexed (avoid re-Read).
+   */
+  private prependHarmonyRegistrationSources(
+    result: ToolResult,
+    projectRoot: string,
+    query: string,
+  ): ToolResult {
+    if (!/route_map|router_map|main_pages/i.test(query)) return result;
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (/^\*\*Registration sources\*\*/m.test(first.text)) return result;
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonyRegistrationSources(cg);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
+  /**
    * An explore response plus the record of what it emitted (CG-17). The record
    * rides the result only as far as {@link execute}, which files it into the
    * calling session's state and deletes it — see {@link EXPLORE_EMISSION_KEY}.
    */
   private exploreResult(text: string, emission: ExploreEmission): ToolResult {
     const meta = inferExplorePartialMeta(text);
-    const result = this.textResult(text);
+    let result = this.textResult(text);
+    result = this.prependHarmonyRegistrationSources(result, emission.projectRoot, emission.query);
     result[EXPLORE_EMISSION_KEY] = {
       ...emission,
       evidenceStatus: emission.evidenceStatus ?? (emission.sourceBytes > 0 ? (meta.partial ? 'partial' : 'complete') : 'partial'),
@@ -11821,6 +11911,7 @@ export class ToolHandler {
     projectRoot: string,
     query: string,
   ): ToolResult {
+    result = this.prependHarmonyRegistrationSources(result, projectRoot, query);
     if (result[EXPLORE_EMISSION_KEY]) {
       const em = result[EXPLORE_EMISSION_KEY]!;
       if (em.partial === undefined || !em.nextAnchor) {

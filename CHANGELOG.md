@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- Harmony `route_map.json` / `router_map.json` / `main_pages.json` are indexed (basename allowlist) and linked into the graph as `route` nodes → page / `buildFunction` symbols. Edges carry `synthesizedBy: arkts-route-map` and `registeredAt` pointing at the config file so explore/trails show the JSON wiring site. When an explore query mentions those filenames, replies lead with a short **Registration sources** table — evidence from those profiles, reducing blind re-Read of the JSON (Spec 0039).
 - MCP tool replies that know the indexed project now begin with `HomeGraph project root: \`<absolute>\`` plus a one-line join rule: repo-relative paths below that root should be passed to Read/Grep as-is (or `<root>/<relative>` with `/`), without inventing experiment/result prefixes. MCP initialize instructions mention the same join base. Indexed path storage stays repo-relative (Spec 0038).
 
 

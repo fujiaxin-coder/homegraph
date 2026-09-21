@@ -1,9 +1,12 @@
 /**
- * ArkTS entry / module manifest resolver.
+ * ArkTS entry / module manifest + Harmony route profile resolver (Spec 0039).
  *
- * Parses HarmonyOS `module.json5` page routes and links startup paths:
- * module pages → @Entry components, loadContent(url) → first-screen lifecycle.
+ * Parses:
+ * - `module.json5` pages → @Entry components, loadContent(url) → lifecycle
+ * - `route_map.json` / `router_map.json` routerMap[] → page / buildFunction
+ * - `main_pages.json` src[] → @Entry (same as module pages)
  */
+import { isHarmonyRouteProfileJson } from '../../extraction/grammars';
 import type { Node } from '../../types';
 import {
   FrameworkResolver,
@@ -19,6 +22,32 @@ function pageStem(pagePath: string): string {
   const normalized = pagePath.replace(/\\/g, '/');
   const base = normalized.split('/').pop() ?? normalized;
   return base.replace(/\.ets$/i, '');
+}
+
+function lineOfNeedle(content: string, needle: string): number {
+  const idx = content.indexOf(needle);
+  if (idx < 0) return 1;
+  return content.slice(0, idx).split('\n').length;
+}
+
+/** Module root = path prefix before `/src/main/` (Harmony HAP/HAR layout). */
+export function harmonyModuleRootFromProfile(profileRel: string): string {
+  const n = profileRel.replace(/\\/g, '/');
+  const marker = '/src/main/';
+  const i = n.indexOf(marker);
+  if (i < 0) return '';
+  return n.slice(0, i);
+}
+
+/** Resolve `pageSourceFile` (module-relative) against the profile's module root. */
+export function resolveHarmonyPageSourcePath(
+  profileRel: string,
+  pageSourceFile: string
+): string {
+  const modRoot = harmonyModuleRootFromProfile(profileRel);
+  const page = pageSourceFile.replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!modRoot) return page;
+  return `${modRoot}/${page}`.replace(/\/+/g, '/');
 }
 
 function parseModuleJson5Pages(content: string): string[] {
@@ -55,6 +84,63 @@ function parseModuleAbilities(content: string): Array<{ name: string; srcEntry: 
   return abilities;
 }
 
+interface RouterMapEntry {
+  name: string;
+  pageSourceFile: string;
+  buildFunction?: string;
+}
+
+/** Parse standard Harmony `routerMap` JSON (route_map / router_map). */
+export function parseHarmonyRouterMap(content: string): RouterMapEntry[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(content);
+  } catch {
+    return [];
+  }
+  if (!data || typeof data !== 'object') return [];
+  const arr = (data as { routerMap?: unknown }).routerMap;
+  if (!Array.isArray(arr)) return [];
+  const out: RouterMapEntry[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+    const pageSourceFile =
+      typeof rec.pageSourceFile === 'string' ? rec.pageSourceFile.trim() : '';
+    if (!name || !pageSourceFile) continue;
+    const buildFunction =
+      typeof rec.buildFunction === 'string' && rec.buildFunction.trim()
+        ? rec.buildFunction.trim()
+        : undefined;
+    out.push({ name, pageSourceFile, buildFunction });
+  }
+  return out;
+}
+
+/** Parse `main_pages.json` `{ "src": ["pages/Index", ...] }`. */
+export function parseHarmonyMainPages(content: string): string[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(content);
+  } catch {
+    return [];
+  }
+  if (!data || typeof data !== 'object') return [];
+  const src = (data as { src?: unknown }).src;
+  if (!Array.isArray(src)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const p of src) {
+    if (typeof p !== 'string') continue;
+    const t = p.trim();
+    if (!t || t.includes('$') || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
 function findArktsComponentByName(context: ResolutionContext, name: string): Node | null {
   for (const kind of ['component', 'struct', 'class'] as const) {
     const iter = context.iterateNodesByKind?.(kind) ?? context.getNodesByKind(kind);
@@ -78,6 +164,39 @@ function findArktsPageComponent(context: ResolutionContext, pagePath: string): N
       if (n.language !== 'arkts' || n.name !== stem) continue;
       const fp = n.filePath.replace(/\\/g, '/');
       if (fp.includes(suffix) || fp.endsWith(`${stem}.ets`)) return n;
+    }
+  }
+  return null;
+}
+
+function findArktsSymbolInFile(
+  context: ResolutionContext,
+  fileRel: string,
+  name: string
+): Node | null {
+  const norm = fileRel.replace(/\\/g, '/');
+  const nodes = context.getNodesInFile(norm);
+  for (const n of nodes) {
+    if (n.name !== name) continue;
+    if (
+      n.kind === 'component' ||
+      n.kind === 'struct' ||
+      n.kind === 'class' ||
+      n.kind === 'function' ||
+      n.kind === 'method'
+    ) {
+      return n;
+    }
+  }
+  return null;
+}
+
+function findArktsBuilderByName(context: ResolutionContext, name: string): Node | null {
+  for (const kind of ['function', 'method'] as const) {
+    const iter = context.iterateNodesByKind?.(kind) ?? context.getNodesByKind(kind);
+    for (const n of iter) {
+      if (n.language !== 'arkts' || n.name !== name) continue;
+      return n;
     }
   }
   return null;
@@ -110,13 +229,102 @@ function findArktsMethodInComponent(
   return null;
 }
 
+function pushPageRoute(
+  nodes: Node[],
+  references: UnresolvedRef[],
+  filePath: string,
+  content: string,
+  page: string,
+  now: number
+): void {
+  const line = lineOfNeedle(content, page);
+  const routeId = `arkts-route:${filePath}:${page}`;
+  nodes.push({
+    id: routeId,
+    kind: 'route',
+    name: page,
+    qualifiedName: `${filePath}::${page}`,
+    filePath,
+    language: 'yaml',
+    startLine: line,
+    endLine: line,
+    startColumn: 0,
+    endColumn: 0,
+    isExported: false,
+    updatedAt: now,
+  });
+  references.push({
+    fromNodeId: routeId,
+    referenceName: pageStem(page),
+    referenceKind: 'references',
+    line,
+    column: 0,
+    filePath,
+    language: 'yaml',
+  });
+}
+
+function extractRouterMapProfile(
+  filePath: string,
+  content: string,
+  now: number
+): FrameworkExtractionResult {
+  const nodes: Node[] = [];
+  const references: UnresolvedRef[] = [];
+  for (const entry of parseHarmonyRouterMap(content)) {
+    const line = lineOfNeedle(content, `"name": "${entry.name}"`) || lineOfNeedle(content, entry.name);
+    const pageRel = resolveHarmonyPageSourcePath(filePath, entry.pageSourceFile);
+    const routeId = `arkts-route:${filePath}:${entry.name}`;
+    const sigParts = [`pageSourceFile=${entry.pageSourceFile}`];
+    if (entry.buildFunction) sigParts.push(`buildFunction=${entry.buildFunction}`);
+    nodes.push({
+      id: routeId,
+      kind: 'route',
+      name: entry.name,
+      qualifiedName: `${filePath}::${entry.name}`,
+      filePath,
+      language: 'yaml',
+      startLine: line,
+      endLine: line,
+      startColumn: 0,
+      endColumn: 0,
+      isExported: false,
+      signature: sigParts.join('; '),
+      updatedAt: now,
+    });
+    references.push({
+      fromNodeId: routeId,
+      referenceName: pageStem(entry.pageSourceFile),
+      referenceKind: 'references',
+      line,
+      column: 0,
+      filePath,
+      language: 'yaml',
+      candidates: [pageRel],
+    });
+    if (entry.buildFunction) {
+      references.push({
+        fromNodeId: routeId,
+        referenceName: entry.buildFunction,
+        referenceKind: 'references',
+        line,
+        column: 0,
+        filePath,
+        language: 'yaml',
+        candidates: [pageRel],
+      });
+    }
+  }
+  return { nodes, references };
+}
+
 export const arktsEntryResolver: FrameworkResolver = {
   name: 'arkts-entry',
   languages: ['arkts', 'yaml'],
 
   detect(context: ResolutionContext): boolean {
     for (const file of context.getAllFiles()) {
-      if (file.endsWith('module.json5')) return true;
+      if (file.endsWith('module.json5') || isHarmonyRouteProfileJson(file)) return true;
       if (!file.endsWith('.ets')) continue;
       const src = context.readFile(file);
       if (src && (/\bUIAbility\b/.test(src) || /\bloadContent\s*\(/.test(src))) return true;
@@ -125,48 +333,27 @@ export const arktsEntryResolver: FrameworkResolver = {
   },
 
   claimsReference(name: string): boolean {
-    return name.startsWith('pages/') || /^[A-Z][A-Za-z0-9]*$/.test(name);
+    return (
+      name.startsWith('pages/') ||
+      /^[A-Z][A-Za-z0-9]*$/.test(name) ||
+      /Builder$/.test(name)
+    );
   },
 
   extract(filePath: string, content: string): FrameworkExtractionResult {
     const nodes: Node[] = [];
     const references: UnresolvedRef[] = [];
     const now = Date.now();
+    const base = filePath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
 
     if (filePath.endsWith('module.json5')) {
       const pages = parseModuleJson5Pages(content);
       for (const page of pages) {
-        const line =
-          content.split('\n').findIndex((l) => l.includes(page)) + 1 || 1;
-        const routeId = `arkts-route:${filePath}:${page}`;
-        nodes.push({
-          id: routeId,
-          kind: 'route',
-          name: page,
-          qualifiedName: `${filePath}::${page}`,
-          filePath,
-          language: 'yaml',
-          startLine: line > 0 ? line : 1,
-          endLine: line > 0 ? line : 1,
-          startColumn: 0,
-          endColumn: 0,
-          isExported: false,
-          updatedAt: now,
-        });
-        references.push({
-          fromNodeId: routeId,
-          referenceName: pageStem(page),
-          referenceKind: 'references',
-          line: line > 0 ? line : 1,
-          column: 0,
-          filePath,
-          language: 'yaml',
-        });
+        pushPageRoute(nodes, references, filePath, content, page, now);
       }
 
       for (const ability of parseModuleAbilities(content)) {
-        const line =
-          content.split('\n').findIndex((l) => l.includes(ability.name)) + 1 || 1;
+        const line = lineOfNeedle(content, ability.name);
         const abilityId = `arkts-ability:${filePath}:${ability.name}`;
         nodes.push({
           id: abilityId,
@@ -175,14 +362,25 @@ export const arktsEntryResolver: FrameworkResolver = {
           qualifiedName: `${filePath}::ability::${ability.name}`,
           filePath,
           language: 'yaml',
-          startLine: line > 0 ? line : 1,
-          endLine: line > 0 ? line : 1,
+          startLine: line,
+          endLine: line,
           startColumn: 0,
           endColumn: 0,
           isExported: false,
           signature: ability.srcEntry,
           updatedAt: now,
         });
+      }
+      return { nodes, references };
+    }
+
+    if (base === 'route_map.json' || base === 'router_map.json') {
+      return extractRouterMapProfile(filePath, content, now);
+    }
+
+    if (base === 'main_pages.json') {
+      for (const page of parseHarmonyMainPages(content)) {
+        pushPageRoute(nodes, references, filePath, content, page, now);
       }
       return { nodes, references };
     }
@@ -213,6 +411,20 @@ export const arktsEntryResolver: FrameworkResolver = {
   resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
     if (ref.referenceKind !== 'references') return null;
 
+    const preferredFile = ref.candidates?.[0]?.replace(/\\/g, '/');
+
+    if (preferredFile) {
+      const inFile = findArktsSymbolInFile(context, preferredFile, ref.referenceName);
+      if (inFile) {
+        return {
+          original: ref,
+          targetNodeId: inFile.id,
+          confidence: 0.92,
+          resolvedBy: 'framework',
+        };
+      }
+    }
+
     if (ref.referenceName.startsWith('pages/')) {
       const routesIter = context.iterateNodesByKind?.('route') ?? context.getNodesByKind('route');
       for (const n of routesIter) {
@@ -235,6 +447,18 @@ export const arktsEntryResolver: FrameworkResolver = {
         };
       }
       return null;
+    }
+
+    if (/Builder$/.test(ref.referenceName)) {
+      const builder = findArktsBuilderByName(context, ref.referenceName);
+      if (builder) {
+        return {
+          original: ref,
+          targetNodeId: builder.id,
+          confidence: 0.85,
+          resolvedBy: 'framework',
+        };
+      }
     }
 
     const component = findArktsComponentByName(context, ref.referenceName);
