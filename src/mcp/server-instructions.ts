@@ -26,9 +26,9 @@ Choose the smallest available tool for that gap:
 - Exact usage/reference locations → \`homegraph_usages\`; callers/callees → the corresponding tool.
 - Named module dependencies/cycles → \`homegraph_modules\`; native exports/registration → \`homegraph_native\`.
 - One missing symbol body → \`homegraph_node\`; prefer direct read if its path is already known.
-- An unresolved cross-symbol mechanism or route registration edges → \`homegraph_explore\` (may include Spec 0039 Registration sources for route_map). Do not use it for routine pre-edit orientation, a literal search, or to re-confirm source already found with bash.
+- An unresolved cross-symbol mechanism or route registration edges → \`homegraph_explore\` (may include Spec 0039 Registration sources for route_map; Spec 0041 Resource hits for \`element/string.json\` literals). Do not use it for routine pre-edit orientation, a literal search, or to re-confirm source already found with bash.
 - ArkUI migration analysis → \`homegraph_arkui_migrate\` when that analysis is needed; SDK contracts → project declarations or SDK documentation.
-- Resource \`string.json\` / color / media key lookup is **not** a HomeGraph graph feature yet — use Grep/Read for those literals.
+- Harmony \`element/string.json\` key/value lookup is searchable via explore/search (Resource hits; no graph edges). Color/media and other resource files still need Grep/Read.
 
 Do not call explore after a focused tool already answered the relation. Keep working directly once the edit location and affected behavior are sufficiently supported. Task difficulty and file count alone do not require graph use.
 `;

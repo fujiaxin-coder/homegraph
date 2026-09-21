@@ -1,12 +1,18 @@
 /**
- * ArkTS entry / module manifest + Harmony route profile resolver (Spec 0039).
+ * ArkTS entry / module manifest + Harmony route profile resolver (Spec 0039)
+ * + element/string.json lightweight constants (Spec 0041, no edges).
  *
  * Parses:
  * - `module.json5` pages → @Entry components, loadContent(url) → lifecycle
  * - `route_map.json` / `router_map.json` routerMap[] → page / buildFunction
  * - `main_pages.json` src[] → @Entry (same as module pages)
+ * - resources/.../element/string.json → constant nodes for FTS (no references)
  */
-import { isHarmonyRouteProfileJson } from '../../extraction/grammars';
+import { parse } from 'jsonc-parser';
+import {
+  isHarmonyElementStringJson,
+  isHarmonyRouteProfileJson,
+} from '../../extraction/grammars';
 import type { Node } from '../../types';
 import {
   FrameworkResolver,
@@ -17,6 +23,9 @@ import {
 } from '../types';
 
 const LOAD_CONTENT_PAGE_RE = /loadContent\s*\(\s*['"]([^'"]+)['"]/g;
+/** Cap string.json entries per file (Spec 0041). */
+const STRING_JSON_ENTRY_CAP = 2000;
+const STRING_JSON_VALUE_CAP = 200;
 
 function pageStem(pagePath: string): string {
   const normalized = pagePath.replace(/\\/g, '/');
@@ -318,13 +327,83 @@ function extractRouterMapProfile(
   return { nodes, references };
 }
 
+/**
+ * Spec 0041 — collect `{ name, value }` string resource entries (no edges).
+ * Same shape as literal-evidence: walk objects; skip illegal keys.
+ */
+export function parseHarmonyStringResources(
+  content: string,
+): Array<{ name: string; value: string; line: number }> {
+  const data: unknown = parse(content, undefined, { allowTrailingComma: true });
+  if (data === undefined || data === null) return [];
+  const out: Array<{ name: string; value: string; line: number }> = [];
+  let visited = 0;
+  const visit = (value: unknown, depth: number): void => {
+    if (++visited > 10000 || depth > 12 || !value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    const entry = value as Record<string, unknown>;
+    if (
+      typeof entry.name === 'string'
+      && typeof entry.value === 'string'
+      && /^[A-Za-z_][\w]*$/.test(entry.name)
+      && out.length < STRING_JSON_ENTRY_CAP
+    ) {
+      const needle = JSON.stringify(entry.name);
+      const idx = content.indexOf(needle);
+      const line = idx < 0 ? 1 : content.slice(0, idx).split('\n').length;
+      out.push({
+        name: entry.name,
+        value: entry.value.slice(0, STRING_JSON_VALUE_CAP),
+        line,
+      });
+    }
+    for (const child of Object.values(entry)) visit(child, depth + 1);
+  };
+  visit(data, 0);
+  return out;
+}
+
+function extractHarmonyStringJson(
+  filePath: string,
+  content: string,
+  now: number,
+): FrameworkExtractionResult {
+  const nodes: Node[] = [];
+  for (const entry of parseHarmonyStringResources(content)) {
+    nodes.push({
+      id: `harmony-string:${filePath}:${entry.name}`,
+      kind: 'constant',
+      name: entry.name,
+      qualifiedName: `app.string.${entry.name}`,
+      filePath,
+      language: 'yaml',
+      startLine: entry.line,
+      endLine: entry.line,
+      startColumn: 0,
+      endColumn: 0,
+      isExported: false,
+      docstring: entry.value,
+      signature: `$r('app.string.${entry.name}')`,
+      updatedAt: now,
+    });
+  }
+  return { nodes, references: [] };
+}
+
 export const arktsEntryResolver: FrameworkResolver = {
   name: 'arkts-entry',
   languages: ['arkts', 'yaml'],
 
   detect(context: ResolutionContext): boolean {
     for (const file of context.getAllFiles()) {
-      if (file.endsWith('module.json5') || isHarmonyRouteProfileJson(file)) return true;
+      if (
+        file.endsWith('module.json5')
+        || isHarmonyRouteProfileJson(file)
+        || isHarmonyElementStringJson(file)
+      ) return true;
       if (!file.endsWith('.ets')) continue;
       const src = context.readFile(file);
       if (src && (/\bUIAbility\b/.test(src) || /\bloadContent\s*\(/.test(src))) return true;
@@ -383,6 +462,10 @@ export const arktsEntryResolver: FrameworkResolver = {
         pushPageRoute(nodes, references, filePath, content, page, now);
       }
       return { nodes, references };
+    }
+
+    if (isHarmonyElementStringJson(filePath)) {
+      return extractHarmonyStringJson(filePath, content, now);
     }
 
     if (!filePath.endsWith('.ets')) {

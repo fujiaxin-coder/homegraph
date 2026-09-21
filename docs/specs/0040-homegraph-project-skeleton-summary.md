@@ -39,7 +39,7 @@ Agent 需要「有哪些模块、路由表文件在哪」时，应走 **工程�
 ### 2.2 不做
 
 - 不把骨架文件抽成 `calls`/`references` 边（边仍由 0039 负责）
-- 不索引 `string.json` / `color.json` 全文检索（轻量检索另案）
+- 不索引 `string.json` / `color.json` 全文检索（轻量检索见 Spec 0041）
 - 不改 project_modules 表结构；不默认展开 profile JSON 全文
 
 ---
@@ -79,4 +79,4 @@ Agent 需要「有哪些模块、路由表文件在哪」时，应走 **工程�
 ## 6. 非目标
 
 - Spec 0039 边语义变更
-- 资源 JSON FTS（C 层）
+- 资源 JSON FTS（C 层 → Spec 0041）

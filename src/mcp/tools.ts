@@ -12,7 +12,7 @@ import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLi
 import { buildArktsEvidencePacks } from './arkts-evidence-packs';
 import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidencePaths } from '../graph/evidence-paths';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
-import { isHarmonyRouteProfileJson } from '../extraction/grammars';
+import { isHarmonyElementStringJson, isHarmonyRouteProfileJson } from '../extraction/grammars';
 import {
   listHarmonyRouteProfilesUnderModule,
   readHarmonyAppBundleName,
@@ -750,6 +750,61 @@ export function formatHarmonyRegistrationSources(
 }
 
 /**
+ * Spec 0041 — short Resource hits table for element/string.json constants.
+ * Triggered when the query names string.json or matches a resource key/value.
+ */
+export function formatHarmonyResourceHits(
+  cg: Pick<HomeGraph, 'getNodesByKind'>,
+  query: string,
+  maxRows = 8,
+): string | null {
+  const constants = cg
+    .getNodesByKind('constant')
+    .filter((n) => isHarmonyElementStringJson(n.filePath));
+  if (constants.length === 0) return null;
+
+  const q = query.trim();
+  const namedFile = /string\.json/i.test(q);
+  const tokens = [
+    ...new Set(
+      q
+        .split(/[\s,;|]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 2 && t.length <= 160 && !/^string\.json$/i.test(t)),
+    ),
+  ].slice(0, 12);
+
+  const matched = constants.filter((n) => {
+    if (namedFile && tokens.length === 0) return true;
+    const hay = `${n.name}\n${n.qualifiedName ?? ''}\n${n.docstring ?? ''}\n${n.signature ?? ''}`.toLocaleLowerCase();
+    return tokens.some((t) => hay.includes(t.toLocaleLowerCase()));
+  });
+
+  // Query named the file with no other tokens → show a small sample so agent
+  // sees the catalog is indexed (same spirit as Registration sources).
+  const rows = (matched.length > 0 ? matched : namedFile ? constants : [])
+    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)
+    .slice(0, maxRows);
+  if (rows.length === 0) return null;
+
+  const lines: string[] = [
+    '**Resource hits** (element/string.json — searchable literals, no graph edges)',
+  ];
+  for (const n of rows) {
+    const fp = n.filePath.replace(/\\/g, '/');
+    const value = (n.docstring ?? '').slice(0, 80);
+    const shown = value ? JSON.stringify(value) : '(empty)';
+    lines.push(
+      `- \`${fp}:${n.startLine}\` — ${shown} → \`${n.name}\` · Grep \`$r('app.string.${n.name}')\` in \`.ets\``,
+    );
+  }
+  if ((matched.length || constants.length) > rows.length) {
+    lines.push(`- … +more string resources`);
+  }
+  return lines.join('\n');
+}
+
+/**
  * Per-file staleness banner emitted at the top of a tool response when the
  * file watcher has pending events for files referenced by the response.
  * The agent uses this to fall back to Read for those specific files
@@ -1210,7 +1265,7 @@ export const tools: ToolDefinition[] = [
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
       'For a missing usage, dependency/cycle or native-registration relation, use ' +
       'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
-      'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
+      'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; element/string.json literals may lead with Resource hits). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
       'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
@@ -11895,6 +11950,31 @@ export class ToolHandler {
     };
   }
 
+  /** Spec 0041: lead with Resource hits when string.json is named or matched. */
+  private prependHarmonyResourceHits(
+    result: ToolResult,
+    projectRoot: string,
+    query: string,
+  ): ToolResult {
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (/^\*\*Resource hits\*\*/m.test(first.text) || /\n\*\*Resource hits\*\*/m.test(first.text)) {
+      return result;
+    }
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonyResourceHits(cg, query);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
   /**
    * An explore response plus the record of what it emitted (CG-17). The record
    * rides the result only as far as {@link execute}, which files it into the
@@ -11904,6 +11984,7 @@ export class ToolHandler {
     const meta = inferExplorePartialMeta(text);
     let result = this.textResult(text);
     result = this.prependHarmonyRegistrationSources(result, emission.projectRoot, emission.query);
+    result = this.prependHarmonyResourceHits(result, emission.projectRoot, emission.query);
     result[EXPLORE_EMISSION_KEY] = {
       ...emission,
       evidenceStatus: emission.evidenceStatus ?? (emission.sourceBytes > 0 ? (meta.partial ? 'partial' : 'complete') : 'partial'),
@@ -11920,6 +12001,7 @@ export class ToolHandler {
     query: string,
   ): ToolResult {
     result = this.prependHarmonyRegistrationSources(result, projectRoot, query);
+    result = this.prependHarmonyResourceHits(result, projectRoot, query);
     if (result[EXPLORE_EMISSION_KEY]) {
       const em = result[EXPLORE_EMISSION_KEY]!;
       if (em.partial === undefined || !em.nextAnchor) {
