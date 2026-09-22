@@ -12,13 +12,14 @@ import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLi
 import { buildArktsEvidencePacks } from './arkts-evidence-packs';
 import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidencePaths } from '../graph/evidence-paths';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
-import { isHarmonyElementStringJson, isHarmonyRouteProfileJson } from '../extraction/grammars';
+import { isHarmonyCapabilityProfileJson, isHarmonyElementStringJson, isHarmonyRouteProfileJson } from '../extraction/grammars';
 import {
   listHarmonyRouteProfilesUnderModule,
   readHarmonyAppBundleName,
   readModuleOhPackageName,
   scanHarmonyResourceInventory,
   formatHarmonyResourceInventory,
+  formatHarmonyModuleRoster,
 } from '../project-map';
 import {
   formatBoundProjectPathPinNotice,
@@ -766,11 +767,12 @@ export function formatHarmonyRegistrationSources(
 }
 
 /**
- * Spec 0041 — short Resource hits table for element/string.json constants.
- * Triggered when the query names string.json or matches a resource key/value.
+ * Spec 0041 / 0048 §3 — short Resource hits table for element/string.json constants.
+ * Spec 0048: append up to 2 in-repo `.ets` binding anchors when signature/docstring
+ * mention `app.string.<key>`.
  */
 export function formatHarmonyResourceHits(
-  cg: Pick<HomeGraph, 'getNodesByKind'>,
+  cg: Pick<HomeGraph, 'getNodesByKind' | 'getProjectRoot' | 'getFiles'>,
   query: string,
   maxRows = 8,
 ): string | null {
@@ -796,12 +798,46 @@ export function formatHarmonyResourceHits(
     return tokens.some((t) => hay.includes(t.toLocaleLowerCase()));
   });
 
-  // Query named the file with no other tokens → show a small sample so agent
-  // sees the catalog is indexed (same spirit as Registration sources).
   const rows = (matched.length > 0 ? matched : namedFile ? constants : [])
     .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)
     .slice(0, maxRows);
   if (rows.length === 0) return null;
+
+  const projectRoot = cg.getProjectRoot();
+  const etsFiles = cg.getFiles()
+    .map((f) => f.path.replace(/\\/g, '/'))
+    .filter((p) => /\.ets$/i.test(p))
+    .slice(0, 80);
+
+  const findBindings = (key: string, stringFile: string): string[] => {
+    const needle = `app.string.${key}`;
+    const hits: string[] = [];
+    const modRoot = (() => {
+      const marker = '/src/main/';
+      const i = stringFile.indexOf(marker);
+      return i >= 0 ? stringFile.slice(0, i) : '';
+    })();
+    for (const rel of etsFiles) {
+      if (hits.length >= 2) break;
+      if (modRoot && !(rel === modRoot || rel.startsWith(`${modRoot}/`))) continue;
+      const abs = pathJoin(projectRoot, rel);
+      if (!existsSync(abs)) continue;
+      let text: string;
+      try {
+        text = readFileSync(abs, 'utf-8');
+      } catch {
+        continue;
+      }
+      const lines = text.split(/\n/);
+      for (let i = 0; i < lines.length; i++) {
+        if (hits.length >= 2) break;
+        if (lines[i]!.includes(needle)) {
+          hits.push(`\`${rel}:${i + 1}\``);
+        }
+      }
+    }
+    return hits;
+  };
 
   const lines: string[] = [
     '**Resource hits** (element/string.json — searchable literals, no graph edges)',
@@ -810,14 +846,154 @@ export function formatHarmonyResourceHits(
     const fp = n.filePath.replace(/\\/g, '/');
     const value = (n.docstring ?? '').slice(0, 80);
     const shown = value ? JSON.stringify(value) : '(empty)';
+    const bounds = findBindings(n.name, fp);
+    const boundNote = bounds.length ? ` · bound ${bounds.join(', ')}` : '';
     lines.push(
-      `- \`${fp}:${n.startLine}\` — ${shown} → \`${n.name}\` · Grep \`$r('app.string.${n.name}')\` in \`.ets\``,
+      `- \`${fp}:${n.startLine}\` — ${shown} → \`${n.name}\`${boundNote} · Grep \`$r('app.string.${n.name}')\` in \`.ets\``,
     );
   }
   if ((matched.length || constants.length) > rows.length) {
     lines.push(`- … +more string resources`);
   }
   return lines.join('\n');
+}
+
+const FORM_QUERY_RE = /form_config|FormExtension|服务卡片|卡片/i;
+const SHORTCUT_QUERY_RE = /shortcuts_config|\bshortcuts\b|快捷方式|长按|快捷入口/i;
+
+/**
+ * Spec 0048 §1–2 — Capability profiles table, or form negative evidence.
+ */
+export function formatHarmonyCapabilityProfiles(
+  cg: Pick<HomeGraph, 'getNodesByKind'>,
+  query: string,
+  maxRows = 8,
+): string | null {
+  const wantForm = FORM_QUERY_RE.test(query);
+  const wantShortcut = SHORTCUT_QUERY_RE.test(query);
+  if (!wantForm && !wantShortcut) return null;
+
+  const constants = cg.getNodesByKind('constant');
+  const routes = cg.getNodesByKind('route');
+  const formNodes = [
+    ...constants.filter((n) =>
+      isHarmonyCapabilityProfileJson(n.filePath)
+      && /form_config\.json$/i.test(n.filePath.replace(/\\/g, '/')),
+    ),
+    ...constants.filter((n) => (n.qualifiedName ?? '').includes('harmony.capability.form')),
+    ...routes.filter((n) => (n.name ?? '').startsWith('formAbility:')),
+  ];
+  const shortcutNodes = [
+    ...constants.filter((n) =>
+      isHarmonyCapabilityProfileJson(n.filePath)
+      && /shortcuts_config\.json$/i.test(n.filePath.replace(/\\/g, '/')),
+    ),
+    ...constants.filter((n) =>
+      (n.qualifiedName ?? '').includes('harmony.capability.shortcut')
+      || (n.qualifiedName ?? '').includes('harmony.shortcut.'),
+    ),
+  ];
+
+  const lines: string[] = [];
+  if (wantForm && formNodes.length === 0) {
+    lines.push(
+      '**Capability profiles:** No in-repo form_config / FormExtensionAbility (do not treat SDK `.d.ts` as project wiring).',
+    );
+  }
+  const rows: string[] = [];
+  const pushRows = (kind: 'form' | 'shortcut', nodes: typeof formNodes) => {
+    for (const n of nodes.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)) {
+      if (rows.length >= maxRows) break;
+      const fp = n.filePath.replace(/\\/g, '/');
+      rows.push(`- (${kind}) \`${n.name}\` @\`${fp}:${n.startLine}\`${n.signature ? ` — ${n.signature}` : ''}`);
+    }
+  };
+  if (wantForm) pushRows('form', formNodes);
+  if (wantShortcut) pushRows('shortcut', shortcutNodes);
+
+  if (rows.length > 0) {
+    lines.push('**Capability profiles** (form_config / shortcuts_config — paths only, no UI edges)');
+    lines.push(...rows);
+  }
+  return lines.length ? lines.join('\n') : null;
+}
+
+/** Spec 0048 §5 — detect empty / log-only method bodies. */
+export function isHarmonyStubBody(source: string): boolean {
+  const body = source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+    .trim();
+  if (!body) return true;
+  const lines = body.split(/\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return true;
+  if (lines.length > 8) return false;
+  const code = lines.join('\n');
+  // Strip common wrapper braces from a method slice.
+  const inner = code.replace(/^[^{]*\{/, '').replace(/\}[^}]*$/, '').trim();
+  const stmts = inner.split(/;|\n/).map((s) => s.trim()).filter(Boolean);
+  if (stmts.length === 0) return true;
+  return stmts.every((s) =>
+    /^(return(\s+[^;]*)?|hilog\.[a-zA-Z]+\s*\(|console\.(log|info|warn|error|debug)\s*\(|\/\/)/i.test(s)
+    || s === '{'
+    || s === '}',
+  );
+}
+
+/**
+ * Spec 0048 §5 — seam notes for located explore anchors.
+ */
+export function formatHarmonySeamNotes(
+  cg: Pick<HomeGraph, 'getNodesByKind' | 'getNode'>,
+  projectRoot: string,
+  located: Array<{ id?: string; name: string; filePath: string; startLine: number }>,
+  maxAnchors = 6,
+): string | null {
+  if (!located.length) return null;
+
+  const lines: string[] = [];
+  const capabilityFiles = new Set(
+    [
+      ...cg.getNodesByKind('constant').filter((n) => isHarmonyCapabilityProfileJson(n.filePath)),
+      ...cg.getNodesByKind('route').filter((n) => isHarmonyRouteProfileJson(n.filePath)),
+    ].map((n) => n.filePath.replace(/\\/g, '/')),
+  );
+
+  for (const loc of located.slice(0, maxAnchors)) {
+    const fp = loc.filePath.replace(/\\/g, '/');
+    const modRoot = (() => {
+      const marker = '/src/main/';
+      const i = fp.indexOf(marker);
+      return i >= 0 ? fp.slice(0, i) : fp.includes('/') ? fp.slice(0, fp.lastIndexOf('/')) : '';
+    })();
+    let profileNote = 0;
+    for (const cap of capabilityFiles) {
+      if (profileNote >= 2) break;
+      if (modRoot && (cap === modRoot || cap.startsWith(`${modRoot}/`))) {
+        lines.push(`- profile near \`${loc.name}\`: \`${cap}\``);
+        profileNote++;
+      }
+    }
+    try {
+      const node = loc.id ? cg.getNode(loc.id) : null;
+      const start = node?.startLine ?? loc.startLine;
+      const end = node?.endLine ?? start + 12;
+      const abs = pathJoin(projectRoot, fp);
+      if (existsSync(abs)) {
+        const content = readFileSync(abs, 'utf-8');
+        const allLines = content.split(/\n/);
+        const slice = allLines.slice(Math.max(0, start - 1), Math.min(allLines.length, end)).join('\n');
+        if (isHarmonyStubBody(slice)) {
+          lines.push(`- stub: \`${loc.name}\` @\`${fp}:${start}\``);
+        }
+      }
+    } catch {
+      /* omit */
+    }
+    if (lines.length >= maxAnchors * 3) break;
+  }
+  if (lines.length === 0) return null;
+  return ['**Seam notes** (config paths / empty stubs — digests still count as Read)', ...lines.slice(0, 18)].join('\n');
 }
 
 /**
@@ -1281,7 +1457,7 @@ export const tools: ToolDefinition[] = [
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
       'For a missing usage, dependency/cycle or native-registration relation, use ' +
       'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
-      'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; element/string.json literals may lead with Resource hits). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
+      'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; form/shortcuts queries may lead with Capability profiles; element/string.json literals may lead with Resource hits + optional bound .ets anchors; Seam notes may flag stubs). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
       'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
@@ -1327,8 +1503,8 @@ export const tools: ToolDefinition[] = [
     description:
       'Shallow engineering map: modules + per-module files. On Harmony repos also prints skeleton pointers ' +
       '(bundleName from app.json5, modules from build-profile.json5, per-module route_map/router_map/main_pages paths, oh-package name) ' +
-      'and a bounded HarmonyOS resources path inventory (string.json / rawfile / media dirs / on-disk modules not in the graph). ' +
-      'GIVES navigation only — NOT symbol bodies, call graphs, or JSON/file contents (use homegraph_explore for route→page / Resource hits; Read to edit). ' +
+      'and a Module roster (local file: deps) plus bounded HarmonyOS resources path inventory (string.json / capability profiles form_config|shortcuts_config / rawfile / media dirs / on-disk modules not in the graph). ' +
+      'GIVES navigation only — NOT symbol bodies, call graphs, or JSON/file contents (use homegraph_explore for route→page / Resource hits / Capability profiles; Read to edit). ' +
       'PRIMARY overview while the full index is still building; also useful after full index. ' +
       'Optional `module` filters by name/path; `includeFiles` defaults true (resources section still prints when false).',
     inputSchema: {
@@ -12166,6 +12342,61 @@ export class ToolHandler {
     };
   }
 
+  /** Spec 0048 §1–2: Capability profiles or form negative evidence. */
+  private prependHarmonyCapabilityProfiles(
+    result: ToolResult,
+    projectRoot: string,
+    query: string,
+  ): ToolResult {
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (
+      /^\*\*Capability profiles/m.test(first.text)
+      || /\n\*\*Capability profiles/m.test(first.text)
+    ) {
+      return result;
+    }
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonyCapabilityProfiles(cg, query);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
+  /** Spec 0048 §5: seam notes for located anchors. */
+  private prependHarmonySeamNotes(
+    result: ToolResult,
+    projectRoot: string,
+    emission?: ExploreEmission,
+  ): ToolResult {
+    const located = emission?.locatedNodes;
+    if (!located || located.length === 0) return result;
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (/^\*\*Seam notes\*\*/m.test(first.text) || /\n\*\*Seam notes\*\*/m.test(first.text)) {
+      return result;
+    }
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonySeamNotes(cg, projectRoot, located);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
   /**
    * An explore response plus the record of what it emitted (CG-17). The record
    * rides the result only as far as {@link execute}, which files it into the
@@ -12195,6 +12426,7 @@ export class ToolHandler {
 
     let result = this.textResult(body);
     result = this.prependHarmonyRegistrationSources(result, emission.projectRoot, emission.query);
+    result = this.prependHarmonyCapabilityProfiles(result, emission.projectRoot, emission.query);
     result = this.prependHarmonyResourceHits(result, emission.projectRoot, emission.query);
     result[EXPLORE_EMISSION_KEY] = {
       ...emission,
@@ -12202,6 +12434,7 @@ export class ToolHandler {
       partial: emission.partial ?? (evidenceStatus !== 'complete' ? true : meta.partial),
       nextAnchor: emission.nextAnchor ?? meta.nextAnchor,
     };
+    result = this.prependHarmonySeamNotes(result, emission.projectRoot, result[EXPLORE_EMISSION_KEY]);
     return result;
   }
 
@@ -12212,6 +12445,7 @@ export class ToolHandler {
     query: string,
   ): ToolResult {
     result = this.prependHarmonyRegistrationSources(result, projectRoot, query);
+    result = this.prependHarmonyCapabilityProfiles(result, projectRoot, query);
     result = this.prependHarmonyResourceHits(result, projectRoot, query);
     if (result[EXPLORE_EMISSION_KEY]) {
       const em = result[EXPLORE_EMISSION_KEY]!;
@@ -12220,6 +12454,7 @@ export class ToolHandler {
         if (em.partial === undefined) em.partial = meta.partial;
         if (!em.nextAnchor && meta.nextAnchor) em.nextAnchor = meta.nextAnchor;
       }
+      result = this.prependHarmonySeamNotes(result, projectRoot, em);
       return result;
     }
     const text = result.content?.[0]?.text ?? '';
@@ -12870,6 +13105,17 @@ export class ToolHandler {
         }
       }
       lines.push('');
+    }
+
+    // Spec 0048 §4 — module roster with local file: deps.
+    try {
+      const roster = formatHarmonyModuleRoster(projectRoot, map.modules);
+      if (roster) {
+        lines.push(roster);
+        lines.push('');
+      }
+    } catch {
+      /* omit roster on failure */
     }
 
     // Spec 0042 B — path inventory (string/rawfile/media + unindexed package dirs).

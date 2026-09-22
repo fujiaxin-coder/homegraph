@@ -338,6 +338,8 @@ export interface HarmonyResourceInventory {
   stringJson: string[];
   rawfiles: string[];
   mediaDirs: Array<{ dir: string; countsByExt: Record<string, number> }>;
+  /** Spec 0048 — form_config.json / shortcuts_config.json paths. */
+  capabilityProfiles: string[];
   unindexedDirs: Array<{ path: string; reason: string }>;
   truncated: boolean;
 }
@@ -348,6 +350,7 @@ const RESOURCE_STRING_CAP = 24;
 const RESOURCE_RAWFILE_CAP = 40;
 const RESOURCE_MEDIA_DIR_CAP = 24;
 const RESOURCE_UNINDEXED_CAP = 16;
+const RESOURCE_CAPABILITY_CAP = 16;
 const RESOURCE_CONFIG_BASENAMES = new Set([
   'shortcuts_config.json',
   'form_config.json',
@@ -366,6 +369,7 @@ export function scanHarmonyResourceInventory(
     stringJson: [],
     rawfiles: [],
     mediaDirs: [],
+    capabilityProfiles: [],
     unindexedDirs: [],
     truncated: false,
   };
@@ -423,9 +427,13 @@ export function scanHarmonyResourceInventory(
         continue;
       }
       const base = rel.split('/').pop()?.toLowerCase() ?? '';
-      if (RESOURCE_CONFIG_BASENAMES.has(base) && out.rawfiles.length < RESOURCE_RAWFILE_CAP) {
-        // Surface optional Harmony config basenames alongside rawfile paths.
-        if (!out.rawfiles.includes(rel)) out.rawfiles.push(rel);
+      if (RESOURCE_CONFIG_BASENAMES.has(base)) {
+        if (out.capabilityProfiles.length < RESOURCE_CAPABILITY_CAP) {
+          if (!out.capabilityProfiles.includes(rel)) out.capabilityProfiles.push(rel);
+        } else {
+          out.truncated = true;
+        }
+        continue;
       }
       if (base === 'oh-package.json5' || base === 'module.json5') {
         const dirRel = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
@@ -446,6 +454,7 @@ export function scanHarmonyResourceInventory(
   }
   out.stringJson.sort((a, b) => a.localeCompare(b));
   out.rawfiles.sort((a, b) => a.localeCompare(b));
+  out.capabilityProfiles.sort((a, b) => a.localeCompare(b));
 
   // Unindexed package/module dirs: on disk but no indexed source under them.
   for (const [dirRel, flags] of [...packageDirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -472,7 +481,10 @@ export function scanHarmonyResourceInventory(
 export function formatHarmonyResourceInventory(inv: HarmonyResourceInventory): string {
   const lines: string[] = [];
   const hasResources =
-    inv.stringJson.length > 0 || inv.rawfiles.length > 0 || inv.mediaDirs.length > 0;
+    inv.stringJson.length > 0
+    || inv.rawfiles.length > 0
+    || inv.mediaDirs.length > 0
+    || inv.capabilityProfiles.length > 0;
   if (hasResources) {
     lines.push('### HarmonyOS resources');
     if (inv.stringJson.length) {
@@ -482,10 +494,19 @@ export function formatHarmonyResourceInventory(inv: HarmonyResourceInventory): s
           + (inv.stringJson.length > shown.length ? `, +${inv.stringJson.length - shown.length} more` : ''),
       );
     }
+    if (inv.capabilityProfiles.length) {
+      const shown = inv.capabilityProfiles.slice(0, 12);
+      lines.push(
+        `- capability profiles (${inv.capabilityProfiles.length}): ${shown.map((p) => `\`${p}\``).join(', ')}`
+          + (inv.capabilityProfiles.length > shown.length
+            ? `, +${inv.capabilityProfiles.length - shown.length} more`
+            : ''),
+      );
+    }
     if (inv.rawfiles.length) {
       const shown = inv.rawfiles.slice(0, 12);
       lines.push(
-        `- rawfile/config (${inv.rawfiles.length}): ${shown.map((p) => `\`${p}\``).join(', ')}`
+        `- rawfile (${inv.rawfiles.length}): ${shown.map((p) => `\`${p}\``).join(', ')}`
           + (inv.rawfiles.length > shown.length ? `, +${inv.rawfiles.length - shown.length} more` : ''),
       );
     }
@@ -513,3 +534,56 @@ export function formatHarmonyResourceInventory(inv: HarmonyResourceInventory): s
   }
   return lines.join('\n');
 }
+
+function readOhpmLocalDeps(manifestAbs: string, cap = 8): string[] {
+  try {
+    const text = fs.readFileSync(manifestAbs, 'utf-8');
+    let deps: Record<string, unknown> | undefined;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const parsed = require('jsonc-parser').parse(text) as {
+        dependencies?: Record<string, unknown>;
+      } | null;
+      deps = parsed?.dependencies;
+    } catch {
+      deps = undefined;
+    }
+    if (!deps || typeof deps !== 'object') return [];
+    const out: string[] = [];
+    for (const [name, ver] of Object.entries(deps)) {
+      if (out.length >= cap) break;
+      if (typeof ver !== 'string') continue;
+      if (!/^(file:|\.\.?\/)/i.test(ver.trim())) continue;
+      out.push(`\`${name}\` (${ver.trim()})`);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Spec 0048 §4 — module roster with oh-package name + local file: deps.
+ */
+export function formatHarmonyModuleRoster(
+  projectRoot: string,
+  modules: Array<{ name: string; rootPath: string; kind: string; fileCount: number }>,
+  maxRows = 24,
+): string {
+  const rows: string[] = [];
+  for (const m of modules) {
+    if (rows.length >= maxRows) break;
+    if (m.kind === 'root' && !m.rootPath) continue;
+    const rootLabel = m.rootPath || '.';
+    const ohpmAbs = path.join(projectRoot, m.rootPath || '.', OHPM_MANIFEST);
+    const pkg = readOhpmName(ohpmAbs);
+    const localDeps = readOhpmLocalDeps(ohpmAbs);
+    let line = `- \`${m.name}\` (\`${rootLabel}\`) · ${m.kind} · ${m.fileCount} files`;
+    if (pkg) line += ` · oh-package \`${pkg}\``;
+    if (localDeps.length) line += ` · deps: ${localDeps.join(', ')}`;
+    rows.push(line);
+  }
+  if (rows.length === 0) return '';
+  return ['### Module roster', ...rows].join('\n');
+}
+

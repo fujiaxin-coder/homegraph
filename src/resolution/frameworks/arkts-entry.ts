@@ -1,15 +1,19 @@
 /**
  * ArkTS entry / module manifest + Harmony route profile resolver (Spec 0039)
- * + element/string.json lightweight constants (Spec 0041, no edges).
+ * + element/string.json lightweight constants (Spec 0041, no edges)
+ * + form_config / shortcuts_config capability profiles (Spec 0048, no UI edges).
  *
  * Parses:
  * - `module.json5` pages → @Entry components, loadContent(url) → lifecycle
  * - `route_map.json` / `router_map.json` routerMap[] → page / buildFunction
  * - `main_pages.json` src[] → @Entry (same as module pages)
  * - resources/.../element/string.json → constant nodes for FTS (no references)
+ * - form_config.json / shortcuts_config.json → capability constants (Spec 0048)
+ * - module.json5 form extensionAbilities + shortcuts/form metadata (Spec 0048)
  */
 import { parse } from 'jsonc-parser';
 import {
+  isHarmonyCapabilityProfileJson,
   isHarmonyElementStringJson,
   isHarmonyRouteProfileJson,
 } from '../../extraction/grammars';
@@ -26,6 +30,7 @@ const LOAD_CONTENT_PAGE_RE = /loadContent\s*\(\s*['"]([^'"]+)['"]/g;
 /** Cap string.json entries per file (Spec 0041). */
 const STRING_JSON_ENTRY_CAP = 2000;
 const STRING_JSON_VALUE_CAP = 200;
+const CAPABILITY_ENTRY_CAP = 64;
 
 function pageStem(pagePath: string): string {
   const normalized = pagePath.replace(/\\/g, '/');
@@ -393,6 +398,202 @@ function extractHarmonyStringJson(
   return { nodes, references: [] };
 }
 
+/** Spec 0048 — form_config.json `forms[].name`. */
+export function parseHarmonyFormConfig(
+  content: string,
+): Array<{ name: string; line: number }> {
+  let data: unknown;
+  try {
+    data = JSON.parse(content);
+  } catch {
+    try {
+      data = parse(content, undefined, { allowTrailingComma: true });
+    } catch {
+      return [];
+    }
+  }
+  if (!data || typeof data !== 'object') return [];
+  const forms = (data as { forms?: unknown }).forms;
+  if (!Array.isArray(forms)) return [];
+  const out: Array<{ name: string; line: number }> = [];
+  for (const item of forms) {
+    if (out.length >= CAPABILITY_ENTRY_CAP) break;
+    if (!item || typeof item !== 'object') continue;
+    const name = typeof (item as { name?: unknown }).name === 'string'
+      ? (item as { name: string }).name.trim()
+      : '';
+    if (!name) continue;
+    const needle = JSON.stringify(name);
+    const idx = content.indexOf(needle);
+    const line = idx < 0 ? 1 : content.slice(0, idx).split('\n').length;
+    out.push({ name, line });
+  }
+  return out;
+}
+
+/** Spec 0048 — shortcuts_config.json `shortcuts[]`. */
+export function parseHarmonyShortcutsConfig(
+  content: string,
+): Array<{ shortcutId: string; label: string; abilityName?: string; line: number }> {
+  let data: unknown;
+  try {
+    data = JSON.parse(content);
+  } catch {
+    try {
+      data = parse(content, undefined, { allowTrailingComma: true });
+    } catch {
+      return [];
+    }
+  }
+  if (!data || typeof data !== 'object') return [];
+  const shortcuts = (data as { shortcuts?: unknown }).shortcuts;
+  if (!Array.isArray(shortcuts)) return [];
+  const out: Array<{ shortcutId: string; label: string; abilityName?: string; line: number }> = [];
+  for (const item of shortcuts) {
+    if (out.length >= CAPABILITY_ENTRY_CAP) break;
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const shortcutId = typeof rec.shortcutId === 'string' ? rec.shortcutId.trim() : '';
+    if (!shortcutId) continue;
+    const label = typeof rec.label === 'string' ? rec.label.trim() : '';
+    let abilityName: string | undefined;
+    if (Array.isArray(rec.wants) && rec.wants[0] && typeof rec.wants[0] === 'object') {
+      const w = rec.wants[0] as Record<string, unknown>;
+      if (typeof w.abilityName === 'string' && w.abilityName.trim()) {
+        abilityName = w.abilityName.trim();
+      }
+    }
+    const needle = JSON.stringify(shortcutId);
+    const idx = content.indexOf(needle);
+    const line = idx < 0 ? 1 : content.slice(0, idx).split('\n').length;
+    out.push({ shortcutId, label, abilityName, line });
+  }
+  return out;
+}
+
+function extractHarmonyFormConfig(
+  filePath: string,
+  content: string,
+  now: number,
+): FrameworkExtractionResult {
+  const nodes: Node[] = [];
+  for (const entry of parseHarmonyFormConfig(content)) {
+    nodes.push({
+      id: `harmony-form:${filePath}:${entry.name}`,
+      kind: 'constant',
+      name: entry.name,
+      qualifiedName: `harmony.form.${entry.name}`,
+      filePath,
+      language: 'yaml',
+      startLine: entry.line,
+      endLine: entry.line,
+      startColumn: 0,
+      endColumn: 0,
+      isExported: false,
+      docstring: 'form_config',
+      signature: `form_config name=${entry.name}`,
+      updatedAt: now,
+    });
+  }
+  return { nodes, references: [] };
+}
+
+function extractHarmonyShortcutsConfig(
+  filePath: string,
+  content: string,
+  now: number,
+): FrameworkExtractionResult {
+  const nodes: Node[] = [];
+  for (const entry of parseHarmonyShortcutsConfig(content)) {
+    const sigParts = [`shortcuts_config id=${entry.shortcutId}`];
+    if (entry.label) sigParts.push(`label=${entry.label}`);
+    if (entry.abilityName) sigParts.push(`ability=${entry.abilityName}`);
+    nodes.push({
+      id: `harmony-shortcut:${filePath}:${entry.shortcutId}`,
+      kind: 'constant',
+      name: entry.shortcutId,
+      qualifiedName: `harmony.shortcut.${entry.shortcutId}`,
+      filePath,
+      language: 'yaml',
+      startLine: entry.line,
+      endLine: entry.line,
+      startColumn: 0,
+      endColumn: 0,
+      isExported: false,
+      docstring: entry.label || 'shortcut',
+      signature: sigParts.join('; '),
+      updatedAt: now,
+    });
+  }
+  return { nodes, references: [] };
+}
+
+/** Spec 0048 — module.json5 form extensions + shortcuts/form metadata. */
+function extractModuleCapabilityWiring(
+  filePath: string,
+  content: string,
+  now: number,
+  nodes: Node[],
+): void {
+  // Locate `"type": "form"` then take the nearest preceding `"name"` in a 500-char window.
+  for (const m of content.matchAll(/"type"\s*:\s*"form"/g)) {
+    const start = Math.max(0, (m.index ?? 0) - 500);
+    const window = content.slice(start, (m.index ?? 0) + m[0].length + 200);
+    const names = [...window.matchAll(/"name"\s*:\s*"([^"]+)"/g)];
+    const name = names.length ? names[names.length - 1]![1]! : '';
+    if (!name || name.startsWith('ohos.')) continue;
+    const src = /"srcEntry"\s*:\s*"([^"]+)"/.exec(window)?.[1] ?? '';
+    const line = lineOfNeedle(content, name);
+    const id = `harmony-form-ability:${filePath}:${name}`;
+    if (nodes.some((n) => n.id === id)) continue;
+    nodes.push({
+      id,
+      kind: 'route',
+      name: `formAbility:${name}`,
+      qualifiedName: `${filePath}::formAbility::${name}`,
+      filePath,
+      language: 'yaml',
+      startLine: line,
+      endLine: line,
+      startColumn: 0,
+      endColumn: 0,
+      isExported: false,
+      docstring: 'FormExtensionAbility',
+      signature: `type=form; srcEntry=${src}`,
+      updatedAt: now,
+    });
+  }
+  for (const m of content.matchAll(
+    /\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"resource"\s*:\s*"(\$profile:[^"]+)"\s*\}/g,
+  )) {
+    const metaName = m[1]!;
+    const resource = m[2]!;
+    const isShortcut =
+      /shortcut/i.test(metaName) || /shortcuts_config/i.test(resource);
+    const isForm =
+      /ohos\.extension\.form/i.test(metaName) || /form_config/i.test(resource);
+    if (!isShortcut && !isForm) continue;
+    const kind = isForm ? 'form' : 'shortcut';
+    const line = content.slice(0, m.index ?? 0).split('\n').length;
+    nodes.push({
+      id: `harmony-capability-meta:${filePath}:${metaName}:${resource}`,
+      kind: 'constant',
+      name: metaName,
+      qualifiedName: `harmony.capability.${kind}.${metaName}`,
+      filePath,
+      language: 'yaml',
+      startLine: line,
+      endLine: line,
+      startColumn: 0,
+      endColumn: 0,
+      isExported: false,
+      docstring: kind,
+      signature: `metadata ${metaName} → ${resource}`,
+      updatedAt: now,
+    });
+  }
+}
+
 export const arktsEntryResolver: FrameworkResolver = {
   name: 'arkts-entry',
   languages: ['arkts', 'yaml'],
@@ -403,6 +604,7 @@ export const arktsEntryResolver: FrameworkResolver = {
         file.endsWith('module.json5')
         || isHarmonyRouteProfileJson(file)
         || isHarmonyElementStringJson(file)
+        || isHarmonyCapabilityProfileJson(file)
       ) return true;
       if (!file.endsWith('.ets')) continue;
       const src = context.readFile(file);
@@ -450,6 +652,7 @@ export const arktsEntryResolver: FrameworkResolver = {
           updatedAt: now,
         });
       }
+      extractModuleCapabilityWiring(filePath, content, now, nodes);
       return { nodes, references };
     }
 
@@ -466,6 +669,14 @@ export const arktsEntryResolver: FrameworkResolver = {
 
     if (isHarmonyElementStringJson(filePath)) {
       return extractHarmonyStringJson(filePath, content, now);
+    }
+
+    if (base === 'form_config.json') {
+      return extractHarmonyFormConfig(filePath, content, now);
+    }
+
+    if (base === 'shortcuts_config.json') {
+      return extractHarmonyShortcutsConfig(filePath, content, now);
     }
 
     if (!filePath.endsWith('.ets')) {
