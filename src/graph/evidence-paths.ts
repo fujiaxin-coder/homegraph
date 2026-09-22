@@ -125,11 +125,20 @@ function edgeSemantics(edge: Edge): { state: boolean; event: boolean } {
   return { state, event };
 }
 
+/** Framework-labelled static UI wiring; never treat an arbitrary reference as rendering. */
+export function isArkuiScopeEdge(edge: Edge): boolean {
+  const by = edge.metadata?.synthesizedBy;
+  return (edge.kind === 'references' || edge.kind === 'calls' || edge.kind === 'contains') && (
+    (by === 'viewtree' && ['child-component', 'builder', 'builder-param'].includes(String(edge.metadata?.via)))
+    || (by === 'arkui-ownership' && edge.metadata?.via === 'build') || by === 'arkui-child' || by === 'arkui-named-nav' || by === 'arkts-route-map' || by === 'arkui-route');
+}
+
 export function evidenceEdgeCost(edge: Edge, goal: EvidencePathGoal): number | null {
   const { state, event } = edgeSemantics(edge);
   let relevanceCost: number;
   if (goal.kind === 'structure') {
-    if (!['extends', 'implements', 'overrides', 'instantiates'].includes(edge.kind)) return null;
+    if (!['extends', 'implements', 'overrides', 'instantiates'].includes(edge.kind)
+      && !(process.env.HOMEGRAPH_ARKTS_IMPLEMENTATION_CONTEXT !== '0' && isArkuiScopeEdge(edge))) return null;
     relevanceCost = 0;
   } else if (goal.kind === 'state' && state && (edge.kind === 'references' || edge.kind === 'calls')) relevanceCost = 0;
   else if (edge.kind === 'calls' && !state) relevanceCost = goal.kind === 'events' ? 0.4 : goal.kind === 'state' ? 0.5 : 0;
@@ -157,7 +166,7 @@ export function searchEvidencePaths(graph: EvidencePathGraph, goal: EvidencePath
   const neighbors = new Map<string, Edge>();
   const paths: EvidencePath[] = [];
   const missing: EvidencePathSearch['missing'] = [];
-  const kinds: EdgeKind[] = goal.kind === 'structure' ? ['extends', 'implements', 'overrides', 'instantiates'] : ['calls', 'references'];
+  const kinds: EdgeKind[] = goal.kind === 'structure' ? ['extends', 'implements', 'overrides', 'instantiates', ...(process.env.HOMEGRAPH_ARKTS_IMPLEMENTATION_CONTEXT !== '0' ? ['calls', 'references', 'contains'] as EdgeKind[] : [])] : ['calls', 'references'];
   const alive = () => {
     if (now() - started >= limits.milliseconds) { hits.add('time'); return false; }
     return true;
@@ -178,7 +187,15 @@ export function searchEvidencePaths(graph: EvidencePathGraph, goal: EvidencePath
     const rows = graph.getEdges(id, direction, kinds, limits.perNode + 1, goal.anchorIds);
     stats.adjacencyReads++; stats.rowsRead += rows.length;
     if (rows.length > limits.perNode) hits.add('neighbors');
-    const valid = rows.slice(0, limits.perNode).filter(e => evidenceEdgeCost(e, goal) !== null
+    const valid = rows.slice(0, limits.perNode).map(e => {
+      if (goal.kind === 'structure' && e.kind === 'contains' && process.env.HOMEGRAPH_ARKTS_IMPLEMENTATION_CONTEXT !== '0') {
+        const from = node(e.source); const to = node(e.target);
+        if (from && ['component', 'struct'].includes(from.kind) && to?.kind === 'method' && to.name === 'build') {
+          return { ...e, metadata: { ...e.metadata, synthesizedBy: 'arkui-ownership', via: 'build' } };
+        }
+      }
+      return e;
+    }).filter(e => evidenceEdgeCost(e, goal) !== null
       && node(e.source) && node(e.target)).sort((a, b) => evidenceEdgeCost(a, goal)! - evidenceEdgeCost(b, goal)!
         || evidenceEdgeKey(a).localeCompare(evidenceEdgeKey(b)));
     adjacency.set(key, valid);

@@ -30,7 +30,7 @@ function defaultExploreMaxFiles(fileCount: number): number {
 }
 
 /** Bump when cache-key normalization or cached payload shape changes. */
-export const QUERY_CACHE_FORMAT_VERSION = 6;
+export const QUERY_CACHE_FORMAT_VERSION = 7;
 
 const METADATA_INDEX_STAMP = 'query_cache_index_stamp';
 const METADATA_FORMAT_VERSION = 'query_cache_format_version';
@@ -163,7 +163,7 @@ function exploreEnvFingerprint(): string {
   const fullSource = process.env.HOMEGRAPH_EXPLORE_FULL_SOURCE === '1' ? '1' : '0';
   const evidencePacks = process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0' ? '0' : '1';
   const queryPaths = process.env.HOMEGRAPH_ARKTS_QUERY_PATHS === '0' ? '0' : '1';
-  return `linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}|arktsEvidence:${evidencePacks}|arktsPaths:${queryPaths}|accuracyTargets:${process.env.HOMEGRAPH_ACCURACY_TARGETS === '0' ? '0' : '1'}|accuracyCoverage:${process.env.HOMEGRAPH_ACCURACY_COVERAGE === '0' ? '0' : '1'}`;
+  return `implementationContext:${process.env.HOMEGRAPH_ARKTS_IMPLEMENTATION_CONTEXT === '0' ? '0' : '1'}|controlEvidence:${process.env.HOMEGRAPH_ARKTS_CONTROL_EVIDENCE === '0' ? '0' : '1'}|linums:${linums}|adaptive:${adaptive}|rankMultiterm:${rankMultiterm}|fullSource:${fullSource}|arktsEvidence:${evidencePacks}|arktsPaths:${queryPaths}|accuracyTargets:${process.env.HOMEGRAPH_ACCURACY_TARGETS === '0' ? '0' : '1'}|accuracyCoverage:${process.env.HOMEGRAPH_ACCURACY_COVERAGE === '0' ? '0' : '1'}`;
 }
 
 function normalizeString(value: unknown): string | undefined {

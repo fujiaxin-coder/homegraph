@@ -342,6 +342,21 @@ export class QueryBuilder {
     return this.ohosApiDbPath;
   }
 
+  /** Exact imported SDK module only. No cross-module bare-name fallback.
+   * A missing/oversized/ambiguous module returns no claim of signature coverage.
+   */
+  getOhosApiModuleNodes(specifier: string): Node[] {
+    if (!this.ohosApiDbPath || !/^@(ohos|hms|kit)\.[A-Za-z0-9_.]+$/.test(specifier)) return [];
+    const stem = specifier.startsWith('@kit.') ? specifier.slice(5) : specifier;
+    const escaped = stem.replace(/[\\%_]/g, c => `\\${c}`);
+    const rows = this.db.prepare(`SELECT * FROM ohos_api.nodes WHERE
+      file_path = ? OR file_path = ? OR file_path LIKE ? ESCAPE '\\' OR file_path LIKE ? ESCAPE '\\'
+      ORDER BY file_path, start_line LIMIT 257`).all(`${stem}.d.ts`, `${stem}.d.ets`,
+      `%/${escaped}.d.ts`, `%/${escaped}.d.ets`) as NodeRow[];
+    if (rows.length > 256 || new Set(rows.map(row => row.file_path)).size !== 1) return [];
+    return rows.map(row => this.mapOhosApiNodeRow(row));
+  }
+
   private hasOhosApiAttached(): boolean {
     return this.ohosApiDbPath != null;
   }

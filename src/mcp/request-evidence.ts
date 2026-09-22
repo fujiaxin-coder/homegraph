@@ -22,7 +22,7 @@ export interface RequestEvidence {
  * Mask comments, strings, templates and regular expressions before reading structure.
  * Escaped/interpolated strings are deliberately not used as exact literal witnesses.
  */
-function lex(source: string): Lexed {
+export function lexEvidenceSource(source: string): Lexed {
   const chars = source.split(''); const strings: StringToken[] = [];
   const mask = (from: number, to: number) => { for (let n = from; n < to; n++) if (chars[n] !== '\n') chars[n] = ' '; };
   let valid = true;
@@ -117,7 +117,7 @@ function controls(parsed: Lexed): Control[] {
 export function createRequestEvidenceInspector(contract: RequestContract) {
   const parsed = new Map<RequestSource, Lexed>();
   const parsedControls = new Map<Lexed, Control[]>();
-  const read = (unit: RequestSource) => { let p = parsed.get(unit); if (!p) { p = lex(unit.source); parsed.set(unit, p); } return p; };
+  const read = (unit: RequestSource) => { let p = parsed.get(unit); if (!p) { p = lexEvidenceSource(unit.source); parsed.set(unit, p); } return p; };
   const location = (unit: RequestSource, offset = 0) => `${unit.filePath}:${unit.start + unit.source.slice(0, offset).split('\n').length - 1}`;
   const score = (units: RequestSource[]): number => contract.targets.reduce((total, target) => {
     if (!units.some(u => matches(target, read(u)))) return total;
@@ -179,4 +179,56 @@ export function renderRequestEvidence(evidence: RequestEvidence, targets: boolea
     ...(behaviors ? evidence.behaviors.map(b => `- Behavior ${b.id} “${safe(b.text)}”: ${b.status}. ${b.locations.map(safe).join(', ')} ${b.note}`) : []),
   ];
   return rows.length ? ['**Request evidence — source coverage is not behavioral completion**', ...rows] : [];
+}
+
+export interface ControlEvidence {
+  location: string; control: string; labels: string[];
+  enabled: 'binding_observed' | 'binding_not_observed' | 'unknown';
+  expression?: string; click?: string;
+  state: Array<{ expression: string; writeLocations: string[] }>;
+}
+
+/** An inventory of returned controls, not a natural-language target match or a UI test.
+ * Resource names stay literal: an icon called "undo" is not translated into a task label.
+ */
+export function inspectControlEvidence(units: RequestSource[]): ControlEvidence[] {
+  const rows: ControlEvidence[] = []; const seen = new Set<string>();
+  for (const unit of units) {
+    if (!/\.ets$/i.test(unit.filePath) || /\.d\.ets$/i.test(unit.filePath)) continue;
+    const p = lexEvidenceSource(unit.source); if (!p.valid) continue;
+    const loc = (offset: number) => `${unit.filePath}:${unit.start + unit.source.slice(0, offset).split('\n').length - 1}`;
+    for (const control of controls(p)) {
+      const click = control.attributes.find(a => a.name === 'onClick');
+      const bindings = control.attributes.filter(a => a.name === 'enabled');
+      if (!click && !bindings.length) continue;
+      const location = loc(control.start);
+      const key = `${location}:${control.start - unit.source.lastIndexOf('\n', control.start)}`;
+      if (seen.has(key)) continue; seen.add(key);
+      const binding = bindings[0];
+      const expression = binding ? unit.source.slice(binding.start, binding.end).trim() : undefined;
+      const rawRefs = p.code.slice(control.start, control.contentEnd)
+        + (binding ? p.code.slice(binding.start, binding.end) : '');
+      const refs = [...new Set([...rawRefs.matchAll(/\bthis(?:\.[A-Za-z_$][\w$]*)+/g)].map(m => m[0]))].slice(0, 4);
+      const state = refs.map(ref => ({ expression: ref, writeLocations: [...p.code.matchAll(new RegExp(
+        `${escape(ref)}(?![\\w$.])\\s*(?:=(?!=|>)|\\+\\+|--|[+*/-]=)`, 'g'))].slice(0, 3).map(m => loc(m.index!)) }));
+      rows.push({ location, control: p.code.slice(control.start).match(/^\w+/)?.[0] ?? 'control',
+        labels: p.strings.filter(t => t.start >= control.start && t.end <= control.contentEnd).map(t => t.value).slice(0, 4),
+        enabled: !control.complete || bindings.length > 1 || (expression !== undefined && /^(?:true|false)?$/.test(expression))
+          ? 'unknown' : binding ? 'binding_observed' : 'binding_not_observed',
+        ...(expression ? { expression: expression.slice(0, 180) } : {}),
+        ...(click ? { click: unit.source.slice(click.start, click.end).trim().slice(0, 180) } : {}), state });
+      if (rows.length >= 8) return rows;
+    }
+  }
+  return rows;
+}
+
+export function renderControlEvidence(rows: ControlEvidence[]): string[] {
+  if (!rows.length) return [];
+  const safe = (s: string) => s.replace(/[`\r\n]/g, ' ');
+  return ['**Control evidence — static inventory, not requirement completion**',
+    'Resource labels identify code only. Missing direct enabled does not exclude inherited enablement. State write locations are local witnesses; conditions, ordering and runtime effects remain unverified.',
+    ...rows.map(r => `- ${safe(r.location)} ${r.control} ${r.labels.map(safe).join(', ')}: ${r.enabled}`
+      + `${r.expression ? ` (${safe(r.expression)})` : ''}; click: ${r.click ? safe(r.click) : 'not observed'}.`
+      + r.state.map(s => ` State ${safe(s.expression)}: ${s.writeLocations.length ? `local writes at ${s.writeLocations.map(safe).join(', ')}` : 'updates not observed in this declaration'}.`).join(''))];
 }

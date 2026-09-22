@@ -76,6 +76,7 @@ export function validateModelQueryPlan(value: unknown, local: QueryPlan, options
   const v = value as Record<string, unknown>;
   const taskContext = normalizeQueryPlanTaskContext(options.taskContext ?? local.taskContext);
   const context = taskContext ? `\n${taskContext}` : '';
+  const originalConstraints = local.originalQuery + context;
   // Spec 0042: taskContext is retained on the plan for planner/literals, but must
   // not be concatenated into the lexical canonicalQuery / FTS string.
   const allowsOverview = queryExplicitlyRequestsProjectMap(local.originalQuery);

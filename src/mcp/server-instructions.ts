@@ -8,6 +8,9 @@ import {
  */
 
 const SOURCE_AND_VALIDATION = `
+- ArkTS implementation context may include actual imports, related types, module configuration and indexed SDK signatures alongside source. Read unresolved export/version notes; an import does not prove a dependency is installed. Render/navigation links show static wiring and shared users, not guaranteed page reachability.
+- Control evidence inventories the returned icons/labels, direct enabled expressions, click handlers and local state writes. Missing direct enabled does not exclude a parent binding; appearance and click guards alone do not prove disabled state. Continue checking public requirements and runtime behavior.
+
 - ArkTS evidence packs keep complete declarations and the source dependencies of displayed static relations together. Gaps identify omitted, stale or unindexed evidence; inspect only a gap relevant to the task. A static link does not prove runtime ordering or value propagation, and a complete declaration does not prove its enclosing call conditions.
 - ArkTS path evidence follows typed, directed relations between named anchors within a bounded search. A provided path includes intermediate declarations and registration sites. Check its goal and stop reason; no path in scope does not prove no relationship. Qualify ambiguous symbols with their owning type or file.
 - When request evidence is supplied, check target page/object and behavioral gaps before editing. Requested new text need not already exist. A direct enabled binding, full source pack, or connected call path does not establish requirement completion or runtime correctness; inspect unsupported behavior explicitly.
