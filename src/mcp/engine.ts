@@ -21,6 +21,7 @@ import { shouldSkipCatchUpSync } from './memory-budget';
 import { getDatabasePath } from '../db';
 import { resolveGraphSources, graphSourceFlags } from '../graph-sources';
 import { validateProjectPath } from '../utils';
+import { logLifecycle, logLifecycleError } from '../runtime-log';
 
 // Lazy-load the heavy HomeGraph chain (sqlite + query/graph/context layers) OFF
 // the MCP startup path. It's only needed once a tool actually opens a project —
@@ -125,6 +126,21 @@ export class MCPEngine {
   /** Shared ToolHandler — sessions delegate tool dispatch through this. */
   getToolHandler(): ToolHandler {
     return this.toolHandler;
+  }
+
+  /**
+   * Spec 0047: true while auto-init / full symbol build is in flight.
+   * Used by the daemon idle timer — never idle-exit mid-build when clients=0.
+   * Does not include routine watch/sync increments.
+   */
+  isIndexBuildInProgress(): boolean {
+    if (!this.cg) return false;
+    try {
+      const phase = this.cg.getBuildPhase();
+      return phase === 'building_fast' || phase === 'indexing';
+    } catch {
+      return false;
+    }
   }
 
   /** Whether the default project's HomeGraph is open. */
@@ -272,6 +288,7 @@ export class MCPEngine {
 
     try {
       process.stderr.write(`[HomeGraph MCP] Auto-init at ${root}\n`);
+      logLifecycle('auto-init.start', { projectRoot: root });
       const HomeGraph = loadHomeGraph();
       // Create DB immediately so tools/open succeed; index in background.
       const cg = await HomeGraph.init(root, { index: false });
@@ -299,6 +316,7 @@ export class MCPEngine {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           process.stderr.write(`[HomeGraph MCP] Fast build failed: ${msg}\n`);
+          logLifecycleError('auto-init.fail', { projectRoot: root, phase: 'fast', msg });
         }
         this.startBackgroundFullBuild(cg);
       })();
@@ -310,6 +328,7 @@ export class MCPEngine {
       }
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[HomeGraph MCP] Auto-init failed: ${msg}\n`);
+      logLifecycleError('auto-init.fail', { projectRoot: root, msg });
       return false;
     }
   }
@@ -387,6 +406,13 @@ export class MCPEngine {
   private startBackgroundFullBuild(cg: HomeGraph): void {
     cg.setBuildPhase('indexing');
     process.stderr.write('[HomeGraph MCP] Full build starting in-process (background)\n');
+    let projectRoot: string | undefined;
+    try {
+      projectRoot = cg.getProjectRoot();
+    } catch {
+      projectRoot = this.projectPath ?? undefined;
+    }
+    logLifecycle('index.start', { projectRoot, via: 'auto-init' });
     void cg
       .indexAll()
       .then((result) => {
@@ -409,15 +435,19 @@ export class MCPEngine {
             `[HomeGraph MCP] Full build complete — files=${files || '?'} nodes=${nodes}` +
               (ok ? '\n' : ' (soft-fail but symbols present)\n'),
           );
+          logLifecycle('index.done', { projectRoot, files, nodes });
+          logLifecycle('auto-init.done', { projectRoot, files, nodes });
         } else {
           cg.setBuildPhase('fast');
           process.stderr.write('[HomeGraph MCP] Full build finished with no symbols — staying on fast map\n');
+          logLifecycle('index.done', { projectRoot, files: 0, nodes: 0, note: 'no-symbols' });
         }
         this.startWatchingAfterAutoInit();
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[HomeGraph MCP] Full build failed: ${msg}\n`);
+        logLifecycleError('index.fail', { projectRoot, msg });
         try {
           let nodes = 0;
           try {

@@ -40,7 +40,7 @@ import type { ResolutionContext } from '../resolution/types';
 import { setArkTSBatchProgressCallback, isArktsBatchRunning } from './context';
 import {
   isArkTSBatchPersisted,
-  isArkTSBatchCommitted,
+  preferHarmonySerialIndexing,
   primeArkTSBatch,
   resetArkTSBatch,
   shrinkArkTSBatchPostParse,
@@ -1620,18 +1620,23 @@ export class ExtractionOrchestrator {
       errors.push(...drainArkTSIndexNotices());
     }
 
-    // Start parse pool only after Scene teardown — most .ets are already in DB.
-    const remainingToParse = files.filter(
-      (f) => !(isArkTSBatchPersisted(f) || (isArkTSBatchCommitted() && isArkAnalyzerSourcePath(f)))
-    ).length;
+    // Start parse pool only after Scene teardown — AA-persisted .ets are already
+    // in DB. Ark sources that never entered a PROJECT module (forgotten HARs /
+    // packageless orphans) are NOT skipped here — they fall through to tree-sitter.
+    const remainingToParse = files.filter((f) => !isArkTSBatchPersisted(f)).length;
     if (useWorker) {
       // CODEGRAPH_PARSE_WORKERS: explicit worker count; 1 = the old single-worker
       // behaviour (the conservative rollback). Unset → clamp(cores-1, 1, 8).
+      // Harmony modular repos default to 1 worker (Spec 0037) unless overridden.
       let poolSize = resolveParsePoolSize(process.env.CODEGRAPH_PARSE_WORKERS, os.cpus().length);
-      if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim() && remainingToParse < 500) {
-        poolSize = Math.min(poolSize, 2);
-      } else if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim() && remainingToParse < 2000) {
-        poolSize = Math.min(poolSize, 4);
+      if (!process.env.CODEGRAPH_PARSE_WORKERS?.trim()) {
+        if (preferHarmonySerialIndexing(this.rootDir)) {
+          poolSize = 1;
+        } else if (remainingToParse < 500) {
+          poolSize = Math.min(poolSize, 2);
+        } else if (remainingToParse < 2000) {
+          poolSize = Math.min(poolSize, 4);
+        }
       }
       pool = new ParseWorkerPool({
         languages: neededLanguages,
@@ -1673,10 +1678,7 @@ export class ExtractionOrchestrator {
       // Read files in parallel (with path validation before any I/O)
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
-          if (
-            isArkTSBatchPersisted(fp) ||
-            (isArkTSBatchCommitted() && isArkAnalyzerSourcePath(fp))
-          ) {
+          if (isArkTSBatchPersisted(fp)) {
             return {
               filePath: fp,
               content: null as string | null,
@@ -1711,11 +1713,7 @@ export class ExtractionOrchestrator {
 
         if (signal?.aborted) { aborted = true; break; }
 
-        if (
-          isArkTSBatchPersisted(filePath) ||
-          arktsBatchSkipped ||
-          (isArkTSBatchCommitted() && isArkAnalyzerSourcePath(filePath))
-        ) {
+        if (isArkTSBatchPersisted(filePath) || arktsBatchSkipped) {
           processed++;
           filesIndexed++;
           onProgress?.({ phase: 'parsing', current: processed, total, currentFile: filePath });

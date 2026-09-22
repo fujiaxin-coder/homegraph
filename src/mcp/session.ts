@@ -19,6 +19,7 @@ import { tools } from './tools';
 import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX } from './server-instructions';
 import { HomeGraphPackageVersion } from './version';
 import { findNearestHomeGraphRoot } from '../directory';
+import { logLifecycle } from '../runtime-log';
 import { getUpdateNotice } from '../upgrade/update-check';
 import { ExploreSessionState } from './explore-session-state';
 
@@ -236,6 +237,11 @@ export class MCPSession {
       capabilities: { tools: {} },
       serverInfo: SERVER_INFO,
       instructions: initializeInstructions(indexed ? SERVER_INSTRUCTIONS : SERVER_INSTRUCTIONS_NO_ROOT_INDEX),
+    });
+
+    logLifecycle('mcp.initialize', {
+      projectRoot: explicitPath ?? undefined,
+      indexed,
     });
 
     if (explicitPath) {

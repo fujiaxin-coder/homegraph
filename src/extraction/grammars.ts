@@ -182,6 +182,9 @@ export const EXTENSION_MAP: Record<string, Language> = {
 export function isSourceFile(filePath: string, overrides?: Record<string, Language>): boolean {
   if (isPlayRoutesFile(filePath)) return true; // Play `conf/routes` is extensionless
   if (isArkModuleJson5(filePath)) return true;
+  if (isHarmonyRouteProfileJson(filePath)) return true; // Spec 0039
+  if (isHarmonyElementStringJson(filePath)) return true; // Spec 0041
+  if (isHarmonyCapabilityProfileJson(filePath)) return true; // Spec 0048
   if (isShopifyLiquidJson(filePath)) return true; // Shopify OS 2.0 JSON templates / section groups
   if (isErlangAppFile(filePath)) return true; // OTP `.app`/`.app.src` resource files
   const dot = filePath.lastIndexOf('.');
@@ -229,6 +232,41 @@ export function isPlayRoutesFile(filePath: string): boolean {
 /** HarmonyOS module manifest — parsed by the arkts-entry framework extractor. */
 export function isArkModuleJson5(filePath: string): boolean {
   return filePath.endsWith('module.json5');
+}
+
+/**
+ * Harmony Navigation / pages profile JSON (Spec 0039) — basename allowlist only.
+ * Parsed by arkts-entry; not general `.json` indexing.
+ */
+export function isHarmonyRouteProfileJson(filePath: string): boolean {
+  const base = filePath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
+  return base === 'route_map.json' || base === 'router_map.json' || base === 'main_pages.json';
+}
+
+/**
+ * Harmony element string resources (Spec 0041) — path allowlist only.
+ * `…/resources/…/element/string.json` (not bare string.json, not color/media).
+ * Indexed as yaml file-level + arkts-entry constants for FTS; no graph edges.
+ */
+export function isHarmonyElementStringJson(filePath: string): boolean {
+  return /(?:^|\/)resources\/(?:[^/]+\/)*element\/string\.json$/i.test(
+    filePath.replace(/\\/g, '/'),
+  );
+}
+
+/**
+ * Harmony capability profiles (Spec 0048) — basename allowlist only.
+ * `form_config.json` (service widgets) and `shortcuts_config.json` (home-screen shortcuts).
+ * Indexed as yaml + arkts-entry constants; no UI call edges.
+ */
+export function isHarmonyCapabilityProfileJson(filePath: string): boolean {
+  const base = filePath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
+  return base === 'form_config.json' || base === 'shortcuts_config.json';
+}
+
+/** Config files that host ArkTS `route` nodes (module manifest + Spec 0039 profiles). */
+export function isHarmonyRouteConfigFile(filePath: string): boolean {
+  return isArkModuleJson5(filePath) || isHarmonyRouteProfileJson(filePath);
 }
 
 /**
@@ -420,7 +458,9 @@ export function detectLanguage(filePath: string, source?: string, overrides?: Re
   // Play framework resolver extracts route nodes from it.
   if (isPlayRoutesFile(filePath)) return 'yaml';
   if (isArkModuleJson5(filePath)) return 'yaml';
-  if (isArkModuleJson5(filePath)) return 'yaml';
+  if (isHarmonyRouteProfileJson(filePath)) return 'yaml';
+  if (isHarmonyElementStringJson(filePath)) return 'yaml'; // Spec 0041
+  if (isHarmonyCapabilityProfileJson(filePath)) return 'yaml'; // Spec 0048
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   // Shopify OS 2.0 JSON templates / section groups → the Liquid extractor (it
   // links each section `"type"` to its `sections/<type>.liquid`).

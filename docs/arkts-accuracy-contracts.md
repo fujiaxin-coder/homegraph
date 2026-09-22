@@ -3,7 +3,7 @@
 基线：052 的 `fe81141`。本目录独立开发，未修改旧版 HomeGraph 或 codingeval。
 本轮落实准确率分析中的 P0-A、P0-B；没有启动模型推理实验。
 发布 develop 前按用户要求合并了远端 main `2ebe761`，包含 1.5.8 的运行时、索引状态及 JSON5 修复；合并后构建通过，304 项相关测试已验证通过，真实索引和 Headroom 检查通过；记录位于 `validation/main-merge/REPORT.md`。
-准确率 Spec 编号更新为 [0036](./specs/0036-arkts-accuracy-contracts.md)，避免与 main 新增文档重号。
+准确率 Spec 编号更新为 [0049](./specs/0049-arkts-accuracy-contracts.md)，避免与 main 新增文档重号。
 
 ## 改了哪里
 

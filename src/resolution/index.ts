@@ -28,6 +28,7 @@ import { loadWorkspacePackages, type WorkspacePackages } from './workspace-packa
 import { logDebug } from '../errors';
 import type { ReExport } from './types';
 import { LRUCache } from './lru-cache';
+import { isHarmonyRouteConfigFile } from '../extraction/grammars';
 
 /** Node kinds that can declare supertypes (extends/implements). */
 const SUPERTYPE_BEARING_KINDS = new Set<Node['kind']>([
@@ -1111,27 +1112,30 @@ export class ReferenceResolver {
         kind,
         line: ref.original.line,
         column: ref.original.column,
-        metadata: {
-          confidence: ref.confidence,
-          resolvedBy: ref.resolvedBy,
-          // The ORIGINAL reference text (and kind, when edge-kind promotion
-          // rewrote it — calls→instantiates, extends→implements,
-          // function_ref→references). If this edge's target is later removed
-          // by a re-index, the edge is resurrected as exactly this ref and
-          // re-resolved (#1240 removal case) — a faithful resurrection, so
-          // re-resolution can never bind anywhere a full re-index wouldn't.
-          // Reconstruction from the target node's name instead would strip
-          // receiver/qualifier context (`h.greet` → `greet`) and risk a
-          // wrong rebind; edges without refName (pre-#1240, synthesized) are
-          // deliberately NOT resurrected for the same reason.
-          refName: ref.original.referenceName,
-          ...(ref.original.referenceKind !== kind ? { refKind: ref.original.referenceKind } : {}),
-          // Uniform marker for function-as-value edges (#756), regardless of
-          // which strategy resolved them (import vs matchFunctionRef) — lets
-          // tooling label "callback registration" and lets validation diff
-          // exactly the edges this feature added.
-          ...(ref.original.referenceKind === 'function_ref' ? { fnRef: true } : {}),
-        },
+        // Spec 0039: Harmony route configs → page/builder edges need heuristic
+        // provenance + registeredAt so explore/trail show the JSON wiring site.
+        ...((): { provenance?: Edge['provenance']; metadata: Record<string, unknown> } => {
+          const sourceNode = this.queries.getNodeById(ref.original.fromNodeId);
+          const isRouteMap =
+            sourceNode?.kind === 'route' &&
+            isHarmonyRouteConfigFile(sourceNode.filePath);
+          const baseMeta: Record<string, unknown> = {
+            confidence: ref.confidence,
+            resolvedBy: ref.resolvedBy,
+            refName: ref.original.referenceName,
+            ...(ref.original.referenceKind !== kind ? { refKind: ref.original.referenceKind } : {}),
+            ...(ref.original.referenceKind === 'function_ref' ? { fnRef: true } : {}),
+          };
+          if (!isRouteMap) return { metadata: baseMeta };
+          return {
+            provenance: 'heuristic',
+            metadata: {
+              ...baseMeta,
+              synthesizedBy: 'arkts-route-map',
+              registeredAt: `${sourceNode!.filePath.replace(/\\/g, '/')}:${ref.original.line}`,
+            },
+          };
+        })(),
       };
     });
   }

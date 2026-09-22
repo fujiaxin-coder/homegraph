@@ -916,6 +916,256 @@ async function arkuiRouterEdges(ctx: ResolutionContext, onYield: MaybeYield): Pr
   return edges;
 }
 
+/** ArkUI custom-component / builder decorators that qualify as child targets. */
+const ARKUI_CHILD_TARGET_DECORATORS = new Set([
+  'Component', 'ComponentV2', 'Entry', 'Builder', 'LocalBuilder',
+]);
+
+const ARKUI_BUILDER_DECORATORS = new Set(['Builder', 'LocalBuilder']);
+
+/** PascalCase call sites inside build / @Builder bodies — `ShoppingCart({…})` / `Foo()`. */
+const ARKUI_CHILD_CALL_RE = /\b([A-Z][A-Za-z0-9]*)\s*\(/g;
+
+function isArkuiChildTarget(n: Node): boolean {
+  const dec = n.decorators ?? [];
+  if (n.kind === 'struct' || n.kind === 'component') {
+    return dec.some((d) => ARKUI_CHILD_TARGET_DECORATORS.has(d));
+  }
+  if (n.kind === 'function' || n.kind === 'method') {
+    return dec.some((d) => ARKUI_BUILDER_DECORATORS.has(d));
+  }
+  return false;
+}
+
+function isArkuiBuildParent(n: Node): boolean {
+  if (n.kind === 'method' && n.name === 'build') return true;
+  if (n.kind === 'function' || n.kind === 'method') {
+    return (n.decorators ?? []).some((d) => ARKUI_BUILDER_DECORATORS.has(d));
+  }
+  return false;
+}
+
+/**
+ * Spec 0045 A — ArkUI parent build/@Builder → child @Component/@Builder.
+ * Analog of react jsx-child: only static PascalCase call names that resolve to
+ * a unique in-repo component/builder; ambiguous names are dropped.
+ *
+ * Scan the enclosing @Component/@Builder struct (or Builder function) body —
+ * not only the `build()` method span — because ArkUI trailing lambdas
+ * (`Column() { Child() }`) are often attributed with tight method ranges that
+ * omit nested call sites.
+ */
+async function arkuiChildComponentEdges(ctx: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  const moduleDirs = (() => {
+    const ws = ctx.getWorkspacePackages?.();
+    return ws ? [...new Set(ws.byName.values())].sort((a, b) => b.length - a.length) : [];
+  })();
+  const moduleScopeOf = (file: string): string => {
+    for (const dir of moduleDirs) {
+      if (file === dir || file.startsWith(dir + '/')) return dir;
+    }
+    return '';
+  };
+
+  const resolveChild = (name: string, fromFile: string, parentId: string): Node | null => {
+    let candidates = ctx.getNodesByName(name).filter(isArkuiChildTarget);
+    if (candidates.length === 0) {
+      candidates = [
+        ...ctx.getNodesByKind('struct'),
+        ...ctx.getNodesByKind('component'),
+        ...ctx.getNodesByKind('function'),
+        ...ctx.getNodesByKind('method'),
+      ].filter((n) => n.name === name && isArkuiChildTarget(n));
+    }
+    candidates = candidates.filter((n) => n.id !== parentId);
+    // Dedupe by id — name index can surface the same row twice across caches.
+    candidates = [...new Map(candidates.map((n) => [n.id, n])).values()];
+    if (candidates.length === 0) return null;
+    if (candidates.length > 1) {
+      const sameFile = candidates.filter((n) => n.filePath === fromFile);
+      if (sameFile.length === 1) {
+        candidates = sameFile;
+      } else if (sameFile.length > 1) {
+        // Same file + same name: extraction duplicate — keep earliest.
+        candidates = [sameFile.sort((a, b) => a.startLine - b.startLine)[0]!];
+      } else {
+        const scope = moduleScopeOf(fromFile);
+        const sameMod = candidates.filter((n) => moduleScopeOf(n.filePath) === scope);
+        if (sameMod.length === 1) candidates = sameMod;
+        else return null;
+      }
+    }
+    return candidates[0] ?? null;
+  };
+
+  const emitFromSource = (
+    parent: Node,
+    src: string,
+    file: string,
+  ): void => {
+    const safe = stripCommentsForRegex(src, 'typescript');
+    const names = new Set<string>();
+    ARKUI_CHILD_CALL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = ARKUI_CHILD_CALL_RE.exec(safe))) names.add(m[1]!);
+    let added = 0;
+    for (const name of names) {
+      if (added >= MAX_JSX_CHILDREN) break;
+      if (name === parent.name) continue;
+      const child = resolveChild(name, file, parent.id);
+      if (!child) continue;
+      const key = `${parent.id}>${child.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: parent.id,
+        target: child.id,
+        kind: 'calls',
+        line: parent.startLine,
+        provenance: 'heuristic',
+        metadata: {
+          synthesizedBy: 'arkui-child',
+          via: name,
+          registeredAt: `${file}:${parent.startLine}`,
+        },
+      });
+      added++;
+    }
+  };
+
+  let scannedFiles = 0;
+  for (const file of ctx.getAllFiles()) {
+    if ((++scannedFiles & 15) === 0) await onYield();
+    if (!file.endsWith('.ets')) continue;
+    const content = ctx.readFile(file);
+    if (!content) continue;
+    const fileNodes = ctx.getNodesInFile(file);
+
+    // @Component / @Entry structs: attribute child calls to their `build()` method.
+    for (const struct of fileNodes) {
+      if (struct.kind !== 'struct' && struct.kind !== 'component') continue;
+      if (!isArkuiChildTarget(struct)) continue;
+      const build = fileNodes.find(
+        (n) => n.kind === 'method' && n.name === 'build'
+          && n.startLine >= struct.startLine && n.endLine <= struct.endLine,
+      ) ?? fileNodes.find(
+        (n) => n.kind === 'method' && n.name === 'build'
+          && n.filePath === struct.filePath
+          && (n.qualifiedName?.includes(struct.name) ?? false),
+      );
+      if (!build) continue;
+      const src = sliceLines(content, struct.startLine, struct.endLine);
+      if (!src) continue;
+      emitFromSource(build, src, file);
+    }
+
+    // Standalone @Builder functions/methods (not the struct build path).
+    for (const parent of fileNodes.filter(isArkuiBuildParent)) {
+      if (parent.kind === 'method' && parent.name === 'build') continue; // handled above
+      const src = sliceLines(content, parent.startLine, parent.endLine);
+      if (!src) continue;
+      emitFromSource(parent, src, file);
+    }
+  }
+  return edges;
+}
+
+/**
+ * Named Navigation / router APIs with a string literal route name.
+ * `pushPathByName('DemoPage')`, `replacePathByName('x')`, `pushNamedRoute({ name: 'x' })`.
+ */
+const ARKUI_NAMED_NAV_RE =
+  /\b(?:pushPathByName|replacePathByName)\s*\(\s*['"]([^'"]+)['"]|\bpushNamedRoute\s*\(\s*\{[^)]{0,200}?\bname\s*:\s*['"]([^'"]+)['"]/g;
+
+/**
+ * Spec 0045 B — literal named-nav → indexed `route` node (from route_map).
+ * Variable / non-literal names are ignored; ambiguous route names dropped.
+ */
+async function arkuiNamedNavEdges(
+  queries: QueryBuilder,
+  ctx: ResolutionContext,
+  onYield: MaybeYield,
+): Promise<Edge[]> {
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  const routesByName = new Map<string, Node[]>();
+  for (const r of queries.iterateNodesByKind('route')) {
+    const list = routesByName.get(r.name) ?? [];
+    list.push(r);
+    routesByName.set(r.name, list);
+  }
+  if (routesByName.size === 0) return edges;
+
+  const moduleDirs = (() => {
+    const ws = ctx.getWorkspacePackages?.();
+    return ws ? [...new Set(ws.byName.values())].sort((a, b) => b.length - a.length) : [];
+  })();
+  const moduleScopeOf = (file: string): string => {
+    for (const dir of moduleDirs) {
+      if (file === dir || file.startsWith(dir + '/')) return dir;
+    }
+    return '';
+  };
+
+  let scannedFiles = 0;
+  for (const file of ctx.getAllFiles()) {
+    if ((++scannedFiles & 15) === 0) await onYield();
+    if (!file.endsWith('.ets')) continue;
+    const content = ctx.readFile(file);
+    if (
+      !content
+      || (!content.includes('pushPathByName')
+        && !content.includes('replacePathByName')
+        && !content.includes('pushNamedRoute'))
+    ) {
+      continue;
+    }
+    const safe = stripCommentsForRegex(content, 'typescript');
+    const nodes = ctx.getNodesInFile(file)
+      .filter((n) => n.kind === 'method' || n.kind === 'function');
+
+    ARKUI_NAMED_NAV_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = ARKUI_NAMED_NAV_RE.exec(safe))) {
+      const routeName = m[1] || m[2];
+      if (!routeName) continue;
+      const line = safe.slice(0, m.index).split('\n').length;
+      const encl = nodes
+        .filter((n) => n.startLine <= line && n.endLine >= line)
+        .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+      if (!encl) continue;
+
+      let candidates = routesByName.get(routeName) ?? [];
+      if (candidates.length === 0) continue;
+      if (candidates.length > 1) {
+        const scope = moduleScopeOf(file);
+        const sameMod = candidates.filter((r) => moduleScopeOf(r.filePath) === scope);
+        if (sameMod.length === 1) candidates = sameMod;
+        else continue;
+      }
+      const route = candidates[0]!;
+      const key = `${encl.id}>${route.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        source: encl.id,
+        target: route.id,
+        kind: 'calls',
+        line,
+        provenance: 'heuristic',
+        metadata: {
+          synthesizedBy: 'arkui-named-nav',
+          event: routeName,
+          registeredAt: `${file}:${line}`,
+        },
+      });
+    }
+  }
+  return edges;
+}
+
 /**
  * Phase 4c: C++ virtual override. A call through a base/interface pointer
  * (`db->Get(...)`, `iter->Next()`) dispatches at runtime to a subclass override,
@@ -3803,6 +4053,8 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'arkuiCommonEvent', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiCommonEventEdges(c, y) },
   { name: 'arkuiTaskpool', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiTaskpoolEdges(c, y) },
   { name: 'arkuiRoutes', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiRouterEdges(c, y) },
+  { name: 'arkuiChildEdges', gate: (has) => has('arkts'), run: (_q, c, y) => arkuiChildComponentEdges(c, y) },
+  { name: 'arkuiNamedNav', gate: (has) => has('arkts'), run: (q, c, y) => arkuiNamedNavEdges(q, c, y) },
   { name: 'arktsStartupEdges', gate: (has) => has('arkts'), run: async (q, c) => arktsEntryEdges(q, c) },
   { name: 'cppEdges', gate: (has) => has('cpp'), run: (q, _c, y) => cppOverrideEdges(q, y) },
   {

@@ -32,8 +32,9 @@
  * (off-thread) and the daemon's indexing shells out to a child process, so the
  * daemon's main thread only ever does fast, bounded work. The default timeout
  * is ~300× the 5h #850 wedge shorter, yet far longer than any legitimate
- * main-thread block. Opt out with `HOMEGRAPH_NO_WATCHDOG=1`; tune with
- * `HOMEGRAPH_WATCHDOG_TIMEOUT_MS`.
+ * main-thread block. Spec 0047: **opt in** with `HOMEGRAPH_WATCHDOG=1` (default
+ * off for product / DevEco concurrent init); `HOMEGRAPH_NO_WATCHDOG=1` still
+ * forces off. Tune with `HOMEGRAPH_WATCHDOG_TIMEOUT_MS`.
  *
  * **Disk-progress deferral (`progressPaths`).** The CLI `index`/`init` path is
  * different: it runs the SQLite store on this thread, and one long synchronous
@@ -80,6 +81,17 @@ function isEnvTruthy(raw: string | undefined): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+/**
+ * Spec 0047: liveness watchdog is opt-in.
+ * Armed only when `HOMEGRAPH_WATCHDOG` is truthy and `HOMEGRAPH_NO_WATCHDOG` is not.
+ */
+export function isLivenessWatchdogEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (isEnvTruthy(env.HOMEGRAPH_NO_WATCHDOG)) return false;
+  return isEnvTruthy(env.HOMEGRAPH_WATCHDOG);
+}
+
 /** Parse the timeout env, falling back to the default for missing/invalid values. */
 export function parseWatchdogTimeoutMs(
   raw: string | undefined,
@@ -122,7 +134,7 @@ const capMs = Number(process.argv[3]);
 const progressPaths = process.argv.slice(4);
 const secs = Math.round(timeoutMs / 1000);
 function kill(extra) {
-  try { fs.writeSync(2, Buffer.from('[HomeGraph] Main thread unresponsive for ~' + secs + 's' + (extra || '') + ' — killing the wedged process so a fresh one can start (#850). Disable with HOMEGRAPH_NO_WATCHDOG=1.\\n')); } catch (e) {}
+  try { fs.writeSync(2, Buffer.from('[HomeGraph] Main thread unresponsive for ~' + secs + 's' + (extra || '') + ' — killing the wedged process so a fresh one can start (#850). Disable with HOMEGRAPH_NO_WATCHDOG=1 (default off; enable with HOMEGRAPH_WATCHDOG=1).\\n')); } catch (e) {}
   try { process.kill(parentPid, 'SIGKILL'); } catch (e) {}
   process.exit(0);
 }
@@ -301,7 +313,8 @@ function rearmFromOptions(options: WatchdogOptions): void {
  * current generation.
  */
 export function installMainThreadWatchdog(options: WatchdogOptions = {}): WatchdogHandle | null {
-  if (isEnvTruthy(process.env.HOMEGRAPH_NO_WATCHDOG)) return null;
+  // Spec 0047: default off — set HOMEGRAPH_WATCHDOG=1 to arm.
+  if (!isLivenessWatchdogEnabled()) return null;
 
   // Replace any prior generation (including a mid-suspend pending re-arm).
   suspendDepth = 0;
@@ -320,7 +333,7 @@ export function installMainThreadWatchdog(options: WatchdogOptions = {}): Watchd
  * resume function. Nested calls refcount; a `stop()` while suspended cancels
  * the pending re-arm.
  *
- * No-op when nothing is armed (tests, `HOMEGRAPH_NO_WATCHDOG`, library embeds).
+ * No-op when nothing is armed (tests, default-off Spec 0047, `HOMEGRAPH_NO_WATCHDOG`, library embeds).
  */
 export function suspendLivenessWatchdog(): () => void {
   suspendDepth++;

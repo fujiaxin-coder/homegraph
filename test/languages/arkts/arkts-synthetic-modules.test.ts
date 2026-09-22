@@ -83,4 +83,63 @@ describe('synthetic Ark modules for orphan TS', () => {
     // Touch disk so findSynthetic would otherwise see package.json under lib/
     expect(fs.existsSync(path.join(root, 'lib/package.json'))).toBe(true);
   });
+
+  it('does not register oh-package or packageless orphans as synthetic PROJECT modules', () => {
+    // scene_board shape: many feature/* HAP modules + forgotten HARs / loose
+    // .ets outside build-profile. Those must NOT become synthetic PROJECT→BODIES
+    // (visionglass oh-package pulls launchercommon etc. back into ModuleCache).
+    const root = makeArktsProject({
+      'build-profile.json5': JSON.stringify({
+        modules: [
+          { name: 'appcenter', srcPath: './feature/appcenter' },
+          { name: 'desktop', srcPath: './feature/desktop/pagedesktop' },
+        ],
+      }),
+      'feature/appcenter/src/main/ets/Index.ets': 'export struct Index {}',
+      'feature/desktop/pagedesktop/src/main/ets/Index.ets': 'export struct Index {}',
+      'feature/intelligent/src/main/ets/Agent.ets': 'export struct Agent {}',
+      'feature/themebase/EditWallpaper.ets': 'export struct EditWallpaper {}',
+      'feature/visionglass/oh-package.json5': JSON.stringify({
+        name: '@ohos/visionglass',
+        version: '1.0.0',
+        dependencies: {
+          '@ohos/launchercommon': '../../staticcommon/launchercommon',
+        },
+      }),
+      'feature/visionglass/Index.ets': 'export struct Glass {}',
+      // Node plugin beside HAPs — still eligible for synthetic.
+      'feature/intelligent/tools/package.json': JSON.stringify({ name: 'intel-tools', version: '1.0.0' }),
+      'feature/intelligent/tools/index.ts': 'export const tip = 1;',
+    });
+
+    const modules = [
+      { name: 'appcenter', srcPath: 'feature/appcenter' },
+      { name: 'desktop', srcPath: 'feature/desktop/pagedesktop' },
+    ];
+    const scanned = [
+      'feature/appcenter/src/main/ets/Index.ets',
+      'feature/desktop/pagedesktop/src/main/ets/Index.ets',
+      'feature/intelligent/src/main/ets/Agent.ets',
+      'feature/intelligent/tools/index.ts',
+      'feature/themebase/EditWallpaper.ets',
+      'feature/visionglass/Index.ets',
+    ];
+
+    expect(listOrphanArkAnalyzerSources(scanned, modules)).toEqual([
+      'feature/intelligent/src/main/ets/Agent.ets',
+      'feature/intelligent/tools/index.ts',
+      'feature/themebase/EditWallpaper.ets',
+      'feature/visionglass/Index.ets',
+    ]);
+    expect(findSyntheticArkModuleRoot(root, 'feature/intelligent/src/main/ets/Agent.ets', modules)).toBeNull();
+    expect(findSyntheticArkModuleRoot(root, 'feature/themebase/EditWallpaper.ets', modules)).toBeNull();
+    expect(findSyntheticArkModuleRoot(root, 'feature/visionglass/Index.ets', modules)).toBeNull();
+    // Plugin under feature/intelligent must not climb to synthetic:feature/
+    expect(findSyntheticArkModuleRoot(root, 'feature/intelligent/tools/index.ts', modules)).toBe(
+      'feature/intelligent/tools'
+    );
+    expect(listSyntheticArkModuleRoots(root, scanned, modules)).toEqual([
+      { name: 'synthetic:tools', srcPath: 'feature/intelligent/tools' },
+    ]);
+  });
 });

@@ -47,6 +47,7 @@ import {
   attachExistingOhosApiDbForProject,
   restoreOhosApiDbAttach,
   ohosApiDbPackageName,
+  preferHarmonySerialIndexing,
   resetArkTSBatch,
   type OhosApiDbBinding,
   OHOS_API_DB_PATH_META,
@@ -574,6 +575,11 @@ export class HomeGraph {
       } catch {
         return { success: false, filesIndexed: 0, filesSkipped: 0, filesErrored: 0, nodesCreated: 0, edgesCreated: 0, errors: [{ message: 'Could not acquire file lock - another process may be indexing', severity: 'error' as const }], durationMs: 0 };
       }
+      // Wall clock for the whole indexAll critical section (extract + FTS rebuild
+      // + resolve/link + maintenance + optional ohos API bind). Orchestrator
+      // durationMs only covers extract/store — printing that alone under-reports
+      // large Harmony repos where resolving dominates the remaining minutes.
+      const wallStartedAt = Date.now();
       const freshDb = this.queries.getNodeAndEdgeCount().nodes === 0;
       const fastInit = process.env.HOMEGRAPH_NO_FAST_INIT !== '1' && freshDb;
       if (fastInit) {
@@ -735,6 +741,7 @@ export class HomeGraph {
           }
         } catch { /* metadata is advisory — never fail an index over it */ }
 
+        result.durationMs = Date.now() - wallStartedAt;
         return result;
       } finally {
         if (walValve) { walValve.stop(); await walValve.drain(); }
@@ -1180,18 +1187,28 @@ export class HomeGraph {
     onSynthesisProgress?: (done: number, total: number) => void,
     backpressure?: () => Promise<void> | null
   ): Promise<ResolutionResult> {
-    return this.resolver.resolveAndPersistBatched(onProgress, undefined, onSynthesisProgress, {
-      dbPath: this.db.getPath(),
-      bulkEdgeLoad: {
-        begin: () => this.db.beginBulkEdgeLoad(),
-        end: () => this.db.endBulkEdgeLoad(),
-      },
-      refIndexLoad: {
-        begin: () => this.db.beginBulkRefLoad(),
-        end: () => this.db.endBulkRefLoad(),
-      },
-      backpressure,
-    });
+    // Harmony modular repos: skip ResolverPool (Spec 0037). Synthesis then runs
+    // on the main thread with concurrency 1 — same peak profile as Plan D.
+    const parallel = preferHarmonySerialIndexing(this.projectRoot)
+      ? undefined
+      : {
+          dbPath: this.db.getPath(),
+          bulkEdgeLoad: {
+            begin: () => this.db.beginBulkEdgeLoad(),
+            end: () => this.db.endBulkEdgeLoad(),
+          },
+          refIndexLoad: {
+            begin: () => this.db.beginBulkRefLoad(),
+            end: () => this.db.endBulkRefLoad(),
+          },
+          backpressure,
+        };
+    return this.resolver.resolveAndPersistBatched(
+      onProgress,
+      undefined,
+      onSynthesisProgress,
+      parallel
+    );
   }
 
   /**

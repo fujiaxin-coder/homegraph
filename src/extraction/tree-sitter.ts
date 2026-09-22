@@ -30,7 +30,7 @@ import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
 import { CfmlExtractor } from './cfml-extractor';
-import { ArkTSExtractor } from './languages/arkts';
+import { ArkTSExtractor, isArkTSBatchCommitted, isArkTSBatchPersisted } from './languages/arkts';
 import {
   getAllFrameworkResolvers,
   getApplicableFrameworks,
@@ -6614,9 +6614,17 @@ export function extractFromSource(
     const extractor = new CfmlExtractor(filePath, source, detectedLanguage);
     result = extractor.extract();
   } else if (detectedLanguage === 'arkts') {
-    // HomeGraph uses the arkanalyzer-backed ArkTS extractor (not tree-sitter).
-    const extractor = new ArkTSExtractor(filePath, source);
-    result = extractor.extract();
+    // Prefer ArkAnalyzer via ArkTSExtractor. After a committed modular/full batch,
+    // files that never entered a PROJECT module must NOT call ArkTSExtractor —
+    // that path would rebuild the entire Scene (second analyseByModule). Use the
+    // TypeScript grammar as a shallow symbol fallback for those orphans.
+    if (isArkTSBatchCommitted() && !isArkTSBatchPersisted(filePath)) {
+      const extractor = new TreeSitterExtractor(filePath, source, 'typescript');
+      result = extractor.extract();
+    } else {
+      const extractor = new ArkTSExtractor(filePath, source);
+      result = extractor.extract();
+    }
   } else if (isFileLevelOnlyLanguage(detectedLanguage)) {
     // No symbol extraction at this stage — files are tracked at the file-record
     // level only. Framework extractors (Drupal routing yml, Spring `@Value`

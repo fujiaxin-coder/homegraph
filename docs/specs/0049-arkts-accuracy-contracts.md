@@ -1,4 +1,4 @@
-# 0036 ArkTS request constraints and behavioral evidence
+# 0049 ArkTS request constraints and behavioral evidence
 
 - Date: 2026-09-17
 - Status: Completed (local implementation and validation; inference accuracy not measured)
@@ -39,6 +39,6 @@ Strengthen the existing query planner and explore, without modifying codingeval,
 ## Main integration
 
 - Merged upstream `main` at `2ebe761` (1.5.8 plus index-status and JSON5 mapping updates).
-- Renumbered the accuracy spec from 0031 to 0036 because upstream now owns spec numbers 0031–0035.
+- Renumbered the accuracy spec from 0031 to 0049 because upstream now owns spec numbers 0031–0035.
 - Retained upstream index readiness, asset packaging and SQLite backend changes; retained 053 target/behavior evidence and Headroom compatibility.
 - Integration validation: build passed; 304 distinct related tests verified (302 initial passes plus affected-suite rerun after two status-copy assertion updates); accuracy/path real-index smokes and Headroom compatibility passed. Records: `validation/main-merge/REPORT.md`.

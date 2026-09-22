@@ -110,3 +110,53 @@ export function isSqliteBusyMessage(message: string): boolean {
 export function textAlreadyHasProductStatus(text: string): boolean {
   return /^\s*HomeGraph status=/m.test(text);
 }
+
+/** Marker line for Spec 0038 project-root path hint (idempotent prepend). */
+export const PROJECT_ROOT_HINT_MARKER = 'HomeGraph project root:';
+
+/**
+ * Short preamble: absolute project root + how to join repo-relative paths (Spec 0038).
+ * `absRoot` should already be resolved (platform-native absolute path).
+ */
+export function formatProjectRootPathHint(absRoot: string): string {
+  const root = absRoot.trim();
+  return (
+    `${PROJECT_ROOT_HINT_MARKER} \`${root}\`\n` +
+    'Paths below are repo-relative to that root. Pass them to Read/Grep as-is, or join as `<root>/<relative>` (use `/`). Do not invent experiment/result directory prefixes.'
+  );
+}
+
+/** True when text already carries a Spec 0038 project-root hint. */
+export function textAlreadyHasProjectRootHint(text: string): boolean {
+  return text.includes(PROJECT_ROOT_HINT_MARKER);
+}
+
+/** Marker for Spec 0043 bound-root projectPath soft-pin notice (idempotent prepend). */
+export const BOUND_PROJECT_PATH_PIN_MARKER = 'This MCP session is bound to';
+
+/**
+ * English preamble when a tool `projectPath` resolves to a different index root
+ * than the MCP session's default bound root (Spec 0043). Success-shaped — not isError.
+ */
+export function formatBoundProjectPathPinNotice(opts: {
+  boundRoot: string;
+  requestedPath: string;
+  resolvedRoot: string | null;
+}): string {
+  const bound = opts.boundRoot.trim();
+  const requested = opts.requestedPath.trim();
+  const resolved =
+    opts.resolvedRoot === null
+      ? 'no .homegraph/ found walking up from it'
+      : `resolves to \`${opts.resolvedRoot.trim()}\``;
+  return (
+    `${BOUND_PROJECT_PATH_PIN_MARKER} \`${bound}\`.\n` +
+    `Ignoring projectPath=\`${requested}\` (${resolved}).\n` +
+    'Results below are from the bound project root only. Omit projectPath, or pass a path under that root.'
+  );
+}
+
+/** True when text already carries a Spec 0043 pin notice. */
+export function textAlreadyHasBoundProjectPathPinNotice(text: string): boolean {
+  return text.includes(BOUND_PROJECT_PATH_PIN_MARKER);
+}

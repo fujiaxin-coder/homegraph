@@ -13,14 +13,28 @@ import { canonicalSourceDeclarations, neutralRetrievalGuidance, trimEvidenceAtLi
 import { buildArktsEvidencePacks } from './arkts-evidence-packs';
 import { completeEvidencePathCandidates, resolveEvidencePathGoal, searchEvidencePaths } from '../graph/evidence-paths';
 import { compileQueryPlanStep, mergeQueryPlanTaskContext, planQuery, QUERY_PLAN_VERSION, type QueryPlan, type QueryPlanBinding } from '../search/query-plan';
+import { isHarmonyCapabilityProfileJson, isHarmonyElementStringJson, isHarmonyRouteProfileJson } from '../extraction/grammars';
 import {
+  listHarmonyRouteProfilesUnderModule,
+  readHarmonyAppBundleName,
+  readModuleOhPackageName,
+  scanHarmonyResourceInventory,
+  formatHarmonyResourceInventory,
+  formatHarmonyModuleRoster,
+} from '../project-map';
+import {
+  formatBoundProjectPathPinNotice,
   formatProductStatusLine,
+  formatProjectRootPathHint,
   isSqliteBusyMessage,
   productIndexGuidance,
   resolveProductIndexState,
+  textAlreadyHasBoundProjectPathPinNotice,
   textAlreadyHasProductStatus,
+  textAlreadyHasProjectRootHint,
 } from './index-availability';
 import { findNearestHomeGraphRoot } from '../directory';
+import { logLifecycle, logToolDebug } from '../runtime-log';
 // Lazy-load the heavy HomeGraph chain off the MCP startup path — see the same
 // helper in engine.ts. ToolHandler must load to answer tools/list (static
 // schemas), but it must NOT drag in sqlite/query layers before the daemon binds;
@@ -51,7 +65,7 @@ import {
   graphSourceFlags,
   graphSourcesDisabledGuidance,
 } from '../graph-sources';
-import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, queryAsContainerCompositionSurvey, queryAsMemberUiConsequenceSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
+import { isTestFile, normalizeNameToken, extractFileBasenamesFromQuery, extractInRepoLocateAnchors, resolveExploreSourceScope, isMcpNoiseNode, extractKitModuleNamesFromQuery, extractKitSubmoduleNamesFromQuery, extractMemberAccessFromQuery, extractImportSearchTerms, extractDependencySymbolsFromQuery, extractApiUsageTokens, hasImportInventoryFilter, shouldBuildCallerInventory, shouldBuildInheritanceSurvey, shouldBuildKitModuleUsageSurvey, shouldBuildHoverHandlerSurvey, queryShouldPreferExploreOverSearch, queryAsNamedComponentAction, queryHasNamedMemberFocus, isMemberLikeIdentifier, shouldBuildMemberSurvey, shouldBuildConfigSection, shouldBuildDomainFileSurvey, shouldBuildApiUsageSurvey, shouldCompactImportListing, shouldOmitSourceBodies, shouldLimitToQueryNamedFile, shouldFocusOnNamedTypeFile, shouldFocusOnQueryNamedDefs, shouldTryFastInventoryExplore, shouldTryLightMechanismExplore, shouldUseCompactExploreBudget, queryAsLocalSymbolDetail, extractLocalDetailAnchors, queryNamesMultipleExploreAnchors, extractTypeNamesFromQuery, extractDomainSearchTerms, extractCallerSurveySymbols, queryAsMechanismSurvey, queryAsCrossModuleFlowSurvey, queryAsDataSourceSurvey, queryAsDataSourceDistinguishAsk, queryAsEventDispatchSurvey, queryAsMultiTypeDependencySurvey, queryAsInterpretationSurvey, queryAsTestOnlyInterpretation, extractMechanismEntrySeeds, isImplementationEntrySymbol, mechanismDomainPathTokens, isDomainRoleSymbol, fileMatchesQueryBasename, resolveImportLineFromNode, queryIsTypeNameFocus, queryAsInheritanceSurvey, queryAsCallerOrMethodSurvey, queryHasFocusedNamedAnchors, queryNeedsCoNamedUseBridge, queryShouldDeferToBuiltinTools, homegraphDeferGuidance, queryAsComponentSurfaceSurvey, queryAsFocusedUiCluster, queryLooksLikeUiComponentType, isFrameworkUiDecoratorName, queryAsTypeLifecycleSurvey, queryAsContainerCompositionSurvey, queryAsMemberUiConsequenceSurvey, extractFieldLikeSymbolsFromQuery, GENERIC_VERB_ANCHOR_NOISE,   queryAsDeclarationSiteSurvey, queryAsInRepoSystemCapabilityHowto, queryAsReturnValueConsumerSurvey, queryAsModuleExportSurvey, queryAsModuleDependencySurvey, queryAsFieldUsageSurvey, extractListedTypeMethodsFromQuery, queryAsDtsWrapSurvey, extractPathSegmentsFromQuery, queryAsNativeRenderThreadSurvey, queryAsNamedControlStateSyncSurvey, queryAsAssignedFlagImpactSurvey, queryAsksKitInstallDeps, isDistinctiveIdentifier, queryAsOutOfRepoSdkCatalog, queryAsKitModuleCapabilitySurvey } from '../search/query-utils';
 
 import {
   closeSync,
@@ -102,6 +116,17 @@ import {
   pickBestDomainRoleAnchor,
   type ExploreRepeatDecision,
 } from './explore-repeat-guard';
+import {
+  formatFilenameDeclarationMismatch,
+  formatLocatedBanner,
+  formatMissBanner,
+  formatPartialBanner,
+  shouldDemoteLogToastSpine,
+  shouldExemptDepthFuseForLocatedSymbol,
+  shouldSuppressSynonymExpansion,
+  LOCATED_MARKER,
+  MISS_MARKER,
+} from './locate-contract';
 import { scanDynamicDispatch } from './dynamic-boundaries';
 import {
   buildMcpQueryCacheKey,
@@ -689,6 +714,290 @@ function fileSectionHeader(filePath: string, suffix: string): string {
 }
 
 /**
+ * Spec 0039 — short Registration sources table from indexed Harmony profile routes.
+ * Returns null when nothing to show.
+ */
+export function formatHarmonyRegistrationSources(
+  cg: Pick<HomeGraph, 'getNodesByKind'>,
+  maxRows = 24,
+): string | null {
+  const routes = cg
+    .getNodesByKind('route')
+    .filter((n) => isHarmonyRouteProfileJson(n.filePath))
+    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine);
+  if (routes.length === 0) return null;
+
+  const byFile = new Map<string, typeof routes>();
+  for (const r of routes) {
+    const fp = r.filePath.replace(/\\/g, '/');
+    const list = byFile.get(fp) ?? [];
+    list.push(r);
+    byFile.set(fp, list);
+  }
+
+  const lines: string[] = [
+    '**Registration sources** (indexed Harmony route profiles — evidence from these files; do not re-Read unless editing)',
+  ];
+  let rows = 0;
+  for (const [fp, list] of byFile) {
+    lines.push(`- \`${fp}\``);
+    for (const r of list) {
+      if (rows >= maxRows) {
+        lines.push(`  - … +more routes`);
+        return lines.join('\n');
+      }
+      const page =
+        typeof r.signature === 'string'
+          ? /pageSourceFile=([^;]+)/.exec(r.signature)?.[1]?.trim()
+          : undefined;
+      const builder =
+        typeof r.signature === 'string'
+          ? /buildFunction=([^;]+)/.exec(r.signature)?.[1]?.trim()
+          : undefined;
+      if (page) {
+        lines.push(
+          `  - \`${r.name}\` → \`${page}\`${builder ? ` (${builder})` : ''} @${fp}:${r.startLine}`
+        );
+      } else {
+        lines.push(`  - \`${r.name}\` @${fp}:${r.startLine}`);
+      }
+      rows++;
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Spec 0041 / 0048 §3 — short Resource hits table for element/string.json constants.
+ * Spec 0048: append up to 2 in-repo `.ets` binding anchors when signature/docstring
+ * mention `app.string.<key>`.
+ */
+export function formatHarmonyResourceHits(
+  cg: Pick<HomeGraph, 'getNodesByKind' | 'getProjectRoot' | 'getFiles'>,
+  query: string,
+  maxRows = 8,
+): string | null {
+  const constants = cg
+    .getNodesByKind('constant')
+    .filter((n) => isHarmonyElementStringJson(n.filePath));
+  if (constants.length === 0) return null;
+
+  const q = query.trim();
+  const namedFile = /string\.json/i.test(q);
+  const tokens = [
+    ...new Set(
+      q
+        .split(/[\s,;|]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 2 && t.length <= 160 && !/^string\.json$/i.test(t)),
+    ),
+  ].slice(0, 12);
+
+  const matched = constants.filter((n) => {
+    if (namedFile && tokens.length === 0) return true;
+    const hay = `${n.name}\n${n.qualifiedName ?? ''}\n${n.docstring ?? ''}\n${n.signature ?? ''}`.toLocaleLowerCase();
+    return tokens.some((t) => hay.includes(t.toLocaleLowerCase()));
+  });
+
+  const rows = (matched.length > 0 ? matched : namedFile ? constants : [])
+    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)
+    .slice(0, maxRows);
+  if (rows.length === 0) return null;
+
+  const projectRoot = cg.getProjectRoot();
+  const etsFiles = cg.getFiles()
+    .map((f) => f.path.replace(/\\/g, '/'))
+    .filter((p) => /\.ets$/i.test(p))
+    .slice(0, 80);
+
+  const findBindings = (key: string, stringFile: string): string[] => {
+    const needle = `app.string.${key}`;
+    const hits: string[] = [];
+    const modRoot = (() => {
+      const marker = '/src/main/';
+      const i = stringFile.indexOf(marker);
+      return i >= 0 ? stringFile.slice(0, i) : '';
+    })();
+    for (const rel of etsFiles) {
+      if (hits.length >= 2) break;
+      if (modRoot && !(rel === modRoot || rel.startsWith(`${modRoot}/`))) continue;
+      const abs = pathJoin(projectRoot, rel);
+      if (!existsSync(abs)) continue;
+      let text: string;
+      try {
+        text = readFileSync(abs, 'utf-8');
+      } catch {
+        continue;
+      }
+      const lines = text.split(/\n/);
+      for (let i = 0; i < lines.length; i++) {
+        if (hits.length >= 2) break;
+        if (lines[i]!.includes(needle)) {
+          hits.push(`\`${rel}:${i + 1}\``);
+        }
+      }
+    }
+    return hits;
+  };
+
+  const lines: string[] = [
+    '**Resource hits** (element/string.json — searchable literals, no graph edges)',
+  ];
+  for (const n of rows) {
+    const fp = n.filePath.replace(/\\/g, '/');
+    const value = (n.docstring ?? '').slice(0, 80);
+    const shown = value ? JSON.stringify(value) : '(empty)';
+    const bounds = findBindings(n.name, fp);
+    const boundNote = bounds.length ? ` · bound ${bounds.join(', ')}` : '';
+    lines.push(
+      `- \`${fp}:${n.startLine}\` — ${shown} → \`${n.name}\`${boundNote} · Grep \`$r('app.string.${n.name}')\` in \`.ets\``,
+    );
+  }
+  if ((matched.length || constants.length) > rows.length) {
+    lines.push(`- … +more string resources`);
+  }
+  return lines.join('\n');
+}
+
+const FORM_QUERY_RE = /form_config|FormExtension|服务卡片|卡片/i;
+const SHORTCUT_QUERY_RE = /shortcuts_config|\bshortcuts\b|快捷方式|长按|快捷入口/i;
+
+/**
+ * Spec 0048 §1–2 — Capability profiles table, or form negative evidence.
+ */
+export function formatHarmonyCapabilityProfiles(
+  cg: Pick<HomeGraph, 'getNodesByKind'>,
+  query: string,
+  maxRows = 8,
+): string | null {
+  const wantForm = FORM_QUERY_RE.test(query);
+  const wantShortcut = SHORTCUT_QUERY_RE.test(query);
+  if (!wantForm && !wantShortcut) return null;
+
+  const constants = cg.getNodesByKind('constant');
+  const routes = cg.getNodesByKind('route');
+  const formNodes = [
+    ...constants.filter((n) =>
+      isHarmonyCapabilityProfileJson(n.filePath)
+      && /form_config\.json$/i.test(n.filePath.replace(/\\/g, '/')),
+    ),
+    ...constants.filter((n) => (n.qualifiedName ?? '').includes('harmony.capability.form')),
+    ...routes.filter((n) => (n.name ?? '').startsWith('formAbility:')),
+  ];
+  const shortcutNodes = [
+    ...constants.filter((n) =>
+      isHarmonyCapabilityProfileJson(n.filePath)
+      && /shortcuts_config\.json$/i.test(n.filePath.replace(/\\/g, '/')),
+    ),
+    ...constants.filter((n) =>
+      (n.qualifiedName ?? '').includes('harmony.capability.shortcut')
+      || (n.qualifiedName ?? '').includes('harmony.shortcut.'),
+    ),
+  ];
+
+  const lines: string[] = [];
+  if (wantForm && formNodes.length === 0) {
+    lines.push(
+      '**Capability profiles:** No in-repo form_config / FormExtensionAbility (do not treat SDK `.d.ts` as project wiring).',
+    );
+  }
+  const rows: string[] = [];
+  const pushRows = (kind: 'form' | 'shortcut', nodes: typeof formNodes) => {
+    for (const n of nodes.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)) {
+      if (rows.length >= maxRows) break;
+      const fp = n.filePath.replace(/\\/g, '/');
+      rows.push(`- (${kind}) \`${n.name}\` @\`${fp}:${n.startLine}\`${n.signature ? ` — ${n.signature}` : ''}`);
+    }
+  };
+  if (wantForm) pushRows('form', formNodes);
+  if (wantShortcut) pushRows('shortcut', shortcutNodes);
+
+  if (rows.length > 0) {
+    lines.push('**Capability profiles** (form_config / shortcuts_config — paths only, no UI edges)');
+    lines.push(...rows);
+  }
+  return lines.length ? lines.join('\n') : null;
+}
+
+/** Spec 0048 §5 — detect empty / log-only method bodies. */
+export function isHarmonyStubBody(source: string): boolean {
+  const body = source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+    .trim();
+  if (!body) return true;
+  const lines = body.split(/\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return true;
+  if (lines.length > 8) return false;
+  const code = lines.join('\n');
+  // Strip common wrapper braces from a method slice.
+  const inner = code.replace(/^[^{]*\{/, '').replace(/\}[^}]*$/, '').trim();
+  const stmts = inner.split(/;|\n/).map((s) => s.trim()).filter(Boolean);
+  if (stmts.length === 0) return true;
+  return stmts.every((s) =>
+    /^(return(\s+[^;]*)?|hilog\.[a-zA-Z]+\s*\(|console\.(log|info|warn|error|debug)\s*\(|\/\/)/i.test(s)
+    || s === '{'
+    || s === '}',
+  );
+}
+
+/**
+ * Spec 0048 §5 — seam notes for located explore anchors.
+ */
+export function formatHarmonySeamNotes(
+  cg: Pick<HomeGraph, 'getNodesByKind' | 'getNode'>,
+  projectRoot: string,
+  located: Array<{ id?: string; name: string; filePath: string; startLine: number }>,
+  maxAnchors = 6,
+): string | null {
+  if (!located.length) return null;
+
+  const lines: string[] = [];
+  const capabilityFiles = new Set(
+    [
+      ...cg.getNodesByKind('constant').filter((n) => isHarmonyCapabilityProfileJson(n.filePath)),
+      ...cg.getNodesByKind('route').filter((n) => isHarmonyRouteProfileJson(n.filePath)),
+    ].map((n) => n.filePath.replace(/\\/g, '/')),
+  );
+
+  for (const loc of located.slice(0, maxAnchors)) {
+    const fp = loc.filePath.replace(/\\/g, '/');
+    const modRoot = (() => {
+      const marker = '/src/main/';
+      const i = fp.indexOf(marker);
+      return i >= 0 ? fp.slice(0, i) : fp.includes('/') ? fp.slice(0, fp.lastIndexOf('/')) : '';
+    })();
+    let profileNote = 0;
+    for (const cap of capabilityFiles) {
+      if (profileNote >= 2) break;
+      if (modRoot && (cap === modRoot || cap.startsWith(`${modRoot}/`))) {
+        lines.push(`- profile near \`${loc.name}\`: \`${cap}\``);
+        profileNote++;
+      }
+    }
+    try {
+      const node = loc.id ? cg.getNode(loc.id) : null;
+      const start = node?.startLine ?? loc.startLine;
+      const end = node?.endLine ?? start + 12;
+      const abs = pathJoin(projectRoot, fp);
+      if (existsSync(abs)) {
+        const content = readFileSync(abs, 'utf-8');
+        const allLines = content.split(/\n/);
+        const slice = allLines.slice(Math.max(0, start - 1), Math.min(allLines.length, end)).join('\n');
+        if (isHarmonyStubBody(slice)) {
+          lines.push(`- stub: \`${loc.name}\` @\`${fp}:${start}\``);
+        }
+      }
+    } catch {
+      /* omit */
+    }
+    if (lines.length >= maxAnchors * 3) break;
+  }
+  if (lines.length === 0) return null;
+  return ['**Seam notes** (config paths / empty stubs — digests still count as Read)', ...lines.slice(0, 18)].join('\n');
+}
+
+/**
  * Per-file staleness banner emitted at the top of a tool response when the
  * file watcher has pending events for files referenced by the response.
  * The agent uses this to fall back to Read for those specific files
@@ -1144,11 +1453,12 @@ export const tools: ToolDefinition[] = [
     name: 'homegraph_explore',
     description:
       'Optional graph evidence for a concrete unresolved cross-symbol mechanism in THIS repo. Required: `query`. ' +
+      'For module/route-profile **paths** and engineering overview use homegraph_project first (not this tool). ' +
       'Use ordinary bash/search/read for paths, symbols, literal strings and local changes; continue editing when that evidence suffices. ' +
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
       'For a missing usage, dependency/cycle or native-registration relation, use ' +
       'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
-      'Returns call paths and compact line-numbered source. ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
+      'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; form/shortcuts queries may lead with Capability profiles; element/string.json literals may lead with Resource hits + optional bound .ets anchors; Seam notes may flag stubs). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
       'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
@@ -1192,9 +1502,12 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_project',
     description:
-      'Shallow project map: modules + files per module (no symbols/call edges). ' +
-      'PRIMARY for engineering overview while the full index is still building; also useful after full index. ' +
-      'Optional `module` filters by name/path; `includeFiles` defaults true.',
+      'Shallow engineering map: modules + per-module files. On Harmony repos also prints skeleton pointers ' +
+      '(bundleName from app.json5, modules from build-profile.json5, per-module route_map/router_map/main_pages paths, oh-package name) ' +
+      'and a Module roster (local file: deps) plus bounded HarmonyOS resources path inventory (string.json / capability profiles form_config|shortcuts_config / rawfile / media dirs / on-disk modules not in the graph). ' +
+      'GIVES navigation only — NOT symbol bodies, call graphs, or JSON/file contents (use homegraph_explore for route→page / Resource hits / Capability profiles; Read to edit). ' +
+      'PRIMARY overview while the full index is still building; also useful after full index. ' +
+      'Optional `module` filters by name/path; `includeFiles` defaults true (resources section still prints when false).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1560,6 +1873,10 @@ export class ToolHandler {
   // The directory the server last searched for a default project. Surfaced in
   // the "not initialized" error so users can see why detection missed.
   private defaultProjectHint: string | null = null;
+  // Spec 0043: when a tool `projectPath` would open a different index root than
+  // the session's default bound project, we soft-pin to the default and stash
+  // an English notice to prepend on the success reply (consumed once).
+  private boundProjectPathPinNotice: string | null = null;
   // Per-start-path cache of the git worktree/index mismatch (issue #155). The
   // mismatch is a fixed property of (where the request came from → which
   // .homegraph/ it resolves to), so the up-to-two `git rev-parse` spawns run
@@ -1820,6 +2137,11 @@ export class ToolHandler {
    *
    * Walks up parent directories to find the nearest .homegraph/ folder,
    * similar to how git finds .git/ directories.
+   *
+   * Spec 0043: when a default project is already bound, a `projectPath` whose
+   * resolved index root differs from that bound root is soft-pinned back to
+   * the default (no DB switch) and a success-shaped English notice is stashed
+   * for the reply preamble.
    */
   private getHomeGraph(projectPath?: string): HomeGraph {
     const sourcesMode = resolveGraphSources();
@@ -1872,6 +2194,26 @@ export class ToolHandler {
     // below), so re-resolving costs only the stat walk, never a reopen.
     const resolvedRoot = findNearestHomeGraphRoot(projectPath);
 
+    // Spec 0043: with a bound default root, never switch the graph to a
+    // different index (sibling / parent / wrong absolute path). Soft-pin and
+    // stash a notice; security refusals above still win.
+    if (this.cg) {
+      const boundRoot = resolvePath(this.cg.getProjectRoot());
+      const resolvedAbs = resolvedRoot ? resolvePath(resolvedRoot) : null;
+      if (resolvedAbs === null || resolvedAbs !== boundRoot) {
+        this.boundProjectPathPinNotice = formatBoundProjectPathPinNotice({
+          boundRoot,
+          requestedPath: projectPath,
+          resolvedRoot: resolvedAbs,
+        });
+        return this.freshen(this.cg);
+      }
+      // Same index root (incl. nested path under the bound project) — reuse the
+      // default instance so we never open a second connection to the same DB
+      // (#238).
+      return this.freshen(this.cg);
+    }
+
     if (!resolvedRoot) {
       throw new NotIndexedError(
         `The project at ${projectPath} isn't indexed with homegraph (no .homegraph/ directory found ` +
@@ -1881,20 +2223,9 @@ export class ToolHandler {
       );
     }
 
-    // If the path resolves to the default project, reuse the already-open
-    // default instance rather than opening a SECOND connection to the same DB.
-    // A duplicate connection serializes reads against the watcher's auto-sync
-    // writes; when WAL isn't in effect (e.g. a filesystem without shared-memory
-    // support) that surfaces as intermittent
-    // "database is locked" on concurrent tool calls. See issue #238. The
-    // default instance is owned/closed by the server, so it's never cached.
-    if (this.cg && this.cg.getProjectRoot() === resolvedRoot) {
-      return this.freshen(this.cg);
-    }
-
-    // Cache the open DB connection by RESOLVED ROOT only — never by the input
-    // path. One key per instance means closeAll() closes each exactly once, and
-    // a changed resolution maps to a different entry instead of a stale hit.
+    // No default project — cross-project open (cached by resolved root).
+    // One key per instance means closeAll() closes each exactly once, and a
+    // changed resolution maps to a different entry instead of a stale hit.
     const cached = this.projectCache.get(resolvedRoot);
     if (cached) return this.freshen(cached);
 
@@ -2162,6 +2493,14 @@ export class ToolHandler {
       } catch {
         reason = null;
       }
+      try {
+        logLifecycle('watcher.degraded', {
+          projectRoot: cg.getProjectRoot(),
+          reason: reason ?? undefined,
+        });
+      } catch {
+        /* ignore */
+      }
       const composed = `${formatDegradedBanner(reason)}\n\n${head.text}`;
       return { ...result, content: [{ type: 'text', text: composed }, ...tail] };
     }
@@ -2173,14 +2512,14 @@ export class ToolHandler {
   }
 
   /**
-   * Append a one-line product index status footer (Spec 0035).
-   * Guidance-only replies that already start with `HomeGraph status=` are left alone.
+   * Decorate successful tool text (Spec 0035 status footer + Spec 0038 project-root hint
+   * + Spec 0043 bound projectPath pin notice).
+   * Prepends absolute project root + join guidance when known; appends status when missing.
    */
   private withProductStatusFooter(result: ToolResult, projectPath?: string): ToolResult {
     if (result.isError) return result;
     const [first, ...rest] = result.content;
     if (!first || first.type !== 'text') return result;
-    if (textAlreadyHasProductStatus(first.text)) return result;
 
     let cg: HomeGraph;
     try {
@@ -2198,26 +2537,55 @@ export class ToolHandler {
       }
     }
 
-    let state;
-    try {
-      state = resolveProductIndexState(cg);
-    } catch {
-      return result;
-    }
+    let text = first.text;
 
-    let pendingPaths: string[] | undefined;
-    if (state === 'dirty') {
+    // Spec 0038: absolute project root + how to join repo-relative paths (idempotent).
+    if (!textAlreadyHasProjectRootHint(text)) {
       try {
-        pendingPaths = (cg.getPendingFiles?.() ?? []).map((p) => p.path);
+        const absRoot = resolvePath(cg.getProjectRoot());
+        if (absRoot) {
+          text = `${formatProjectRootPathHint(absRoot)}\n\n${text}`;
+        }
       } catch {
-        pendingPaths = [];
+        /* no root — skip hint */
       }
     }
 
-    const line = formatProductStatusLine(state, { pendingPaths });
+    // Spec 0043: bound-root soft-pin notice at the very top (consume once).
+    const pinNotice = this.boundProjectPathPinNotice;
+    this.boundProjectPathPinNotice = null;
+    if (pinNotice && !textAlreadyHasBoundProjectPathPinNotice(text)) {
+      text = `${pinNotice}\n\n${text}`;
+    }
+
+    // Spec 0035: one-line product index status footer (skip if already present).
+    if (!textAlreadyHasProductStatus(text)) {
+      let state;
+      try {
+        state = resolveProductIndexState(cg);
+      } catch {
+        return {
+          ...result,
+          content: [{ type: 'text', text }, ...rest],
+        };
+      }
+
+      let pendingPaths: string[] | undefined;
+      if (state === 'dirty') {
+        try {
+          pendingPaths = (cg.getPendingFiles?.() ?? []).map((p) => p.path);
+        } catch {
+          pendingPaths = [];
+        }
+      }
+
+      const line = formatProductStatusLine(state, { pendingPaths });
+      text = `${text}\n\n${line}`;
+    }
+
     return {
       ...result,
-      content: [{ type: 'text', text: `${first.text}\n\n${line}` }, ...rest],
+      content: [{ type: 'text', text }, ...rest],
     };
   }
 
@@ -2233,9 +2601,56 @@ export class ToolHandler {
     sessionState?: ExploreSessionState,
   ): Promise<ToolResult> {
     const requestStartedAt = Date.now();
+    const result = await this.executeCore(toolName, args, sessionState, requestStartedAt);
+    this.traceToolCall(toolName, args, result, requestStartedAt);
+    return result;
+  }
+
+  /** Spec 0046: HOMEGRAPH_DEBUG tool summary → stderr + daemon.log. */
+  private traceToolCall(
+    toolName: string,
+    args: Record<string, unknown>,
+    result: ToolResult,
+    requestStartedAt: number,
+  ): void {
+    try {
+      let projectRoot: string | undefined;
+      try {
+        projectRoot = this.getHomeGraph(args.projectPath as string | undefined).getProjectRoot();
+      } catch {
+        projectRoot = typeof args.projectPath === 'string' ? args.projectPath : undefined;
+      }
+      const q = typeof args.query === 'string'
+        ? args.query
+        : typeof args.symbol === 'string'
+          ? args.symbol
+          : undefined;
+      const evidenceStatus = (result._meta?.homegraphEvidence as { status?: string } | undefined)?.status
+        ?? result[EXPLORE_EMISSION_KEY]?.evidenceStatus;
+      logToolDebug(toolName, {
+        projectRoot,
+        durationMs: Date.now() - requestStartedAt,
+        isError: !!result.isError,
+        evidenceStatus,
+        query: q,
+      });
+    } catch {
+      /* logging never fails the tool */
+    }
+  }
+
+  private async executeCore(
+    toolName: string,
+    args: Record<string, unknown>,
+    sessionState: ExploreSessionState | undefined,
+    requestStartedAt: number,
+  ): Promise<ToolResult> {
     args = { ...args };
     for (const key of [QUERY_PLAN_ARG, QUERY_DEADLINE_ARG, QUERY_STARTED_ARG, QUERY_INDEX_STATE_ARG, QUERY_FAST_ATTEMPTED_ARG, '_hgEvidenceMaxChars']) delete args[key];
     try {
+      // Spec 0043: drop any leftover pin notice from a prior call that exited
+      // before withProductStatusFooter (gate / defer / refuse).
+      this.boundProjectPathPinNotice = null;
       // Block the first tool call on the engine's post-open reconcile so we
       // never serve rows for files deleted/edited while no MCP server was
       // running. The wait is time-boxed (#905): a huge-repo reconcile takes
@@ -2526,18 +2941,21 @@ export class ToolHandler {
     try {
       const cg = this.getHomeGraph(args.projectPath as string | undefined);
       const root = cg.getProjectRoot();
-      const decision = decideDepthToolFuse(
-        sessionState.forProject(root),
-        sessionState.depthToolCount(root),
-        toolName,
-      );
-      if (!decision.refuse) return null;
-      const hint = typeof args.symbol === 'string'
+      const prior = sessionState.forProject(root);
+      const symbolHint = typeof args.symbol === 'string'
         ? args.symbol
         : typeof args.file === 'string'
           ? args.file
           : undefined;
-      return this.textResult(formatDepthToolRefuse(decision, toolName, hint));
+      // Spec 0044 §10.2: symbols already on the locate list bypass the Partial depth cap.
+      if (shouldExemptDepthFuseForLocatedSymbol(prior, symbolHint)) return null;
+      const decision = decideDepthToolFuse(
+        prior,
+        sessionState.depthToolCount(root),
+        toolName,
+      );
+      if (!decision.refuse) return null;
+      return this.textResult(formatDepthToolRefuse(decision, toolName, symbolHint));
     } catch {
       return null;
     }
@@ -2594,6 +3012,9 @@ export class ToolHandler {
       const prior = sessionState.forProject(root);
       const last = prior?.calls[prior.calls.length - 1];
       if (!last || inferExploreEvidenceStatus(last) === 'complete') return;
+      const symbolHint = typeof args.symbol === 'string' ? args.symbol : undefined;
+      // Spec 0044 §10.2: located-symbol drills do not consume the Partial depth budget.
+      if (shouldExemptDepthFuseForLocatedSymbol(prior, symbolHint)) return;
       sessionState.recordDepthTool(root);
     } catch { /* bookkeeping only */ }
   }
@@ -3494,6 +3915,13 @@ export class ToolHandler {
       return {
         label: `function-pointer dispatch via ${via} (dynamic dispatch)`,
         compact: `dynamic: fn-pointer ${m.via ? String(m.via) : ''}${at}`,
+        registeredAt,
+      };
+    }
+    if (m?.synthesizedBy === 'arkts-route-map') {
+      return {
+        label: `Harmony route registration (config → page/builder)`,
+        compact: `route-map registration${at}`,
         registeredAt,
       };
     }
@@ -6569,7 +6997,13 @@ export class ToolHandler {
     const isTestPath = (p: string) => /(^|\/)(tests?|spec)\//i.test(p) || /\.(test|spec)\./i.test(p);
     const fileNodes = new Map<string, Node[]>();
     const seedIds = new Set<string>();
-    const domainPathTokens = mechanismDomainPathTokens(query);
+    const domainPathTokens = shouldSuppressSynonymExpansion({
+      hasExactAnchorHit: extractInRepoLocateAnchors(query).length > 0
+        || extractTypeNamesFromQuery(query).length > 0,
+      hasLiteralWitness: false,
+    })
+      ? []
+      : mechanismDomainPathTokens(query);
 
     const addNode = (n: Node): void => {
       if (isOhosApiFilePath(n.filePath)) return;
@@ -7025,9 +7459,8 @@ export class ToolHandler {
     query: string,
     domainTokens: string[],
   ): Node[] {
-    const tokens = domainTokens.length > 0
-      ? domainTokens
-      : mechanismDomainPathTokens(query);
+    // Spec 0044 §9: callers may pass [] to suppress CJK→ASCII synonym expansion.
+    const tokens = domainTokens;
     if (tokens.length === 0) return [];
 
     const byId = new Map<string, Node>();
@@ -7473,7 +7906,9 @@ export class ToolHandler {
         }
         if (!callersOnly) {
           for (const { node: c } of cg.getCallees(id).slice(0, 10)) {
-            // Skip log*/hilog helpers — Export→logInfo homonyms ballooned seeds.
+            if (shouldDemoteLogToastSpine(c.name, query)) {
+              continue;
+            }
             if (/^log(?:Info|Error|Warn|Debug|Fatal)?$/i.test(c.name) || /^hilog$/i.test(c.name)) {
               continue;
             }
@@ -7656,11 +8091,13 @@ export class ToolHandler {
         if (callers.length === 0 && callees.length === 0) continue;
         trail.push(`- \`${seedNode.name}\` (${seedNode.kind}) — ${seedNode.filePath}:${seedNode.startLine}`);
         for (const c of callers) {
+          if (isMcpNoiseNode(c.node)) continue;
           const loc = c.node.startLine ? `:${c.node.startLine}` : '';
           trail.push(`  ← used by \`${c.node.name}\` (${c.node.kind}) — ${c.node.filePath}${loc}`);
           trailBullets++;
         }
         for (const c of callees) {
+          if (isMcpNoiseNode(c.node)) continue;
           const loc = c.node.startLine ? `:${c.node.startLine}` : '';
           trail.push(`  → calls \`${c.node.name}\` (${c.node.kind}) — ${c.node.filePath}${loc}`);
           trailBullets++;
@@ -9751,6 +10188,8 @@ export class ToolHandler {
     let maxFiles = clamp((args.maxFiles as number) || budget.defaultMaxFiles, 1, 20);
 
     const queryFileBasenames = extractFileBasenamesFromQuery(query);
+    const locateAnchors = extractInRepoLocateAnchors(query);
+    const exploreSourceScope = resolveExploreSourceScope(query, plan?.sourceScope);
     const interpretationQuery = feature('queryAsInterpretationSurvey', queryAsInterpretationSurvey);
     const testOnlyInterpretation = feature('queryAsTestOnlyInterpretation', queryAsTestOnlyInterpretation);
     const crossModuleFlow = feature('queryAsCrossModuleFlowSurvey', queryAsCrossModuleFlowSurvey) || plan?.intent === 'flow';
@@ -9763,22 +10202,31 @@ export class ToolHandler {
       ? `${queryFileBasenames[0]} ${query}`
       : queryFileBasenames.length === 1
         ? `${queryFileBasenames[0]} ${query}`
-        : query;
+        : locateAnchors.length === 1
+          ? `${locateAnchors[0]} ${query}`
+          : query;
+    const wantHints = !!(plan && (plan.source === 'llm' || plan.literalTexts?.length || plan.anchors?.length || plan.requestContract))
+      || exploreSourceScope !== 'all';
     const subgraph = await cg.findRelevantContext(contextQuery, {
       ...contextOpts,
-      ...(plan && (plan.source === 'llm' || plan.literalTexts?.length || plan.requestContract) ? { retrievalHints: {
-        symbols: plan.anchors.filter((anchor) => !(plan.bindings ?? []).some((node) =>
-          anchor === node.name || anchor === node.qualifiedName)),
-        searchTerms: plan.searchTerms, literalTexts: [...new Set([...(plan.literalTexts ?? []),
-          ...(accuracyTargetsEnabled() && !plan.bindings?.length ? contractLiteralTexts(plan.requestContract) : [])])].slice(0, 8), sourceScope: plan.sourceScope, nodeIds: (plan.bindings ?? []).map((node) => node.id),
+      ...(wantHints ? { retrievalHints: {
+        symbols: [
+          ...(plan?.anchors ?? []).filter((anchor) => !(plan?.bindings ?? []).some((node) =>
+            anchor === node.name || anchor === node.qualifiedName)),
+          ...locateAnchors,
+        ].slice(0, 16),
+        searchTerms: plan?.searchTerms ?? [], literalTexts: [...new Set([...(plan?.literalTexts ?? []),
+          ...(accuracyTargetsEnabled() && !plan?.bindings?.length ? contractLiteralTexts(plan?.requestContract) : [])])].slice(0, 8),
+        sourceScope: exploreSourceScope,
+        nodeIds: (plan?.bindings ?? []).map((node) => node.id),
       } } : {}),
     });
 
-    // Path-first: always seed nodes from an explicit `Foo.ets` basename so a
-    // CJK-only ask + path (or a shared prop like showSearchIcon) cannot leave
-    // the named file out of the subgraph / digests.
-    if (queryFileBasenames.length > 0 && plan?.sourceScope !== 'sdk') {
-      for (const base of queryFileBasenames.slice(0, 3)) {
+    // Path-first + Spec 0042 identifier seeding: Foo.ets and PascalCase ≥8 exact hits
+    // become roots so taskContext-polluted FTS cannot drop the named in-repo file.
+    if (exploreSourceScope !== 'sdk') {
+      const seedNames = [...new Set([...queryFileBasenames, ...locateAnchors])].slice(0, 6);
+      for (const base of seedNames) {
         let hits: SearchResult[] = [];
         try {
           hits = cg.searchNodes(base, { limit: 50 });
@@ -9786,7 +10234,14 @@ export class ToolHandler {
           continue;
         }
         for (const r of hits) {
-          if (!fileMatchesQueryBasename(r.node.filePath, [base])) continue;
+          if (isMcpNoiseNode(r.node)) continue;
+          const fp = r.node.filePath.replace(/\\/g, '/');
+          const stem = fp.split('/').pop()?.replace(/\.[^.]+$/, '') ?? '';
+          const exactFile = stem.toLowerCase() === base.toLowerCase()
+            || fileMatchesQueryBasename(r.node.filePath, [base]);
+          const exactSymbol = r.node.name === base
+            || (r.node.qualifiedName?.split(/::|\./).pop() === base);
+          if (!exactFile && !exactSymbol) continue;
           if (!subgraph.nodes.has(r.node.id)) {
             subgraph.nodes.set(r.node.id, r.node);
             subgraph.roots.push(r.node.id);
@@ -9817,10 +10272,27 @@ export class ToolHandler {
     }
     const literalSource = this.renderLiteralSource(cg, subgraph);
     if (subgraph.nodes.size === 0) {
-      const text = literalSource.text || `No relevant code found for "${query}"`;
-      return this.exploreResult(text, { projectRoot, query, files: literalSource.files,
-        sourceBytes: literalSource.files.reduce((sum, file) => sum + file.bytes, 0), responseBytes: text.length,
-        locatedNodes: literalSource.nodes, partial: true, evidenceStatus: literalSource.text ? 'partial' : 'empty' });
+      // Spec 0044 §9: empty exact evidence → Miss (paths only), not a source dump.
+      let fuzzyPaths: string[] = [];
+      try {
+        fuzzyPaths = [...new Set(
+          cg.searchNodes(query.slice(0, 64), { limit: 12 })
+            .map((r) => r.node.filePath.replace(/\\/g, '/'))
+            .filter((p) => p && !isOhosApiFilePath(p)),
+        )].slice(0, 8);
+      } catch { /* ignore */ }
+      const text = literalSource.text
+        || formatMissBanner(fuzzyPaths);
+      return this.exploreResult(text, {
+        projectRoot,
+        query,
+        files: literalSource.files,
+        sourceBytes: literalSource.files.reduce((sum, file) => sum + file.bytes, 0),
+        responseBytes: text.length,
+        locatedNodes: literalSource.nodes,
+        partial: true,
+        evidenceStatus: literalSource.text ? 'partial' : 'empty',
+      });
     }
 
     // Seed import nodes for @kit.* / *Kit names (and named symbols like taskpool).
@@ -9975,7 +10447,7 @@ export class ToolHandler {
         const raw = isQual ? this.findAllSymbols(cg, t).nodes : cg.getNodesByName(t);
         let cands = raw
           .filter((n) => SEED_KINDS.has(n.kind) && !isTestPath(n.filePath)
-            && !(plan?.sourceScope === 'local' && isOhosApiFilePath(n.filePath)))
+            && !(exploreSourceScope === 'local' && isOhosApiFilePath(n.filePath)))
           .sort((a, b) => {
             // Prefer callables over types when both share a name, then body size.
             const ac = CALLABLE.has(a.kind) ? 1 : 0;
@@ -10320,11 +10792,15 @@ export class ToolHandler {
     // dropped, so the budget never fills with incidental files. Guarded so it
     // never prunes below 2.
     if (maxGraph > 0) {
+      const litKeep = new Set(
+        (subgraph.literalEvidence?.hits ?? []).map((h) => h.filePath).filter(Boolean),
+      );
       const gated = relevantFiles.filter(([fp]) =>
         (fileGraphScore.get(fp) ?? 0) >= maxGraph * 0.06
         || centralFiles.has(fp)
         || entryFiles.has(fp)
         || changeSurfaceFiles.has(fp)
+        || litKeep.has(fp)
         || (fileTermHits.get(fp) ?? 0) >= 2,
       );
       if (gated.length >= 2) relevantFiles = gated;
@@ -10348,6 +10824,24 @@ export class ToolHandler {
     // buried-rescue pass) is the lexically-dissimilar answer; give it the named
     // tier so it isn't buried under files that merely share surface words (#1064).
     for (const fp of changeSurfaceFiles) namedSeedFiles.add(fp);
+
+    // Spec 0044 §7: literal witness files must stay in the pack and rank with named seeds.
+    {
+      const litPaths = [...new Set(
+        (subgraph.literalEvidence?.hits ?? []).map((h) => h.filePath).filter(Boolean),
+      )];
+      for (const fp of litPaths) {
+        entryFiles.add(fp);
+        namedSeedFiles.add(fp);
+        if (relevantFiles.some(([f]) => f === fp)) continue;
+        let group = fileGroups.get(fp);
+        if (!group) {
+          group = { nodes: [], score: 1000 };
+          fileGroups.set(fp, group);
+        }
+        relevantFiles.push([fp, group]);
+      }
+    }
 
     // Multi-term corroboration tier: a file that is BOTH (a) an entry/central file
     // (a search root, named seed, or graph-central hub — i.e. structurally part of
@@ -10374,13 +10868,23 @@ export class ToolHandler {
     const sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
-      if (plan?.sourceScope === 'local') {
+      if (exploreSourceScope === 'local') {
         const sdkOrder = Number(isOhosApiFilePath(a[0])) - Number(isOhosApiFilePath(b[0]));
         if (sdkOrder) return sdkOrder;
       }
       const literalOrder = Number((subgraph.literalEvidence?.hits ?? []).some((hit) => hit.filePath === b[0]))
         - Number((subgraph.literalEvidence?.hits ?? []).some((hit) => hit.filePath === a[0]));
       if (literalOrder) return literalOrder;
+
+      // Spec 0044 §7: demote Logger/hilog/Toast-only files when query did not name them.
+      const logToastDemote = (fp: string): number => {
+        const group = fileGroups.get(fp);
+        if (!group?.nodes.length) return 0;
+        const allNoise = group.nodes.every((n) => shouldDemoteLogToastSpine(n.name, query));
+        return allNoise ? 1 : 0;
+      };
+      const logOrder = logToastDemote(a[0]) - logToastDemote(b[0]);
+      if (logOrder) return logOrder;
 
       // Query-named file (LocationController.ets in the question) before partial
       // substring matches (control.ets matching "Controller" inside LocationController).
@@ -11505,7 +12009,18 @@ export class ToolHandler {
       const headerSuffix = omittedCount > 0
         ? `${headerSymbols.join(', ')}, +${omittedCount} more`
         : headerSymbols.join(', ');
-      const fileHeader = fileSectionHeader(filePath, headerSuffix);
+      let fileHeader = fileSectionHeader(filePath, headerSuffix);
+      // Spec 0044 §10.1: warn when basename ≠ primary declaration.
+      {
+        const primary = group?.nodes.find((n) =>
+          ['class', 'struct', 'component', 'interface', 'enum'].includes(n.kind)
+          && !n.name.startsWith('%'),
+        ) ?? group?.nodes.find((n) =>
+          ['function', 'method'].includes(n.kind) && !n.name.startsWith('%'),
+        );
+        const mismatch = formatFilenameDeclarationMismatch(filePath, primary?.name);
+        if (mismatch) fileHeader = `${fileHeader}\n${mismatch}`;
+      }
 
       // The total cap bounds INCIDENTAL files only. A file that DEFINES a symbol
       // the agent named (or that's on the flow spine) renders even when the
@@ -11805,19 +12320,150 @@ export class ToolHandler {
   }
 
   /**
+   * Spec 0039: when the query names Harmony route profiles, lead with a short
+   * Registration sources table so agents see JSON was indexed (avoid re-Read).
+   */
+  private prependHarmonyRegistrationSources(
+    result: ToolResult,
+    projectRoot: string,
+    query: string,
+  ): ToolResult {
+    if (!/route_map|router_map|main_pages/i.test(query)) return result;
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (/^\*\*Registration sources\*\*/m.test(first.text)) return result;
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonyRegistrationSources(cg);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
+  /** Spec 0041: lead with Resource hits when string.json is named or matched. */
+  private prependHarmonyResourceHits(
+    result: ToolResult,
+    projectRoot: string,
+    query: string,
+  ): ToolResult {
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (/^\*\*Resource hits\*\*/m.test(first.text) || /\n\*\*Resource hits\*\*/m.test(first.text)) {
+      return result;
+    }
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonyResourceHits(cg, query);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
+  /** Spec 0048 §1–2: Capability profiles or form negative evidence. */
+  private prependHarmonyCapabilityProfiles(
+    result: ToolResult,
+    projectRoot: string,
+    query: string,
+  ): ToolResult {
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (
+      /^\*\*Capability profiles/m.test(first.text)
+      || /\n\*\*Capability profiles/m.test(first.text)
+    ) {
+      return result;
+    }
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonyCapabilityProfiles(cg, query);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
+  /** Spec 0048 §5: seam notes for located anchors. */
+  private prependHarmonySeamNotes(
+    result: ToolResult,
+    projectRoot: string,
+    emission?: ExploreEmission,
+  ): ToolResult {
+    const located = emission?.locatedNodes;
+    if (!located || located.length === 0) return result;
+    const [first, ...rest] = result.content;
+    if (!first || first.type !== 'text') return result;
+    if (/^\*\*Seam notes\*\*/m.test(first.text) || /\n\*\*Seam notes\*\*/m.test(first.text)) {
+      return result;
+    }
+    let cg: HomeGraph;
+    try {
+      cg = this.getHomeGraph(projectRoot);
+    } catch {
+      return result;
+    }
+    const section = formatHarmonySeamNotes(cg, projectRoot, located);
+    if (!section) return result;
+    return {
+      ...result,
+      content: [{ type: 'text', text: `${section}\n\n${first.text}` }, ...rest],
+    };
+  }
+
+  /**
    * An explore response plus the record of what it emitted (CG-17). The record
    * rides the result only as far as {@link execute}, which files it into the
    * calling session's state and deletes it — see {@link EXPLORE_EMISSION_KEY}.
    */
   private exploreResult(text: string, emission: ExploreEmission): ToolResult {
     const meta = inferExplorePartialMeta(text);
-    const result = this.textResult(text);
+    let evidenceStatus = emission.evidenceStatus
+      ?? (emission.sourceBytes > 0 ? (meta.partial ? 'partial' : 'complete') : 'partial');
+    let body = text;
+
+    // Spec 0044 §8: Located banner when complete exact evidence; soften Partial wording.
+    if (evidenceStatus === 'complete' && !body.includes(LOCATED_MARKER)) {
+      if (/\*\*Partial locator\*\*/i.test(body)) {
+        body = body.replace(/>\s*\*\*Partial locator\*\*[^\n]*/gi, formatLocatedBanner());
+      } else if (!/\*\*ANSWER NOW/i.test(body) && !body.includes(MISS_MARKER)) {
+        body = `${formatLocatedBanner()}\n\n${body}`;
+      }
+    } else if (
+      (evidenceStatus === 'partial' || meta.partial)
+      && /\*\*Partial locator\*\*/i.test(body)
+      && !body.includes(LOCATED_MARKER)
+    ) {
+      // Spec 0044 §8: Partial next-step → node/usages/search (not Grep same names).
+      body = body.replace(/>\s*\*\*Partial locator\*\*[^\n]*/gi, formatPartialBanner());
+    }
+
+    let result = this.textResult(body);
+    result = this.prependHarmonyRegistrationSources(result, emission.projectRoot, emission.query);
+    result = this.prependHarmonyCapabilityProfiles(result, emission.projectRoot, emission.query);
+    result = this.prependHarmonyResourceHits(result, emission.projectRoot, emission.query);
     result[EXPLORE_EMISSION_KEY] = {
       ...emission,
-      evidenceStatus: emission.evidenceStatus ?? (emission.sourceBytes > 0 ? (meta.partial ? 'partial' : 'complete') : 'partial'),
-      partial: emission.partial ?? (emission.evidenceStatus && emission.evidenceStatus !== 'complete' ? true : meta.partial),
+      evidenceStatus,
+      partial: emission.partial ?? (evidenceStatus !== 'complete' ? true : meta.partial),
       nextAnchor: emission.nextAnchor ?? meta.nextAnchor,
     };
+    result = this.prependHarmonySeamNotes(result, emission.projectRoot, result[EXPLORE_EMISSION_KEY]);
     return result;
   }
 
@@ -11827,6 +12473,9 @@ export class ToolHandler {
     projectRoot: string,
     query: string,
   ): ToolResult {
+    result = this.prependHarmonyRegistrationSources(result, projectRoot, query);
+    result = this.prependHarmonyCapabilityProfiles(result, projectRoot, query);
+    result = this.prependHarmonyResourceHits(result, projectRoot, query);
     if (result[EXPLORE_EMISSION_KEY]) {
       const em = result[EXPLORE_EMISSION_KEY]!;
       if (em.partial === undefined || !em.nextAnchor) {
@@ -11834,6 +12483,7 @@ export class ToolHandler {
         if (em.partial === undefined) em.partial = meta.partial;
         if (!em.nextAnchor && meta.nextAnchor) em.nextAnchor = meta.nextAnchor;
       }
+      result = this.prependHarmonySeamNotes(result, projectRoot, em);
       return result;
     }
     const text = result.content?.[0]?.text ?? '';
@@ -12030,7 +12680,8 @@ export class ToolHandler {
     const nodes = cg.getNodesInFile(filePath)
       .filter((n) => n.kind !== 'file' && n.kind !== 'import' && n.kind !== 'export')
       .sort((a, b) => a.startLine - b.startLine);
-    const dependents = cg.getFileDependents(filePath);
+    const dependents = cg.getFileDependents(filePath)
+      .filter((p) => !p.includes('@dummy') && !p.replace(/\\/g, '/').split('/').pop()?.startsWith('@dummy'));
 
     // Compact, one-line blast radius (homegraph's value-add over a plain Read).
     const depSummary = dependents.length
@@ -12226,6 +12877,7 @@ export class ToolHandler {
       const out: Array<{ node: Node; edge: Edge }> = [];
       for (const e of edges) {
         if (seen.has(e.node.id)) continue;
+        if (isMcpNoiseNode(e.node)) continue;
         seen.add(e.node.id);
         out.push(e);
       }
@@ -12433,15 +13085,45 @@ export class ToolHandler {
     }
 
     const FILE_CAP = 80;
+    const projectRoot = cg.getProjectRoot();
+    const hasHarmony = map.modules.some((m) => m.kind === 'harmony');
     const lines: string[] = [
       `**Project map** (phase=${map.phase})`,
       `modules: ${map.modules.length} · files: ${map.fileCount}`,
-      '',
     ];
+    // Spec 0040 — Harmony skeleton summary (navigation pointers, not call edges).
+    try {
+      const bundle = readHarmonyAppBundleName(projectRoot);
+      if (bundle) lines.push(`bundle: \`${bundle}\` (from app.json5)`);
+    } catch {
+      /* omit */
+    }
+    if (hasHarmony) {
+      lines.push(
+        'modules from `build-profile.json5` — skeleton map only (not call edges; use `homegraph_explore` for route_map → page)'
+      );
+    }
+    lines.push('');
 
     for (const m of map.modules) {
       const rootLabel = m.rootPath || '.';
       lines.push(`### ${m.name} (\`${rootLabel}\`) · ${m.kind} · ${m.fileCount} files`);
+      if (m.kind === 'harmony' || m.rootPath) {
+        try {
+          const profiles = listHarmonyRouteProfilesUnderModule(projectRoot, m.rootPath || '');
+          for (const p of profiles) {
+            lines.push(`- route profile: \`${p}\``);
+          }
+        } catch {
+          /* omit */
+        }
+        try {
+          const ohpm = readModuleOhPackageName(projectRoot, m.rootPath || '');
+          if (ohpm) lines.push(`- oh-package: \`${ohpm}\``);
+        } catch {
+          /* omit */
+        }
+      }
       if (m.files && m.files.length > 0) {
         const shown = m.files.slice(0, FILE_CAP);
         for (const f of shown) {
@@ -12452,6 +13134,41 @@ export class ToolHandler {
         }
       }
       lines.push('');
+    }
+
+    // Spec 0048 §4 — module roster with local file: deps.
+    try {
+      const roster = formatHarmonyModuleRoster(projectRoot, map.modules);
+      if (roster) {
+        lines.push(roster);
+        lines.push('');
+      }
+    } catch {
+      /* omit roster on failure */
+    }
+
+    // Spec 0042 B — path inventory (string/rawfile/media + unindexed package dirs).
+    // Skip when the caller filtered to a single non-Harmony module? Still useful
+    // project-wide; keep always on Harmony-shaped trees or whenever scan finds hits.
+    try {
+      const indexedPaths = map.modules.flatMap((m) => (m.files ?? []).map((f) => f.path));
+      // When includeFiles=false, files arrays are empty — fall back to full map paths.
+      let pathsForUnindexed = indexedPaths;
+      if (pathsForUnindexed.length === 0) {
+        try {
+          const full = cg.getProjectMap({ includeFiles: true });
+          pathsForUnindexed = full.modules.flatMap((m) => (m.files ?? []).map((f) => f.path));
+        } catch {
+          pathsForUnindexed = [];
+        }
+      }
+      const inv = scanHarmonyResourceInventory(projectRoot, { indexedPaths: pathsForUnindexed });
+      const section = formatHarmonyResourceInventory(inv);
+      if (section) {
+        lines.push(section);
+      }
+    } catch {
+      /* omit inventory on scan failure */
     }
 
     return this.textResult(lines.join('\n').trimEnd());
