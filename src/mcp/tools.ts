@@ -10033,7 +10033,7 @@ export class ToolHandler {
             anchor === node.name || anchor === node.qualifiedName)),
           ...locateAnchors,
         ].slice(0, 16),
-        searchTerms: plan?.searchTerms, literalTexts: plan?.literalTexts,
+        searchTerms: plan?.searchTerms ?? [], literalTexts: plan?.literalTexts,
         sourceScope: exploreSourceScope,
         nodeIds: (plan?.bindings ?? []).map((node) => node.id),
       } } : {}),
