@@ -22,15 +22,29 @@ import { getDatabasePath } from '../db';
 import { resolveGraphSources, graphSourceFlags } from '../graph-sources';
 import { validateProjectPath } from '../utils';
 import { logLifecycle, logLifecycleError } from '../runtime-log';
+import { isIndexableRoot, parseDeferProbeMs } from './indexable-root';
 
 // Lazy-load the heavy HomeGraph chain (sqlite + query/graph/context layers) OFF
 // the MCP startup path. It's only needed once a tool actually opens a project —
 // not to answer initialize/tools-list — so deferring it lets `serve mcp` (and
 // the daemon it spawns) bind + register tools in ~Node-startup time instead of
 // ~800ms, closing the "No such tool available" cold-start race that made headless
-// agents flounder. require() is sync + cached on the CommonJS build.
-const loadHomeGraph = (): typeof import('../index').default =>
-  (require('../index') as typeof import('../index')).default;
+// agents flounder. Prefer dynamic import (vitest + CJS); sync require remains for
+// the sync retry path after an async load has warmed the cache (or under dist/).
+let homeGraphCtor: typeof import('../index').default | null = null;
+
+const loadHomeGraph = async (): Promise<typeof import('../index').default> => {
+  if (!homeGraphCtor) {
+    homeGraphCtor = (await import('../index')).default;
+  }
+  return homeGraphCtor;
+};
+
+const loadHomeGraphSync = (): typeof import('../index').default => {
+  if (homeGraphCtor) return homeGraphCtor;
+  homeGraphCtor = (require('../index') as typeof import('../index')).default;
+  return homeGraphCtor;
+};
 
 export interface MCPEngineOptions {
   /**
@@ -77,6 +91,13 @@ export class MCPEngine {
   // Off-loop read-tool pool (daemon mode only). Created lazily once the default
   // project is open — workers each hold their own WAL read connection.
   private queryPool: QueryPool | null = null;
+  /**
+   * Spec 0049: auto-init deferred because the root was empty. Probe until
+   * indexable, then run the normal create-DB path once.
+   */
+  private deferredAutoInitRoot: string | null = null;
+  private deferProbeTimer: ReturnType<typeof setInterval> | null = null;
+  private deferAutoInitPromise: Promise<boolean> | null = null;
 
   constructor(opts: MCPEngineOptions = {}) {
     this.opts = { watch: opts.watch ?? true, queryPool: opts.queryPool ?? false, rootFloor: opts.rootFloor ?? null };
@@ -148,6 +169,22 @@ export class MCPEngine {
     return this.toolHandler.hasDefaultHomeGraph();
   }
 
+  /** Spec 0049: true while auto-init is waiting for an empty root to grow sources. */
+  isAutoInitDeferred(): boolean {
+    return this.deferredAutoInitRoot !== null && !this.toolHandler.hasDefaultHomeGraph();
+  }
+
+  /**
+   * Spec 0049: on tool call (or timer), re-check the deferred root and start
+   * the normal auto-init once it becomes indexable. Idempotent.
+   */
+  async kickDeferredAutoInit(): Promise<boolean> {
+    if (this.closed || this.toolHandler.hasDefaultHomeGraph()) return false;
+    const root = this.deferredAutoInitRoot;
+    if (!root) return false;
+    return this.tryAutoInit(root);
+  }
+
   /**
    * Walk up from `searchFrom` to find the nearest `.homegraph/` and open it.
    * Idempotent: concurrent callers share one in-flight init; subsequent
@@ -195,7 +232,7 @@ export class MCPEngine {
         try { this.cg.close(); } catch { /* ignore */ }
         this.cg = null;
       }
-      this.cg = loadHomeGraph().openSync(resolvedRoot, { sources: mode });
+      this.cg = loadHomeGraphSync().openSync(resolvedRoot, { sources: mode });
       this.projectPath = resolvedRoot;
       this.toolHandler.setDefaultHomeGraph(this.cg);
       this.startWatching();
@@ -213,6 +250,7 @@ export class MCPEngine {
   stop(): void {
     if (this.closed) return;
     this.closed = true;
+    this.clearDeferProbe();
     // Detach + terminate the worker pool first so no tool call routes to a
     // worker mid-teardown; outstanding pool calls resolve with graceful guidance.
     this.toolHandler.setQueryPool(null);
@@ -253,7 +291,7 @@ export class MCPEngine {
         );
         return;
       }
-      this.cg = await loadHomeGraph().open(resolvedRoot, { sources: mode });
+      this.cg = await (await loadHomeGraph()).open(resolvedRoot, { sources: mode });
       this.toolHandler.setDefaultHomeGraph(this.cg);
       this.healBuildPhase(this.cg);
       this.startWatching();
@@ -283,13 +321,40 @@ export class MCPEngine {
     // Race: another process finished init before we entered — open, don't bail
     // (Spec 0032). Returning false here left the session with no cg forever.
     if (isInitialized(root)) {
+      this.clearDeferProbe();
       return this.openAfterAutoInitRace(root);
     }
 
+    // Spec 0049: empty workspace — do not create `.homegraph/` (blocks
+    // in-place `devecocli create`). Probe later / on tool kick.
+    if (!isIndexableRoot(root)) {
+      this.armDeferProbe(root);
+      process.stderr.write(
+        `[HomeGraph MCP] Auto-init deferred — empty root at ${root} ` +
+          `(no build-profile.json5 / indexable sources yet)\n`
+      );
+      logLifecycle('auto-init.deferred', { projectRoot: root });
+      this.projectPath = root;
+      return false;
+    }
+
+    if (this.deferAutoInitPromise) {
+      return this.deferAutoInitPromise;
+    }
+
+    this.deferAutoInitPromise = this.runAutoInitCreate(root).finally(() => {
+      this.deferAutoInitPromise = null;
+    });
+    return this.deferAutoInitPromise;
+  }
+
+  /** Spec 0049: create DB + fast map + background full (shared by first hit and kick). */
+  private async runAutoInitCreate(root: string): Promise<boolean> {
+    this.clearDeferProbe();
     try {
       process.stderr.write(`[HomeGraph MCP] Auto-init at ${root}\n`);
       logLifecycle('auto-init.start', { projectRoot: root });
-      const HomeGraph = loadHomeGraph();
+      const HomeGraph = await loadHomeGraph();
       // Create DB immediately so tools/open succeed; index in background.
       const cg = await HomeGraph.init(root, { index: false });
       // Pin empty state before returning so the first tool call cannot see `none`
@@ -329,7 +394,46 @@ export class MCPEngine {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[HomeGraph MCP] Auto-init failed: ${msg}\n`);
       logLifecycleError('auto-init.fail', { projectRoot: root, msg });
+      // Keep probing so a later scaffold (or retry) can still land.
+      if (!isInitialized(root)) {
+        this.armDeferProbe(root);
+      }
       return false;
+    }
+  }
+
+  /** Spec 0049: remember empty root and (optionally) poll until indexable. */
+  private armDeferProbe(root: string): void {
+    this.deferredAutoInitRoot = root;
+    if (this.deferProbeTimer) return;
+    const ms = parseDeferProbeMs(process.env.HOMEGRAPH_DEFER_PROBE_MS);
+    if (ms <= 0) return;
+    this.deferProbeTimer = setInterval(() => {
+      if (this.closed || this.toolHandler.hasDefaultHomeGraph()) {
+        this.clearDeferProbe();
+        return;
+      }
+      const target = this.deferredAutoInitRoot;
+      if (!target) {
+        this.clearDeferProbe();
+        return;
+      }
+      if (!isIndexableRoot(target)) return;
+      void this.tryAutoInit(target).then((ok) => {
+        if (ok) this.clearDeferProbe();
+      });
+    }, ms);
+    // Don't keep the process alive solely for the probe in direct mode.
+    if (typeof this.deferProbeTimer.unref === 'function') {
+      this.deferProbeTimer.unref();
+    }
+  }
+
+  private clearDeferProbe(): void {
+    this.deferredAutoInitRoot = null;
+    if (this.deferProbeTimer) {
+      clearInterval(this.deferProbeTimer);
+      this.deferProbeTimer = null;
     }
   }
 
@@ -348,7 +452,7 @@ export class MCPEngine {
       }
       try {
         process.stderr.write(`[HomeGraph MCP] Auto-init raced; opening existing index at ${root}\n`);
-        this.cg = await loadHomeGraph().open(root, { sources: mode });
+        this.cg = await (await loadHomeGraph()).open(root, { sources: mode });
         this.projectPath = root;
         this.toolHandler.setDefaultHomeGraph(this.cg);
         this.healBuildPhase(this.cg);
@@ -602,6 +706,8 @@ export function parseFixedWindowEnv(raw: string | undefined): number | undefined
   if (n < 1000 || n > 30 * 60 * 1000) return undefined;
   return n;
 }
+
+export { isIndexableRoot, parseDeferProbeMs } from './indexable-root';
 
 /**
  * Parse and clamp the HOMEGRAPH_WATCH_DEBOUNCE_MS env override.
