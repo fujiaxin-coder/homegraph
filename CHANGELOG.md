@@ -13,6 +13,11 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - ArkTS explore can bundle verified render/navigation scope, used imports and types, explicit module exports and local dependency configuration with the located source. Attached SDK modules provide bounded method/parameter signatures, while control summaries distinguish icon appearance, click guards and direct enabled bindings. Whole-group budgets and source fingerprints preserve evidence boundaries; optional local pack audit supports error analysis. No additional model call or mandatory tool (Spec 0050).
 
+## [1.6.0] - 2026-09-23
+
+### Improvements
+
+- MCP auto-init (Spec 0049): empty workspace roots no longer create `.homegraph/` on `--auto-init` / `HOMEGRAPH_AUTO_INIT` (fixes DevEco in-place `devecocli create` hitting `PROJECT_EXISTS` because only an index dir existed). A 60s probe (`HOMEGRAPH_DEFER_PROBE_MS`; `0` = tool-kick only) and the first `homegraph_*` call re-check `isIndexableRoot` (root `build-profile.json5` or any indexable source); once non-empty, the existing fast-map + background full index path runs once. Status footers stay the product empty/fast/full/dirty/syncing lines. Lifecycle logging no longer mkdir's `.homegraph/` just to write `daemon.log`.
 - Harmony locate seams (Spec 0048): index `form_config.json` / `shortcuts_config.json` (plus module.json5 form extensionAbilities and shortcuts/form metadata) as searchable capability nodes — explore may lead with **Capability profiles**, or an explicit no-in-repo form note instead of SDK `.d.ts`. Resource hits can append in-repo `$r('app.string.<key>')` **bound** `.ets` anchors. `homegraph_project` adds a **Module roster** (oh-package + local `file:` deps) and lists capability profile paths separately from rawfile. Explore may prepend **Seam notes** for nearby profiles and empty/log-only stubs.
 - MCP product lifecycle (Spec 0047): main-thread liveness watchdog is **off by default** (enable with `HOMEGRAPH_WATCHDOG=1`; `HOMEGRAPH_NO_WATCHDOG=1` still forces off) so concurrent DevEco init no longer gets false "Main thread unresponsive" kills — file watch / incremental sync unchanged. Shared daemon idle linger defaults to **60s** after the last client disconnects; if auto-init/full index is still in `building_fast`/`indexing`, idle exit waits until that build settles, then starts the 60s linger. While any client is connected the daemon never idle-exits.
 - MCP runtime log (Spec 0046): always-on coarse lifecycle lines (`mcp.start` / `mcp.initialize` / `auto-init.*` / `index.*` / `watcher.degraded`) go to stderr and `.homegraph/daemon.log` (same file daemon stdio already uses); soft-rotate at ~5 MiB to `daemon.log.1`. Set `HOMEGRAPH_DEBUG=1` for per-tool summaries (`tool.<name>` with duration / error / truncated query). No new `logs/` directory; default is not a full request ledger.
@@ -24,7 +29,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `homegraph_project` on Harmony repos now prints a **skeleton summary**: `bundle` from `app.json5`, a note that modules come from `build-profile.json5`, per-module `route profile:` paths (`route_map` / `router_map` / `main_pages`), and `oh-package` names when present. Still no call edges or profile JSON bodies — use explore for route→page (Spec 0039) and Read to edit. Tool descriptions and MCP initialize instructions spell out project vs explore (Spec 0040).
 - Harmony `route_map.json` / `router_map.json` / `main_pages.json` are indexed (basename allowlist) and linked into the graph as `route` nodes → page / `buildFunction` symbols. Edges carry `synthesizedBy: arkts-route-map` and `registeredAt` pointing at the config file so explore/trails show the JSON wiring site. When an explore query mentions those filenames, replies lead with a short **Registration sources** table — evidence from those profiles, reducing blind re-Read of the JSON (Spec 0039).
 - MCP tool replies that know the indexed project now begin with `HomeGraph project root: \`<absolute>\`` plus a one-line join rule: repo-relative paths below that root should be passed to Read/Grep as-is (or `<root>/<relative>` with `/`), without inventing experiment/result prefixes. MCP initialize instructions mention the same join base. Indexed path storage stays repo-relative (Spec 0038).
-
 
 ## [1.5.10] - 2026-09-20
 
@@ -273,3 +277,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.5.7]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.7
 [1.5.8]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.8
 [1.5.10]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.10
+[1.6.0]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.0

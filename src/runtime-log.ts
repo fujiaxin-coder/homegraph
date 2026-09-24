@@ -90,7 +90,9 @@ export function appendProjectDaemonLog(projectRoot: string | null | undefined, l
   if (!projectRoot) return;
   try {
     const dir = getHomeGraphDir(projectRoot);
-    fs.mkdirSync(dir, { recursive: true });
+    // Spec 0049: never create `.homegraph/` solely to write a log line — that
+    // recreated the empty-workspace PROJECT_EXISTS trap for DevEco create.
+    if (!fs.existsSync(dir)) return;
     const logPath = path.join(dir, 'daemon.log');
     maybeRotateDaemonLog(logPath);
     fs.appendFileSync(logPath, line.endsWith('\n') ? line : `${line}\n`, 'utf8');

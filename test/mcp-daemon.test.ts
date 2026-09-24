@@ -302,10 +302,12 @@ describe('Shared MCP daemon (issue #411)', () => {
     servers.push(first);
     sendInitialize(first.child, `file://${tempDir}`, 1);
     await waitFor(() => findResponse(first.stdout, 1), 10000);
-    // Direct mode — no daemon machinery touched.
+    // Direct mode — no shared daemon attach / lock / socket.
+    // Spec 0046 may still append lifecycle lines to daemon.log in direct mode.
     expect(first.stderr.some((l) => l.includes('Attached to shared daemon'))).toBe(false);
     expect(fs.existsSync(path.join(realRoot, '.homegraph', 'daemon.pid'))).toBe(false);
-    expect(fs.existsSync(path.join(realRoot, '.homegraph', 'daemon.log'))).toBe(false);
+    expect(fs.existsSync(getDaemonSocketPath(realRoot))).toBe(false);
+    expect(countListeningLines(realRoot)).toBe(0);
   }, 20000);
 
   it('clears a stale (dead-pid) lockfile and a fresh daemon takes over', async () => {

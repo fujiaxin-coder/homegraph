@@ -152,8 +152,11 @@ describe('languages/arkts migrate index enrichment', () => {
       const res = await handler.execute('homegraph_arkui_migrate', { scope: 'ParentPage' });
       expect(res.isError).toBeFalsy();
       const text = res.content[0]!.text as string;
-      // Spec 0035 appends a `HomeGraph status=` footer after the JSON body.
-      const parsed = JSON.parse(text.replace(/\n\nHomeGraph status=[\s\S]*$/, ''));
+      // Spec 0038 prepends project-root hint; Spec 0035 appends status= footer.
+      const raw = text
+        .replace(/^HomeGraph project root:[\s\S]*?\n\n/, '')
+        .replace(/\n\nHomeGraph status=[\s\S]*$/, '');
+      const parsed = JSON.parse(raw);
       expect(parsed.components[0].name).toBe('ParentPage');
     } finally {
       cg.close();

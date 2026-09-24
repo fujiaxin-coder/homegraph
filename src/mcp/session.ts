@@ -322,6 +322,15 @@ export class MCPSession {
 
     if (this.engine.hasDefaultHomeGraph()) return;
 
+    // Spec 0049: empty-root defer — re-probe and start auto-init as soon as
+    // sources appear (do not wait for the next timer tick).
+    if (this.engine.isAutoInitDeferred()) {
+      try {
+        await this.engine.kickDeferredAutoInit();
+      } catch { /* fall through */ }
+      if (this.engine.hasDefaultHomeGraph()) return;
+    }
+
     const hint = this.explicitProjectPath ?? this.engine.getProjectPath();
     if (!hint && !this.rootsAttempted) {
       this.rootsAttempted = true;

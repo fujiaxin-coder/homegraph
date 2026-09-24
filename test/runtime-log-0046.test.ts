@@ -74,8 +74,16 @@ describe('runtime-log (Spec 0046)', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('appendProjectDaemonLog does not create .homegraph when absent (Spec 0049)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-rtlog-empty-'));
+    appendProjectDaemonLog(dir, 'should-not-mkdir');
+    expect(fs.existsSync(path.join(dir, '.homegraph'))).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('logLifecycle appends when projectRoot is set', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-rtlog-'));
+    fs.mkdirSync(path.join(dir, '.homegraph'), { recursive: true });
     logLifecycle('mcp.start', { projectRoot: dir, mode: 'direct' });
     const text = fs.readFileSync(getDaemonLogPath(dir), 'utf8');
     expect(text).toMatch(/\[HomeGraph\] info mcp\.start/);
@@ -86,6 +94,7 @@ describe('runtime-log (Spec 0046)', () => {
   it('logToolDebug writes under HOMEGRAPH_DEBUG', () => {
     process.env.HOMEGRAPH_DEBUG = '1';
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-rtlog-'));
+    fs.mkdirSync(path.join(dir, '.homegraph'), { recursive: true });
     logToolDebug('homegraph_search', {
       projectRoot: dir,
       durationMs: 5,
