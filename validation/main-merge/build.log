@@ -1,0 +1,6 @@
+> homegraph@1.5.8 build
+> tsc && npm run copy-assets && node -e "require('fs').chmodSync('dist/bin/homegraph.js', 0o755)"
+
+
+> homegraph@1.5.8 copy-assets
+> node scripts/copy-assets.mjs

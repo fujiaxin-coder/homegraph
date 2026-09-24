@@ -1,0 +1,105 @@
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+
+ RUN  v2.1.9 <repository>
+
+ ✓ test/query-plan.test.ts (43 tests) 376ms
+ ✓ test/query-plan-semantics.test.ts (62 tests) 556ms
+ ✓ test/arkts-query-paths.test.ts (14 tests) 341ms
+ ✓ test/arkts-evidence-packs.test.ts (18 tests) 358ms
+ ✓ test/product-index-states.test.ts (12 tests) 920ms
+
+    ArkTS: analyseByModule (PROJECT→BODIES, deps→SIGNATURES, memoryLimitMB=3328, maxOldSpace=3584, streamPersist)...
+ ✓ test/request-evidence-integration.test.ts (9 tests) 282ms
+    ArkTS: indexed module 1: @ohos/library → INDEX (streamed 1 files)
+    ArkTS: indexed module 2: @ohos/entry → INDEX (streamed 1 files)
+
+    ArkTS: analyseByModule incremental (1 module(s)→BODIES, deps→SIGNATURES, memoryLimitMB=3328, streamPersist)...
+    ArkTS: indexed module 1: @ohos/library → INDEX (streamed 1 files)
+
+    ArkTS: incremental module reindex done (library)
+
+    ArkTS: analyseByModule (PROJECT→BODIES, deps→SIGNATURES, memoryLimitMB=3328, maxOldSpace=3584, streamPersist)...
+    ArkTS: indexed module 1: @ohos/library → INDEX (streamed 1 files)
+    ArkTS: indexed module 2: @ohos/entry → INDEX (streamed 1 files)
+ ✓ test/languages/arkts/arkts-module-incremental.test.ts (12 tests) 710ms
+   ✓ languages/arkts module incremental — sync > reindexes a dirty library module without dropping entry symbols 515ms
+ ✓ test/literal-evidence.test.ts (7 tests) 367ms
+ ✓ test/evidence-rendering.test.ts (8 tests) 630ms
+   ✓ typed evidence renders source and preserves relation direction > renders a resource/UI witness even when the UI has no indexed symbol 334ms
+ ❯ test/query-plan-integration.test.ts (22 tests | 2 failed) 2956ms
+   × structured query planning at the MCP boundary > gates fast with zero symbols before planning on both entry points 92ms
+     → expected 'HomeGraph status=fast — map only; use…' to match /still building|preparing/i
+   × structured query planning at the MCP boundary > gates indexing with zero symbols before planning on both entry points 82ms
+     → expected 'HomeGraph status=fast — map only; use…' to match /still building|preparing/i
+   ✓ structured query planning at the MCP boundary > transfers one plan through the real worker without a second model request 481ms
+ ✓ test/query-plan-source-receipts.test.ts (3 tests) 356ms
+ ✓ test/evidence-recovery-wire.test.ts (7 tests) 8ms
+ ✓ test/query-plan-cache.test.ts (11 tests) 6ms
+ ✓ test/request-evidence.test.ts (18 tests) 6ms
+ ✓ test/request-contract.test.ts (13 tests) 52ms
+ ✓ test/explore-zero-files-description.test.ts (6 tests) 177ms
+stderr | test/sqlite-backend.test.ts > DatabaseConnection — backend reporting > can force wasm via HOMEGRAPH_SQLITE_BACKEND
+────────────────────────────────────────────────────────────────────────
+[HomeGraph] WASM SQLite fallback active (node:sqlite unavailable or lacks FTS5)
+────────────────────────────────────────────────────────────────────────
+Indexing and sync will be 5-10x slower than a WAL backend, and concurrent
+reads can hit "database is locked". Prefer Node.js 22.5 or newer.
+
+Fix — use built-in SQLite:
+  Use Node.js 22.5 or newer, then restart homegraph
+
+Verify after fix: `homegraph status` should show Backend: node-sqlite.
+────────────────────────────────────────────────────────────────────────
+
+ ✓ test/sqlite-backend.test.ts (11 tests) 538ms
+   ✓ DatabaseConnection — backend reporting > can force wasm via HOMEGRAPH_SQLITE_BACKEND 431ms
+ ✓ test/native-sqlite-backend.test.ts (5 tests) 96ms
+ ✓ test/copy-assets.test.ts (3 tests) 90ms
+ ✓ test/mcp-query-cache.test.ts (8 tests) 6513ms
+   ✓ MCP query cache > does not cache homegraph_status 5193ms
+ ✓ test/openai-optional.test.ts (3 tests) 47ms
+stderr | test/mcp-staleness-banner.test.ts > MCP status=dirty footer (Spec 0035) > prepends a whole-index degraded banner once live watching has permanently stopped (#876)
+[HomeGraph] File watcher disabled {
+  projectRoot: '<temporary-project>',
+  reason: 'OS watch/file limit exhausted; auto-sync disabled. Run `homegraph sync` (or install git sync hooks) to refresh the graph after changes.',
+  error: 'Error: too many open files'
+}
+
+stderr | test/mcp-staleness-banner.test.ts > MCP status=dirty footer (Spec 0035) > surfaces the degraded state as its own section in homegraph_status (#876)
+[HomeGraph] File watcher disabled {
+  projectRoot: '<temporary-project>',
+  reason: 'OS watch/file limit exhausted; auto-sync disabled. Run `homegraph sync` (or install git sync hooks) to refresh the graph after changes.',
+  error: 'Error: too many open files'
+}
+
+ ✓ test/mcp-staleness-banner.test.ts (7 tests) 6069ms
+   ✓ MCP status=dirty footer (Spec 0035) > uses status=full once sync clears pending 394ms
+   ✓ MCP status=dirty footer (Spec 0035) > lists pending files under "Pending sync" in homegraph_status 5144ms
+ ✓ test/server-instructions-path-first.test.ts (2 tests) 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/query-plan-integration.test.ts > structured query planning at the MCP boundary > gates fast with zero symbols before planning on both entry points
+ FAIL  test/query-plan-integration.test.ts > structured query planning at the MCP boundary > gates indexing with zero symbols before planning on both entry points
+AssertionError: expected 'HomeGraph status=fast — map only; use…' to match /still building|preparing/i
+
+- Expected:
+/still building|preparing/i
+
++ Received:
+"HomeGraph status=fast — map only; use homegraph_project; retry other tools later."
+
+ ❯ test/query-plan-integration.test.ts:193:32
+    191|         expect(result.isError).toBeFalsy();
+    192|         expect(output(result)).toContain('homegraph_project');
+    193|         expect(output(result)).toMatch(/still building|preparing/i);
+       |                                ^
+    194|         expect(output(result)).not.toContain('ANSWER NOW');
+    195|       }
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ Test Files  1 failed | 22 passed (23)
+      Tests  2 failed | 302 passed (304)
+   Start at  17:47:45
+   Duration  11.38s (transform 1.20s, setup 0ms, collect 8.92s, tests 21.46s, environment 2ms, prepare 762ms)

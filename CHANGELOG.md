@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- ArkTS explore can bundle verified render/navigation scope, used imports and types, explicit module exports and local dependency configuration with the located source. Attached SDK modules provide bounded method/parameter signatures, while control summaries distinguish icon appearance, click guards and direct enabled bindings. Whole-group budgets and source fingerprints preserve evidence boundaries; optional local pack audit supports error analysis. No additional model call or mandatory tool (Spec 0050).
 
 ## [1.6.0] - 2026-09-23
 
@@ -38,6 +41,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- ArkTS explore can retain grounded page/literal/object targets and report request evidence separately from source completeness. Verified joint targets improve candidate ordering; a scoped enabled-binding check distinguishes actual modifiers from appearance-only controls while keeping runtime behavior unverified. Results honor source fingerprints and pack budgets, with independent target/behavior switches. Existing precise relationship and resource routes remain available (Spec 0049).
 - Bump `arkanalyzer` to **1.0.94**.
 - Harmony projects with a root `build-profile.json5` now default to **serial indexing** after ArkAnalyzer: one parse worker and no resolve/synthesis worker pool. On SceneBoard-scale repos this cut peak process-tree PrivateMemory from ~8.5GB to ~3.8GB with only ~6% more wall clock. Opt out with `HOMEGRAPH_HARMONY_SERIAL=0`; force on with `=1`. Explicit `CODEGRAPH_PARSE_WORKERS` still overrides parse concurrency (Spec 0037).
 - MCP product index readiness is now five short states (`empty` / `fast` / `full` / `dirty` / `syncing`): tool replies use a one-line `HomeGraph status=…` footer (or that line alone when the tool cannot answer yet). Pending edits surface as `dirty` with path list instead of the long stale banner; write locks stay `syncing`. MCP initialize includes a one-line status glossary (Spec 0035).

@@ -1,0 +1,6 @@
+> homegraph@1.5.7 build
+> tsc && npm run copy-assets && node -e "require('fs').chmodSync('dist/bin/homegraph.js', 0o755)"
+
+
+> homegraph@1.5.7 copy-assets
+> node -e "const fs=require('fs');fs.mkdirSync('dist/db',{recursive:true});fs.copyFileSync('src/db/schema.sql','dist/db/schema.sql');fs.mkdirSync('dist/spec/db',{recursive:true});fs.copyFileSync('src/spec/db/schema.sql','dist/spec/db/schema.sql');fs.mkdirSync('dist/extraction/wasm',{recursive:true});fs.readdirSync('src/extraction/wasm').filter(f=>f.endsWith('.wasm')).forEach(f=>fs.copyFileSync('src/extraction/wasm/'+f,'dist/extraction/wasm/'+f))"

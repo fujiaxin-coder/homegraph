@@ -1,0 +1,9 @@
+{
+  "output": "<repository>/validation/main-merge/accuracy-smoke.json",
+  "plannerFixtureCalls": 3,
+  "behaviors": {
+    "appearanceOnly": "binding_not_observed",
+    "stale": "unknown",
+    "binding": "binding_observed"
+  }
+}

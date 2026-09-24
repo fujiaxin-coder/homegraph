@@ -1,0 +1,879 @@
+{
+  "scope": "Synthetic real-index regression; fixed planner fixture; no inference or accuracy measurement",
+  "files": {
+    "AccountPage.ets": "@Entry\n@Component\nstruct AccountPage {\n  @State ready: boolean = false;\n  onTap() { if (!this.ready) return; }\n  build() {\n    Column() {\n      Text('账户设置')\n      Button('保存').onClick(() => this.onTap())\n    }\n  }\n}\n",
+    "OtherPage.ets": "@Component\nstruct OtherPage {\n build() {\n  Button(\"保存\")\n }\n}\n"
+  },
+  "changedSource": "@Entry\n@Component\nstruct AccountPage {\n  @State ready: boolean = false;\n  onTap() { if (!this.ready) return; }\n  build() {\n    Column() {\n      Text('账户设置')\n      Button('保存').enabled(this.ready).onClick(() => this.onTap())\n    }\n  }\n}\n",
+  "query": "Explain how the “保存” button in “账户设置” follows the input state, then inspect the binding. 输入完整后启用“保存”。",
+  "index": {
+    "success": true,
+    "filesIndexed": 2,
+    "filesSkipped": 0,
+    "filesErrored": 0,
+    "filesDiscovered": 2,
+    "nodesCreated": 16,
+    "edgesCreated": 21,
+    "errors": [
+      {
+        "message": "HarmonyOS project detected but compileSdkVersion was not found in build-profile.json5 and no local OHOS SDK was discovered (set OHOS_SDK_HOME / DEVECO_SDK_HOME). SDK API lookup disabled; project indexing continues normally.",
+        "severity": "warning",
+        "code": "ohos_api_version_unknown"
+      }
+    ],
+    "durationMs": 668
+  },
+  "reindex": {
+    "success": true,
+    "filesIndexed": 2,
+    "filesSkipped": 0,
+    "filesErrored": 0,
+    "filesDiscovered": 2,
+    "nodesCreated": 0,
+    "edgesCreated": 0,
+    "errors": [
+      {
+        "message": "HarmonyOS project detected but compileSdkVersion was not found in build-profile.json5 and no local OHOS SDK was discovered (set OHOS_SDK_HOME / DEVECO_SDK_HOME). SDK API lookup disabled; project indexing continues normally.",
+        "severity": "warning",
+        "code": "ohos_api_version_unknown"
+      }
+    ],
+    "durationMs": 141
+  },
+  "plannerFixtureCalls": 3,
+  "results": {
+    "appearanceOnly": {
+      "content": [
+        {
+          "type": "text",
+          "text": "**ArkTS evidence packs**\n\n> **Partial locator** — explicit gaps below.\n\nComplete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.\n\n**Request evidence — source coverage is not behavioral completion**\n\n- Target page “账户设置”: observed. AccountPage.ets:1 Exact source witness; page ownership and full requirement still need verification.\n\n- Target save “保存”: ambiguous. AccountPage.ets:1, OtherPage.ets:1 Exact source witness; page ownership and full requirement still need verification.\n\n- Behavior enabled “输入完整后启用“保存””: binding_not_observed. AccountPage.ets:9 No direct .enabled(...) on this returned control. Images and click guards do not establish enabled state; inspect inherited enablement or add the required binding.\n\n**Static relations (with source dependencies)**\n\n- AccountPage::build::%AM0$build @ AccountPage.ets:9 → calls → AccountPage::onTap @ AccountPage.ets:5 [heuristic; arkanalyzer]\n\n- AccountPage::build @ AccountPage.ets:6 → calls → AccountPage::build::%AM0$build @ AccountPage.ets:9 [heuristic; arkanalyzer]\n\n- AccountPage::build @ AccountPage.ets:6 → references → AccountPage::build::%AM0$build @ AccountPage.ets:9 [heuristic; viewtree/onClick; site AccountPage.ets:9]\n\n- AccountPage::ready @ AccountPage.ets:4 → references → AccountPage::build @ AccountPage.ets:6 [heuristic; viewtree/state-binding; site AccountPage.ets:4]\n\n### AccountPage.ets:1-12 — complete declaration; file-fingerprint=216:91ee6f284c1d7e64\n\n```arkts\n\n1\t@Entry\n2\t@Component\n3\tstruct AccountPage {\n4\t  @State ready: boolean = false;\n5\t  onTap() { if (!this.ready) return; }\n6\t  build() {\n7\t    Column() {\n8\t      Text('账户设置')\n9\t      Button('保存').onClick(() => this.onTap())\n10\t    }\n11\t  }\n12\t}\n\n```\n\n### OtherPage.ets:1-6 — complete declaration; file-fingerprint=61:15ec1408a6587d5c\n\n```arkts\n\n1\t@Component\n2\tstruct OtherPage {\n3\t build() {\n4\t  Button(\"保存\")\n5\t }\n6\t}\n\n```\n\n**Gaps — inspect only the missing evidence needed for the task**\n\n- unindexed_connection: call/use connection for OtherPage::build @ OtherPage.ets:3. Next anchor: OtherPage.ets:3.\n\n- unindexed_connection: connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3. Next anchor: OtherPage.ets:3."
+        }
+      ],
+      "_meta": {
+        "homegraphEvidencePacks": {
+          "requestEvidence": {
+            "scope": "returned_source_only",
+            "runtimeVerified": false,
+            "targets": [
+              {
+                "id": "page",
+                "text": "账户设置",
+                "presence": "existing",
+                "status": "observed",
+                "locations": [
+                  "AccountPage.ets:1"
+                ],
+                "note": "Exact source witness; page ownership and full requirement still need verification."
+              },
+              {
+                "id": "save",
+                "text": "保存",
+                "presence": "existing",
+                "status": "ambiguous",
+                "locations": [
+                  "AccountPage.ets:1",
+                  "OtherPage.ets:1"
+                ],
+                "note": "Exact source witness; page ownership and full requirement still need verification."
+              }
+            ],
+            "behaviors": [
+              {
+                "id": "enabled",
+                "text": "输入完整后启用“保存”",
+                "kind": "enabled",
+                "locations": [
+                  "AccountPage.ets:9"
+                ],
+                "status": "binding_not_observed",
+                "note": "No direct .enabled(...) on this returned control. Images and click guards do not establish enabled state; inspect inherited enablement or add the required binding."
+              }
+            ]
+          },
+          "version": 1,
+          "scope": "bounded_static_evidence",
+          "status": "partial",
+          "selectedPacks": [
+            "relation:0",
+            "relation:1",
+            "relation:2",
+            "source:method:2187efe87082c39e090d378f73b6b4d0",
+            "source:method:5f08c5b44a84e79be01e42bb536c702b",
+            "relation:3",
+            "source:component:351423b976250d86b96d1b2d52aea48c",
+            "source:method:5a1523f06a71645dea58cf3312a16fe2",
+            "source:method:869c6f599a5ee650f4673c83e3ba8d83",
+            "source:component:d903d489c02139b9b68945914ae29eef"
+          ],
+          "gaps": [
+            {
+              "target": "call/use connection for OtherPage::build @ OtherPage.ets:3",
+              "reason": "unindexed_connection",
+              "nextAnchor": "OtherPage.ets:3"
+            },
+            {
+              "target": "connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3",
+              "reason": "unindexed_connection",
+              "nextAnchor": "OtherPage.ets:3"
+            }
+          ],
+          "relations": [
+            {
+              "source": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "target": "method:5a1523f06a71645dea58cf3312a16fe2",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            },
+            {
+              "source": "method:2187efe87082c39e090d378f73b6b4d0",
+              "target": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            },
+            {
+              "source": "method:2187efe87082c39e090d378f73b6b4d0",
+              "target": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "kind": "references",
+              "provenance": "heuristic",
+              "via": "viewtree/onClick",
+              "site": "AccountPage.ets:9"
+            },
+            {
+              "source": "property:c91f485284d48872ecd05fcce17c34ec",
+              "target": "method:2187efe87082c39e090d378f73b6b4d0",
+              "kind": "references",
+              "provenance": "heuristic",
+              "via": "viewtree/state-binding",
+              "site": "AccountPage.ets:4"
+            }
+          ]
+        },
+        "homegraphQueryPlan": {
+          "steps": [
+            {
+              "id": "locate",
+              "intent": "general",
+              "status": "partial",
+              "resolvedAnchors": [
+                "build",
+                "build",
+                "AccountPage",
+                "onTap",
+                "OtherPage"
+              ],
+              "locatedNodes": [
+                {
+                  "id": "method:2187efe87082c39e090d378f73b6b4d0",
+                  "name": "build",
+                  "qualifiedName": "AccountPage::build",
+                  "filePath": "AccountPage.ets",
+                  "startLine": 6
+                },
+                {
+                  "id": "method:869c6f599a5ee650f4673c83e3ba8d83",
+                  "name": "build",
+                  "qualifiedName": "OtherPage::build",
+                  "filePath": "OtherPage.ets",
+                  "startLine": 3
+                },
+                {
+                  "id": "component:351423b976250d86b96d1b2d52aea48c",
+                  "name": "AccountPage",
+                  "qualifiedName": "AccountPage",
+                  "filePath": "AccountPage.ets",
+                  "startLine": 1
+                },
+                {
+                  "id": "method:5a1523f06a71645dea58cf3312a16fe2",
+                  "name": "onTap",
+                  "qualifiedName": "AccountPage::onTap",
+                  "filePath": "AccountPage.ets",
+                  "startLine": 5
+                },
+                {
+                  "id": "component:d903d489c02139b9b68945914ae29eef",
+                  "name": "OtherPage",
+                  "qualifiedName": "OtherPage",
+                  "filePath": "OtherPage.ets",
+                  "startLine": 1
+                }
+              ],
+              "durationMs": 39
+            }
+          ],
+          "version": 3,
+          "source": "llm",
+          "intent": "general",
+          "route": "general",
+          "confidence": 0.9,
+          "plannerSeeds": {
+            "anchors": [],
+            "searchTerms": [
+              "保存"
+            ],
+            "literalTexts": [
+              "保存",
+              "账户设置"
+            ],
+            "sourceScope": "local",
+            "requestContract": {
+              "targets": [
+                {
+                  "id": "page",
+                  "text": "账户设置",
+                  "role": "page",
+                  "presence": "existing",
+                  "objectKind": "ui"
+                },
+                {
+                  "id": "save",
+                  "text": "保存",
+                  "role": "literal",
+                  "presence": "existing",
+                  "objectKind": "ui"
+                }
+              ],
+              "obligations": [
+                {
+                  "id": "enabled",
+                  "text": "输入完整后启用“保存”",
+                  "kind": "enabled",
+                  "targetId": "save"
+                }
+              ]
+            }
+          },
+          "hasTaskContext": true,
+          "matchedFeatures": [
+            "shouldUseCompactExploreBudget"
+          ],
+          "planningMs": 78,
+          "durationMs": 125,
+          "modelRequests": 1,
+          "planningEligible": true,
+          "planningReason": "task_context_requires_planning",
+          "ruleRoute": "general",
+          "inputTokens": null,
+          "outputTokens": null,
+          "cacheHit": false
+        },
+        "homegraphEvidence": {
+          "status": "partial",
+          "files": [
+            {
+              "path": "AccountPage.ets",
+              "ranges": [
+                {
+                  "start": 1,
+                  "end": 12
+                }
+              ],
+              "bytes": 215,
+              "fingerprint": "216:91ee6f284c1d7e64"
+            },
+            {
+              "path": "OtherPage.ets",
+              "ranges": [
+                {
+                  "start": 1,
+                  "end": 6
+                }
+              ],
+              "bytes": 60,
+              "fingerprint": "61:15ec1408a6587d5c"
+            }
+          ],
+          "locatedNodes": [
+            {
+              "id": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "name": "%AM0$build",
+              "qualifiedName": "AccountPage::build::%AM0$build",
+              "filePath": "AccountPage.ets",
+              "startLine": 9
+            },
+            {
+              "id": "method:2187efe87082c39e090d378f73b6b4d0",
+              "name": "build",
+              "qualifiedName": "AccountPage::build",
+              "filePath": "AccountPage.ets",
+              "startLine": 6
+            },
+            {
+              "id": "method:869c6f599a5ee650f4673c83e3ba8d83",
+              "name": "build",
+              "qualifiedName": "OtherPage::build",
+              "filePath": "OtherPage.ets",
+              "startLine": 3
+            },
+            {
+              "id": "component:351423b976250d86b96d1b2d52aea48c",
+              "name": "AccountPage",
+              "qualifiedName": "AccountPage",
+              "filePath": "AccountPage.ets",
+              "startLine": 1
+            },
+            {
+              "id": "method:5a1523f06a71645dea58cf3312a16fe2",
+              "name": "onTap",
+              "qualifiedName": "AccountPage::onTap",
+              "filePath": "AccountPage.ets",
+              "startLine": 5
+            },
+            {
+              "id": "component:d903d489c02139b9b68945914ae29eef",
+              "name": "OtherPage",
+              "qualifiedName": "OtherPage",
+              "filePath": "OtherPage.ets",
+              "startLine": 1
+            }
+          ],
+          "coveredObligations": [
+            "AccountPage::build::%AM0$build @ AccountPage.ets:9 → calls → AccountPage::onTap @ AccountPage.ets:5",
+            "AccountPage::build @ AccountPage.ets:6 → calls → AccountPage::build::%AM0$build @ AccountPage.ets:9",
+            "AccountPage::build @ AccountPage.ets:6 → references → AccountPage::build::%AM0$build @ AccountPage.ets:9",
+            "AccountPage::build @ AccountPage.ets:6",
+            "AccountPage::build::%AM0$build @ AccountPage.ets:9",
+            "AccountPage::ready @ AccountPage.ets:4 → references → AccountPage::build @ AccountPage.ets:6",
+            "AccountPage @ AccountPage.ets:1",
+            "AccountPage::onTap @ AccountPage.ets:5",
+            "OtherPage::build @ OtherPage.ets:3",
+            "OtherPage @ OtherPage.ets:1"
+          ],
+          "uncoveredObligations": [
+            "unindexed_connection: call/use connection for OtherPage::build @ OtherPage.ets:3",
+            "unindexed_connection: connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3"
+          ]
+        }
+      }
+    },
+    "stale": {
+      "content": [
+        {
+          "type": "text",
+          "text": "**ArkTS evidence packs**\n\n> **Partial locator** — explicit gaps below.\n\nComplete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.\n\n**Request evidence — source coverage is not behavioral completion**\n\n- Target page “账户设置”: not_observed.  No verified witness in returned declarations; inspect the specified page/object or resource binding.\n\n- Target save “保存”: observed. OtherPage.ets:1 Exact source witness; page ownership and full requirement still need verification.\n\n- Behavior enabled “输入完整后启用“保存””: unknown.  Requested page has no returned source witness; locate page ownership before checking the control.\n\n### OtherPage.ets:1-6 — complete declaration; file-fingerprint=61:15ec1408a6587d5c\n\n```arkts\n\n1\t@Component\n2\tstruct OtherPage {\n3\t build() {\n4\t  Button(\"保存\")\n5\t }\n6\t}\n\n```\n\n**Gaps — inspect only the missing evidence needed for the task**\n\n- unindexed_connection: call/use connection for OtherPage::build @ OtherPage.ets:3. Next anchor: OtherPage.ets:3.\n\n- unindexed_connection: connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3. Next anchor: OtherPage.ets:3.\n\n- stale: AccountPage::build::%AM0$build @ AccountPage.ets:9. Next anchor: AccountPage.ets:9.\n\n- stale: AccountPage::onTap @ AccountPage.ets:5. Next anchor: AccountPage.ets:5.\n\n- stale: AccountPage::build @ AccountPage.ets:6. Next anchor: AccountPage.ets:6.\n\n- stale: AccountPage::ready @ AccountPage.ets:4. Next anchor: AccountPage.ets:4.\n\n- 1 further gaps omitted from this bounded display; coverage remains partial."
+        }
+      ],
+      "_meta": {
+        "homegraphEvidencePacks": {
+          "requestEvidence": {
+            "scope": "returned_source_only",
+            "runtimeVerified": false,
+            "targets": [
+              {
+                "id": "page",
+                "text": "账户设置",
+                "presence": "existing",
+                "status": "not_observed",
+                "locations": [],
+                "note": "No verified witness in returned declarations; inspect the specified page/object or resource binding."
+              },
+              {
+                "id": "save",
+                "text": "保存",
+                "presence": "existing",
+                "status": "observed",
+                "locations": [
+                  "OtherPage.ets:1"
+                ],
+                "note": "Exact source witness; page ownership and full requirement still need verification."
+              }
+            ],
+            "behaviors": [
+              {
+                "id": "enabled",
+                "text": "输入完整后启用“保存”",
+                "kind": "enabled",
+                "locations": [],
+                "status": "unknown",
+                "note": "Requested page has no returned source witness; locate page ownership before checking the control."
+              }
+            ]
+          },
+          "version": 1,
+          "scope": "bounded_static_evidence",
+          "status": "partial",
+          "selectedPacks": [
+            "source:method:869c6f599a5ee650f4673c83e3ba8d83",
+            "source:component:d903d489c02139b9b68945914ae29eef"
+          ],
+          "gaps": [
+            {
+              "target": "call/use connection for OtherPage::build @ OtherPage.ets:3",
+              "reason": "unindexed_connection",
+              "nextAnchor": "OtherPage.ets:3"
+            },
+            {
+              "target": "connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3",
+              "reason": "unindexed_connection",
+              "nextAnchor": "OtherPage.ets:3"
+            },
+            {
+              "target": "AccountPage::build::%AM0$build @ AccountPage.ets:9",
+              "reason": "stale",
+              "nextAnchor": "AccountPage.ets:9"
+            },
+            {
+              "target": "AccountPage::onTap @ AccountPage.ets:5",
+              "reason": "stale",
+              "nextAnchor": "AccountPage.ets:5"
+            },
+            {
+              "target": "AccountPage::build @ AccountPage.ets:6",
+              "reason": "stale",
+              "nextAnchor": "AccountPage.ets:6"
+            },
+            {
+              "target": "AccountPage::ready @ AccountPage.ets:4",
+              "reason": "stale",
+              "nextAnchor": "AccountPage.ets:4"
+            },
+            {
+              "target": "AccountPage @ AccountPage.ets:1",
+              "reason": "stale",
+              "nextAnchor": "AccountPage.ets:1"
+            }
+          ],
+          "relations": []
+        },
+        "homegraphQueryPlan": {
+          "steps": [
+            {
+              "id": "locate",
+              "intent": "general",
+              "status": "partial",
+              "resolvedAnchors": [
+                "build",
+                "OtherPage"
+              ],
+              "locatedNodes": [
+                {
+                  "id": "method:869c6f599a5ee650f4673c83e3ba8d83",
+                  "name": "build",
+                  "qualifiedName": "OtherPage::build",
+                  "filePath": "OtherPage.ets",
+                  "startLine": 3
+                },
+                {
+                  "id": "component:d903d489c02139b9b68945914ae29eef",
+                  "name": "OtherPage",
+                  "qualifiedName": "OtherPage",
+                  "filePath": "OtherPage.ets",
+                  "startLine": 1
+                }
+              ],
+              "durationMs": 9
+            }
+          ],
+          "version": 3,
+          "source": "llm",
+          "intent": "general",
+          "route": "general",
+          "confidence": 0.9,
+          "plannerSeeds": {
+            "anchors": [],
+            "searchTerms": [
+              "保存"
+            ],
+            "literalTexts": [
+              "保存",
+              "账户设置"
+            ],
+            "sourceScope": "local",
+            "requestContract": {
+              "targets": [
+                {
+                  "id": "page",
+                  "text": "账户设置",
+                  "role": "page",
+                  "presence": "existing",
+                  "objectKind": "ui"
+                },
+                {
+                  "id": "save",
+                  "text": "保存",
+                  "role": "literal",
+                  "presence": "existing",
+                  "objectKind": "ui"
+                }
+              ],
+              "obligations": [
+                {
+                  "id": "enabled",
+                  "text": "输入完整后启用“保存”",
+                  "kind": "enabled",
+                  "targetId": "save"
+                }
+              ]
+            }
+          },
+          "hasTaskContext": true,
+          "matchedFeatures": [
+            "shouldUseCompactExploreBudget"
+          ],
+          "planningMs": 19,
+          "durationMs": 29,
+          "modelRequests": 1,
+          "planningEligible": true,
+          "planningReason": "task_context_requires_planning",
+          "ruleRoute": "general",
+          "inputTokens": null,
+          "outputTokens": null,
+          "cacheHit": false
+        },
+        "homegraphEvidence": {
+          "status": "partial",
+          "files": [
+            {
+              "path": "OtherPage.ets",
+              "ranges": [
+                {
+                  "start": 1,
+                  "end": 6
+                }
+              ],
+              "bytes": 60,
+              "fingerprint": "61:15ec1408a6587d5c"
+            }
+          ],
+          "locatedNodes": [
+            {
+              "id": "method:869c6f599a5ee650f4673c83e3ba8d83",
+              "name": "build",
+              "qualifiedName": "OtherPage::build",
+              "filePath": "OtherPage.ets",
+              "startLine": 3
+            },
+            {
+              "id": "component:d903d489c02139b9b68945914ae29eef",
+              "name": "OtherPage",
+              "qualifiedName": "OtherPage",
+              "filePath": "OtherPage.ets",
+              "startLine": 1
+            }
+          ],
+          "coveredObligations": [
+            "OtherPage::build @ OtherPage.ets:3",
+            "OtherPage @ OtherPage.ets:1"
+          ],
+          "uncoveredObligations": [
+            "unindexed_connection: call/use connection for OtherPage::build @ OtherPage.ets:3",
+            "unindexed_connection: connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3",
+            "stale: AccountPage::build::%AM0$build @ AccountPage.ets:9",
+            "stale: AccountPage::onTap @ AccountPage.ets:5",
+            "stale: AccountPage::build @ AccountPage.ets:6",
+            "stale: AccountPage::ready @ AccountPage.ets:4",
+            "stale: AccountPage @ AccountPage.ets:1"
+          ]
+        }
+      }
+    },
+    "binding": {
+      "content": [
+        {
+          "type": "text",
+          "text": "**ArkTS evidence packs**\n\n> **Partial locator** — explicit gaps below.\n\nComplete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.\n\n**Request evidence — source coverage is not behavioral completion**\n\n- Target page “账户设置”: observed. AccountPage.ets:1 Exact source witness; page ownership and full requirement still need verification.\n\n- Target save “保存”: ambiguous. AccountPage.ets:1, OtherPage.ets:1 Exact source witness; page ownership and full requirement still need verification.\n\n- Behavior enabled “输入完整后启用“保存””: binding_observed. AccountPage.ets:9 Direct .enabled(expression) exists on this control. Condition correctness, state updates and runtime behavior remain unverified.\n\n**Static relations (with source dependencies)**\n\n- AccountPage::build::%AM0$build @ AccountPage.ets:9 → calls → AccountPage::onTap @ AccountPage.ets:5 [heuristic; arkanalyzer]\n\n- AccountPage::build @ AccountPage.ets:6 → calls → AccountPage::build::%AM0$build @ AccountPage.ets:9 [heuristic; arkanalyzer]\n\n- AccountPage::build @ AccountPage.ets:6 → references → AccountPage::build::%AM0$build @ AccountPage.ets:9 [heuristic; viewtree/onClick; site AccountPage.ets:9]\n\n- AccountPage::ready @ AccountPage.ets:4 → references → AccountPage::build @ AccountPage.ets:6 [heuristic; viewtree/state-binding; site AccountPage.ets:4]\n\n### AccountPage.ets:1-12 — complete declaration; file-fingerprint=236:28f488d039eef223\n\n```arkts\n\n1\t@Entry\n2\t@Component\n3\tstruct AccountPage {\n4\t  @State ready: boolean = false;\n5\t  onTap() { if (!this.ready) return; }\n6\t  build() {\n7\t    Column() {\n8\t      Text('账户设置')\n9\t      Button('保存').enabled(this.ready).onClick(() => this.onTap())\n10\t    }\n11\t  }\n12\t}\n\n```\n\n### OtherPage.ets:1-6 — complete declaration; file-fingerprint=61:15ec1408a6587d5c\n\n```arkts\n\n1\t@Component\n2\tstruct OtherPage {\n3\t build() {\n4\t  Button(\"保存\")\n5\t }\n6\t}\n\n```\n\n**Gaps — inspect only the missing evidence needed for the task**\n\n- unindexed_connection: call/use connection for OtherPage::build @ OtherPage.ets:3. Next anchor: OtherPage.ets:3.\n\n- unindexed_connection: connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3. Next anchor: OtherPage.ets:3."
+        }
+      ],
+      "_meta": {
+        "homegraphEvidencePacks": {
+          "requestEvidence": {
+            "scope": "returned_source_only",
+            "runtimeVerified": false,
+            "targets": [
+              {
+                "id": "page",
+                "text": "账户设置",
+                "presence": "existing",
+                "status": "observed",
+                "locations": [
+                  "AccountPage.ets:1"
+                ],
+                "note": "Exact source witness; page ownership and full requirement still need verification."
+              },
+              {
+                "id": "save",
+                "text": "保存",
+                "presence": "existing",
+                "status": "ambiguous",
+                "locations": [
+                  "AccountPage.ets:1",
+                  "OtherPage.ets:1"
+                ],
+                "note": "Exact source witness; page ownership and full requirement still need verification."
+              }
+            ],
+            "behaviors": [
+              {
+                "id": "enabled",
+                "text": "输入完整后启用“保存”",
+                "kind": "enabled",
+                "locations": [
+                  "AccountPage.ets:9"
+                ],
+                "status": "binding_observed",
+                "note": "Direct .enabled(expression) exists on this control. Condition correctness, state updates and runtime behavior remain unverified."
+              }
+            ]
+          },
+          "version": 1,
+          "scope": "bounded_static_evidence",
+          "status": "partial",
+          "selectedPacks": [
+            "relation:0",
+            "relation:1",
+            "relation:2",
+            "source:method:2187efe87082c39e090d378f73b6b4d0",
+            "source:method:5f08c5b44a84e79be01e42bb536c702b",
+            "relation:3",
+            "source:component:351423b976250d86b96d1b2d52aea48c",
+            "source:method:5a1523f06a71645dea58cf3312a16fe2",
+            "source:method:869c6f599a5ee650f4673c83e3ba8d83",
+            "source:component:d903d489c02139b9b68945914ae29eef"
+          ],
+          "gaps": [
+            {
+              "target": "call/use connection for OtherPage::build @ OtherPage.ets:3",
+              "reason": "unindexed_connection",
+              "nextAnchor": "OtherPage.ets:3"
+            },
+            {
+              "target": "connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3",
+              "reason": "unindexed_connection",
+              "nextAnchor": "OtherPage.ets:3"
+            }
+          ],
+          "relations": [
+            {
+              "source": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "target": "method:5a1523f06a71645dea58cf3312a16fe2",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            },
+            {
+              "source": "method:2187efe87082c39e090d378f73b6b4d0",
+              "target": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            },
+            {
+              "source": "method:2187efe87082c39e090d378f73b6b4d0",
+              "target": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "kind": "references",
+              "provenance": "heuristic",
+              "via": "viewtree/onClick",
+              "site": "AccountPage.ets:9"
+            },
+            {
+              "source": "property:c91f485284d48872ecd05fcce17c34ec",
+              "target": "method:2187efe87082c39e090d378f73b6b4d0",
+              "kind": "references",
+              "provenance": "heuristic",
+              "via": "viewtree/state-binding",
+              "site": "AccountPage.ets:4"
+            }
+          ]
+        },
+        "homegraphQueryPlan": {
+          "steps": [
+            {
+              "id": "locate",
+              "intent": "general",
+              "status": "partial",
+              "resolvedAnchors": [
+                "build",
+                "build",
+                "AccountPage",
+                "onTap",
+                "OtherPage"
+              ],
+              "locatedNodes": [
+                {
+                  "id": "method:2187efe87082c39e090d378f73b6b4d0",
+                  "name": "build",
+                  "qualifiedName": "AccountPage::build",
+                  "filePath": "AccountPage.ets",
+                  "startLine": 6
+                },
+                {
+                  "id": "method:869c6f599a5ee650f4673c83e3ba8d83",
+                  "name": "build",
+                  "qualifiedName": "OtherPage::build",
+                  "filePath": "OtherPage.ets",
+                  "startLine": 3
+                },
+                {
+                  "id": "component:351423b976250d86b96d1b2d52aea48c",
+                  "name": "AccountPage",
+                  "qualifiedName": "AccountPage",
+                  "filePath": "AccountPage.ets",
+                  "startLine": 1
+                },
+                {
+                  "id": "method:5a1523f06a71645dea58cf3312a16fe2",
+                  "name": "onTap",
+                  "qualifiedName": "AccountPage::onTap",
+                  "filePath": "AccountPage.ets",
+                  "startLine": 5
+                },
+                {
+                  "id": "component:d903d489c02139b9b68945914ae29eef",
+                  "name": "OtherPage",
+                  "qualifiedName": "OtherPage",
+                  "filePath": "OtherPage.ets",
+                  "startLine": 1
+                }
+              ],
+              "durationMs": 8
+            }
+          ],
+          "version": 3,
+          "source": "llm",
+          "intent": "general",
+          "route": "general",
+          "confidence": 0.9,
+          "plannerSeeds": {
+            "anchors": [],
+            "searchTerms": [
+              "保存"
+            ],
+            "literalTexts": [
+              "保存",
+              "账户设置"
+            ],
+            "sourceScope": "local",
+            "requestContract": {
+              "targets": [
+                {
+                  "id": "page",
+                  "text": "账户设置",
+                  "role": "page",
+                  "presence": "existing",
+                  "objectKind": "ui"
+                },
+                {
+                  "id": "save",
+                  "text": "保存",
+                  "role": "literal",
+                  "presence": "existing",
+                  "objectKind": "ui"
+                }
+              ],
+              "obligations": [
+                {
+                  "id": "enabled",
+                  "text": "输入完整后启用“保存”",
+                  "kind": "enabled",
+                  "targetId": "save"
+                }
+              ]
+            }
+          },
+          "hasTaskContext": true,
+          "matchedFeatures": [
+            "shouldUseCompactExploreBudget"
+          ],
+          "planningMs": 17,
+          "durationMs": 25,
+          "modelRequests": 1,
+          "planningEligible": true,
+          "planningReason": "task_context_requires_planning",
+          "ruleRoute": "general",
+          "inputTokens": null,
+          "outputTokens": null,
+          "cacheHit": false
+        },
+        "homegraphEvidence": {
+          "status": "partial",
+          "files": [
+            {
+              "path": "AccountPage.ets",
+              "ranges": [
+                {
+                  "start": 1,
+                  "end": 12
+                }
+              ],
+              "bytes": 235,
+              "fingerprint": "236:28f488d039eef223"
+            },
+            {
+              "path": "OtherPage.ets",
+              "ranges": [
+                {
+                  "start": 1,
+                  "end": 6
+                }
+              ],
+              "bytes": 60,
+              "fingerprint": "61:15ec1408a6587d5c"
+            }
+          ],
+          "locatedNodes": [
+            {
+              "id": "method:5f08c5b44a84e79be01e42bb536c702b",
+              "name": "%AM0$build",
+              "qualifiedName": "AccountPage::build::%AM0$build",
+              "filePath": "AccountPage.ets",
+              "startLine": 9
+            },
+            {
+              "id": "method:2187efe87082c39e090d378f73b6b4d0",
+              "name": "build",
+              "qualifiedName": "AccountPage::build",
+              "filePath": "AccountPage.ets",
+              "startLine": 6
+            },
+            {
+              "id": "method:869c6f599a5ee650f4673c83e3ba8d83",
+              "name": "build",
+              "qualifiedName": "OtherPage::build",
+              "filePath": "OtherPage.ets",
+              "startLine": 3
+            },
+            {
+              "id": "component:351423b976250d86b96d1b2d52aea48c",
+              "name": "AccountPage",
+              "qualifiedName": "AccountPage",
+              "filePath": "AccountPage.ets",
+              "startLine": 1
+            },
+            {
+              "id": "method:5a1523f06a71645dea58cf3312a16fe2",
+              "name": "onTap",
+              "qualifiedName": "AccountPage::onTap",
+              "filePath": "AccountPage.ets",
+              "startLine": 5
+            },
+            {
+              "id": "component:d903d489c02139b9b68945914ae29eef",
+              "name": "OtherPage",
+              "qualifiedName": "OtherPage",
+              "filePath": "OtherPage.ets",
+              "startLine": 1
+            }
+          ],
+          "coveredObligations": [
+            "AccountPage::build::%AM0$build @ AccountPage.ets:9 → calls → AccountPage::onTap @ AccountPage.ets:5",
+            "AccountPage::build @ AccountPage.ets:6 → calls → AccountPage::build::%AM0$build @ AccountPage.ets:9",
+            "AccountPage::build @ AccountPage.ets:6 → references → AccountPage::build::%AM0$build @ AccountPage.ets:9",
+            "AccountPage::build @ AccountPage.ets:6",
+            "AccountPage::build::%AM0$build @ AccountPage.ets:9",
+            "AccountPage::ready @ AccountPage.ets:4 → references → AccountPage::build @ AccountPage.ets:6",
+            "AccountPage @ AccountPage.ets:1",
+            "AccountPage::onTap @ AccountPage.ets:5",
+            "OtherPage::build @ OtherPage.ets:3",
+            "OtherPage @ OtherPage.ets:1"
+          ],
+          "uncoveredObligations": [
+            "unindexed_connection: call/use connection for OtherPage::build @ OtherPage.ets:3",
+            "unindexed_connection: connecting path in the bounded graph slice: AccountPage::build::%AM0$build @ AccountPage.ets:9 → OtherPage::build @ OtherPage.ets:3"
+          ]
+        }
+      }
+    }
+  }
+}

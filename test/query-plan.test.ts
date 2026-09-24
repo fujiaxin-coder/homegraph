@@ -67,7 +67,7 @@ describe('query planner contracts', () => {
     expect(system).toContain('including non-English identifiers');
     expect(system).toContain('do not translate them or invent compound code names');
     expect(system).not.toContain('optionally English');
-    expect(payload).toMatchObject({ temperature: 0, max_tokens: 900, stream: false });
+    expect(payload).toMatchObject({ temperature: 0, max_tokens: 1500, stream: false });
     expect(payload.messages[1].content).toBe(QUESTION);
   });
   it('keeps Chinese identifiers and exact paths while compiling English step terms', async () => {

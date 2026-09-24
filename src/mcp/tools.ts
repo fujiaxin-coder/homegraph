@@ -1,3 +1,6 @@
+import { recordEvidencePack } from './evidence-audit';
+import { implementationContextEnabled } from './implementation-context';
+import { accuracyTargetsEnabled, accuracyCoverageEnabled, contractLiteralTexts } from '../search/request-contract';
 /**
  * MCP Tool Definitions
  *
@@ -1457,6 +1460,7 @@ export const tools: ToolDefinition[] = [
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
       'For a missing usage, dependency/cycle or native-registration relation, use ' +
       'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
+      'Located ArkTS code may include render scope, imported types, module configuration, indexed SDK signatures and control-state gaps. ' +
       'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; form/shortcuts queries may lead with Capability profiles; element/string.json literals may lead with Resource hits + optional bound .ets anchors; Seam notes may flag stubs). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
@@ -2740,7 +2744,8 @@ export class ToolHandler {
       // would re-serve the first call's full source and defeat CG-18 dedup.
       const skipCacheForSession = toolName === 'homegraph_explore' && !!sessionState;
       const requestPlan = readQueryPlan(args);
-      const cacheEnabled = !skipCacheForSession && requestPlan?.source !== 'llm'
+      const cacheEnabled = !skipCacheForSession && !(toolName === 'homegraph_explore' && process.env.HOMEGRAPH_ARKTS_EVIDENCE_LOG === '1') && requestPlan?.source !== 'llm'
+        && !(requestPlan?.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled()))
         && !requestPlan?.telemetry.fallbackReason && isMcpQueryCacheEnabled() && isCacheableMcpTool(toolName);
       let cacheKey: string | undefined;
       let cacheQueries: ReturnType<HomeGraph['getQueryBuilder']> | undefined;
@@ -2760,9 +2765,9 @@ export class ToolHandler {
           }
           cacheKey = buildMcpQueryCacheKey(toolName, args, fileCount);
           const cached = cacheIndex.getEntry(cacheQueries, cacheKey);
-          const packMeta = cached?._meta?.homegraphEvidencePacks as { status?: string } | undefined;
+          const packMeta = cached?._meta?.homegraphEvidencePacks as { status?: string; implementationContext?: unknown[]; controls?: unknown[] } | undefined;
           const cachedFiles = (cached?._meta?.homegraphEvidence as { files?: ExploreFileEmission[] } | undefined)?.files;
-          if (cached && (!packMeta || (packMeta.status === 'complete'
+          if (cached && (!packMeta || (packMeta.status === 'complete' && !packMeta.implementationContext?.length
             && this.areEvidenceFilesCurrent(cachedFiles ?? [], cacheCg.getProjectRoot())))) {
             const diagnosed = this.withQueryPlanDiagnostics(cached, args, true);
             const withWorktree = this.withWorktreeNotice(diagnosed, projectPath);
@@ -5993,7 +5998,7 @@ export class ToolHandler {
       ...prior, version: plan.version, source: plan.source, intent: plan.intent, route: plan.route,
       confidence: plan.confidence,
       plannerSeeds: { anchors: plan.anchors, searchTerms: plan.searchTerms, literalTexts: plan.literalTexts,
-        sourceScope: plan.sourceScope, relation: plan.relation },
+        sourceScope: plan.sourceScope, relation: plan.relation, requestContract: plan.requestContract },
       hasTaskContext: !!plan.taskContext,
       matchedFeatures: Object.entries(plan.features).filter(([, matched]) => matched).map(([name]) => name).slice(0, 12),
       planningMs: plan.telemetry.durationMs, durationMs: Math.max(plan.telemetry.durationMs, Date.now() - started),
@@ -6019,6 +6024,9 @@ export class ToolHandler {
     if (plan.route === 'usages' || plan.route === 'modules' || plan.route === 'native') {
       return this.runSpecializedExploreRoute(plan.route, cg, query, root, plan);
     }
+    // Constrained ArkTS retrieval needs the full, verified-source renderer.
+    if (plan.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled())
+      && plan.sourceScope !== 'sdk' && cg.getFiles().some(f => /\.ets$/i.test(f.path))) return null;
     // These legacy paths re-extract seeds from text and cannot consume bound
     // node identity / step hints. Model general/flow plans use full explore;
     // rule/default and specialized routes retain their existing fast behavior.
@@ -6927,19 +6935,52 @@ export class ToolHandler {
     if (process.env.HOMEGRAPH_ARKTS_EVIDENCE_PACKS === '0') return null;
     if (!nodes.some(n => /\.ets$/i.test(n.filePath) && !n.filePath.startsWith('ohos-sdk:'))) return null;
     const budget = getExploreOutputBudget(cg.getStats().fileCount);
-    const queryPaths = process.env.HOMEGRAPH_ARKTS_QUERY_PATHS !== '0';
+    const constrained = !!plan?.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled());
+    const queryPaths = (!constrained || plan?.intent === 'flow' || !!plan?.bindings?.length) && process.env.HOMEGRAPH_ARKTS_QUERY_PATHS !== '0';
     if (queryPaths) nodes = completeEvidencePathCandidates(query, nodes,
       (name, limit) => cg.getQueryBuilder().getNodesByQualifiedNameExact(name, limit), plan);
+    if (implementationContextEnabled()) {
+      const boundIds = new Set(focusIds);
+      nodes = nodes.map(n => {
+        if (n.kind !== 'struct') return n;
+        const component = cg.getNodesInFile(n.filePath).find(c => c.kind === 'component' && c.name === n.name && c.startLine === n.startLine);
+        if (component && boundIds.has(n.id)) boundIds.add(component.id);
+        return component ?? n;
+      });
+      focusIds = boundIds;
+    }
     const pathSearch = !queryPaths ? undefined : searchEvidencePaths({
       getNode: id => cg.getNode(id),
-      getEdges: (id, direction, kinds, limit, preferred) => cg.getQueryBuilder().getEvidenceEdges(id, direction, kinds, limit, preferred),
+      getEdges: (id, direction, kinds, limit, preferred) => {
+        const read = (nodeId: string) => cg.getQueryBuilder().getEvidenceEdges(nodeId, direction, kinds, limit, preferred);
+        if (!implementationContextEnabled()) return read(id);
+        const owner = cg.getNode(id);
+        const aliases = owner && ['struct', 'component'].includes(owner.kind)
+          ? cg.getNodesInFile(owner.filePath).filter(n => ['struct', 'component'].includes(n.kind) && n.name === owner.name
+            && n.startLine === owner.startLine && n.endLine === owner.endLine).slice(0, 2) : [];
+        const canonical = (nodeId: string): string => {
+          const n = cg.getNode(nodeId); if (!n || n.kind !== 'struct') return nodeId;
+          return cg.getNodesInFile(n.filePath).find(c => c.kind === 'component' && c.name === n.name
+            && c.startLine === n.startLine && c.endLine === n.endLine)?.id ?? nodeId;
+        };
+        // ArkAnalyzer stores struct/component roles for the same declaration. Project
+        // their ownership edges to one identity; this is not a new runtime call.
+        const edges = (aliases.length ? aliases.flatMap(n => read(n.id)) : read(id)).map(e => ({ ...e,
+          source: canonical(e.source), target: canonical(e.target) })).filter(e => e.source !== e.target);
+        return [...new Map(edges.map(e => [JSON.stringify([e.source, e.target, e.kind, e.metadata]), e])).values()].slice(0, limit);
+      },
     }, resolveEvidencePathGoal(query, nodes, focusIds, plan));
     const result = buildArktsEvidencePacks(cg, { projectRoot, query, nodes, focusIds,
-      maxChars: Math.min(budget.maxOutputChars, maxChars ?? budget.maxOutputChars), maxFiles, pathSearch });
+      maxChars: Math.min(budget.maxOutputChars, maxChars ?? budget.maxOutputChars), maxFiles, pathSearch, requestContract: plan?.requestContract,
+      sdkModule: cg.getGraphSources() === 'project' || cg.getGraphSources() === 'none' ? undefined : module => {
+        const nodes = cg.getQueryBuilder().getOhosApiModuleNodes(module);
+        return nodes.length ? { nodes, version: cg.getOhosApiBinding()?.version ?? 'unknown' } : undefined;
+      } });
     if (!result) return null;
+    const audit = recordEvidencePack(projectRoot, { query, requestContract: plan?.requestContract }, result);
     // The pack renderer already supplies neutral guidance and exact source bytes.
     return { content: [{ type: 'text', text: result.text }], [EXPLORE_EMISSION_KEY]: result.emission,
-      _meta: { homegraphEvidencePacks: result.metadata } };
+      _meta: { homegraphEvidencePacks: result.metadata, ...(audit !== 'disabled' ? { homegraphEvidenceAudit: audit } : {}) } };
   }
 
   /** Render a compact symbol-bounded slice on the legacy mechanism path. */
@@ -10199,7 +10240,7 @@ export class ToolHandler {
         : locateAnchors.length === 1
           ? `${locateAnchors[0]} ${query}`
           : query;
-    const wantHints = !!(plan && (plan.source === 'llm' || plan.literalTexts?.length || plan.anchors?.length))
+    const wantHints = !!(plan && (plan.source === 'llm' || plan.literalTexts?.length || plan.anchors?.length || plan.requestContract))
       || exploreSourceScope !== 'all';
     const subgraph = await cg.findRelevantContext(contextQuery, {
       ...contextOpts,
@@ -10209,7 +10250,8 @@ export class ToolHandler {
             anchor === node.name || anchor === node.qualifiedName)),
           ...locateAnchors,
         ].slice(0, 16),
-        searchTerms: plan?.searchTerms ?? [], literalTexts: plan?.literalTexts,
+        searchTerms: plan?.searchTerms ?? [], literalTexts: [...new Set([...(plan?.literalTexts ?? []),
+          ...(accuracyTargetsEnabled() && !plan?.bindings?.length ? contractLiteralTexts(plan?.requestContract) : [])])].slice(0, 8),
         sourceScope: exploreSourceScope,
         nodeIds: (plan?.bindings ?? []).map((node) => node.id),
       } } : {}),
@@ -10244,6 +10286,25 @@ export class ToolHandler {
     }
 
 
+    if (plan?.requestContract && (accuracyTargetsEnabled() || accuracyCoverageEnabled()) && plan.sourceScope !== 'sdk'
+      // Resource values need the existing resource + reference renderer; a bare
+      // declaration would silently drop the value-to-key witness.
+      && !subgraph.literalEvidence?.hits.some(hit => hit.kind === 'resource_reference')) {
+      // One existing retrieval pass; raw literal hits affect candidate order only.
+      // Actual target evidence is checked against hash-verified source in the packer.
+      const hits = subgraph.literalEvidence?.hits ?? [];
+      const fileHits = new Map<string, Set<string>>();
+      for (const hit of hits) {
+        const labels = fileHits.get(hit.filePath) ?? new Set<string>(); labels.add(hit.literal); fileHits.set(hit.filePath, labels);
+      }
+      const candidates = [...subgraph.nodes.values()];
+      if (accuracyTargetsEnabled()) candidates.sort((a, b) =>
+        (fileHits.get(b.filePath)?.size ?? 0) - (fileHits.get(a.filePath)?.size ?? 0));
+      const packed = this.tryArktsEvidenceExplore(cg, query, projectRoot, candidates,
+        new Set(plan.bindings?.length ? plan.bindings.map(b => b.id) : subgraph.roots),
+        args._hgEvidenceMaxChars as number | undefined, maxFiles, plan);
+      if (packed) return packed;
+    }
     const literalSource = this.renderLiteralSource(cg, subgraph);
     if (subgraph.nodes.size === 0) {
       // Spec 0044 §9: empty exact evidence → Miss (paths only), not a source dump.
@@ -12257,7 +12318,10 @@ export class ToolHandler {
     const nodes: QueryPlanBinding[] = [];
     const seen = new Set<string>();
     let chars = 0;
-    for (const hit of subgraph.literalEvidence?.hits ?? []) {
+    // Preserve value-to-key provenance when a plain label in the same file
+    // would otherwise consume its single source-witness slot first.
+    const literalHits = [...(subgraph.literalEvidence?.hits ?? [])].sort((a, b) => Number(!!b.resource) - Number(!!a.resource));
+    for (const hit of literalHits) {
       if (files.length >= 2 || seen.has(hit.filePath)) continue;
       const absolute = validatePathWithinRoot(cg.getProjectRoot(), hit.filePath);
       if (!absolute) continue;

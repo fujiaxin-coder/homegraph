@@ -1,0 +1,11 @@
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+
+ RUN  v2.1.9 <repository>
+
+ ✓ test/query-plan-integration.test.ts (22 tests) 2523ms
+   ✓ structured query planning at the MCP boundary > transfers one plan through the real worker without a second model request 412ms
+
+ Test Files  1 passed (1)
+      Tests  22 passed (22)
+   Start at  17:48:38
+   Duration  3.91s (transform 846ms, setup 0ms, collect 1.24s, tests 2.52s, environment 0ms, prepare 30ms)

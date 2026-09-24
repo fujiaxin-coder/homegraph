@@ -1,0 +1,1312 @@
+{
+  "scope": "synthetic retrieval correctness; no model/inference latency measurement",
+  "query": "PipelineStart.start ValueStore.apply",
+  "files": {
+    "DemoPage.ets": "import { PipelineStart } from './PipelineStart';\n@Entry\n@Component\nstruct DemoPage {\n  build() {\n    Button('Apply').onClick(() => { PipelineStart.start(12); })\n  }\n}\n",
+    "PipelineStart.ets": "import { NormalizeInput } from './NormalizeInput';\nimport { AuditLog } from './AuditLog';\nexport class PipelineStart {\n  static start(value: number): number {\n    AuditLog.record(value);\n    return NormalizeInput.clean(value);\n  }\n}\n",
+    "NormalizeInput.ets": "import { ClampInput } from './ClampInput';\nexport class NormalizeInput {\n  static clean(value: number): number {\n    if (value < 0) {\n      return ClampInput.clamp(0);\n    } else {\n      return ClampInput.clamp(value);\n    }\n  }\n}\n",
+    "ClampInput.ets": "import { ValueStore } from './ValueStore';\nexport class ClampInput {\n  static clamp(value: number): number {\n    return ValueStore.apply(Math.min(value, 100));\n  }\n}\n",
+    "ValueStore.ets": "export class ValueStore {\n  static apply(value: number): number {\n    return value * 2;\n  }\n}\n",
+    "AuditLog.ets": "export class AuditLog {\n  static record(value: number): void {\n    console.info('Observed input', value);\n  }\n}\n"
+  },
+  "index": {
+    "success": true,
+    "filesIndexed": 6,
+    "filesSkipped": 0,
+    "filesErrored": 0,
+    "filesDiscovered": 6,
+    "nodesCreated": 34,
+    "edgesCreated": 36,
+    "errors": [
+      {
+        "message": "HarmonyOS project detected but compileSdkVersion was not found in build-profile.json5 and no local OHOS SDK was discovered (set OHOS_SDK_HOME / DEVECO_SDK_HOME). SDK API lookup disabled; project indexing continues normally.",
+        "severity": "warning",
+        "code": "ohos_api_version_unknown"
+      }
+    ],
+    "durationMs": 421
+  },
+  "indexedNodes": [
+    {
+      "id": "file:DemoPage.ets",
+      "kind": "file",
+      "name": "DemoPage.ets",
+      "qualifiedName": "DemoPage.ets",
+      "filePath": "DemoPage.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 9,
+      "startColumn": 0,
+      "endColumn": 0,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "method:163e7834d83a827cff3a495f90dfb15a",
+      "kind": "method",
+      "name": "constructor",
+      "qualifiedName": "DemoPage::constructor",
+      "filePath": "DemoPage.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 49,
+      "endColumn": 49,
+      "signature": "constructor(##storage?: LocalStorage): DemoPage",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "returnType": "DemoPage",
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "import:a7aa07b5d4e979ec8c93e673af34f0e3",
+      "kind": "import",
+      "name": "PipelineStart",
+      "qualifiedName": "DemoPage.ets::import::PipelineStart::1",
+      "filePath": "DemoPage.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "./PipelineStart",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "struct:a5dfd773ab26b9fc8315a71954a150b4",
+      "kind": "struct",
+      "name": "DemoPage",
+      "qualifiedName": "DemoPage",
+      "filePath": "DemoPage.ets",
+      "language": "arkts",
+      "startLine": 2,
+      "endLine": 8,
+      "startColumn": 1,
+      "endColumn": 1,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "decorators": [
+        "Entry",
+        "Component"
+      ],
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "component:aeb024491b1b6836d65c9f870778aeb7",
+      "kind": "component",
+      "name": "DemoPage",
+      "qualifiedName": "DemoPage",
+      "filePath": "DemoPage.ets",
+      "language": "arkts",
+      "startLine": 2,
+      "endLine": 8,
+      "startColumn": 1,
+      "endColumn": 1,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "decorators": [
+        "Entry",
+        "Component"
+      ],
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "method:e8e21402ba18d78cb02fb9e48412375b",
+      "kind": "method",
+      "name": "build",
+      "qualifiedName": "DemoPage::build",
+      "filePath": "DemoPage.ets",
+      "language": "arkts",
+      "startLine": 5,
+      "endLine": 7,
+      "startColumn": 3,
+      "endColumn": 3,
+      "signature": "build(): void",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "method:965d39664c7d9ff54501881d04a3be5b",
+      "kind": "method",
+      "name": "%AM0$build",
+      "qualifiedName": "DemoPage::build::%AM0$build",
+      "filePath": "DemoPage.ets",
+      "language": "arkts",
+      "startLine": 6,
+      "endLine": 6,
+      "startColumn": 29,
+      "endColumn": 29,
+      "signature": "%AM0$build(): void",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535699
+    },
+    {
+      "id": "file:PipelineStart.ets",
+      "kind": "file",
+      "name": "PipelineStart.ets",
+      "qualifiedName": "PipelineStart.ets",
+      "filePath": "PipelineStart.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 9,
+      "startColumn": 0,
+      "endColumn": 0,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "method:54b42a96cc17b9fad28eb3b5aec40313",
+      "kind": "method",
+      "name": "constructor",
+      "qualifiedName": "PipelineStart::constructor",
+      "filePath": "PipelineStart.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "constructor(): PipelineStart",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "returnType": "PipelineStart",
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "import:5dacb856b036fabafb726f4c2b849f5a",
+      "kind": "import",
+      "name": "NormalizeInput",
+      "qualifiedName": "PipelineStart.ets::import::NormalizeInput::1",
+      "filePath": "PipelineStart.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "./NormalizeInput",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "import:eda678af386f072582ea96842b46f7fb",
+      "kind": "import",
+      "name": "AuditLog",
+      "qualifiedName": "PipelineStart.ets::import::AuditLog::2",
+      "filePath": "PipelineStart.ets",
+      "language": "arkts",
+      "startLine": 2,
+      "endLine": 2,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "./AuditLog",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "class:f4b9f8c1214b0de6914eb18130d8c0c6",
+      "kind": "class",
+      "name": "PipelineStart",
+      "qualifiedName": "PipelineStart",
+      "filePath": "PipelineStart.ets",
+      "language": "arkts",
+      "startLine": 3,
+      "endLine": 8,
+      "startColumn": 1,
+      "endColumn": 1,
+      "visibility": null,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "method:2d839a568a77df7f6690c133f2019190",
+      "kind": "method",
+      "name": "start",
+      "qualifiedName": "PipelineStart::start",
+      "filePath": "PipelineStart.ets",
+      "language": "arkts",
+      "startLine": 4,
+      "endLine": 7,
+      "startColumn": 3,
+      "endColumn": 3,
+      "signature": "static start(value: number): number",
+      "visibility": "public",
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "file:NormalizeInput.ets",
+      "kind": "file",
+      "name": "NormalizeInput.ets",
+      "qualifiedName": "NormalizeInput.ets",
+      "filePath": "NormalizeInput.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 11,
+      "startColumn": 0,
+      "endColumn": 0,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "method:a8367c9c4eb08e6e9de35f2c3b064dcc",
+      "kind": "method",
+      "name": "constructor",
+      "qualifiedName": "NormalizeInput::constructor",
+      "filePath": "NormalizeInput.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "constructor(): NormalizeInput",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "returnType": "NormalizeInput",
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "import:ebed4daccd9397f90b7286c54353cf8a",
+      "kind": "import",
+      "name": "ClampInput",
+      "qualifiedName": "NormalizeInput.ets::import::ClampInput::1",
+      "filePath": "NormalizeInput.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "./ClampInput",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "class:c717710f3716ba329bbbec9efb139ad8",
+      "kind": "class",
+      "name": "NormalizeInput",
+      "qualifiedName": "NormalizeInput",
+      "filePath": "NormalizeInput.ets",
+      "language": "arkts",
+      "startLine": 2,
+      "endLine": 10,
+      "startColumn": 1,
+      "endColumn": 1,
+      "visibility": null,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "method:f8bc16babd4a2f6434e38575459320f8",
+      "kind": "method",
+      "name": "clean",
+      "qualifiedName": "NormalizeInput::clean",
+      "filePath": "NormalizeInput.ets",
+      "language": "arkts",
+      "startLine": 3,
+      "endLine": 9,
+      "startColumn": 3,
+      "endColumn": 3,
+      "signature": "static clean(value: number): number",
+      "visibility": "public",
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "file:ClampInput.ets",
+      "kind": "file",
+      "name": "ClampInput.ets",
+      "qualifiedName": "ClampInput.ets",
+      "filePath": "ClampInput.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 7,
+      "startColumn": 0,
+      "endColumn": 0,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "method:668d55a80d987383df59e1c62e816fbd",
+      "kind": "method",
+      "name": "constructor",
+      "qualifiedName": "ClampInput::constructor",
+      "filePath": "ClampInput.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "constructor(): ClampInput",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "returnType": "ClampInput",
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "import:a64f225d48f9caf8d181b7fd4a880a49",
+      "kind": "import",
+      "name": "ValueStore",
+      "qualifiedName": "ClampInput.ets::import::ValueStore::1",
+      "filePath": "ClampInput.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "./ValueStore",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "class:6668b1848bc61b81c3e66b210c721870",
+      "kind": "class",
+      "name": "ClampInput",
+      "qualifiedName": "ClampInput",
+      "filePath": "ClampInput.ets",
+      "language": "arkts",
+      "startLine": 2,
+      "endLine": 6,
+      "startColumn": 1,
+      "endColumn": 1,
+      "visibility": null,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "method:1a6002c4f19fcf837256d3974af07e04",
+      "kind": "method",
+      "name": "clamp",
+      "qualifiedName": "ClampInput::clamp",
+      "filePath": "ClampInput.ets",
+      "language": "arkts",
+      "startLine": 3,
+      "endLine": 5,
+      "startColumn": 3,
+      "endColumn": 3,
+      "signature": "static clamp(value: number): number",
+      "visibility": "public",
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "isAbstract": false,
+      "updatedAt": 1789638535697
+    },
+    {
+      "id": "file:ValueStore.ets",
+      "kind": "file",
+      "name": "ValueStore.ets",
+      "qualifiedName": "ValueStore.ets",
+      "filePath": "ValueStore.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 6,
+      "startColumn": 0,
+      "endColumn": 0,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "class:94a2e9668e5419f74d508d317e734439",
+      "kind": "class",
+      "name": "ValueStore",
+      "qualifiedName": "ValueStore",
+      "filePath": "ValueStore.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 5,
+      "startColumn": 1,
+      "endColumn": 1,
+      "visibility": null,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "method:90da49a69318f1b7769fae21e1b54003",
+      "kind": "method",
+      "name": "constructor",
+      "qualifiedName": "ValueStore::constructor",
+      "filePath": "ValueStore.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "constructor(): ValueStore",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "returnType": "ValueStore",
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "method:7e98789c3182cb9d7c1b8bc12999d287",
+      "kind": "method",
+      "name": "apply",
+      "qualifiedName": "ValueStore::apply",
+      "filePath": "ValueStore.ets",
+      "language": "arkts",
+      "startLine": 2,
+      "endLine": 4,
+      "startColumn": 3,
+      "endColumn": 3,
+      "signature": "static apply(value: number): number",
+      "visibility": "public",
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "isAbstract": false,
+      "updatedAt": 1789638535698
+    },
+    {
+      "id": "file:AuditLog.ets",
+      "kind": "file",
+      "name": "AuditLog.ets",
+      "qualifiedName": "AuditLog.ets",
+      "filePath": "AuditLog.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 6,
+      "startColumn": 0,
+      "endColumn": 0,
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535695
+    },
+    {
+      "id": "class:595144febe224ca7541f9d5898698ef9",
+      "kind": "class",
+      "name": "AuditLog",
+      "qualifiedName": "AuditLog",
+      "filePath": "AuditLog.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 5,
+      "startColumn": 1,
+      "endColumn": 1,
+      "visibility": null,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "updatedAt": 1789638535696
+    },
+    {
+      "id": "method:d0fb803ba3cae4833526a5770e44ac6e",
+      "kind": "method",
+      "name": "constructor",
+      "qualifiedName": "AuditLog::constructor",
+      "filePath": "AuditLog.ets",
+      "language": "arkts",
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 0,
+      "signature": "constructor(): AuditLog",
+      "visibility": null,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "isAbstract": false,
+      "returnType": "AuditLog",
+      "updatedAt": 1789638535696
+    },
+    {
+      "id": "method:94fb8d677b18322b3e6d39f39606be27",
+      "kind": "method",
+      "name": "record",
+      "qualifiedName": "AuditLog::record",
+      "filePath": "AuditLog.ets",
+      "language": "arkts",
+      "startLine": 2,
+      "endLine": 4,
+      "startColumn": 3,
+      "endColumn": 3,
+      "signature": "static record(value: number): void",
+      "visibility": "public",
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "isAbstract": false,
+      "updatedAt": 1789638535696
+    }
+  ],
+  "indexedEdges": [
+    {
+      "source": "file:DemoPage.ets",
+      "target": "struct:a5dfd773ab26b9fc8315a71954a150b4",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:DemoPage.ets",
+      "target": "import:a7aa07b5d4e979ec8c93e673af34f0e3",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "struct:a5dfd773ab26b9fc8315a71954a150b4",
+      "target": "component:aeb024491b1b6836d65c9f870778aeb7",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "struct:a5dfd773ab26b9fc8315a71954a150b4",
+      "target": "method:163e7834d83a827cff3a495f90dfb15a",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "struct:a5dfd773ab26b9fc8315a71954a150b4",
+      "target": "method:e8e21402ba18d78cb02fb9e48412375b",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "component:aeb024491b1b6836d65c9f870778aeb7",
+      "target": "method:965d39664c7d9ff54501881d04a3be5b",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "method:e8e21402ba18d78cb02fb9e48412375b",
+      "target": "method:965d39664c7d9ff54501881d04a3be5b",
+      "kind": "calls",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer",
+        "dispatch": "indirect",
+        "sourceFile": "DemoPage.ets"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "method:e8e21402ba18d78cb02fb9e48412375b",
+      "target": "method:965d39664c7d9ff54501881d04a3be5b",
+      "kind": "references",
+      "metadata": {
+        "synthesizedBy": "viewtree",
+        "via": "onClick",
+        "registeredAt": "DemoPage.ets:6"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "method:965d39664c7d9ff54501881d04a3be5b",
+      "target": "method:2d839a568a77df7f6690c133f2019190",
+      "kind": "calls",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer",
+        "dispatch": "indirect",
+        "sourceFile": "DemoPage.ets"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:PipelineStart.ets",
+      "target": "class:f4b9f8c1214b0de6914eb18130d8c0c6",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:PipelineStart.ets",
+      "target": "import:5dacb856b036fabafb726f4c2b849f5a",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:PipelineStart.ets",
+      "target": "import:eda678af386f072582ea96842b46f7fb",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:f4b9f8c1214b0de6914eb18130d8c0c6",
+      "target": "method:54b42a96cc17b9fad28eb3b5aec40313",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:f4b9f8c1214b0de6914eb18130d8c0c6",
+      "target": "method:2d839a568a77df7f6690c133f2019190",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "method:2d839a568a77df7f6690c133f2019190",
+      "target": "method:94fb8d677b18322b3e6d39f39606be27",
+      "kind": "calls",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer",
+        "dispatch": "indirect",
+        "sourceFile": "PipelineStart.ets"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "method:2d839a568a77df7f6690c133f2019190",
+      "target": "method:f8bc16babd4a2f6434e38575459320f8",
+      "kind": "calls",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer",
+        "dispatch": "indirect",
+        "sourceFile": "PipelineStart.ets"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:NormalizeInput.ets",
+      "target": "class:c717710f3716ba329bbbec9efb139ad8",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:NormalizeInput.ets",
+      "target": "import:ebed4daccd9397f90b7286c54353cf8a",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:c717710f3716ba329bbbec9efb139ad8",
+      "target": "method:a8367c9c4eb08e6e9de35f2c3b064dcc",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:c717710f3716ba329bbbec9efb139ad8",
+      "target": "method:f8bc16babd4a2f6434e38575459320f8",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "method:f8bc16babd4a2f6434e38575459320f8",
+      "target": "method:1a6002c4f19fcf837256d3974af07e04",
+      "kind": "calls",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer",
+        "dispatch": "indirect",
+        "sourceFile": "NormalizeInput.ets"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:ClampInput.ets",
+      "target": "class:6668b1848bc61b81c3e66b210c721870",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:ClampInput.ets",
+      "target": "import:a64f225d48f9caf8d181b7fd4a880a49",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:6668b1848bc61b81c3e66b210c721870",
+      "target": "method:668d55a80d987383df59e1c62e816fbd",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:6668b1848bc61b81c3e66b210c721870",
+      "target": "method:1a6002c4f19fcf837256d3974af07e04",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "method:1a6002c4f19fcf837256d3974af07e04",
+      "target": "method:7e98789c3182cb9d7c1b8bc12999d287",
+      "kind": "calls",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer",
+        "dispatch": "indirect",
+        "sourceFile": "ClampInput.ets"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:ValueStore.ets",
+      "target": "class:94a2e9668e5419f74d508d317e734439",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:94a2e9668e5419f74d508d317e734439",
+      "target": "method:90da49a69318f1b7769fae21e1b54003",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:94a2e9668e5419f74d508d317e734439",
+      "target": "method:7e98789c3182cb9d7c1b8bc12999d287",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "file:AuditLog.ets",
+      "target": "class:595144febe224ca7541f9d5898698ef9",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:595144febe224ca7541f9d5898698ef9",
+      "target": "method:d0fb803ba3cae4833526a5770e44ac6e",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    },
+    {
+      "source": "class:595144febe224ca7541f9d5898698ef9",
+      "target": "method:94fb8d677b18322b3e6d39f39606be27",
+      "kind": "contains",
+      "metadata": {
+        "synthesizedBy": "arkanalyzer"
+      },
+      "provenance": "heuristic"
+    }
+  ],
+  "results": {
+    "batch1": {
+      "content": [
+        {
+          "type": "text",
+          "text": "**ArkTS evidence packs**\n\n> **Partial locator** — explicit gaps below.\n\nComplete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.\n\n**Static relations (with source dependencies)**\n\n- ClampInput::clamp @ ClampInput.ets:3 → calls → ValueStore::apply @ ValueStore.ets:2 [heuristic; arkanalyzer]\n\n### ClampInput.ets:3-5 — complete declaration; file-fingerprint=166:2c1e1957b8af8c91\n\n```arkts\n\n3\t  static clamp(value: number): number {\n4\t    return ValueStore.apply(Math.min(value, 100));\n5\t  }\n\n```\n\n### PipelineStart.ets:3-8 — complete declaration; file-fingerprint=233:e5750cb0b35db9a0\n\n```arkts\n\n3\texport class PipelineStart {\n4\t  static start(value: number): number {\n5\t    AuditLog.record(value);\n6\t    return NormalizeInput.clean(value);\n7\t  }\n8\t}\n\n```\n\n### ValueStore.ets:1-5 — complete declaration; file-fingerprint=94:682f686242291eb4\n\n```arkts\n\n1\texport class ValueStore {\n2\t  static apply(value: number): number {\n3\t    return value * 2;\n4\t  }\n5\t}\n\n```\n\n**Gaps — inspect only the missing evidence needed for the task**\n\n- unindexed_connection: call/use connection for PipelineStart @ PipelineStart.ets:3. Next anchor: PipelineStart.ets:3.\n\n- unindexed_connection: connecting path in the bounded graph slice: PipelineStart @ PipelineStart.ets:3 → ValueStore::apply @ ValueStore.ets:2. Next anchor: ValueStore.ets:2.\n\nHomeGraph status=full — complete and up to date."
+        }
+      ],
+      "_meta": {
+        "homegraphEvidencePacks": {
+          "version": 1,
+          "scope": "bounded_static_evidence",
+          "status": "partial",
+          "selectedPacks": [
+            "source:class:94a2e9668e5419f74d508d317e734439",
+            "source:class:f4b9f8c1214b0de6914eb18130d8c0c6",
+            "source:method:7e98789c3182cb9d7c1b8bc12999d287",
+            "relation:0"
+          ],
+          "gaps": [
+            {
+              "target": "call/use connection for PipelineStart @ PipelineStart.ets:3",
+              "reason": "unindexed_connection",
+              "nextAnchor": "PipelineStart.ets:3"
+            },
+            {
+              "target": "connecting path in the bounded graph slice: PipelineStart @ PipelineStart.ets:3 → ValueStore::apply @ ValueStore.ets:2",
+              "reason": "unindexed_connection",
+              "nextAnchor": "ValueStore.ets:2"
+            }
+          ],
+          "relations": [
+            {
+              "source": "method:1a6002c4f19fcf837256d3974af07e04",
+              "target": "method:7e98789c3182cb9d7c1b8bc12999d287",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            }
+          ]
+        },
+        "homegraphEvidence": {
+          "status": "partial",
+          "files": [
+            {
+              "path": "ClampInput.ets",
+              "ranges": [
+                {
+                  "start": 3,
+                  "end": 5
+                }
+              ],
+              "bytes": 94,
+              "fingerprint": "166:2c1e1957b8af8c91"
+            },
+            {
+              "path": "PipelineStart.ets",
+              "ranges": [
+                {
+                  "start": 3,
+                  "end": 8
+                }
+              ],
+              "bytes": 142,
+              "fingerprint": "233:e5750cb0b35db9a0"
+            },
+            {
+              "path": "ValueStore.ets",
+              "ranges": [
+                {
+                  "start": 1,
+                  "end": 5
+                }
+              ],
+              "bytes": 93,
+              "fingerprint": "94:682f686242291eb4"
+            }
+          ],
+          "locatedNodes": [
+            {
+              "id": "class:f4b9f8c1214b0de6914eb18130d8c0c6",
+              "name": "PipelineStart",
+              "qualifiedName": "PipelineStart",
+              "filePath": "PipelineStart.ets",
+              "startLine": 3
+            },
+            {
+              "id": "class:94a2e9668e5419f74d508d317e734439",
+              "name": "ValueStore",
+              "qualifiedName": "ValueStore",
+              "filePath": "ValueStore.ets",
+              "startLine": 1
+            },
+            {
+              "id": "method:7e98789c3182cb9d7c1b8bc12999d287",
+              "name": "apply",
+              "qualifiedName": "ValueStore::apply",
+              "filePath": "ValueStore.ets",
+              "startLine": 2
+            }
+          ],
+          "coveredObligations": [
+            "ValueStore @ ValueStore.ets:1",
+            "PipelineStart @ PipelineStart.ets:3",
+            "ValueStore::apply @ ValueStore.ets:2",
+            "ClampInput::clamp @ ClampInput.ets:3 → calls → ValueStore::apply @ ValueStore.ets:2"
+          ],
+          "uncoveredObligations": [
+            "unindexed_connection: call/use connection for PipelineStart @ PipelineStart.ets:3",
+            "unindexed_connection: connecting path in the bounded graph slice: PipelineStart @ PipelineStart.ets:3 → ValueStore::apply @ ValueStore.ets:2"
+          ]
+        },
+        "homegraphQueryPlan": {
+          "version": 3,
+          "source": "rules",
+          "intent": "general",
+          "route": "general",
+          "confidence": 1,
+          "plannerSeeds": {
+            "anchors": [
+              "PipelineStart.start",
+              "ValueStore.apply",
+              "PipelineStart",
+              "ValueStore",
+              "apply"
+            ],
+            "searchTerms": [
+              "start",
+              "pipelinestart",
+              "apply",
+              "valuestore",
+              "pipeline",
+              "value",
+              "store"
+            ]
+          },
+          "hasTaskContext": false,
+          "matchedFeatures": [
+            "shouldUseCompactExploreBudget",
+            "shouldBuildMemberSurvey",
+            "queryAsLocalSymbolDetail",
+            "queryHasNamedMemberFocus"
+          ],
+          "planningMs": 10,
+          "durationMs": 25,
+          "modelRequests": 0,
+          "planningEligible": false,
+          "planningReason": "planner_disabled",
+          "skip_reason": "planner_disabled",
+          "ruleRoute": "general",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheHit": false,
+          "steps": [
+            {
+              "id": "s1",
+              "intent": "general",
+              "status": "partial",
+              "resolvedAnchors": []
+            }
+          ]
+        }
+      }
+    },
+    "batch2": {
+      "content": [
+        {
+          "type": "text",
+          "text": "**ArkTS evidence packs**\n\n> Bounded evidence supplied for the selected declarations and static links.\n\nComplete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.\n\nPath goal: calls; search direction: either; stop: supported. Static paths do not prove runtime behavior.\n\n**Directed paths (all source dependencies provided)**\n\n- directed calls path: PipelineStart::start @ PipelineStart.ets:4 → NormalizeInput::clean @ NormalizeInput.ets:3 → ClampInput::clamp @ ClampInput.ets:3 → ValueStore::apply @ ValueStore.ets:2\n\n**Static relations (with source dependencies)**\n\n- PipelineStart::start @ PipelineStart.ets:4 → calls → NormalizeInput::clean @ NormalizeInput.ets:3 [heuristic; arkanalyzer]\n\n- NormalizeInput::clean @ NormalizeInput.ets:3 → calls → ClampInput::clamp @ ClampInput.ets:3 [heuristic; arkanalyzer]\n\n- ClampInput::clamp @ ClampInput.ets:3 → calls → ValueStore::apply @ ValueStore.ets:2 [heuristic; arkanalyzer]\n\n### ClampInput.ets:3-5 — complete declaration; file-fingerprint=166:2c1e1957b8af8c91\n\n```arkts\n\n3\t  static clamp(value: number): number {\n4\t    return ValueStore.apply(Math.min(value, 100));\n5\t  }\n\n```\n\n### NormalizeInput.ets:3-9 — complete declaration; file-fingerprint=231:829c07ef5d1f6327\n\n```arkts\n\n3\t  static clean(value: number): number {\n4\t    if (value < 0) {\n5\t      return ClampInput.clamp(0);\n6\t    } else {\n7\t      return ClampInput.clamp(value);\n8\t    }\n9\t  }\n\n```\n\n### PipelineStart.ets:4-7 — complete declaration; file-fingerprint=233:e5750cb0b35db9a0\n\n```arkts\n\n4\t  static start(value: number): number {\n5\t    AuditLog.record(value);\n6\t    return NormalizeInput.clean(value);\n7\t  }\n\n```\n\n### ValueStore.ets:2-4 — complete declaration; file-fingerprint=94:682f686242291eb4\n\n```arkts\n\n2\t  static apply(value: number): number {\n3\t    return value * 2;\n4\t  }\n\n```\n\nHomeGraph status=full — complete and up to date."
+        }
+      ],
+      "_meta": {
+        "homegraphEvidencePacks": {
+          "version": 2,
+          "scope": "bounded_static_evidence",
+          "status": "complete",
+          "selectedPacks": [
+            "path:1",
+            "relation:0",
+            "relation:1",
+            "relation:2",
+            "source:method:1a6002c4f19fcf837256d3974af07e04",
+            "source:method:2d839a568a77df7f6690c133f2019190",
+            "source:method:7e98789c3182cb9d7c1b8bc12999d287",
+            "source:method:f8bc16babd4a2f6434e38575459320f8"
+          ],
+          "gaps": [],
+          "relations": [
+            {
+              "source": "method:2d839a568a77df7f6690c133f2019190",
+              "target": "method:f8bc16babd4a2f6434e38575459320f8",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            },
+            {
+              "source": "method:f8bc16babd4a2f6434e38575459320f8",
+              "target": "method:1a6002c4f19fcf837256d3974af07e04",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            },
+            {
+              "source": "method:1a6002c4f19fcf837256d3974af07e04",
+              "target": "method:7e98789c3182cb9d7c1b8bc12999d287",
+              "kind": "calls",
+              "provenance": "heuristic",
+              "via": "arkanalyzer"
+            }
+          ],
+          "pathSearch": {
+            "goal": {
+              "kind": "calls",
+              "direction": "either",
+              "anchorIds": [
+                "method:2d839a568a77df7f6690c133f2019190",
+                "method:7e98789c3182cb9d7c1b8bc12999d287"
+              ],
+              "ambiguous": [],
+              "limited": false
+            },
+            "stopReason": "supported",
+            "limitsHit": [],
+            "stats": {
+              "adjacencyReads": 9,
+              "rowsRead": 9,
+              "nodesVisited": 8,
+              "durationMs": 1
+            },
+            "paths": [
+              {
+                "id": "path:1",
+                "nodeIds": [
+                  "method:2d839a568a77df7f6690c133f2019190",
+                  "method:f8bc16babd4a2f6434e38575459320f8",
+                  "method:1a6002c4f19fcf837256d3974af07e04",
+                  "method:7e98789c3182cb9d7c1b8bc12999d287"
+                ],
+                "cost": 5.25,
+                "evidence": "provided"
+              }
+            ]
+          }
+        },
+        "homegraphEvidence": {
+          "status": "complete",
+          "files": [
+            {
+              "path": "ClampInput.ets",
+              "ranges": [
+                {
+                  "start": 3,
+                  "end": 5
+                }
+              ],
+              "bytes": 94,
+              "fingerprint": "166:2c1e1957b8af8c91"
+            },
+            {
+              "path": "NormalizeInput.ets",
+              "ranges": [
+                {
+                  "start": 3,
+                  "end": 9
+                }
+              ],
+              "bytes": 155,
+              "fingerprint": "231:829c07ef5d1f6327"
+            },
+            {
+              "path": "PipelineStart.ets",
+              "ranges": [
+                {
+                  "start": 4,
+                  "end": 7
+                }
+              ],
+              "bytes": 111,
+              "fingerprint": "233:e5750cb0b35db9a0"
+            },
+            {
+              "path": "ValueStore.ets",
+              "ranges": [
+                {
+                  "start": 2,
+                  "end": 4
+                }
+              ],
+              "bytes": 65,
+              "fingerprint": "94:682f686242291eb4"
+            }
+          ],
+          "locatedNodes": [
+            {
+              "id": "method:1a6002c4f19fcf837256d3974af07e04",
+              "name": "clamp",
+              "qualifiedName": "ClampInput::clamp",
+              "filePath": "ClampInput.ets",
+              "startLine": 3
+            },
+            {
+              "id": "method:f8bc16babd4a2f6434e38575459320f8",
+              "name": "clean",
+              "qualifiedName": "NormalizeInput::clean",
+              "filePath": "NormalizeInput.ets",
+              "startLine": 3
+            },
+            {
+              "id": "method:2d839a568a77df7f6690c133f2019190",
+              "name": "start",
+              "qualifiedName": "PipelineStart::start",
+              "filePath": "PipelineStart.ets",
+              "startLine": 4
+            },
+            {
+              "id": "method:7e98789c3182cb9d7c1b8bc12999d287",
+              "name": "apply",
+              "qualifiedName": "ValueStore::apply",
+              "filePath": "ValueStore.ets",
+              "startLine": 2
+            }
+          ],
+          "coveredObligations": [
+            "directed calls path: PipelineStart::start @ PipelineStart.ets:4 → NormalizeInput::clean @ NormalizeInput.ets:3 → ClampInput::clamp @ ClampInput.ets:3 → ValueStore::apply @ ValueStore.ets:2",
+            "PipelineStart::start @ PipelineStart.ets:4 → calls → NormalizeInput::clean @ NormalizeInput.ets:3",
+            "NormalizeInput::clean @ NormalizeInput.ets:3 → calls → ClampInput::clamp @ ClampInput.ets:3",
+            "ClampInput::clamp @ ClampInput.ets:3 → calls → ValueStore::apply @ ValueStore.ets:2",
+            "ClampInput::clamp @ ClampInput.ets:3",
+            "PipelineStart::start @ PipelineStart.ets:4",
+            "ValueStore::apply @ ValueStore.ets:2",
+            "NormalizeInput::clean @ NormalizeInput.ets:3"
+          ],
+          "uncoveredObligations": []
+        },
+        "homegraphQueryPlan": {
+          "version": 3,
+          "source": "rules",
+          "intent": "general",
+          "route": "general",
+          "confidence": 1,
+          "plannerSeeds": {
+            "anchors": [
+              "PipelineStart.start",
+              "ValueStore.apply",
+              "PipelineStart",
+              "ValueStore",
+              "apply"
+            ],
+            "searchTerms": [
+              "start",
+              "pipelinestart",
+              "apply",
+              "valuestore",
+              "pipeline",
+              "value",
+              "store"
+            ]
+          },
+          "hasTaskContext": false,
+          "matchedFeatures": [
+            "shouldUseCompactExploreBudget",
+            "shouldBuildMemberSurvey",
+            "queryAsLocalSymbolDetail",
+            "queryHasNamedMemberFocus"
+          ],
+          "planningMs": 3,
+          "durationMs": 7,
+          "modelRequests": 0,
+          "planningEligible": false,
+          "planningReason": "planner_disabled",
+          "skip_reason": "planner_disabled",
+          "ruleRoute": "general",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheHit": false,
+          "steps": [
+            {
+              "id": "s1",
+              "intent": "general",
+              "status": "evidence",
+              "resolvedAnchors": []
+            }
+          ]
+        }
+      }
+    }
+  }
+}

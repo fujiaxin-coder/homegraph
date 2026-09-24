@@ -72,3 +72,6 @@ tmux-web/
 
 # Local retrieval debug source copies and transcripts
 .homegraph-debug/
+
+# Local 054 verification records (retain locally; contain machine paths)
+validation/054/

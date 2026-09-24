@@ -1,3 +1,8 @@
+import { parseJson5Minimal } from '../extraction/languages/arkts';
+import { implementationContextEnabled, controlEvidenceEnabled, collectImplementationContext, type SdkModule } from './implementation-context';
+import * as path from 'node:path';
+import { accuracyTargetsEnabled, accuracyCoverageEnabled, type RequestContract } from '../search/request-contract';
+import { createRequestEvidenceInspector, renderRequestEvidence, type RequestEvidence, type RequestSource, inspectControlEvidence, renderControlEvidence, type ControlEvidence } from './request-evidence';
 import { createHash } from 'node:crypto';
 import { closeSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import type HomeGraph from '../index';
@@ -12,13 +17,14 @@ export type EvidenceGapReason = 'budget' | 'unavailable' | 'stale' | 'invalid_ra
   | 'scope_limit' | 'unindexed_connection' | 'registration_source' | 'ambiguous_anchor';
 export interface EvidenceGap { target: string; reason: EvidenceGapReason; nextAnchor: string }
 interface SourceUnit {
-  id: string; node: Node; start: number; end: number; source: string; fingerprint: string;
+  id: string; node: Node; start: number; end: number; source: string; fingerprint: string; snapshot?: boolean;
 }
 interface RelationEvidence {
   source: string; target: string; kind: Edge['kind']; provenance?: Edge['provenance']; via?: string; site?: string;
 }
 interface EvidencePack {
   id: string; label: string; sources: string[]; priority: number; gaps: EvidenceGap[];
+  context?: { label: string; notes: string[]; sdk?: { module: string; version: string; nodes: Node[] } };
   relation?: RelationEvidence;
   path?: { id: string; nodeIds: string[]; relations: RelationEvidence[] };
 }
@@ -27,6 +33,9 @@ export interface ArktsEvidenceResult {
   emission: ExploreEmission;
   metadata: {
     version: 1 | 2; scope: 'bounded_static_evidence'; status: 'complete' | 'partial' | 'empty';
+    requestEvidence?: RequestEvidence;
+    controls?: ControlEvidence[];
+    implementationContext?: Array<NonNullable<EvidencePack['context']>>;
     selectedPacks: string[]; gaps: EvidenceGap[]; relations: NonNullable<EvidencePack['relation']>[];
     pathSearch?: { goal: EvidencePathSearch['goal']; stopReason: string; limitsHit: string[]; stats: EvidencePathSearch['stats'];
       paths: Array<{ id: string; nodeIds: string[]; cost: number; evidence: 'provided' | 'partial' }> };
@@ -34,7 +43,7 @@ export interface ArktsEvidenceResult {
 }
 
 const LIMITS = { nodes: 36, expand: 12, edges: 48, files: 8, fileBytes: 512 * 1024, bytes: 2 * 1024 * 1024 };
-const DECLARATIONS = new Set(['class', 'struct', 'component', 'interface', 'method', 'function', 'property', 'field', 'constant', 'variable', 'enum']);
+const BASE_DECLARATIONS = new Set(['class', 'struct', 'component', 'interface', 'method', 'function', 'property', 'field', 'constant', 'variable', 'enum']);
 const CONTAINERS = new Set(['class', 'struct', 'component', 'interface', 'enum']);
 const RELATIONS = new Set(['calls', 'references', 'extends', 'implements', 'instantiates']);
 const inline = (s: string): string => s.replace(/[`\r\n]/g, ' ');
@@ -50,16 +59,28 @@ const artifact = (n: Node): boolean => n.filePath.includes('@dummy') || n.name.s
 /** Consume already-located nodes. No text search, new planner call or recursive retrieval. */
 export function buildArktsEvidencePacks(
   graph: Pick<HomeGraph, 'getNode' | 'getNodesInFile' | 'getFile' | 'getOutgoingEdges' | 'getIncomingEdges'>,
-  options: { projectRoot: string; query: string; nodes: Node[]; focusIds: Set<string>; maxChars: number; maxFiles?: number; pathSearch?: EvidencePathSearch },
+  options: { projectRoot: string; query: string; nodes: Node[]; focusIds: Set<string>; maxChars: number; maxFiles?: number; pathSearch?: EvidencePathSearch; requestContract?: RequestContract; sdkModule?: (module: string) => SdkModule | undefined },
 ): ArktsEvidenceResult | null {
+  const contextEnabled = implementationContextEnabled();
+  const DECLARATIONS = contextEnabled ? new Set([...BASE_DECLARATIONS, 'type_alias', 'import', 'export', 'route', 'file']) : BASE_DECLARATIONS;
   if (!options.nodes.some(n => local(n) && /\.ets$/i.test(n.filePath) && DECLARATIONS.has(n.kind))) return null;
   const search = options.pathSearch;
+  const targetChecks = accuracyTargetsEnabled(); const behaviorChecks = accuracyCoverageEnabled();
+  const inspector = options.requestContract && (targetChecks || behaviorChecks)
+    ? createRequestEvidenceInspector(options.requestContract) : undefined;
+  const requestSources = new Map<SourceUnit, RequestSource>();
+  const requestUnit = (s: SourceUnit): RequestSource => {
+    let unit = requestSources.get(s);
+    if (!unit) { unit = { filePath: s.node.filePath, start: s.start, source: s.source }; requestSources.set(s, unit); }
+    return unit;
+  };
   const requiredIds = search ? new Set([...search.goal.anchorIds, ...search.paths.flatMap(p => p.nodeIds)]) : options.focusIds;
   const inputNodes = search && requiredIds.size ? [...requiredIds].flatMap(id => { const n = graph.getNode(id); return n ? [n] : []; }) : options.nodes;
   const all = canonicalSourceDeclarations(inputNodes.filter(n => DECLARATIONS.has(n.kind) && local(n) && !artifact(n)));
   if (!all.length) return null;
+  const inputOrder = new Map(all.map((node, index) => [node.id, index]));
   const candidates = all.sort((a, b) => Number(requiredIds.has(b.id)) - Number(requiredIds.has(a.id))
-    || a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine).slice(0, LIMITS.nodes);
+    || (inspector && targetChecks ? inputOrder.get(a.id)! - inputOrder.get(b.id)! : a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine)).slice(0, LIMITS.nodes);
   const focus = candidates.filter(n => requiredIds.has(n.id));
   // A named owning type provides scope for its named members, not another
   // callable endpoint. Do not invent a missing Type→method call obligation.
@@ -74,10 +95,10 @@ export function buildArktsEvidencePacks(
   let bytesRead = 0;
   const root = realpathSync(options.projectRoot);
   const maxFiles = Math.max(1, Math.min(LIMITS.files, options.maxFiles ?? LIMITS.files));
-  const readSource = (node: Node): { id?: string; gap?: EvidenceGap } => {
+  const readSource = (node: Node, snapshot = false): { id?: string; gap?: EvidenceGap } => {
     const previous = nodeSources.get(node.id);
     if (previous) return previous;
-    if (!local(node) || artifact(node) || !DECLARATIONS.has(node.kind)) {
+    if ((!local(node) && !(contextEnabled && (snapshot || node.kind === 'route' || (!node.filePath.startsWith('ohos-sdk:') && /\.d\.(?:ts|ets)$/.test(node.filePath))))) || artifact(node) || !DECLARATIONS.has(node.kind)) {
       const failure = { gap: { target: label(node), reason: 'unavailable' as const, nextAnchor: location(node) } };
       nodeSources.set(node.id, failure);
       return failure;
@@ -110,12 +131,18 @@ export function buildArktsEvidencePacks(
             const content = buffer.subarray(0, bytes).toString('utf8');
             const indexed = graph.getFile(node.filePath);
             // Hash equality, not mtime: edits can retain timestamps and invalidate ranges.
-            if (bytes !== size || !indexed || indexed.contentHash !== createHash('sha256').update(content).digest('hex')) file.reason = 'stale';
+            if (bytes !== size || (!snapshot && (!indexed || indexed.contentHash !== createHash('sha256').update(content).digest('hex')))) file.reason = 'stale';
             else file = { content, lines: content.split('\n'), fingerprint: fileFingerprint(content) };
           }
         }
       } catch { file.reason = 'unavailable'; }
       fileCache.set(node.filePath, file);
+    }
+    if ((snapshot || node.kind === 'file') && file.lines) node = { ...node, endLine: file.lines.length };
+    if (node.kind === 'import' && file.lines) {
+      const head = file.lines.slice(node.startLine - 1, node.startLine + 20).join('\n');
+      const importText = head.match(/^\s*import\s+[\s\S]*?\bfrom\s*['"][^'"\r\n]+['"][^\S\r\n]*;?/);
+      if (importText) node = { ...node, endLine: node.startLine + importText[0].split('\n').length - 1 };
     }
     const reason = file.reason ?? (!Number.isInteger(node.startLine) || !Number.isInteger(node.endLine)
       || node.startLine < 1 || node.endLine < node.startLine || node.endLine > file.lines!.length
@@ -130,13 +157,13 @@ export function buildArktsEvidencePacks(
     while (start > 1 && /^\s*@\w+(?:\([^\n]*\))?\s*$/.test(file.lines![start - 2]!)) start--;
     const id = `${node.filePath}:${start}-${node.endLine}`;
     if (!sources.has(id)) sources.set(id, { id, node, start, end: node.endLine,
-      source: file.lines!.slice(start - 1, node.endLine).join('\n'), fingerprint: file.fingerprint! });
+      source: file.lines!.slice(start - 1, node.endLine).join('\n'), fingerprint: file.fingerprint!, ...(snapshot ? { snapshot: true } : {}) });
     const result = { id };
     nodeSources.set(node.id, result);
     return result;
   };
   const dependencies = (nodes: Node[]): { sources: string[]; gaps: EvidenceGap[] } => {
-    const resolved = nodes.map(readSource);
+    const resolved = nodes.map(n => readSource(n));
     return { sources: [...new Set(resolved.flatMap(s => s.id ? [s.id] : []))],
       gaps: resolved.flatMap(s => s.gap ? [s.gap] : []) };
   };
@@ -146,6 +173,71 @@ export function buildArktsEvidencePacks(
     priority: requiredIds.has(n.id) ? 80 : 20, ...dependencies([n]) });
   if (all.length > candidates.length) globalGaps.push({ target: `${all.length - candidates.length} additional candidates`,
     reason: 'scope_limit', nextAnchor: location(all[candidates.length]!) });
+
+  const configNode = (file: string): Node => ({ id: `context-config:${file}`, kind: 'constant', name: file, qualifiedName: file,
+    filePath: file, startLine: 1, endLine: 1, startColumn: 0, endColumn: 0, updatedAt: 0, language: 'yaml' });
+  const manifestCache = new Map<string, Node | undefined>();
+  const nearestManifest = (file: string): Node | undefined => {
+    if (manifestCache.has(file)) return manifestCache.get(file);
+    let dir = path.posix.dirname(file.replace(/\\/g, '/')); let found: Node | undefined;
+    for (let depth = 0; depth < 12; depth++) {
+      const manifest = path.posix.join(dir, 'oh-package.json5');
+      const absolute = validatePathWithinRoot(root, manifest);
+      try { if (absolute && statSync(absolute).isFile()) { found = configNode(manifest); break; } } catch { /* absent */ }
+      if (dir === '.') break; dir = path.posix.dirname(dir);
+    }
+    manifestCache.set(file, found); return found;
+  };
+  const configValue = (node: Node): Record<string, unknown> | undefined => {
+    const r = readSource(node, true); if (!r.id) return undefined;
+    try { const value = parseJson5Minimal(sources.get(r.id)!.source); return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+    catch { return undefined; }
+  };
+  const moduleBinding = (importer: string, module: string) => {
+    const manifest = nearestManifest(importer); if (!manifest) return undefined;
+    const config = configValue(manifest); const deps = config?.dependencies;
+    if (!deps || typeof deps !== 'object' || Array.isArray(deps)) return undefined;
+    const dep = (deps as Record<string, unknown>)[module];
+    if (typeof dep !== 'string' || !/^file:\.{1,2}\//.test(dep)) return undefined;
+    const depRoot = path.posix.normalize(path.posix.join(path.posix.dirname(manifest.filePath), dep.slice(5)));
+    if (depRoot === '..' || depRoot.startsWith('../') || path.posix.isAbsolute(depRoot)) return undefined;
+    const targetManifest = configNode(path.posix.join(depRoot, 'oh-package.json5'));
+    const target = configValue(targetManifest); if (!target) return undefined;
+    const entry = typeof target.main === 'string' ? path.posix.join(depRoot, target.main) : depRoot;
+    const relativePath = './' + path.posix.relative(path.posix.dirname(importer), entry);
+    return { relativePath, witnesses: [manifest, targetManifest] };
+  };
+  const contextGroups = contextEnabled ? collectImplementationContext(graph, focus.length ? focus : candidates,
+    node => { const r = readSource(node); return r.id ? sources.get(r.id)?.source : undefined; }, options.sdkModule, moduleBinding) : [];
+  for (const group of contextGroups) {
+    const deps = dependencies(group.nodes);
+    packs.push({ id: group.id, label: group.label, priority: 130, ...deps,
+      context: { label: group.label, notes: [...group.notes, ...group.missing.map(m => `Unresolved: ${m}`)], ...(group.sdk ? { sdk: group.sdk } : {}) } });
+    for (const missing of group.missing) globalGaps.push({ target: missing, reason: 'unindexed_connection', nextAnchor: missing });
+  }
+  // Only ancestor manifests of the located code; no workspace traversal or credential files.
+  const configs = new Set<string>();
+  for (const node of contextEnabled && contextGroups.some(g => g.id.startsWith('impl-import:')) ? (focus.length ? focus : candidates).slice(0, 3) : []) {
+    let dir = path.posix.dirname(node.filePath.replace(/\\/g, '/'));
+    for (let depth = 0; depth < 12; depth++) {
+      const manifest = path.posix.join(dir, 'oh-package.json5');
+      const absolute = validatePathWithinRoot(root, manifest);
+      try {
+        if (absolute && statSync(absolute).isFile()) { configs.add(manifest); break; }
+      } catch { /* missing ancestor manifest */ }
+      if (dir === '.') break;
+      dir = path.posix.dirname(dir);
+    }
+  }
+  if (configs.size) configs.add('build-profile.json5');
+  for (const config of configs) {
+    const node: Node = { id: `context-config:${config}`, kind: 'constant', name: config, qualifiedName: config,
+      filePath: config, startLine: 1, endLine: 1, startColumn: 0, endColumn: 0, updatedAt: Date.now(), language: 'yaml' };
+    const dep = readSource(node, true);
+    if (dep.id) packs.push({ id: node.id, label: `module/version configuration ${config}`, priority: 125, sources: [dep.id], gaps: [],
+      context: { label: `module/version configuration ${config}`, notes: ['Current configuration snapshot; declared dependencies do not prove installation or export availability.'] } });
+    else if (dep.gap && dep.gap.reason !== 'unavailable') globalGaps.push(dep.gap);
+  }
 
   const candidateIds = new Set(candidates.map(n => n.id));
   const edges: Edge[] = [];
@@ -163,6 +255,11 @@ export function buildArktsEvidencePacks(
       if (edges.length >= LIMITS.edges) { edgesLimited = true; continue; }
       edges.push(edge);
     }
+  }
+  for (const group of contextGroups) for (const edge of group.edges) {
+    if (edge.kind === 'imports') continue;
+    const key = evidenceEdgeKey(edge);
+    if (!edgeKeys.has(key)) { edgeKeys.add(key); edges.push(edge); }
   }
   if (search) {
     const fallbackNeighbors = search.missing.length || search.goal.anchorIds.length < 2 ? search.neighbors : [];
@@ -195,7 +292,7 @@ export function buildArktsEvidencePacks(
   for (const [i, edge] of edges.entries()) {
     const from = graph.getNode(edge.source);
     const to = graph.getNode(edge.target);
-    if (!from || !to || !local(from) || !local(to)) {
+    if (!from || !to || (!local(from) && from.kind !== 'route') || (!local(to) && to.kind !== 'route')) {
       globalGaps.push({ target: `${from ? label(from) : edge.source} ${edge.kind} ${to ? label(to) : edge.target}`,
         reason: 'unavailable', nextAnchor: from ? location(from) : edge.source });
       continue;
@@ -256,6 +353,17 @@ export function buildArktsEvidencePacks(
       reason: 'unindexed_connection', nextAnchor: location(disconnected[0]!) });
   }
 
+  // Rank already-read, hash-verified declarations by joint targets in the same file.
+  // Never discard a dependent helper merely because it has no UI label.
+  if (inspector && targetChecks) {
+    const byFile = new Map<string, RequestSource[]>();
+    for (const unit of sources.values()) {
+      const list = byFile.get(unit.node.filePath) ?? [];
+      list.push(requestUnit(unit)); byFile.set(unit.node.filePath, list);
+    }
+    const scores = new Map([...byFile].map(([file, units]) => [file, inspector.score(units)]));
+    for (const pack of packs) pack.priority += 30 * Math.max(0, ...pack.sources.map(id => scores.get(sources.get(id)!.node.filePath) ?? 0));
+  }
   const selected: EvidencePack[] = [];
   const rejectedGap = (p: EvidencePack): EvidenceGap[] => p.gaps.length ? p.gaps : [{ target: p.label, reason: 'budget',
     nextAnchor: sources.get(p.sources[0] ?? '') ? location(sources.get(p.sources[0]!)!.node) : p.label }];
@@ -270,6 +378,11 @@ export function buildArktsEvidencePacks(
     return units.filter(s => !units.some(other => other.id !== s.id && other.node.filePath === s.node.filePath
       && other.start <= s.start && other.end >= s.end)).sort((a, b) => a.node.filePath.localeCompare(b.node.filePath) || a.start - b.start);
   };
+  const controlCache = new Map<SourceUnit, ControlEvidence[]>();
+  const controlsFor = (chosen: EvidencePack[]): ControlEvidence[] => unitsFor(chosen).flatMap(unit => {
+    if (!controlCache.has(unit)) controlCache.set(unit, inspectControlEvidence([requestUnit(unit)]));
+    return controlCache.get(unit)!;
+  }).slice(0, 8);
   const relationsFor = (chosen: EvidencePack[]): RelationEvidence[] => [...new Map(chosen.flatMap(p => p.path?.relations ?? (p.relation ? [p.relation] : []))
     .map(r => [JSON.stringify(r), r])).values()];
   const stopFor = (chosen: EvidencePack[]): string => search?.stopReason === 'supported'
@@ -279,6 +392,14 @@ export function buildArktsEvidencePacks(
     const lines = ['**ArkTS evidence packs**', gaps.length ? '> **Partial locator** — explicit gaps below.' : '> Bounded evidence supplied for the selected declarations and static links.',
       'Complete declarations preserve internal branches. Enclosing callers and runtime order/value flow are not proven. Retrieval is not task completion.'];
     if (search) lines.push(`Path goal: ${search.goal.kind}; search direction: ${search.goal.direction}; stop: ${stopFor(chosen)}. Static paths do not prove runtime behavior.`);
+    if (inspector) lines.push(...renderRequestEvidence(inspector.inspect(unitsFor(chosen).map(requestUnit)), targetChecks, behaviorChecks));
+    if (controlEvidenceEnabled()) lines.push(...renderControlEvidence(controlsFor(chosen)));
+    for (const pack of chosen.filter(p => p.context)) {
+      lines.push(`**Implementation context: ${inline(pack.context!.label)}**`, ...pack.context!.notes.map(n => `- ${inline(n)}`));
+      const sdk = pack.context!.sdk;
+      if (sdk) lines.push(`Indexed SDK signatures for ${inline(sdk.module)}; database version ${inline(sdk.version)}. Not source bodies or device validation.`,
+        ...sdk.nodes.map(n => `- ${inline(n.filePath)}:${n.startLine} ${inline(n.signature || n.name)}${n.docstring ? ` — ${inline(n.docstring).slice(0, 500)}${n.docstring.length > 500 ? ' [documentation excerpt; remaining constraints not shown]' : ''}` : ''}`));
+    }
     const chosenPaths = chosen.filter(p => p.path);
     if (chosenPaths.length) lines.push('**Directed paths (all source dependencies provided)**', ...chosenPaths.map(p => `- ${inline(p.label)}`));
     const relations = relationsFor(chosen);
@@ -289,7 +410,7 @@ export function buildArktsEvidencePacks(
     for (const unit of unitsFor(chosen)) {
       // Fence longer than any source backtick run: source-like guidance cannot escape.
       const fence = '`'.repeat(Math.max(3, ...Array.from(unit.source.matchAll(/`+/g), m => m[0].length + 1)));
-      lines.push(`### ${inline(unit.node.filePath)}:${unit.start}-${unit.end} — complete declaration; file-fingerprint=${unit.fingerprint}`,
+      lines.push(`### ${inline(unit.node.filePath)}:${unit.start}-${unit.end} — ${unit.snapshot ? 'current configuration snapshot' : unit.node.kind === 'file' ? 'complete indexed file' : 'complete declaration'}; file-fingerprint=${unit.fingerprint}`,
         fence + unit.node.language, unit.source.split('\n').map((line, i) => `${unit.start + i}\t${line}`).join('\n'), fence);
     }
     if (gaps.length) {
@@ -321,11 +442,20 @@ export function buildArktsEvidencePacks(
   const locatedNodes = candidates.filter(n => units.some(s => s.node.filePath === n.filePath && s.start <= n.startLine && s.end >= n.endLine))
     .map(n => ({ id: n.id, name: n.name, qualifiedName: n.qualifiedName, filePath: n.filePath, startLine: n.startLine }));
   const status = !units.length ? 'empty' : gaps.length ? 'partial' : 'complete';
+  const checkedRequest = inspector?.inspect(units.map(requestUnit));
+  const requestEvidence = checkedRequest ? { ...checkedRequest, targets: targetChecks ? checkedRequest.targets : [],
+    behaviors: behaviorChecks ? checkedRequest.behaviors : [] } : undefined;
   return { text, emission: { projectRoot: options.projectRoot, query: options.query, files,
     sourceBytes: files.reduce((sum, f) => sum + f.bytes, 0), responseBytes: text.length, locatedNodes,
     evidenceStatus: status, partial: status !== 'complete', coveredObligations: selected.map(p => p.label),
     uncoveredObligations: gaps.map(g => `${g.reason}: ${g.target}`), nextAnchor: gaps[0]?.nextAnchor },
-    metadata: { version: search ? 2 : 1, scope: 'bounded_static_evidence', status, selectedPacks: selected.map(p => p.id), gaps,
+    metadata: { ...(controlEvidenceEnabled() ? { controls: controlsFor(selected) } : {}),
+      ...(contextEnabled ? { implementationContext: selected.flatMap(p => p.context ? [{ ...p.context,
+        ...(p.context.sdk ? { sdk: { ...p.context.sdk, nodes: p.context.sdk.nodes.map(n => ({
+          id: n.id, name: n.name, qualifiedName: n.qualifiedName, kind: n.kind, filePath: n.filePath,
+          startLine: n.startLine, endLine: n.endLine, startColumn: n.startColumn, endColumn: n.endColumn,
+          language: n.language, updatedAt: n.updatedAt, signature: n.signature,
+        })) } } : {}) }] : []) } : {}), ...(requestEvidence ? { requestEvidence } : {}), version: search ? 2 : 1, scope: 'bounded_static_evidence', status, selectedPacks: selected.map(p => p.id), gaps,
       relations: relationsFor(selected), ...(search ? { pathSearch: { goal: search.goal, stopReason: stopFor(selected),
         limitsHit: search.limitsHit, stats: search.stats, paths: search.paths.map(p => ({ id: p.id, nodeIds: p.nodeIds, cost: p.cost,
           evidence: selected.some(c => c.path?.id === p.id) ? 'provided' as const : 'partial' as const })) } } : {}) } };
