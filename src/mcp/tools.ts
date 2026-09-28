@@ -1168,10 +1168,11 @@ const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
 };
 
 /**
- * All HomeGraph MCP tools
+ * All HomeGraph MCP tool definitions (handlers stay registered).
  *
- * Prefer the smallest tool that answers: callers/node for one named symbol,
- * explore for multi-file flows. Skip HomeGraph entirely for topic file-lists,
+ * Default tools/list is the slim pair in `DEFAULT_MCP_TOOL_SHORT_NAMES`
+ * (explore / project). Opt into the full catalog with
+ * `HOMEGRAPH_MCP_TOOLS=all`. Skip HomeGraph entirely for topic file-lists,
  * concept compares, SDK catalogs, and literal greps.
  *
  * All tools support cross-project queries via the optional `projectPath` parameter.
@@ -1458,8 +1459,6 @@ export const tools: ToolDefinition[] = [
       'For module/route-profile **paths** and engineering overview use homegraph_project first (not this tool). ' +
       'Use ordinary bash/search/read for paths, symbols, literal strings and local changes; continue editing when that evidence suffices. ' +
       'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
-      'For a missing usage, dependency/cycle or native-registration relation, use ' +
-      'homegraph_usages, homegraph_modules, or homegraph_native instead. ' +
       'Located ArkTS code may include render scope, imported types, module configuration, indexed SDK signatures and control-state gaps. ' +
       'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; form/shortcuts queries may lead with Capability profiles; element/string.json literals may lead with Resource hits + optional bound .ets anchors; Seam notes may flag stubs). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
@@ -1474,7 +1473,7 @@ export const tools: ToolDefinition[] = [
           description:
             'Required. For pre-edit orientation or how/mechanism: pass the user task or domain keywords (page/module/feature words). ' +
             'For named flows, include Type / Type.member / component names. For @kit mechanism/flow, include module/export tokens; ' +
-            'use homegraph_usages for a narrow import/usage inventory, not SDK catalogs.',
+            'not SDK feature catalogs.',
         },
         taskContext: {
           type: 'string',
@@ -1704,18 +1703,46 @@ function withRequiredProjectPath(defs: ToolDefinition[]): ToolDefinition[] {
 }
 
 /**
+ * Default MCP tools/list surface (product slim). Handlers for other tools remain
+ * in-tree; restore the full catalog with `HOMEGRAPH_MCP_TOOLS=all` (or `*`), or
+ * name a comma list (e.g. `explore,node,search,arkui_migrate`).
+ */
+export const DEFAULT_MCP_TOOL_SHORT_NAMES = ['explore', 'project'] as const;
+
+/** Parsed HOMEGRAPH_MCP_TOOLS: a short-name set, or `'all'` for the full catalog. */
+export type McpToolAllowlist = Set<string> | 'all';
+
+/** Resolve the exposed-tool allowlist from env (default = product slim pair). */
+export function resolveMcpToolAllowlist(
+  raw: string | undefined = process.env.HOMEGRAPH_MCP_TOOLS,
+): McpToolAllowlist {
+  if (!raw || !raw.trim()) {
+    return new Set(DEFAULT_MCP_TOOL_SHORT_NAMES);
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '*' || /^all$/i.test(trimmed)) return 'all';
+  const set = new Set(
+    trimmed.split(',').map((s) => s.trim().replace(/^homegraph_/, '')).filter(Boolean),
+  );
+  return set.size ? set : new Set(DEFAULT_MCP_TOOL_SHORT_NAMES);
+}
+
+function filterToolsByAllowlist(
+  defs: ToolDefinition[],
+  allow: McpToolAllowlist,
+): ToolDefinition[] {
+  if (allow === 'all') return defs;
+  return defs.filter((t) => allow.has(t.name.replace(/^homegraph_/, '')));
+}
+
+/**
  * Allowlist-filtered tool definitions WITHOUT an engine — the static surface the
  * proxy answers `tools/list` with before any project is open. Mirrors
  * `ToolHandler.getTools()` in the no-HomeGraph case (the dynamic per-repo budget
  * note in a description only adds once `cg` is loaded; the schemas are static).
  */
 export function getStaticTools(): ToolDefinition[] {
-  const raw = process.env.HOMEGRAPH_MCP_TOOLS ?? process.env.HOMEGRAPH_MCP_TOOLS;
-  if (!raw || !raw.trim()) {
-    return tools;
-  }
-  const allow = new Set(raw.split(',').map(s => s.trim().replace(/^homegraph_/, '').replace(/^homegraph_/, '')).filter(Boolean));
-  return allow.size ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, ''))) : tools;
+  return filterToolsByAllowlist(tools, resolveMcpToolAllowlist());
 }
 
 /** Prose that reads like an identifier but never names a symbol worth scanning. */
@@ -1985,26 +2012,20 @@ export class ToolHandler {
   }
 
   /**
-   * Optional allowlist of exposed tools, parsed from the HOMEGRAPH_MCP_TOOLS
-   * env var (comma-separated short names, e.g. "explore,search,node").
-   * Unset/empty → every tool is exposed. Set → only the listed tools are
-   * exposed. Lets an operator (or an A/B harness) trim the tool surface
-   * without rebuilding the client config; the ablated tool is then truly
-   * absent from ListTools rather than merely denied on call.
+   * Optional allowlist of exposed tools, parsed from HOMEGRAPH_MCP_TOOLS.
+   * Unset/empty → product slim default (`explore`, `project`).
+   * `all` / `*` → full catalog. Comma list → only those short names.
    * Matching is on the short form, so "node" and "homegraph_node" both work.
    */
-  private toolAllowlist(): Set<string> | null {
-    const raw = process.env.HOMEGRAPH_MCP_TOOLS ?? process.env.HOMEGRAPH_MCP_TOOLS;
-    if (!raw || !raw.trim()) return null;
-    const short = (s: string) => s.trim().replace(/^homegraph_/, '');
-    const set = new Set(raw.split(',').map(short).filter(Boolean));
-    return set.size ? set : null;
+  private toolAllowlist(): McpToolAllowlist {
+    return resolveMcpToolAllowlist();
   }
 
-  /** Whether a tool name passes the HOMEGRAPH_MCP_TOOLS allowlist (if any). */
+  /** Whether a tool name passes the HOMEGRAPH_MCP_TOOLS allowlist. */
   private isToolAllowed(name: string): boolean {
     const allow = this.toolAllowlist();
-    return !allow || allow.has(name.replace(/^homegraph_/, ''));
+    if (allow === 'all') return true;
+    return allow.has(name.replace(/^homegraph_/, ''));
   }
 
   /**
@@ -2015,11 +2036,7 @@ export class ToolHandler {
    */
   getTools(): ToolDefinition[] {
     const allow = this.toolAllowlist();
-    // No explicit allowlist → expose every defined tool. An allowlist trims
-    // the surface to only the listed short names.
-    let visible = allow
-      ? tools.filter(t => allow.has(t.name.replace(/^homegraph_/, '')))
-      : tools;
+    let visible = filterToolsByAllowlist(tools, allow);
     // No default project loaded → no-root-index case (#993): a gateway server
     // started outside any repo, or a monorepo root whose indexes live in
     // sub-projects. With nothing to fall back to, EVERY call needs an explicit
@@ -2035,29 +2052,13 @@ export class ToolHandler {
     try {
       const stats = this.cg.getStats();
 
-      // Tiny-repo tool gating: on projects under TINY_REPO_FILE_THRESHOLD
-      // files, only expose the core trio (search, node, explore) — one
-      // below even the 4-tool default: at this scale callers, too, reduces
-      // to one grep. (Historical note: the audit below ran when context and
-      // trace still existed; its "5 core tools" are today's trio.)
+      // Tiny-repo tool gating applies only when the host asked for the full
+      // catalog (`HOMEGRAPH_MCP_TOOLS=all`). The product default is already the
+      // slim pair; an explicit comma allowlist is left untouched.
       //
-      // n=2 audits ruled out cutting below 5 tools:
-      // - 3-tool gate (search + context + trace): cost regressed on
-      //   cobra/ky/sinatra. The agent fell back to raw Reads to cover
-      //   what homegraph_node + homegraph_explore would have answered.
-      // - 1-tool gate (search only): catastrophic regression — express
-      //   went from -43% WIN to +107% LOSS. With only search, the agent
-      //   can't navigate the call graph structurally and reads everything.
-      //
-      // 5 is the empirical lower bound. Tools beyond search/context/
-      // node/explore/trace pay overhead that the agent doesn't recoup
-      // on tiny-repo flow questions.
-      // ITER4: raise threshold 150 → 500 so single-file frameworks
-      // (sinatra at 159, slim_framework around 200) also get the
-      // 5-tool surface. The empirical 5-tool floor was set on <150
-      // probes; iter3 measurement showed sinatra is structurally the
-      // SAME problem as cobra (single-file WITHOUT-arm Read wins),
-      // so it deserves the same gating.
+      // Historical note: n=2 audits ruled out cutting below ~5 tools on the
+      // *full* catalog for tiny OSS repos (search+node+explore+…). That trim
+      // still matters when someone opts into `all` on a <500-file tree.
       const TINY_REPO_FILE_THRESHOLD = 500;
       const TINY_REPO_CORE_TOOLS = new Set([
         'homegraph_explore',
@@ -2066,9 +2067,9 @@ export class ToolHandler {
         'homegraph_diff_impact',
         'homegraph_project',
       ]);
-      // An explicit host selection overrides the default size-based surface.
-      // Otherwise small ArkTS repos silently lose requested specialized tools.
-      if (!allow && stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
+      const envRaw = (process.env.HOMEGRAPH_MCP_TOOLS ?? '').trim();
+      const askedForFullCatalog = allow === 'all' && (/^all$/i.test(envRaw) || envRaw === '*');
+      if (askedForFullCatalog && stats.fileCount < TINY_REPO_FILE_THRESHOLD) {
         visible = visible.filter(t => TINY_REPO_CORE_TOOLS.has(t.name));
       }
 

@@ -64,11 +64,15 @@ describe('specialized explore routing', () => {
     expect(result.content[0].text).toContain('consumer/theme.ts');
   });
 
-  it('keeps default small-repo tool trimming when no surface is selected', () => {
+  it('keeps product slim default when no surface is selected', () => {
     vi.stubEnv('HOMEGRAPH_MCP_TOOLS', '');
-    const names = handler.getTools().map(tool => tool.name);
-    expect(names).toContain('homegraph_explore');
+    const names = handler.getTools().map(tool => tool.name).sort();
+    expect(names).toEqual([
+      'homegraph_explore',
+      'homegraph_project',
+    ]);
     expect(names).not.toContain('homegraph_usages');
+    expect(names).not.toContain('homegraph_arkui_migrate');
   });
 
   async function text(tool: string, query: string): Promise<string> {
@@ -89,23 +93,23 @@ describe('specialized explore routing', () => {
     }
   });
 
-  it('keeps focused relation tools discoverable without a compulsory first call', () => {
+  it('keeps the slim tool pair discoverable without a compulsory first call', () => {
     for (const instructions of [SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX]) {
-      expect(instructions).toContain('homegraph_usages');
-      expect(instructions).toContain('homegraph_modules');
-      expect(instructions).toContain('homegraph_native');
+      expect(instructions).toContain('homegraph_project');
+      expect(instructions).toContain('homegraph_explore');
+      expect(instructions).not.toContain('homegraph_arkui_migrate');
+      expect(instructions).not.toContain('homegraph_usages');
+      expect(instructions).not.toContain('homegraph_modules');
+      expect(instructions).not.toContain('homegraph_native');
+      expect(instructions).not.toContain('homegraph_node');
       expect(instructions).toContain('HomeGraph is optional');
       expect(instructions).toContain('ordinary bash/search/read tools first');
-      expect(instructions).toContain('Do not call explore after a focused');
       expect(instructions).not.toMatch(/Must explore-first:[^\n]*(?:usages|deps\/cycles|NAPI)/i);
     }
     const explore = tools.find((tool) => tool.name === 'homegraph_explore')!;
     expect(explore.annotations?.title).toBe('HomeGraph General Explore');
-    expect(explore.description).toContain('homegraph_usages, homegraph_modules, or homegraph_native instead');
-    const exploreIndex = tools.findIndex((tool) => tool.name === 'homegraph_explore');
-    for (const name of ['homegraph_usages', 'homegraph_modules', 'homegraph_native']) {
-      expect(tools.findIndex((tool) => tool.name === name), name).toBeLessThan(exploreIndex);
-    }
+    expect(explore.description).not.toContain('homegraph_usages');
+    expect(explore.description).toContain('homegraph_project first');
   });
 
   it('runs usages directly and auto-routes a constant-only explore', async () => {

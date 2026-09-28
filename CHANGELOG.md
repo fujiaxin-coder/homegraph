@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- MCP default tools/list is now the product slim pair — `homegraph_explore`, `homegraph_project` — so tool schemas stop dominating host context. Full catalog via `HOMEGRAPH_MCP_TOOLS=all` (or `*`) or an explicit comma list (e.g. add `arkui_migrate` when needed). MCP initialize instructions and the explore tool description match the slim surface (no pointers to tools hidden by default) (Spec 0051).
 - ArkTS explore can bundle verified render/navigation scope, used imports and types, explicit module exports and local dependency configuration with the located source. Attached SDK modules provide bounded method/parameter signatures, while control summaries distinguish icon appearance, click guards and direct enabled bindings. Whole-group budgets and source fingerprints preserve evidence boundaries; optional local pack audit supports error analysis. No additional model call or mandatory tool (Spec 0050).
 
 ## [1.6.0] - 2026-09-23

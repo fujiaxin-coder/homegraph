@@ -1,10 +1,14 @@
 /**
- * HOMEGRAPH_MCP_TOOLS allowlist — lets an operator (or an A/B harness) trim the
- * exposed MCP tool surface without touching the client config. Inert when unset.
- * Filtering happens in ListTools (getTools) and is enforced again on execute().
+ * HOMEGRAPH_MCP_TOOLS allowlist — default product slim surface; `all` / `*` for
+ * the full catalog; comma list for an explicit subset. Filtering happens in
+ * ListTools (getTools) and is enforced again on execute().
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { ToolHandler, tools as allTools } from '../src/mcp/tools';
+import {
+  ToolHandler,
+  tools as allTools,
+  DEFAULT_MCP_TOOL_SHORT_NAMES,
+} from '../src/mcp/tools';
 
 const ENV = 'HOMEGRAPH_MCP_TOOLS';
 
@@ -16,9 +20,27 @@ describe('HOMEGRAPH_MCP_TOOLS allowlist', () => {
   });
 
   const listed = () => new ToolHandler(null).getTools().map(t => t.name).sort();
+  const defaultListed = [...DEFAULT_MCP_TOOL_SHORT_NAMES]
+    .map((s) => `homegraph_${s}`)
+    .sort();
 
-  it('exposes all tools when unset', () => {
+  it('exposes the product slim pair when unset', () => {
     delete process.env[ENV];
+    expect(listed()).toEqual(defaultListed);
+  });
+
+  it('treats an empty/whitespace value as the slim default', () => {
+    process.env[ENV] = '   ';
+    expect(listed()).toEqual(defaultListed);
+  });
+
+  it('exposes the full catalog when set to all', () => {
+    process.env[ENV] = 'all';
+    expect(listed()).toEqual(allTools.map(t => t.name).sort());
+  });
+
+  it('exposes the full catalog when set to *', () => {
+    process.env[ENV] = '*';
     expect(listed()).toEqual(allTools.map(t => t.name).sort());
   });
 
@@ -35,11 +57,6 @@ describe('HOMEGRAPH_MCP_TOOLS allowlist', () => {
   it('accepts fully-qualified homegraph_ names and ignores whitespace', () => {
     process.env[ENV] = ' homegraph_explore , search ';
     expect(listed()).toEqual(['homegraph_explore', 'homegraph_search']);
-  });
-
-  it('treats an empty/whitespace value as unset (all tools)', () => {
-    process.env[ENV] = '   ';
-    expect(listed()).toEqual(allTools.map(t => t.name).sort());
   });
 
   it('rejects a disabled tool on execute (defense in depth)', async () => {

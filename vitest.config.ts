@@ -33,6 +33,9 @@ export default defineConfig({
      */
     env: {
       HOMEGRAPH_ALLOW_UNSAFE_NODE: '1',
+      // Product default MCP surface is the slim pair; unit/integration tests still
+      // exercise the full catalog (handlers + allowlist opt-in) via `all`.
+      HOMEGRAPH_MCP_TOOLS: 'all',
     },
     coverage: {
       provider: 'v8',

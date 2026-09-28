@@ -171,29 +171,76 @@ homegraph serve mcp             # 启动 MCP 服务（一般由 Agent 自动拉�
 
 Agent 侧工具名前缀为 `homegraph_`。
 
-**暴露规则：** 默认注册全部工具。索引文件数 **少于 500** 的小项目会自动收缩为三个核心工具（`explore` / `search` / `node`）。可通过环境变量 `HOMEGRAPH_MCP_TOOLS`（逗号分隔短名，如 `explore,node`）自定义暴露列表。
+### 默认暴露（下载即用）
 
-**跨项目查询：** 所有工具均支持可选参数 `projectPath`（绝对路径），用于在 monorepo 中查询子项目，或当 MCP 服务器根目录没有索引时指定目标项目。
-
-**图谱数据源（`--sources` / `HOMEGRAPH_SOURCES`）：** 控制 MCP 查询是否使用工程索引、OHOS SDK API 库，或两者。取值 `both`（默认）| `project` | `sdk` | `none`。CLI 优先于环境变量。评测示例：`homegraph serve mcp --path <app> --sources sdk`。`homegraph_status` 会打印当前模式。
+未设置 `HOMEGRAPH_MCP_TOOLS` 时，`tools/list` **只注册下面 2 个工具**（为压缩宿主上下文；Spec 0051）。刚升级后若发现以前能用的 `homegraph_node` / `search` / `arkui_migrate` 等「不见了」，不是卸载坏了，而是默认不再暴露——实现仍在，按下方「如何打开更多工具」恢复即可。
 
 | 工具 | 用途 |
 |------|------|
-| `homegraph_usages` | **精确用法清单首选**：查询一个已命名 API、成员、常量或字段在哪里被引用 |
-| `homegraph_modules` | **模块拓扑首选**：查询已命名模块之间的依赖关系或循环依赖 |
-| `homegraph_native` | **Native 边界首选**：查询已命名路径或类型的 NAPI/native 导出和注册位置 |
-| `homegraph_explore` | **通用结构探索**：一次调用返回相关符号的源码、调用路径与影响范围；窄清单问题优先使用上面三个专用工具 |
-| `homegraph_search` | 按名称快速搜索符号（仅返回位置，不含源码） |
-| `homegraph_node` | 读取单个符号或整个文件的源码（带行号）及调用关系；可替代 Read 读文件 |
+| `homegraph_project` | 工程/模块地图与 Harmony skeleton、资源**路径**导航（无符号正文、无调用图） |
+| `homegraph_explore` | 通用结构探索：相关符号源码、调用路径、usage/依赖/NAPI 关系、route/resource/capability 等图证据 |
+
+### 默认不暴露（需配置才进 tools/list）
+
+下列工具 **handler 仍在**，默认不出现在 `tools/list`；未配置时直接调用会返回 `disabled via HOMEGRAPH_MCP_TOOLS`。
+
+| 工具 | 用途 |
+|------|------|
+| `homegraph_usages` | 精确用法清单：已命名 API / 成员 / 常量 / 字段的引用位置 |
+| `homegraph_modules` | 模块拓扑：已命名模块之间的依赖或循环依赖 |
+| `homegraph_native` | Native 边界：NAPI / native 导出与注册位置 |
+| `homegraph_search` | 按名称快速搜索符号（仅位置，不含源码） |
+| `homegraph_node` | 读取单个符号或整个文件的源码（带行号）及调用关系 |
 | `homegraph_callers` / `homegraph_callees` | 查看调用方 / 被调用方 |
 | `homegraph_impact` | 变更影响分析（重构前使用） |
 | `homegraph_diff_impact` | 传入 unified diff（或 hunks），返回与变更行相交的符号及调用/影响证据包（代码审查用） |
 | `homegraph_arkui_migrate` | 一次返回 ArkUI 组件迁移/状态语义快照（装饰器、状态字段、Provide/Consume 等） |
 | `homegraph_files` | 已索引的文件树（支持 glob 过滤、按语言分组） |
 | `homegraph_status` | 索引健康状态（调试用；含 WAL 大小等） |
-| `homegraph_spec_match` | 将新需求描述与 Commit4Spec 知识图谱做全文匹配，返回相似历史Spec及关联提交与代码片段 |
-| `homegraph_spec_find` | 根据文件路径反向查找关联的Spec |
-| `homegraph_spec_trace` | 根据代码符号追溯回关联的Spec |
+| `homegraph_spec_match` | 将新需求描述与 Commit4Spec 知识图谱做全文匹配 |
+| `homegraph_spec_find` | 根据文件路径反向查找关联的 Spec |
+| `homegraph_spec_trace` | 根据代码符号追溯回关联的 Spec |
+
+默认两件套下：用法/依赖/NAPI 类问题优先用 `homegraph_explore`；读已知路径用宿主 Read/Grep；ArkUI 迁移请显式打开 `arkui_migrate`（或 `all`）。
+
+### 如何打开更多 / 全部 MCP 工具
+
+在 **MCP 服务配置的 `environment` 字段**里设置（与 `HOMEGRAPH_NO_DAEMON` 同级）。这是注入给 HomeGraph MCP **进程**的环境变量；**不要**指望只在 Windows「系统属性 → 环境变量」里添加——MCP 子进程通常读不到系统/用户变量。
+
+**打开全部工具：**
+
+```json
+{
+  "mcpServers": {
+    "homegraph": {
+      "command": "homegraph",
+      "args": ["serve", "mcp"],
+      "environment": {
+        "HOMEGRAPH_NO_DAEMON": "1",
+        "HOMEGRAPH_MCP_TOOLS": "all"
+      }
+    }
+  }
+}
+```
+
+`HOMEGRAPH_MCP_TOOLS=*` 与 `all` 等价。
+
+**只打开需要的子集（更省上下文）：**
+
+```json
+"environment": {
+  "HOMEGRAPH_MCP_TOOLS": "explore,project,node,search,arkui_migrate"
+}
+```
+
+短名即可（`node` ≡ `homegraph_node`），逗号分隔。改完后**重启对应 Agent / MCP 服务**使配置生效。
+
+**小仓注意：** 仅当设为 `all` / `*` 且索引文件数 **少于 500** 时，仍可能再裁到历史 TINY 核心集（`explore` / `search` / `node` / `diff_impact` / `project`）。小仓也要 `usages` / `arkui_migrate` 等时，请用**显式逗号列表**，不要只靠 `all`。
+
+**跨项目查询：** 所有工具均支持可选参数 `projectPath`（绝对路径），用于在 monorepo 中查询子项目，或当 MCP 服务器根目录没有索引时指定目标项目。
+
+**图谱数据源（`--sources` / `HOMEGRAPH_SOURCES`）：** 控制 MCP 查询是否使用工程索引、OHOS SDK API 库，或两者。取值 `both`（默认）| `project` | `sdk` | `none`。CLI 优先于环境变量。评测示例：`homegraph serve mcp --path <app> --sources sdk`。`homegraph_status`（需先暴露该工具）会打印当前模式。
 
 ### 查询规划（实验性）
 
@@ -333,13 +380,16 @@ npm run cli
     "homegraph": {
       "type": "stdio",
       "command": "homegraph",
-      "args": ["serve", "mcp"]
+      "args": ["serve", "mcp"],
+      "environment": {
+        "HOMEGRAPH_MCP_TOOLS": "all"
+      }
     }
   }
 }
 ```
 
-Cursor 等项目级配置写入 `./.cursor/mcp.json`，格式相同。推荐使用 `homegraph install` 自动完成。
+不设 `HOMEGRAPH_MCP_TOOLS` 时默认只暴露 `explore` + `project`；需要全量或子集时按上一节「如何打开更多 / 全部 MCP 工具」配置。Cursor 等项目级配置写入 `./.cursor/mcp.json`，格式相同。推荐使用 `homegraph install` 自动完成。
 
 ---
 
