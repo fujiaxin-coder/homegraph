@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.6.1] - 2026-09-28
+
 ### Improvements
 
 - MCP default tools/list is now the product slim pair — `homegraph_explore`, `homegraph_project` — so tool schemas stop dominating host context. Full catalog via `HOMEGRAPH_MCP_TOOLS=all` (or `*`) or an explicit comma list (e.g. add `arkui_migrate` when needed). MCP initialize instructions and the explore tool description match the slim surface (no pointers to tools hidden by default) (Spec 0051).
@@ -279,3 +282,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.5.8]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.8
 [1.5.10]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.10
 [1.6.0]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.0
+[1.6.1]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.1
