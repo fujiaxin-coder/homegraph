@@ -143,10 +143,20 @@ export function buildRelaunchArgv(
  * On spawn failure, returns so the caller runs in-process anyway — risking the
  * OOM is still better than refusing to start.
  */
+/** Bun is not V8 — `--liftoff-only` / `--max-old-space-size` relaunch does not apply. */
+export function isBunRuntime(
+  g: { Bun?: unknown } = globalThis as { Bun?: unknown },
+): boolean {
+  return typeof g.Bun !== 'undefined';
+}
+
 export function relaunchWithWasmRuntimeFlagsIfNeeded(scriptPath: string): void {
   if (processHasRequiredRuntimeFlags()) return;
   if (process.env[RELAUNCH_GUARD_ENV]) return;
   if (process.env.HOMEGRAPH_NO_RELAUNCH) return;
+  // Product hosts (e.g. DevEco Code) spawn MCP under Bun; V8 flags would be
+  // ignored or break relaunch. Stay in-process.
+  if (isBunRuntime()) return;
 
   const argv = buildRelaunchArgv(scriptPath, process.argv.slice(2));
   const result = spawnSync(process.execPath, argv, {
