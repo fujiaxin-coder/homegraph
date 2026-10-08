@@ -8,6 +8,7 @@
  */
 
 import { AgentTarget, Location, TargetId } from './types';
+import { icodeTarget } from './icode';
 import { claudeTarget } from './claude';
 import { cursorTarget } from './cursor';
 import { codexTarget } from './codex';
@@ -20,6 +21,7 @@ import { antigravityTarget } from './antigravity';
 import { kiroTarget } from './kiro';
 
 export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
+  icodeTarget,
   claudeTarget,
   cursorTarget,
   codexTarget,
