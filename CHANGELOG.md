@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- MCP tools/list: when a session has no default project, `projectPath` is already marked `required` in the schema — its property description no longer says "Omit to use this session's default project", so agents are not told the field is both required and optional.
+
 
 ## [1.6.1] - 2026-09-28
 

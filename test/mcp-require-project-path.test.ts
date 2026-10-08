@@ -9,7 +9,8 @@
  * first call instead of omitting it (the reported behavior). When a default
  * project IS open, projectPath stays optional: a bare call falls back to it.
  *
- * The change is schema-only — the runtime stays exactly as before: a missing
+ * The property description must match: required surface says Required (no
+ * "Omit…"); optional surface keeps Omit. Runtime is unchanged — missing
  * projectPath with no default still returns SUCCESS-shaped guidance (never
  * `isError`), and a missing projectPath WITH a default still falls back to it.
  */
@@ -22,8 +23,17 @@ import { HomeGraph } from '../src';
 
 const ENV = 'HOMEGRAPH_MCP_TOOLS';
 
-const exploreOf = (defs: { name: string; inputSchema: { required?: string[] } }[]) =>
-  defs.find((t) => t.name === 'homegraph_explore')!;
+type ToolDef = {
+  name: string;
+  inputSchema: {
+    required?: string[];
+    properties: { projectPath?: { description: string } };
+  };
+};
+
+const exploreOf = (defs: ToolDef[]) => defs.find((t) => t.name === 'homegraph_explore')!;
+
+const projectPathDesc = (tool: ToolDef) => tool.inputSchema.properties.projectPath!.description;
 
 describe('No-default-project requires projectPath in the schema (#993)', () => {
   const originalAllowlist = process.env[ENV];
@@ -39,6 +49,14 @@ describe('No-default-project requires projectPath in the schema (#993)', () => {
     expect(explore.inputSchema.required).toContain('query');
   });
 
+  it('required projectPath description does not say Omit (schema/prose agree)', () => {
+    const explore = exploreOf(new ToolHandler(null).getTools());
+    const desc = projectPathDesc(explore);
+    expect(desc).toMatch(/^Required\./);
+    expect(desc).toMatch(/no default project/i);
+    expect(desc).not.toMatch(/\bOmit\b/);
+  });
+
   it('requires projectPath on EVERY exposed tool, incl. ones with no prior required list', () => {
     // status has no `required` array of its own → it should gain ['projectPath'].
     process.env[ENV] = 'explore,node,status';
@@ -50,6 +68,8 @@ describe('No-default-project requires projectPath in the schema (#993)', () => {
     ]);
     for (const t of got) {
       expect(t.inputSchema.required ?? []).toContain('projectPath');
+      expect(projectPathDesc(t)).toMatch(/^Required\./);
+      expect(projectPathDesc(t)).not.toMatch(/\bOmit\b/);
     }
   });
 
@@ -58,6 +78,8 @@ describe('No-default-project requires projectPath in the schema (#993)', () => {
     // the schema every later default-project session reuses.
     new ToolHandler(null).getTools();
     expect(exploreOf(tools).inputSchema.required).toEqual(['query']);
+    expect(projectPathDesc(exploreOf(tools))).toMatch(/\bOmit\b/);
+    expect(projectPathDesc(exploreOf(tools))).not.toMatch(/^Required\./);
   });
 
   it('a missing projectPath with no default is still SUCCESS-shaped guidance, not isError', async () => {
@@ -92,6 +114,13 @@ describe('A default project keeps projectPath OPTIONAL (#993)', () => {
     const explore = exploreOf(new ToolHandler(cg).getTools());
     expect(explore.inputSchema.required).toEqual(['query']);
     expect(explore.inputSchema.required).not.toContain('projectPath');
+  });
+
+  it('optional projectPath description keeps Omit wording', () => {
+    const explore = exploreOf(new ToolHandler(cg).getTools());
+    const desc = projectPathDesc(explore);
+    expect(desc).toMatch(/\bOmit\b/);
+    expect(desc).not.toMatch(/^Required\./);
   });
 
   it('a bare call (no projectPath) still falls back to the default project', async () => {

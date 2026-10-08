@@ -1142,11 +1142,21 @@ export interface ToolResult {
 }
 
 /**
- * Common projectPath property for cross-project queries
+ * projectPath property descriptions — kept in sync with whether the field is
+ * in `inputSchema.required`. The optional text is the module-level default
+ * (session has a bound root). {@link withRequiredProjectPath} swaps in the
+ * required text when there is no default project, so schema and prose agree.
  */
+const PROJECT_PATH_DESC_OPTIONAL =
+  'Absolute path to the project to query (or any directory inside it) — homegraph uses the nearest .homegraph/ index at or above that path. Omit to use this session\'s default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).';
+
+const PROJECT_PATH_DESC_REQUIRED =
+  'Required. Absolute path to the project to query (or any directory inside it) — homegraph uses the nearest .homegraph/ index at or above that path. This session has no default project, so every call must pass projectPath (e.g. a monorepo sub-project with its own .homegraph/, or any already-indexed folder).';
+
+/** Common projectPath property for cross-project queries (optional / default-project sessions). */
 const projectPathProperty: PropertySchema = {
   type: 'string',
-  description: 'Absolute path to the project to query (or any directory inside it) — homegraph uses the nearest .homegraph/ index at or above that path. Omit to use this session\'s default project. Pass it to query a second codebase, or when the server root has no index of its own (e.g. a monorepo where only sub-projects are indexed, so there is no default project).',
+  description: PROJECT_PATH_DESC_OPTIONAL,
 };
 
 /**
@@ -1673,11 +1683,12 @@ export const tools: ToolDefinition[] = [
 ];
 
 /**
- * Return `defs` with `projectPath` marked `required` in each tool's inputSchema.
+ * Return `defs` with `projectPath` marked `required` in each tool's inputSchema
+ * and with a matching property description (no "Omit…" wording).
  *
  * Used for the NO-DEFAULT-PROJECT tool surface (issue #993): when the MCP server
  * has no default project to fall back to — a gateway server started outside any
- * repo, or a monorepo root whose `.codegraph/` indexes live only in sub-projects
+ * repo, or a monorepo root whose `.homegraph/` indexes live only in sub-projects
  * — every call MUST carry an explicit `projectPath`, so the schema should say so.
  * A `required` field is a HIGH-salience channel (MCP clients surface and often
  * validate it), unlike the instructions text the reporter found too weak to stop
@@ -1686,18 +1697,30 @@ export const tools: ToolDefinition[] = [
  *
  * Pure: clones each tool's schema rather than mutating the shared module-level
  * `tools` array (reused by every session and the static surface). A tool that
- * doesn't expose projectPath, or already requires it, is returned untouched;
- * explore's `['query']` becomes `['query', 'projectPath']`, and a tool with no
- * `required` list (status/files) gains `['projectPath']`.
+ * doesn't expose projectPath is returned untouched; explore's `['query']`
+ * becomes `['query', 'projectPath']`, and a tool with no `required` list
+ * (status/files) gains `['projectPath']`. The property description is always
+ * swapped to {@link PROJECT_PATH_DESC_REQUIRED} so it cannot contradict
+ * `required`.
  */
 function withRequiredProjectPath(defs: ToolDefinition[]): ToolDefinition[] {
   return defs.map((tool) => {
-    if (!tool.inputSchema.properties.projectPath) return tool;
+    const prop = tool.inputSchema.properties.projectPath;
+    if (!prop) return tool;
     const required = tool.inputSchema.required ?? [];
-    if (required.includes('projectPath')) return tool;
+    const nextRequired = required.includes('projectPath')
+      ? required
+      : [...required, 'projectPath'];
     return {
       ...tool,
-      inputSchema: { ...tool.inputSchema, required: [...required, 'projectPath'] },
+      inputSchema: {
+        ...tool.inputSchema,
+        properties: {
+          ...tool.inputSchema.properties,
+          projectPath: { ...prop, description: PROJECT_PATH_DESC_REQUIRED },
+        },
+        required: nextRequired,
+      },
     };
   });
 }
