@@ -1759,13 +1759,50 @@ function filterToolsByAllowlist(
 }
 
 /**
+ * Product hosts that prefix MCP tools with the server name (e.g. DevEco Code
+ * → `homegraph_` + tool name) set `HOMEGRAPH_MCP_SHORT_TOOL_NAMES=1` so
+ * tools/list exposes `explore` / `project` instead of `homegraph_explore`.
+ * After the host prefix, the model-visible name is still `homegraph_explore`.
+ * Cursor / Claude leave this unset and keep the canonical `homegraph_*` names.
+ */
+export function shortMcpToolNamesEnabled(
+  raw: string | undefined = process.env.HOMEGRAPH_MCP_SHORT_TOOL_NAMES,
+): boolean {
+  const v = (raw ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+const CANONICAL_TOOL_NAMES = new Set(tools.map((t) => t.name));
+
+/**
+ * Map a tools/call name to the canonical `homegraph_*` form.
+ * Accepts both short (`explore`) and long (`homegraph_explore`) so hosts that
+ * list short names (or still pass the long name) both work.
+ */
+export function canonicalizeMcpToolName(name: string): string {
+  if (!name) return name;
+  if (name.startsWith('homegraph_')) return name;
+  const canonical = `homegraph_${name}`;
+  return CANONICAL_TOOL_NAMES.has(canonical) ? canonical : name;
+}
+
+/** Clone defs with `homegraph_` stripped from each tool name (list surface only). */
+function withShortToolNames(defs: ToolDefinition[]): ToolDefinition[] {
+  if (!shortMcpToolNamesEnabled()) return defs;
+  return defs.map((t) => ({
+    ...t,
+    name: t.name.replace(/^homegraph_/, ''),
+  }));
+}
+
+/**
  * Allowlist-filtered tool definitions WITHOUT an engine — the static surface the
  * proxy answers `tools/list` with before any project is open. Mirrors
  * `ToolHandler.getTools()` in the no-HomeGraph case (the dynamic per-repo budget
  * note in a description only adds once `cg` is loaded; the schemas are static).
  */
 export function getStaticTools(): ToolDefinition[] {
-  return filterToolsByAllowlist(tools, resolveMcpToolAllowlist());
+  return withShortToolNames(filterToolsByAllowlist(tools, resolveMcpToolAllowlist()));
 }
 
 /** Prose that reads like an identifier but never names a symbol worth scanning. */
@@ -2070,7 +2107,7 @@ export class ToolHandler {
     // null here means "genuinely no default", not a startup race. When a default
     // IS open we leave projectPath optional (below): a bare call falls back to
     // it, exactly as in the common single-project launch.
-    if (!this.cg) return withRequiredProjectPath(visible);
+    if (!this.cg) return withShortToolNames(withRequiredProjectPath(visible));
 
     try {
       const stats = this.cg.getStats();
@@ -2096,7 +2133,7 @@ export class ToolHandler {
         visible = visible.filter(t => TINY_REPO_CORE_TOOLS.has(t.name));
       }
 
-      return visible.map(tool => {
+      return withShortToolNames(visible.map(tool => {
         if (tool.name === 'homegraph_explore') {
           return {
             ...tool,
@@ -2104,9 +2141,9 @@ export class ToolHandler {
           };
         }
         return tool;
-      });
+      }));
     } catch {
-      return visible;
+      return withShortToolNames(visible);
     }
   }
 
@@ -2627,6 +2664,8 @@ export class ToolHandler {
     args: Record<string, unknown>,
     sessionState?: ExploreSessionState,
   ): Promise<ToolResult> {
+    // Short list names (`explore`) and canonical (`homegraph_explore`) both work.
+    toolName = canonicalizeMcpToolName(toolName);
     const requestStartedAt = Date.now();
     const result = await this.executeCore(toolName, args, sessionState, requestStartedAt);
     this.traceToolCall(toolName, args, result, requestStartedAt);

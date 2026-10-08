@@ -15,7 +15,7 @@
 import * as path from 'path';
 import { JsonRpcRequest, JsonRpcNotification, JsonRpcTransport, ErrorCodes } from './transport';
 import { MCPEngine } from './engine';
-import { tools } from './tools';
+import { canonicalizeMcpToolName, tools } from './tools';
 import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_NO_ROOT_INDEX } from './server-instructions';
 import { HomeGraphPackageVersion } from './version';
 import { findNearestHomeGraphRoot } from '../directory';
@@ -284,7 +284,8 @@ export class MCPSession {
       return;
     }
 
-    const toolName = params.name;
+    // Accept short list names (`explore`) and canonical (`homegraph_explore`).
+    const toolName = canonicalizeMcpToolName(params.name);
     const toolArgs = params.arguments || {};
 
     const tool = tools.find((t) => t.name === toolName);
@@ -292,7 +293,7 @@ export class MCPSession {
       this.transport.sendError(
         request.id,
         ErrorCodes.InvalidParams,
-        `Unknown tool: ${toolName}`,
+        `Unknown tool: ${params.name}`,
       );
       return;
     }

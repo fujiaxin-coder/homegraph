@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- MCP product hosts that prefix tools with the server name (e.g. DevEco Code) can set `HOMEGRAPH_MCP_SHORT_TOOL_NAMES=1` so tools/list exposes short names (`explore`, `project`) and tools/call still accepts both short and `homegraph_*` forms — avoiding a doubled `homegraph_homegraph_*` name after the host prefix. Unset by default; Cursor/Claude keep canonical `homegraph_*` names.
+
 ### Fixes
 
 - MCP tools/list: when a session has no default project, `projectPath` is already marked `required` in the schema — its property description no longer says "Omit to use this session's default project", so agents are not told the field is both required and optional.
