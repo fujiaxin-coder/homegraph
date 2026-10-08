@@ -1465,10 +1465,10 @@ export const tools: ToolDefinition[] = [
   {
     name: 'homegraph_explore',
     description:
-      'Optional graph evidence for a concrete unresolved cross-symbol mechanism in THIS repo. Required: `query`. ' +
+      'Default locator when the task touches existing code in THIS repo. Required: `query`. ' +
+      'Open alone (no parallel grep/glob/read in the same step) with feature/component/symbol keywords; `taskContext` = the requirement. ' +
       'For module/route-profile **paths** and engineering overview use homegraph_project first (not this tool). ' +
-      'Use ordinary bash/search/read for paths, symbols, literal strings and local changes; continue editing when that evidence suffices. ' +
-      'Do not call for routine pre-edit orientation or merely because implementation is difficult. ' +
+      'Do NOT skip because the index might still be building — call anyway. ' +
       'Located ArkTS code may include render scope, imported types, module configuration, indexed SDK signatures and control-state gaps. ' +
       'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; form/shortcuts queries may lead with Capability profiles; element/string.json literals may lead with Resource hits + optional bound .ets anchors; Seam notes may flag stubs). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +

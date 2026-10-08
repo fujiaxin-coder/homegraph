@@ -12,6 +12,7 @@ describe('specialized explore routing', () => {
   let handler: ToolHandler;
 
   beforeEach(async () => {
+    vi.stubEnv('HOMEGRAPH_MCP_SHORT_TOOL_NAMES', '');
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-specialized-'));
     const app = path.join(testDir, 'src', 'app');
     const consumer = path.join(testDir, 'src', 'consumer');
@@ -102,8 +103,9 @@ describe('specialized explore routing', () => {
       expect(instructions).not.toContain('homegraph_modules');
       expect(instructions).not.toContain('homegraph_native');
       expect(instructions).not.toContain('homegraph_node');
-      expect(instructions).toContain('HomeGraph is optional');
-      expect(instructions).toContain('ordinary bash/search/read tools first');
+      expect(instructions).toMatch(/graph-first for existing code/i);
+      expect(instructions).not.toContain('HomeGraph is optional');
+      expect(instructions).not.toContain('ordinary bash/search/read tools first');
       expect(instructions).not.toMatch(/Must explore-first:[^\n]*(?:usages|deps\/cycles|NAPI)/i);
     }
     const explore = tools.find((tool) => tool.name === 'homegraph_explore')!;

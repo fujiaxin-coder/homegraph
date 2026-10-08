@@ -180,7 +180,7 @@ describe('No-root-index session policy', () => {
     // Playbook wording drifts (`Use` / `open` / section title) — pin the
     // structural cue that this is the full indexed-workspace guide.
     expect(instructions).toMatch(
-      /When to call \(path-first, bash-first\)/i
+      /When to call \(graph-first for existing code\)/i
     );
     expect(instructions).not.toMatch(/inactive/i);
 

@@ -3,7 +3,8 @@ import {
 } from './index-availability';
 
 /**
- * MCP initialize 中的统一工具指引；工具描述必须遵守相同的按需策略。
+ * MCP initialize 中的统一工具指引；工具描述必须遵守相同的选用策略。
+ * 与 DevEco 产品侧 graph-first 口径对齐（去掉 bash-first / optional 劝退）。
  * 仅调整检索选择，不改变索引、查询语义或编码任务的验收要求。
  */
 
@@ -19,19 +20,17 @@ const SOURCE_AND_VALIDATION = `
 - Retrieval completion is not task completion. Continue the requested edits and validation; check the original task's behavior and preservation constraints. Build success alone does not establish functional correctness.
 `;
 
-const ON_DEMAND = `## When to call (path-first, bash-first)
+const ON_DEMAND = `## When to call (graph-first for existing code)
 
-Use ordinary bash/search/read tools first for repository paths, symbols, literal strings and local changes. Skip HomeGraph when those tools provide sufficient evidence, including for difficult implementation tasks. A known path can be read directly; an adequate source result does not need a second graph lookup.
-
-HomeGraph is optional. Use it only for a concrete unresolved relationship that benefits from graph evidence: cross-file state/event propagation, callers/callees, module dependencies or ArkTS-to-native registration. Name the missing relation and use anchors from the current task or source. There is no mandatory number of bash searches before a useful graph query.
+When the task touches existing project code, open with \`homegraph_explore\` alone (no parallel grep/glob/read in the same step) using feature/component/symbol keywords (Chinese + English Type/\`Type.member\`; \`taskContext\` = the requirement). Do NOT skip HomeGraph because you think the index might still be building — call it anyway.
 
 Choose the smallest available tool for that gap:
 - Engineering overview / which module owns a feature / where \`route_map.json\` or resource dirs live → \`homegraph_project\` (module map + Harmony skeleton pointers + Module roster with local \`file:\` deps + bounded resources path inventory: string.json / form_config|shortcuts_config / rawfile / media / on-disk modules not in the graph). It does **not** return symbol bodies, call graphs, or JSON/media contents.
-- An unresolved cross-symbol mechanism, usage/dependency/native-registration relation, or route registration edges → \`homegraph_explore\` (may include Spec 0039 Registration sources for route_map; Spec 0041 Resource hits for \`element/string.json\` literals; Spec 0048 Capability profiles for form/shortcuts, or an explicit no-in-repo form note; Seam notes for stubs). Do not use it for routine pre-edit orientation, a literal search, or to re-confirm source already found with bash. SDK contracts → project declarations or SDK documentation.
+- An unresolved cross-symbol mechanism, usage/dependency/native-registration relation, or route registration edges → \`homegraph_explore\` (may include Spec 0039 Registration sources for route_map; Spec 0041 Resource hits for \`element/string.json\` literals; Spec 0048 Capability profiles for form/shortcuts, or an explicit no-in-repo form note; Seam notes for stubs). Literal string/pattern greps and SDK/@kit feature catalogs → ordinary search/read. SDK contracts → project declarations or SDK documentation.
 - Harmony \`element/string.json\` key/value lookup is searchable via explore (Resource hits may include bound \`.ets\` anchors; no graph edges). Project lists resource **paths**; color/other non-allowlisted files still need Grep/Read.
 - Harmony \`form_config.json\` / \`shortcuts_config.json\` are indexed as capability profiles (paths + names; no UI edges). Card/shortcut tasks should use explore/project — do not treat SDK Form \`.d.ts\` as project wiring when the negative note says no in-repo form.
 
-Keep working directly once the edit location and affected behavior are sufficiently supported. Task difficulty and file count alone do not require graph use.
+Keep working directly once the edit location and affected behavior are sufficiently supported.
 `;
 
 const QUERY = `## Query and recovery
@@ -46,7 +45,7 @@ const INDEX_STATUS = `## Index status
 Tool replies may start with \`HomeGraph project root: …\` (absolute join base for relative paths) and end with \`HomeGraph status=…\`. ${PRODUCT_STATUS_GLOSSARY}.
 `;
 
-export const SERVER_INSTRUCTIONS = `# HomeGraph — optional structural evidence for this repo
+export const SERVER_INSTRUCTIONS = `# HomeGraph — structural index for this repo
 
 ${ON_DEMAND}
 ${QUERY}
@@ -55,7 +54,7 @@ ${SOURCE_AND_VALIDATION}
 No index → use ordinary tools; indexing is managed by the host. Do not run HomeGraph initialization as part of solving the task.
 `;
 
-export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — optional per-project evidence
+export const SERVER_INSTRUCTIONS_NO_ROOT_INDEX = `# HomeGraph — per-project structural index
 
 Pass \`projectPath\` to an already indexed folder with \`.homegraph/\`. No index → use ordinary tools; indexing is managed by the host.
 

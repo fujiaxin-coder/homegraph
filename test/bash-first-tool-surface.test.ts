@@ -28,9 +28,11 @@ describe('bash-first MCP tool surface', () => {
     for (const surface of surfaces) {
       for (const tool of surface) expect(tool.description, tool.name).not.toMatch(forbidden);
       const explore = surface.find(t => t.name === 'homegraph_explore')!;
-      expect(explore.description).toContain('Optional graph evidence');
-      expect(explore.description).toContain('ordinary bash/search/read');
-      expect(explore.description).toContain('unresolved cross-symbol');
+      expect(explore.description).toContain('Default locator');
+      expect(explore.description).toContain('Open alone');
+      expect(explore.description).not.toContain('Optional graph evidence');
+      expect(explore.description).not.toContain('ordinary bash/search/read');
+      expect(explore.description).not.toContain('Do not call for routine pre-edit orientation');
       expect(explore.inputSchema.required).toContain('query');
       expect(explore.annotations?.readOnlyHint).toBe(true);
       for (const name of ['homegraph_usages', 'homegraph_modules', 'homegraph_native']) {

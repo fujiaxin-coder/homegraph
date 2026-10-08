@@ -11,6 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Improvements
 
+- MCP initialize / `homegraph_explore` description: drop bash-first and "HomeGraph is optional" wording that conflicted with DevEco Code's graph-first product prompt; existing-code tasks open with `homegraph_explore` alone. Tool list, budgets, and evidence caveats unchanged.
 - MCP under Bun skips the Node/V8 `--liftoff-only` relaunch (those flags do not apply), so product hosts can spawn `homegraph.js` with the host Bun binary (Spec 0052).
 - MCP product hosts that prefix tools with the server name (e.g. DevEco Code) can set `HOMEGRAPH_MCP_SHORT_TOOL_NAMES=1` so tools/list exposes short names (`explore`, `project`) and tools/call still accepts both short and `homegraph_*` forms — avoiding a doubled `homegraph_homegraph_*` name after the host prefix. Unset by default; Cursor/Claude keep canonical `homegraph_*` names.
 
