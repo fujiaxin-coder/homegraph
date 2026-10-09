@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- **iCode support** in the installer. `homegraph install --target icode` wires the MCP server into iCode's agent profiles. iCode stores each agent as a YAML profile under `~/.chrys/agents/` (macOS/Linux) or `%APPDATA%\chrys\agents\` (Windows), and has no project-local config — the target is **global-only**. Install edits every existing user profile in place (sibling MCP servers and all other sections preserved), and, when iCode's installed runtime is present, also creates "shadow" profiles for its built-in agents (`Code` / `QA` / `Explore` / `General`) with the full built-in content plus the HomeGraph entry. If the runtime can't be located, install still configures existing profiles and prints manual guidance instead of failing. Set `HOMEGRAPH_ICODE_NO_BUILTINS=1` to edit user profiles only and never create built-in shadows. No instructions file is written — iCode injects the server's MCP `initialize` instructions into system reminders by default.
+
 ### Fixes
 
 - Explore soft-close / routing guards: treat `parser` like parse noise so short stems (`xml`) survive agent EN bags; light-mechanism can close on distinctive import evidence + digests (path-diversified import bullets); compact no longer demotes UI surface / `Type.member` / `$r`-vs-download asks to Partial when digests already answer; `Type` + plural `methods` (e.g. `class definition methods`) routes to caller inventory without mistaking singular `method` bags; module/cycle surveys (`*constants` + 循环依赖) no longer concept-skip.
