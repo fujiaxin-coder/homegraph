@@ -66,7 +66,7 @@ describe('locate-contract (spec 0044)', () => {
   it('formats Located / Partial / Miss banners', () => {
     expect(formatLocatedBanner()).toContain(LOCATED_MARKER);
     expect(formatLocatedBanner()).toMatch(/do \*\*not\*\* Grep the same symbol/i);
-    expect(formatPartialBanner()).toMatch(/homegraph_node/);
+    expect(formatPartialBanner()).not.toMatch(/homegraph_node/);
     expect(formatPartialBanner()).toMatch(/homegraph_usages/);
     expect(formatPartialBanner()).toMatch(/homegraph_search/);
     const miss = formatMissBanner(['pages/A.ets', 'pages/B.ets']);

@@ -160,6 +160,12 @@ function rowToNode(row: NodeRow): Node {
 /**
  * Convert database row to Edge object
  */
+/** Channel name stored on `edges.synthesized_by` (Spec 0053). */
+export function edgeSynthesizedBy(edge: Edge): string | null {
+  const value = edge.metadata?.synthesizedBy;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function rowToEdge(row: EdgeRow): Edge {
   return {
     source: row.source,
@@ -493,12 +499,13 @@ export class QueryBuilder {
             edge.line ?? null,
             edge.column ?? null,
             edge.provenance ?? null,
+            edgeSynthesizedBy(edge),
           ]);
         }
         this.runBatched(
           'insertEdges',
-          'INSERT OR IGNORE INTO edges (source, target, kind, metadata, line, col, provenance) VALUES ',
-          '(?,?,?,?,?,?,?)',
+          'INSERT OR IGNORE INTO edges (source, target, kind, metadata, line, col, provenance, synthesized_by) VALUES ',
+          '(?,?,?,?,?,?,?,?)',
           rows
         );
       }
@@ -1171,11 +1178,13 @@ export class QueryBuilder {
       return this.mergeOhosApiTextSearch(text, { kinds, languages, limit }, []);
     }
 
-    // First try FTS5 with prefix matching
+    // First try FTS5 with prefix matching. Chinese literals (for example
+    // string.json values in docstring) are real FTS tokens — do not skip them.
     let results = text
       ? this.searchNodesFTS(text, { kinds, languages, limit, offset })
       // Over-fetch by 5× when running filter-only (no text). The
-      // post-scoring path: + name: filters can be very selective, so      // a smaller multiplier risks returning fewer than `limit`
+      // post-scoring path: name: filters can be very selective, so
+      // a smaller multiplier risks returning fewer than `limit`
       // results despite the DB having plenty of matches.
       : this.searchAllByFilters({ kinds, languages, limit: limit * 5 });
 
@@ -1734,8 +1743,8 @@ export class QueryBuilder {
   insertEdge(edge: Edge): void {
     if (!this.stmts.insertEdge) {
       this.stmts.insertEdge = this.db.prepare(`
-        INSERT OR IGNORE INTO edges (source, target, kind, metadata, line, col, provenance)
-        VALUES (@source, @target, @kind, @metadata, @line, @col, @provenance)
+        INSERT OR IGNORE INTO edges (source, target, kind, metadata, line, col, provenance, synthesized_by)
+        VALUES (@source, @target, @kind, @metadata, @line, @col, @provenance, @synthesizedBy)
       `);
     }
 
@@ -1747,6 +1756,7 @@ export class QueryBuilder {
       line: edge.line ?? null,
       col: edge.column ?? null,
       provenance: edge.provenance ?? null,
+      synthesizedBy: edgeSynthesizedBy(edge),
     });
   }
 
@@ -1975,8 +1985,8 @@ export class QueryBuilder {
         `DELETE FROM edges
          WHERE kind = 'calls'
            AND provenance = 'heuristic'
-           AND metadata LIKE '%"synthesizedBy":"arkanalyzer"%'
-           AND metadata LIKE '%"sourceFile"%'`
+           AND synthesized_by = 'arkanalyzer'
+           AND json_extract(metadata, '$.sourceFile') IS NOT NULL`
       )
       .run();
     return result.changes;

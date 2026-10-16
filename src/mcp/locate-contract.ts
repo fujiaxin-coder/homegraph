@@ -63,7 +63,7 @@ export function formatLocatedBanner(): string {
 export function formatPartialBanner(): string {
   return (
     '> **Partial** — evidence is incomplete (missing relation or budget). '
-    + 'Next: `homegraph_node` / `homegraph_usages` / `homegraph_search` for the named gap — '
+    + 'Next: `homegraph_usages` / `homegraph_search` for the named gap — '
     + 'do **not** Grep the same symbol names already shown.'
   );
 }

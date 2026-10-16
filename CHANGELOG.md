@@ -17,6 +17,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- MCP `homegraph_explore` call budget shown to agents is **2** on every repo size, matching the session hard cap. Output sizing tiers are unchanged. Heuristic edges store `synthesized_by`, and ArkTS cross-file call cleanup deletes that channel by column instead of a JSON text match. Explore and Partial replies no longer tell the agent to call `homegraph_node`. Name search still tries FTS first, including Chinese literals (Spec 0053).
 - MCP tools/list: when a session has no default project, `projectPath` is already marked `required` in the schema — its property description no longer says "Omit to use this session's default project", so agents are not told the field is both required and optional.
 
 

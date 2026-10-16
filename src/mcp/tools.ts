@@ -106,6 +106,7 @@ import {
 import {
   decideDepthToolFuse,
   decideExploreRepeat,
+  EXPLORE_CALL_BUDGET,
   formatDepthToolRefuse,
   formatExploreRepeatRefuse,
   formatMechanismPartialFooter,
@@ -388,6 +389,15 @@ export function getExploreBudget(fileCount: number): number {
   if (fileCount < 15000) return 3;
   if (fileCount < 25000) return 4;
   return 5;
+}
+
+/**
+ * Session explore call ceiling shown to agents. Always {@link EXPLORE_CALL_BUDGET}
+ * (the hard refuse), independent of {@link getExploreBudget}'s output tiers.
+ */
+export function formatExploreCallBudgetNote(fileCount: number): string {
+  const files = Math.max(0, fileCount).toLocaleString();
+  return `Budget: make at most ${EXPLORE_CALL_BUDGET} calls for this project (${files} files indexed).`;
 }
 
 /**
@@ -2165,7 +2175,7 @@ export class ToolHandler {
    */
   private exploreSuffix(fileCount: number): string {
     if (fileCount > 0) {
-      return `Budget: make at most ${getExploreBudget(fileCount)} calls for this project (${fileCount.toLocaleString()} files indexed).`;
+      return formatExploreCallBudgetNote(fileCount);
     }
     const cg = this.cg;
     if (cg) {
@@ -4344,7 +4354,7 @@ export class ToolHandler {
       '',
       ...notes,
       '',
-      '> These sites choose their call target at runtime (registry / bus / reflection) — the site shown IS where the flow continues. To follow it, run homegraph_explore or homegraph_node on a candidate; source for the sites above is included below.',
+      '> These sites choose their call target at runtime (registry / bus / reflection) — the site shown IS where the flow continues. To follow it, run homegraph_explore on a candidate; source for the sites above is included below.',
       '',
     ].join('\n');
   }
@@ -5483,7 +5493,7 @@ export class ToolHandler {
       lines.push(
         '> **Partial locator** — related writers / sibling Managers above are anchors, not a full answer. ' +
         'ONE tighter explore with a named Type, or ONE narrow Grep for `@ohos` if still missing — ' +
-        'do **not** fan out `homegraph_node` / callers. Do **not** ANSWER NOW from local cache helpers.',
+        'do **not** fan out callers. Do **not** ANSWER NOW from local cache helpers.',
       );
     }
     lines.push('');
@@ -5599,7 +5609,7 @@ export class ToolHandler {
           '**Event types → Manager / handler sites**',
           '',
           '> **Partial locator** — no event Type/enum exports indexed for the named anchors. '
-            + '`homegraph_node` / ONE explore on the Event Type file, or ONE Grep for enum members / '
+            + 'ONE explore on the Event Type file, or ONE Grep for enum members / '
             + '`case` branches — not a repo-wide storm. Do **not** ANSWER NOW.',
           '',
         ].join('\n'),
@@ -5822,7 +5832,7 @@ export class ToolHandler {
       lines.push('');
       lines.push(
         '> **Partial locator** — event anchors above only. '
-          + '`homegraph_node` the Event file or ONE Grep for handler/`case` branches — do **not** ANSWER NOW as a full dispatch map.',
+          + 'ONE Grep for handler/`case` branches — do **not** ANSWER NOW as a full dispatch map.',
       );
     } else {
       for (const h of ranked.slice(0, 24)) {
@@ -5852,7 +5862,7 @@ export class ToolHandler {
       } else {
         lines.push(
           '> **Partial locator** — handler files are anchors, but enum-member coverage may be incomplete. '
-            + '`homegraph_node` the Event Type / ONE Grep for members or `case` — do **not** repo-storm; do **not** ANSWER NOW as a full map.',
+            + 'ONE Grep for members or `case` — do **not** repo-storm; do **not** ANSWER NOW as a full map.',
         );
       }
     }
@@ -6007,14 +6017,14 @@ export class ToolHandler {
     if (!hasGraph && !hasExtends) {
       lines.push(
         '> **Partial locator** — Type files above are anchors. '
-          + '`homegraph_node` / `homegraph_callees` one Type at a time; do **not** ANSWER NOW as a full graph.',
+          + '`homegraph_callees` one Type at a time; do **not** ANSWER NOW as a full graph.',
       );
     } else {
       lines.push(
         '> Multi-Type dependency inventory — **ANSWER NOW** from locations'
           + (hasExtends ? ' + `extends` bases' : '')
           + (hasGraph ? ' + import/caller edges' : '')
-          + ' above; only `homegraph_node` one Type if a body detail is still missing.',
+          + ' above; one tighter explore if a body detail is still missing.',
       );
     }
     lines.push('');
@@ -6565,9 +6575,9 @@ export class ToolHandler {
             soft
               ? `Named-Type dependency inventory — **${multi.hitCount}** locator hit(s). `
                 + '**Partial locator** — locations above; ONE tighter explore with a named Type, '
-                + 'or ONE narrow Grep — do **not** fan out `homegraph_node` / callees.'
+                + 'or ONE narrow Grep — do **not** fan out callees.'
               : `Named-Type dependency inventory — **${multi.hitCount}** locator hit(s). `
-                + '**ANSWER NOW** from locations + cross links; one `homegraph_node` only if a body detail is still missing.',
+                + '**ANSWER NOW** from locations + cross links; one tighter explore only if a body detail is still missing.',
             '',
             multi.section,
           ].join('\n'),
@@ -7272,7 +7282,7 @@ export class ToolHandler {
         : '> **Partial locator** — Manager / domain inventory below are anchors, not a full mechanism closure. '
           + 'Pick **ONE** concrete `*Manager` / next-hop name from the list for a tighter explore — '
           + 'do **not** re-explore a paraphrase of the same keyword bag. '
-          + 'At most one `homegraph_node` after Partial; prefer ONE narrow Grep for unlisted wiring — not a repo storm. '
+          + 'Prefer ONE narrow Grep for unlisted wiring — not a repo storm. '
           + 'Do **not** ANSWER NOW yet.',
       '',
       `Mechanism anchors: **${seedIds.size}** symbol(s) — lightweight explore (seed + flow spine).`,
@@ -7494,7 +7504,7 @@ export class ToolHandler {
     if (mechanismClosed || (hasFlowPath && topIsStrong)) {
       lines.push(
         '> **Mechanism explore complete — ANSWER NOW** from the Manager inventory + spine + digests above. '
-          + 'Do **not** call `homegraph_node`, Read, or Grep for symbols/files already shown. '
+          + 'Do **not** Read or Grep for symbols/files already shown. '
           + 'Only one tighter `homegraph_explore` if a **named** Type essential to the answer is still missing.',
       );
     } else if (softClose) {
@@ -8661,7 +8671,7 @@ export class ToolHandler {
     lines.push('---');
     lines.push(
       '> **Compact local explore complete — ANSWER NOW.** ' +
-      'Do **not** Read/Grep/`homegraph_search`/`homegraph_explore`/`homegraph_node` for the same symbols.',
+      'Do **not** Read/Grep/`homegraph_search`/`homegraph_explore` for the same symbols.',
     );
     lines.push('');
     return this.textResult(lines.join('\n'));
@@ -11481,9 +11491,9 @@ export class ToolHandler {
       exploreLocatorDigestEnabled()
         ? '> Spine / top-hit digests — treat as already Read. '
           + 'Answer from Flow + Anchors + digests when you can; ONE narrow Grep for residual unindexed wiring. '
-          + 'Do not re-dump these files via Read/`homegraph_node`.'
+          + 'Do not re-dump these files via Read.'
         : '> Line-numbered source — treat as already Read. Answer from Flow + Source below when you can; ' +
-          'do not re-read/grep these files, and do not fan out `homegraph_node` / search for symbols already shown. ' +
+          'do not re-read/grep these files, and do not fan out search for symbols already shown. ' +
           'Another `homegraph_explore` with tighter names only if a needed symbol is missing.',
     );
     lines.push('');
@@ -12215,18 +12225,17 @@ export class ToolHandler {
       lines.push(`> **Complete source for ${filesIncluded} files is included above — do NOT re-read them.** If your question also needs files/symbols listed under "Not shown above" (or any area this call didn't cover), make ANOTHER homegraph_explore targeting those names — it returns the same source with line numbers and is cheaper and more complete than reading. Reserve Read for a single specific line range explore can't surface.`);
     } else if (anyFileTrimmed) {
       lines.push('');
-      lines.push(`> Some file sections were trimmed for size. For a specific symbol you still need, run another \`homegraph_explore\` (or \`homegraph_node\`) with its exact name — line-numbered source, cheaper and more complete than Read.`);
+      lines.push(`> Some file sections were trimmed for size. For a specific symbol you still need, run another \`homegraph_explore\` with its exact name — line-numbered source, cheaper and more complete than Read.`);
     }
 
     // Add explore budget note based on project size
     if (budget.includeBudgetNote) {
       try {
         const stats = cg.getStats();
-        const callBudget = getExploreBudget(stats.fileCount);
         lines.push('');
         lines.push(
-          `> **Usually one explore is enough** (budget ≤${callBudget} for ${stats.fileCount.toLocaleString()} files). ` +
-          'Answer from Flow + Source above. Extra explore/`homegraph_node`/Read for the **same** symbols multiplies tokens — ' +
+          `> **Usually one explore is enough** (budget ≤${EXPLORE_CALL_BUDGET} for ${stats.fileCount.toLocaleString()} files). ` +
+          'Answer from Flow + Source above. Extra explore/Read for the **same** symbols multiplies tokens — ' +
           'only call again for a missing **named** symbol.',
         );
       } catch {
@@ -12302,7 +12311,7 @@ export class ToolHandler {
     if (!finalText.includes('**Partial result**') && !finalText.includes('> **Explore complete**')) {
       finalText +=
         '\n\n> **Explore complete — ANSWER NOW.** Flow + Source above are authoritative for this query. ' +
-        'Do **not** grep/read/`homegraph_node`/`homegraph_search` for the same symbols or files (multiplies tokens). ' +
+        'Do **not** grep/read/`homegraph_search` for the same symbols or files (multiplies tokens). ' +
         'Only call one tighter `homegraph_explore` if a named symbol essential to the answer is missing.';
     }
 

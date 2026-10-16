@@ -170,7 +170,8 @@ describe('explore-repeat-guard', () => {
     expect(text).toMatch(/Partial result/);
     expect(text).toMatch(/AuthService/);
     expect(text).toMatch(/narrow Grep/i);
-    expect(text).toMatch(/one.*homegraph_node/i);
+    expect(text).toMatch(/one.*callers\/callees/i);
+    expect(text).not.toMatch(/homegraph_node/);
     expect(text).not.toMatch(/Grep storm/);
   });
 

@@ -39,7 +39,7 @@ export function neutralRetrievalGuidance(text: string): string {
     return line
       .replace(/\*{0,2}ANSWER NOW\*{0,2}/g, 'use the evidence shown')
       .replace(/Flow \+ Source above are authoritative for this query\./g, 'Source coverage is limited to the displayed ranges.')
-      .replace(/Do \*\*not\*\* grep\/read\/`homegraph_node`\/`homegraph_search`[^.]*\./gi, 'Inspect missing evidence as needed.')
+      .replace(/Do \*\*not\*\* grep\/read\/(?:`homegraph_node`\/)?`homegraph_search`[^.]*\./gi, 'Inspect missing evidence as needed.')
       .replace(/do\s+\*{0,2}not\*{0,2}\s+(?:re-)?(?:grep|read|glob)(?:\/[^.;]+)?[^.;]*[.;]/gi, 'Avoid duplicate reads of unchanged ranges;');
   }).join('\n');
 }

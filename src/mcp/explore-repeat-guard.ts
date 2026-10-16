@@ -142,8 +142,13 @@ export interface ExploreRepeatDecision {
 /**
  * Absolute retrieval budget per session/project. Empty receipts count as
  * attempts too, so failed recovery cannot create an unbounded retry loop.
+ *
+ * Tool descriptions and explore footers must quote this same ceiling.
+ * `getExploreBudget` scales output size only — it is not the call cap.
  */
-const MAX_EXPLORES = 2;
+export const EXPLORE_CALL_BUDGET = 2;
+
+const MAX_EXPLORES = EXPLORE_CALL_BUDGET;
 
 /**
  * After a counted Partial explore, allow this many depth tools
@@ -499,7 +504,7 @@ export function formatPartialExploreGuidance(opts: {
     `⚠️ **Partial result** — ${why}. This is NOT an error.`,
     'A targeted Read or **ONE narrow Grep** may recover missing evidence using names already in the question.',
     anchorLine,
-    'At most **one** focused `homegraph_node` or callers/callees recovery after Partial; reuse source already returned.',
+    'At most **one** focused callers/callees recovery after Partial; reuse source already returned.',
     'If a second explore is still Partial, its retrieval budget is exhausted. Inspect missing source directly and continue the requested work; do not infer task completion.',
   ].join('\n');
 }

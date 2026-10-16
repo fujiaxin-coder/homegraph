@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 11;
+export const CURRENT_SCHEMA_VERSION = 12;
 
 /**
  * Migration definition
@@ -191,7 +191,35 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 12,
+    description:
+      'Add edges.synthesized_by and backfill from metadata.synthesizedBy (Spec 0053)',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(edges)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'synthesized_by')) {
+        db.exec('ALTER TABLE edges ADD COLUMN synthesized_by TEXT');
+      }
+      backfillEdgeSynthesizedBy(db);
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_edges_synthesized_by ON edges(synthesized_by) WHERE synthesized_by IS NOT NULL'
+      );
+    },
+  },
 ];
+
+/**
+ * Copy `metadata.synthesizedBy` onto `edges.synthesized_by` when the column is empty.
+ * Channel deletes read the column, not JSON text (Spec 0053).
+ */
+export function backfillEdgeSynthesizedBy(db: SqliteDatabase): void {
+  db.exec(`
+    UPDATE edges
+    SET synthesized_by = json_extract(metadata, '$.synthesizedBy')
+    WHERE (synthesized_by IS NULL OR synthesized_by = '')
+      AND json_extract(metadata, '$.synthesizedBy') IS NOT NULL
+  `);
+}
 
 /**
  * Get the current schema version from the database
