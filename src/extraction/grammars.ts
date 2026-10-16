@@ -494,7 +494,8 @@ function looksLikeCpp(source: string): boolean {
   // routed through the C extractor (which extracts no classes), and its class
   // definition silently vanishes. The two-token shape (`<KW> <MACRO> <Name>`
   // before a `[:{]`) never occurs in valid C, so this can't misclassify C headers.
-  return /\bnamespace\b|\bclass\s+\w+\s*[:{]|\b(?:class|struct)\s+[A-Z][A-Z0-9_]+\s+\w+\s*(?:final\s*)?[:{]|\btemplate\s*<|\b(?:public|private|protected)\s*:|\bvirtual\b|\busing\s+(?:namespace\b|\w+\s*=)/.test(sample);
+  // `struct Derived : Base` is C++. A plain `struct Point {` stays C.
+  return /\bnamespace\b|\bclass\s+\w+\s*[:{]|\bstruct\s+\w+\s*:|\b(?:class|struct)\s+[A-Z][A-Z0-9_]+\s+\w+\s*(?:final\s*)?[:{]|\btemplate\s*<|\b(?:public|private|protected)\s*:|\bvirtual\b|\busing\s+(?:namespace\b|\w+\s*=)/.test(sample);
 }
 
 /**

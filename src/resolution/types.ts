@@ -258,6 +258,9 @@ export interface ImportMapping {
  * `export * from './other'`. Used by the resolver to chase
  * symbols through barrel files.
  */
+/** A `#define` recorded as a constant node's signature (C/C++ macro visibility). */
+export const CPP_DEFINE_SIGNATURE = /^\s*#\s*define\b/;
+
 export type ReExport =
   | {
       kind: 'named';

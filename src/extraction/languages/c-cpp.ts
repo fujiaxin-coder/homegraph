@@ -470,6 +470,45 @@ export function blankMetalAttributes(source: string): string {
  * ALL-CAPS call that isn't markup only loses that one annotation, never a whole
  * class.
  */
+/**
+ * Mask C++ raw string literals (`R"delim(...)delim"`) so later blankers do not
+ * treat their contents as code. Offsets stay aligned with the original source.
+ */
+export function maskCppRawStrings(source: string): { source: string; restore: (blanked: string) => string } {
+  const unchanged = { source, restore: (blanked: string): string => blanked };
+  if (source.indexOf('R"') === -1) return unchanged;
+  const re = /\/\/[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)|\b(?:u8|[LuU])?R"([^ \t\v\f\r\n()\\]{0,16})\(|"(?:\\[\s\S]|[^"\\])*(?:"|$)|(?<!\w)(?:u8|[LuU])?'(?:\\[\s\S]|[^'\\])*(?:'|$)/g;
+  const spans: Array<{ start: number; end: number }> = [];
+  const parts: string[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    if (m[1] === undefined) continue;
+    const closer = `)${m[1]}"`;
+    const close = source.indexOf(closer, re.lastIndex);
+    const end = close < 0 ? source.length : close + closer.length;
+    spans.push({ start: m.index, end });
+    parts.push(source.slice(last, m.index), source.slice(m.index, end).replace(/[^\r\n]/g, '\0'));
+    last = re.lastIndex = end;
+  }
+  if (spans.length === 0) return unchanged;
+  parts.push(source.slice(last));
+  const masked = parts.join('');
+  return {
+    source: masked,
+    restore(blanked): string {
+      if (blanked === masked || blanked.length !== source.length) return source;
+      const chars = blanked.split('');
+      for (const { start, end } of spans) {
+        for (let i = start; i < end; i++) {
+          if (chars[i] === '\0') chars[i] = source[i] as string;
+        }
+      }
+      return chars.join('');
+    },
+  };
+}
+
 export function blankCppAnnotationMacroCalls(source: string): string {
   if (!/^[ \t]*[A-Z][A-Z0-9_]{2,}\s*\(/m.test(source)) return source;
   const chars = source.split('');

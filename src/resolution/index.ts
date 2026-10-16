@@ -29,6 +29,7 @@ import { logDebug } from '../errors';
 import type { ReExport } from './types';
 import { LRUCache } from './lru-cache';
 import { isHarmonyRouteConfigFile } from '../extraction/grammars';
+import { clearCppMacroVisibility, isVisibleCppMacro } from './cpp-macro-visibility';
 
 /** Node kinds that can declare supertypes (extends/implements). */
 const SUPERTYPE_BEARING_KINDS = new Set<Node['kind']>([
@@ -408,6 +409,7 @@ export class ReferenceResolver {
     if (this.context) {
       clearImportResolverMemos(this.context);
       clearNameMatcherMemos(this.context);
+      clearCppMacroVisibility(this.context);
     }
   }
 
@@ -856,6 +858,16 @@ export class ReferenceResolver {
   resolveOne(ref: UnresolvedRef): ResolvedRef | null {
     // Skip built-in/external references
     if (this.isBuiltInOrExternal(ref)) {
+      return null;
+    }
+
+    // A C/C++ call that is a visible function-like macro is not a call.
+    // The include walk that decides this is bounded (Spec 0054).
+    if (
+      (ref.language === 'c' || ref.language === 'cpp')
+      && ref.referenceKind === 'calls'
+      && isVisibleCppMacro(ref, this.context)
+    ) {
       return null;
     }
 
