@@ -17,6 +17,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
+- C/C++: a call no longer binds another file's `static` function when a definition with external linkage exists. A C definition compiled only under a feature flag nothing in the project sets yields to the definition the default build compiles (Spec 0056).
 - Windows: a file the daemon only read no longer shows up as edited. Watcher events whose size and modification time still match the index are ignored, so an NTFS last-access update does not mark the file pending sync (Spec 0055).
 - C/C++: a header whose only C++ signal is `struct Derived : Base` is indexed as C++. A call that names a function-like macro visible at that line is not linked to a same-named function, and the include walk that decides this is bounded so a deep guard graph cannot blow the heap (Spec 0054).
 - MCP `homegraph_explore` call budget shown to agents is **2** on every repo size, matching the session hard cap. Output sizing tiers are unchanged. Heuristic edges store `synthesized_by`, and ArkTS cross-file call cleanup deletes that channel by column instead of a JSON text match. Explore and Partial replies no longer tell the agent to call `homegraph_node`. Name search still tries FTS first, including Chinese literals (Spec 0053).

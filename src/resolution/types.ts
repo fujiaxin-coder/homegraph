@@ -97,6 +97,12 @@ export interface ResolutionContext {
    */
   getFileLines?(filePath: string): string[] | null;
   /**
+   * Whether `filePath` contains `text`, without reading the whole file when
+   * the host can answer cheaper. Optional; C feature-flag scans fall back to
+   * `readFile` (Spec 0056).
+   */
+  fileContains?(filePath: string, text: string): boolean;
+  /**
    * The method-definition nodes matching `typeName::methodName` in `language` —
    * exactly `resolveMethodOnType`'s kind/language/qualifiedName-suffix filter,
    * LRU-cached per (language, type, method). The uncached path re-fetches every

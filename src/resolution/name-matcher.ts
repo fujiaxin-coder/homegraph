@@ -6,6 +6,7 @@
 
 import { Language, Node } from '../types';
 import { UnresolvedRef, ResolvedRef, ResolutionContext } from './types';
+import { clearCFeatureVariantMemos, isCFeatureVariant, isOffByDefault } from './c-feature-variants';
 
 /**
  * Ceiling on how many same-named definitions a FUZZY name-match strategy will
@@ -376,6 +377,48 @@ function isLexicallyReachable(
   );
 }
 
+/** Per-context memo: node id → file-scope `static` (C linkage). */
+const C_STATIC_MEMO = new WeakMap<ResolutionContext, Map<string, boolean>>();
+
+/**
+ * A C function whose declaration line (or the line above it) is `static`.
+ * Another translation unit cannot call it. Fail open when the source is missing.
+ */
+function isStaticCFunction(candidate: Node, context: ResolutionContext): boolean {
+  let memo = C_STATIC_MEMO.get(context);
+  if (!memo) {
+    memo = new Map();
+    C_STATIC_MEMO.set(context, memo);
+  }
+  const hit = memo.get(candidate.id);
+  if (hit !== undefined) return hit;
+  const lines = context.getFileLines?.(candidate.filePath) ?? context.readFile(candidate.filePath)?.split('\n') ?? [];
+  const head = [lines[candidate.startLine - 2] ?? '', lines[candidate.startLine - 1] ?? ''].join('\n');
+  const isStatic = /(^|[\s;}])static\s/.test(head);
+  memo.set(candidate.id, isStatic);
+  return isStatic;
+}
+
+/**
+ * Among same-named C/C++ function definitions, drop another file's `static`
+ * when a definition with external linkage remains, and drop a definition that
+ * exists only under a feature flag nothing in the project sets (Spec 0056).
+ * Same-file definitions stay. Any other language, or a non-call, is unchanged.
+ */
+function narrowCCallTargets(ref: UnresolvedRef, candidates: Node[], context: ResolutionContext): Node[] {
+  if ((ref.language !== 'c' && ref.language !== 'cpp') || ref.referenceKind !== 'calls') return candidates;
+  const funcs = candidates.filter((n) => n.kind === 'function');
+  if (funcs.length < 2) return candidates;
+  const rest = candidates.filter((n) => n.kind !== 'function');
+  const visible = funcs.filter((n) => n.filePath === ref.filePath || !isStaticCFunction(n, context));
+  let pool = visible.length > 0 ? visible : funcs;
+  if (ref.language === 'c' && !isOffByDefault(ref.filePath, ref.line, context)) {
+    const plain = pool.filter((n) => !isCFeatureVariant(n, ref, context));
+    if (plain.length > 0 && plain.length < pool.length) pool = plain;
+  }
+  return pool.length === funcs.length ? candidates : [...pool, ...rest];
+}
+
 /**
  * Try to resolve a reference by exact name match
  */
@@ -421,8 +464,9 @@ export function matchByExactName(
     return null;
   }
 
-  // Multiple matches - try to narrow down
-  const bestMatch = findBestMatch(ref, candidates, context);
+  // Multiple matches - try to narrow down. C/C++ linkage runs first so a
+  // nearer file's `static` copy cannot beat the definition the call can see.
+  const bestMatch = findBestMatch(ref, narrowCCallTargets(ref, candidates, context), context);
   if (bestMatch) {
     // Lower confidence when the match is from a distant/unrelated module
     const proximity = computePathProximity(ref.filePath, bestMatch.filePath);
@@ -1171,6 +1215,8 @@ function getInferScanStates(context: ResolutionContext): Map<string, InferScanSt
 /** Drop the per-context scan states (see ReferenceResolver.clearCaches). */
 export function clearNameMatcherMemos(context: ResolutionContext): void {
   INFER_SCAN_STATES.delete(context);
+  C_STATIC_MEMO.delete(context);
+  clearCFeatureVariantMemos(context);
 }
 
 function memoPatterns(key: string, build: () => RegExp[]): RegExp[] {

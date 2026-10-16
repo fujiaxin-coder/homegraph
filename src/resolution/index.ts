@@ -30,6 +30,7 @@ import type { ReExport } from './types';
 import { LRUCache } from './lru-cache';
 import { isHarmonyRouteConfigFile } from '../extraction/grammars';
 import { clearCppMacroVisibility, isVisibleCppMacro } from './cpp-macro-visibility';
+import { clearCFeatureVariantMemos } from './c-feature-variants';
 
 /** Node kinds that can declare supertypes (extends/implements). */
 const SUPERTYPE_BEARING_KINDS = new Set<Node['kind']>([
@@ -410,6 +411,7 @@ export class ReferenceResolver {
       clearImportResolverMemos(this.context);
       clearNameMatcherMemos(this.context);
       clearCppMacroVisibility(this.context);
+      clearCFeatureVariantMemos(this.context);
     }
   }
 
