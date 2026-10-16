@@ -39,12 +39,15 @@ function setHome(dir: string): { restore: () => void } {
     APPDATA: process.env.APPDATA,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
     HERMES_HOME: process.env.HERMES_HOME,
+    PYAPP_INSTALL_DIR_ICODE: process.env.PYAPP_INSTALL_DIR_ICODE,
   };
   process.env.HOME = dir;
   process.env.USERPROFILE = dir;
   process.env.APPDATA = path.join(dir, '.config');
   process.env.XDG_CONFIG_HOME = path.join(dir, '.config');
   delete process.env.HERMES_HOME;
+  // Never let the host machine's iCode runtime leak into a temp-home run.
+  delete process.env.PYAPP_INSTALL_DIR_ICODE;
   return {
     restore() {
       if (prev.HOME === undefined) delete process.env.HOME; else process.env.HOME = prev.HOME;
@@ -52,8 +55,28 @@ function setHome(dir: string): { restore: () => void } {
       if (prev.APPDATA === undefined) delete process.env.APPDATA; else process.env.APPDATA = prev.APPDATA;
       if (prev.XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = prev.XDG_CONFIG_HOME;
       if (prev.HERMES_HOME === undefined) delete process.env.HERMES_HOME; else process.env.HERMES_HOME = prev.HERMES_HOME;
+      if (prev.PYAPP_INSTALL_DIR_ICODE === undefined) delete process.env.PYAPP_INSTALL_DIR_ICODE;
+      else process.env.PYAPP_INSTALL_DIR_ICODE = prev.PYAPP_INSTALL_DIR_ICODE;
     },
   };
+}
+
+/** iCode's agent dir for the temp home `setHome` just installed. */
+function icodeAgentsDir(home: string): string {
+  return process.platform === 'win32'
+    ? path.join(home, '.config', 'chrys', 'agents')
+    : path.join(home, '.chrys', 'agents');
+}
+
+// iCode's install only edits EXISTING agent profiles. Contract and sweep
+// tests that install every target need one profile or iCode writes nothing.
+function seedIcodeProfile(home: string): void {
+  const dir = icodeAgentsDir(home);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'Test.yaml'),
+    ['name: Test', 'id: test-001', 'instructions: "You are a test agent."', ''].join('\n'),
+  );
 }
 
 // A marker-delimited HomeGraph block exactly as a previous installer
@@ -80,6 +103,7 @@ describe('Installer targets — contract', () => {
     origCwd = process.cwd();
     process.chdir(tmpCwd);
     homeRestore = setHome(tmpHome);
+    seedIcodeProfile(tmpHome);
   });
 
   afterEach(() => {
@@ -1359,6 +1383,7 @@ describe('Installer — uninstallTargets sweep (homegraph uninstall)', () => {
     origCwd = process.cwd();
     process.chdir(tmpCwd);
     homeRestore = setHome(tmpHome);
+    seedIcodeProfile(tmpHome);
   });
 
   afterEach(() => {
@@ -1461,6 +1486,7 @@ describe('Installer — refreshTargets sweep (homegraph install --refresh)', () 
     origCwd = process.cwd();
     process.chdir(tmpCwd);
     homeRestore = setHome(tmpHome);
+    seedIcodeProfile(tmpHome);
   });
 
   afterEach(() => {
@@ -1870,5 +1896,160 @@ describe('Installer targets — deveco XDG config path', () => {
     const deveco = getTarget('deveco')!;
     expect(deveco.detect('global').installed).toBe(true);
     expect(deveco.detect('global').alreadyConfigured).toBe(false);
+  });
+});
+
+describe('Installer targets — iCode built-in shadowing', () => {
+  let tmpHome: string;
+  let tmpCwd: string;
+  let origCwd: string;
+  let homeRestore: { restore: () => void };
+
+  beforeEach(() => {
+    tmpHome = mkTmpDir('icode-home');
+    tmpCwd = mkTmpDir('icode-cwd');
+    origCwd = process.cwd();
+    process.chdir(tmpCwd);
+    homeRestore = setHome(tmpHome);
+  });
+
+  afterEach(() => {
+    homeRestore.restore();
+    process.chdir(origCwd);
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpCwd, { recursive: true, force: true });
+  });
+
+  const agentsPath = (...p: string[]) => path.join(icodeAgentsDir(tmpHome), ...p);
+
+  function seedBuiltinRuntime(): void {
+    const builtins = path.join(
+      tmpHome, 'fake-runtime', 'site-packages', 'chrys',
+      'service', 'profiles', 'agents', 'builtins',
+    );
+    fs.mkdirSync(builtins, { recursive: true });
+    fs.writeFileSync(path.join(builtins, 'Code.yaml'), [
+      'name: Code',
+      'id: b011c0de0001',
+      'display_name: "Code Agent"',
+      'instructions: "code agent"',
+      'tools:',
+      '  builtins:',
+      '    - shell',
+      '',
+      'approval:',
+      '  default: auto',
+      '',
+    ].join('\n'));
+    process.env.PYAPP_INSTALL_DIR_ICODE = path.join(tmpHome, 'fake-runtime');
+  }
+
+  it('edits an existing user profile and creates a shadow for a discovered built-in', () => {
+    seedBuiltinRuntime();
+    fs.mkdirSync(agentsPath(), { recursive: true });
+    fs.writeFileSync(agentsPath('Mine.yaml'), 'name: Mine\ninstructions: hi\n');
+
+    const res = getTarget('icode')!.install('global', { autoAllow: false });
+
+    const mine = fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8');
+    expect(mine).toContain('- name: homegraph');
+    expect(mine).toContain('command: homegraph');
+
+    const shadow = fs.readFileSync(agentsPath('Code.yaml'), 'utf-8');
+    expect(shadow).toContain('id: b011c0de0001');
+    expect(shadow).toContain('- shell');
+    expect(shadow).toContain('- name: homegraph');
+    expect(res.files.find((f) => f.path.endsWith('Code.yaml'))?.action).toBe('created');
+    expect(res.files.find((f) => f.path.endsWith('Mine.yaml'))?.action).toBe('updated');
+    expect(res.notes?.join(' ')).not.toMatch(/Could not locate/);
+  });
+
+  it('degrades to manual guidance when the runtime cannot be located', () => {
+    fs.mkdirSync(agentsPath(), { recursive: true });
+    fs.writeFileSync(agentsPath('Mine.yaml'), 'name: Mine\ninstructions: hi\n');
+
+    const res = getTarget('icode')!.install('global', { autoAllow: false });
+
+    expect(res.notes?.join(' ')).toMatch(/Could not locate the installed iCode runtime/);
+    expect(fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8')).toContain('- name: homegraph');
+    expect(fs.existsSync(agentsPath('Code.yaml'))).toBe(false);
+  });
+
+  it('preserves a sibling mcp server and removes only its own entry', () => {
+    fs.mkdirSync(agentsPath(), { recursive: true });
+    fs.writeFileSync(agentsPath('Mine.yaml'), [
+      'name: Mine',
+      'tools:',
+      '  mcp:',
+      '    - name: other',
+      '      transport: stdio',
+      '      command: x',
+      '      enabled: true',
+      '',
+    ].join('\n'));
+
+    const icode = getTarget('icode')!;
+    icode.install('global', { autoAllow: false });
+    let body = fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8');
+    expect(body).toContain('- name: other');
+    expect(body).toContain('- name: homegraph');
+
+    icode.uninstall('global');
+    body = fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8');
+    expect(body).toContain('- name: other');
+    expect(body).not.toContain('homegraph');
+  });
+
+  it('drops the mcp block when homegraph was its only entry, keeping tools.builtins', () => {
+    fs.mkdirSync(agentsPath(), { recursive: true });
+    fs.writeFileSync(agentsPath('Mine.yaml'), [
+      'name: Mine',
+      'tools:',
+      '  builtins:',
+      '    - shell',
+      '',
+    ].join('\n'));
+
+    const icode = getTarget('icode')!;
+    icode.install('global', { autoAllow: false });
+    icode.uninstall('global');
+    const body = fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8');
+    expect(body).not.toContain('homegraph');
+    expect(body).toContain('- shell');
+  });
+
+  it('is idempotent — a second install reports unchanged', () => {
+    seedBuiltinRuntime();
+    fs.mkdirSync(agentsPath(), { recursive: true });
+    fs.writeFileSync(agentsPath('Mine.yaml'), 'name: Mine\ninstructions: hi\n');
+
+    const icode = getTarget('icode')!;
+    icode.install('global', { autoAllow: false });
+    const afterFirst = fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8');
+    const second = icode.install('global', { autoAllow: false });
+    for (const f of second.files) expect(f.action).toBe('unchanged');
+    expect(fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8')).toBe(afterFirst);
+  });
+
+  it('HOMEGRAPH_ICODE_NO_BUILTINS=1 edits user profiles but creates no shadow', () => {
+    seedBuiltinRuntime();
+    fs.mkdirSync(agentsPath(), { recursive: true });
+    fs.writeFileSync(agentsPath('Mine.yaml'), 'name: Mine\ninstructions: hi\n');
+    process.env.HOMEGRAPH_ICODE_NO_BUILTINS = '1';
+    try {
+      const res = getTarget('icode')!.install('global', { autoAllow: false });
+      expect(fs.readFileSync(agentsPath('Mine.yaml'), 'utf-8')).toContain('- name: homegraph');
+      expect(fs.existsSync(agentsPath('Code.yaml'))).toBe(false);
+      expect(res.files.some((f) => f.path.endsWith('Code.yaml'))).toBe(false);
+    } finally {
+      delete process.env.HOMEGRAPH_ICODE_NO_BUILTINS;
+    }
+  });
+
+  it('reports no profiles when iCode is present but has no agent profiles', () => {
+    fs.mkdirSync(path.dirname(icodeAgentsDir(tmpHome)), { recursive: true });
+    const res = getTarget('icode')!.install('global', { autoAllow: false });
+    expect(res.files).toEqual([]);
+    expect(res.notes?.join(' ')).toMatch(/No iCode agent profiles found/);
   });
 });

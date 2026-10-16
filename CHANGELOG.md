@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New Features
+
+- **iCode support** in the installer. `homegraph install --target icode` wires the MCP server into iCode agent profiles (`~/.chrys/agents/` on macOS/Linux, `%APPDATA%\chrys\agents\` on Windows). The target is global-only. It edits existing profiles in place and, when the iCode runtime is found, writes shadow profiles for the built-in agents. If the runtime is missing, install still updates existing profiles and prints manual guidance. `HOMEGRAPH_ICODE_NO_BUILTINS=1` skips shadows. No instructions file is written (Spec 0057).
+
 ### Improvements
 
 - MCP initialize / `homegraph_explore` description: drop bash-first and "HomeGraph is optional" wording that conflicted with DevEco Code's graph-first product prompt; existing-code tasks open with `homegraph_explore` alone. Tool list, budgets, and evidence caveats unchanged.
