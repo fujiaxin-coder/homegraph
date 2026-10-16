@@ -1012,7 +1012,13 @@ export class HomeGraph {
         const filesChanged = result.filesAdded + result.filesModified + result.filesRemoved;
         return { filesChanged, durationMs: result.durationMs };
       },
-      options
+      {
+        ...options,
+        indexedFingerprint: options.indexedFingerprint ?? ((rel) => {
+          const rec = this.getFile(rel);
+          return rec ? { size: rec.size, modifiedAt: rec.modifiedAt } : null;
+        }),
+      }
     );
 
     return this.watcher.start();

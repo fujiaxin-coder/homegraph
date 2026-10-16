@@ -220,6 +220,30 @@ export interface WatchOptions {
    * sets it.
    */
   inertForTests?: boolean;
+
+  /**
+   * Indexed size and mtime for a project-relative path, or null when the
+   * file is not in the index. On Windows this drops watcher events whose
+   * size and modification time still match the index — NTFS last-access
+   * updates look like edits (Spec 0055). Absent means every event is kept.
+   */
+  indexedFingerprint?: (relPath: string) => { size: number; modifiedAt: number } | null;
+}
+
+/**
+ * True when a watcher event is only an NTFS last-access update: Windows,
+ * the file is already indexed, and its size and modification time still
+ * match. A missing stat, a missing index row, or any other platform is a
+ * real change (fail open).
+ */
+export function isAccessTimeOnlyChange(
+  platform: NodeJS.Platform,
+  onDisk: { size: number; mtimeMs: number } | null,
+  indexed: { size: number; modifiedAt: number } | null,
+): boolean {
+  if (platform !== 'win32' || !onDisk || !indexed) return false;
+  return onDisk.size === indexed.size
+    && Math.floor(onDisk.mtimeMs) === Math.floor(indexed.modifiedAt);
 }
 
 /**
@@ -353,6 +377,7 @@ export class FileWatcher {
   private readonly onSyncError?: WatchOptions['onSyncError'];
   private readonly onDegraded?: WatchOptions['onDegraded'];
   private readonly inertForTests: boolean;
+  private readonly indexedFingerprint?: WatchOptions['indexedFingerprint'];
 
   constructor(
     projectRoot: string,
@@ -367,6 +392,7 @@ export class FileWatcher {
     this.onSyncError = options.onSyncError;
     this.onDegraded = options.onDegraded;
     this.inertForTests = options.inertForTests ?? false;
+    this.indexedFingerprint = options.indexedFingerprint;
   }
 
   /**
@@ -591,6 +617,11 @@ export class FileWatcher {
       return;
     }
 
+    if (this.isAccessTimeOnly(rel)) {
+      logDebug('Ignoring Windows access-time watcher event', { file: rel });
+      return;
+    }
+
     logDebug('File change detected', { file: rel });
     if (this.ready) {
       const now = Date.now();
@@ -601,6 +632,29 @@ export class FileWatcher {
       });
     }
     this.scheduleSync();
+  }
+
+  /**
+   * Windows ReadDirectoryChangesW reports a read as `change` when NTFS
+   * updates last-access time. Drop that event when size and mtime still
+   * match the index. Stat or lookup failure keeps the event.
+   */
+  private isAccessTimeOnly(rel: string): boolean {
+    if (process.platform !== 'win32' || !this.indexedFingerprint) return false;
+    let indexed: { size: number; modifiedAt: number } | null;
+    try {
+      indexed = this.indexedFingerprint(rel);
+    } catch {
+      return false;
+    }
+    let onDisk: { size: number; mtimeMs: number } | null = null;
+    try {
+      const st = fs.statSync(path.join(this.projectRoot, rel));
+      if (st.isFile()) onDisk = { size: st.size, mtimeMs: st.mtimeMs };
+    } catch {
+      onDisk = null;
+    }
+    return isAccessTimeOnlyChange(process.platform, onDisk, indexed);
   }
 
   /**
