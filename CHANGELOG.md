@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.6.2] - 2026-10-19
+
 ### New Features
 
 - **iCode support** in the installer. `homegraph install --target icode` wires the MCP server into iCode agent profiles (`~/.chrys/agents/` on macOS/Linux, `%APPDATA%\chrys\agents\` on Windows). The target is global-only. It edits existing profiles in place and, when the iCode runtime is found, writes shadow profiles for the built-in agents. If the runtime is missing, install still updates existing profiles and prints manual guidance. `HOMEGRAPH_ICODE_NO_BUILTINS=1` skips shadows. No instructions file is written (Spec 0057).
@@ -27,7 +30,6 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - C/C++: a header whose only C++ signal is `struct Derived : Base` is indexed as C++. A call that names a function-like macro visible at that line is not linked to a same-named function, and the include walk that decides this is bounded so a deep guard graph cannot blow the heap (Spec 0054).
 - MCP `homegraph_explore` call budget shown to agents is **2** on every repo size, matching the session hard cap. Output sizing tiers are unchanged. Heuristic edges store `synthesized_by`, and ArkTS cross-file call cleanup deletes that channel by column instead of a JSON text match. Explore and Partial replies no longer tell the agent to call `homegraph_node`. Name search still tries FTS first, including Chinese literals (Spec 0053).
 - MCP tools/list: when a session has no default project, `projectPath` is already marked `required` in the schema — its property description no longer says "Omit to use this session's default project", so agents are not told the field is both required and optional.
-
 
 ## [1.6.1] - 2026-09-28
 
@@ -302,3 +304,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.5.10]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.5.10
 [1.6.0]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.0
 [1.6.1]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.1
+[1.6.2]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.2
