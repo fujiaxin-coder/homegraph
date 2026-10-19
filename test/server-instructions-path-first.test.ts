@@ -9,7 +9,7 @@ describe('SERVER_INSTRUCTIONS aligned with DevEco graph-first', () => {
       expect(text).not.toMatch(/bash-first/i);
       expect(text).not.toContain('HomeGraph is optional');
       expect(text).not.toContain('ordinary bash/search/read tools first');
-      expect(text).toContain('ceilings, never a required sequence');
+      expect(text).toContain('wait 10 seconds before calling it again on the same project');
     }
   });
 });

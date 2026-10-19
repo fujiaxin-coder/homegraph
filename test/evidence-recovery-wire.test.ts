@@ -6,7 +6,7 @@ import type HomeGraph from '../src/index';
 import { ToolHandler, type ToolResult } from '../src/mcp/tools';
 import { EXPLORE_EMISSION_KEY, ExploreSessionState, type ExploreEmission } from '../src/mcp/explore-session-state';
 import { fileFingerprint } from '../src/mcp/explore-dedup';
-import { decideExploreRepeat, type ExploreRepeatDecision } from '../src/mcp/explore-repeat-guard';
+import { decideExploreRepeat, EXPLORE_COOLDOWN_MS, type ExploreRepeatDecision } from '../src/mcp/explore-repeat-guard';
 
 interface ReceiptBoundary {
   takeExploreEmission(result: ToolResult, session: ExploreSessionState): ToolResult;
@@ -54,7 +54,7 @@ describe('evidence recovery at the MCP receipt boundary', () => {
     expect(refused?.content[0]?.text).toMatch(/evidence may still be incomplete/);
   });
 
-  it('reports the exhausted retrieval budget after two short incomplete responses', () => {
+  it('tells the agent to wait 10 seconds after a second short incomplete response', () => {
     const handler = new ToolHandler(null) as unknown as ReceiptBoundary;
     const session = new ExploreSessionState();
     handler.takeExploreEmission(receipt(), session);
@@ -87,7 +87,9 @@ describe('evidence recovery at the MCP receipt boundary', () => {
     session.record({ projectRoot: root, query: 'Player play', evidenceStatus: 'complete', partial: false,
       sourceBytes: source.length, responseBytes: 800, files: [{ path: 'Player.ts',
         ranges: [{ start: 1, end: 1 }], bytes: source.length, fingerprint: fileFingerprint(source) }] });
-    return { root, file, source, session, decision: decideExploreRepeat(session.forProject(root), 'Player play'),
+    const prior = session.forProject(root);
+    const afterCooldown = prior!.calls[0]!.returnedAt! + EXPLORE_COOLDOWN_MS;
+    return { root, file, source, session, decision: decideExploreRepeat(prior, 'Player play', afterCooldown),
       handler: new ToolHandler(null) as unknown as ReceiptBoundary };
   }
 
@@ -98,7 +100,7 @@ describe('evidence recovery at the MCP receipt boundary', () => {
     // Equal-length edits must invalidate the content receipt too.
     fs.writeFileSync(file, source.replace('before', 'after!'));
     expect(handler.shouldRefuseRepeatedEvidence(decision, root)).toBe(false);
-    expect(handler.shouldRefuseRepeatedEvidence({ ...decision, reason: 'hard-cap' }, root)).toBe(true);
+    expect(handler.shouldRefuseRepeatedEvidence({ ...decision, reason: 'cooldown' }, root)).toBe(true);
   });
 
   it('does not claim unchanged evidence for deleted or oversized files', () => {

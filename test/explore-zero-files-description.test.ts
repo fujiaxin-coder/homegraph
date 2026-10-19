@@ -92,7 +92,7 @@ describe('homegraph_explore description at fileCount === 0 (Spec 0027)', () => {
     );
     cg = await HomeGraph.init(tempDir, { index: true });
     const d = exploreOf(cg).description;
-    expect(d.endsWith('Budget: make at most 2 calls for this project (1 files indexed).')).toBe(true);
+    expect(d.endsWith('Wait 10 seconds after homegraph_explore returns before calling it again (1 files indexed).')).toBe(true);
   });
 
   it('read-only annotations survive the 0-file description rewrite (#1018)', async () => {

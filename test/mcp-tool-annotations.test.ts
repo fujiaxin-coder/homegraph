@@ -101,7 +101,7 @@ describe('Live tool surface keeps annotations with a project open (#1018)', () =
     // object spread; the annotation must survive that rewrite.
     const explore = got.find((t) => t.name === 'homegraph_explore');
     expect(explore).toBeDefined();
-    expect(explore!.description).toMatch(/Budget: make at most/);
+    expect(explore!.description).toMatch(/Wait 10 seconds after homegraph_explore returns/);
     expectReadOnly(explore!);
   });
 });

@@ -1,6 +1,7 @@
 import {
   PRODUCT_STATUS_GLOSSARY,
 } from './index-availability';
+import { exploreCooldownSeconds } from './explore-repeat-guard';
 
 /**
  * MCP initialize 中的统一工具指引；工具描述必须遵守相同的选用策略。
@@ -37,7 +38,7 @@ const QUERY = `## Query and recovery
 
 Write one focused sentence: requested action + target + known anchors + unresolved relation + preservation constraints. Use the full public task as \`taskContext\` when needed. Keep UI labels verbatim; use exact symbols from the task or source instead of inventing names or piling up generic keywords. Tool replies may begin with \`HomeGraph project root: \`…\`\` — that absolute root is the join base for repo-relative paths below; pass those paths to Read/Grep as-is, or join as \`<root>/<relative>\` (use \`/\`). Do not invent experiment/result directory prefixes; a path refusal requires valid in-repo relocation, not broader permissions. When this MCP session already has a bound project root, a mismatched \`projectPath\` is ignored (results stay on the bound root) with a short English notice — do not treat that as a hard error.
 
-A project map (\`homegraph_project\`) is navigation and Harmony skeleton pointers, not proof of a located feature and not a call graph. Preserve requested product/module scope and verify each candidate before editing. Start with one focused graph request; recover only a named missing body/relation. Budget: ≤2 \`homegraph_explore\` attempts per project. These are ceilings, never a required sequence. If evidence is still missing, use targeted bash/search/read and continue implementation. Do not expand into unrelated files merely to exhaust a budget.
+A project map (\`homegraph_project\`) is navigation and Harmony skeleton pointers, not proof of a located feature and not a call graph. Preserve requested product/module scope and verify each candidate before editing. Start with one focused graph request; recover only a named missing body/relation. After \`homegraph_explore\` returns, wait ${exploreCooldownSeconds()} seconds before calling it again on the same project. If evidence is still missing, use targeted bash/search/read and continue implementation. Do not expand into unrelated files merely to fill the wait.
 `;
 
 const INDEX_STATUS = `## Index status

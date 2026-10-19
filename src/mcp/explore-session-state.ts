@@ -121,6 +121,11 @@ export interface ExploreEmission {
 export interface ExploreCallRecord extends ExploreEmission {
   /** 1-based call index within this session FOR THIS PROJECT. Survives eviction. */
   index: number;
+  /**
+   * Epoch ms when this result was recorded and about to be returned.
+   * The explore cooldown measures from here, not from when the request arrived.
+   */
+  returnedAt?: number;
 }
 
 /** Everything the session knows about one project. */
@@ -278,6 +283,7 @@ export class ExploreSessionState {
 
     const record: ExploreCallRecord = {
       index: state.callCount,
+      returnedAt: Date.now(),
       projectRoot: emission.projectRoot,
       query: typeof emission.query === 'string' ? emission.query : '',
       files: this.boundFiles(emission.files),

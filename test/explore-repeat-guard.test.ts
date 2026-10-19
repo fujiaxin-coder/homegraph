@@ -33,6 +33,7 @@ function call(partial: Partial<ExploreCallRecord> & { query: string }): ExploreC
     responseBytes: partial.responseBytes ?? 5000,
     partial: partial.partial,
     nextAnchor: partial.nextAnchor,
+    returnedAt: partial.returnedAt,
     evidenceStatus: partial.evidenceStatus ?? (partial.partial ? 'partial' : 'complete'),
     coveredObligations: partial.coveredObligations,
     uncoveredObligations: partial.uncoveredObligations,
@@ -85,15 +86,19 @@ describe('explore-repeat-guard', () => {
     expect(novelAnchorsVsPriors('NotificationBridgeEventManager', state.calls).length).toBeGreaterThan(0);
   });
 
-  it('hard-caps after two counted explores even with a novel Type name', () => {
+  it('refuses a novel Type name only while the return cooldown is running', () => {
+    const recent = Date.now();
     const state = prior([
-      call({ index: 1, query: 'how is backup and restore implemented', responseBytes: 5000, partial: true }),
-      call({ index: 2, query: 'BackupManager', responseBytes: 4500 }),
+      call({ index: 1, query: 'how is backup and restore implemented', responseBytes: 5000, partial: true, returnedAt: recent - 20_000 }),
+      call({ index: 2, query: 'BackupManager', responseBytes: 4500, returnedAt: recent }),
     ]);
-    const d = decideExploreRepeat(state, 'RestoreController');
-    expect(d.refuse).toBe(true);
-    expect(d.reason).toBe('hard-cap');
-    expect(formatExploreRepeatRefuse(d, 'RestoreController')).toMatch(/narrow Grep|Stop exploring/i);
+    const during = decideExploreRepeat(state, 'RestoreController', recent + 1_000);
+    expect(during.refuse).toBe(true);
+    expect(during.reason).toBe('cooldown');
+    expect(formatExploreRepeatRefuse(during, 'RestoreController')).toMatch(/\*\*10\*\* seconds/);
+    expect(formatExploreRepeatRefuse(during, 'RestoreController')).toMatch(/Read\/Grep/);
+    const later = decideExploreRepeat(state, 'RestoreController', recent + 10_000);
+    expect(later.refuse).toBe(false);
   });
 
   it('allows one recovery even when Partial suggested an irrelevant Next anchor', () => {
@@ -135,14 +140,14 @@ describe('explore-repeat-guard', () => {
     expect(d.refuse).toBe(false);
   });
 
-  it('counts short empty attempts so one failed recovery cannot retry forever', () => {
+  it('blocks an immediate empty retry, then allows it after the cooldown', () => {
+    const recent = Date.now();
     const state = prior([
-      call({ query: 'badge manager source', responseBytes: 242, evidenceStatus: 'empty' }),
-      call({ query: 'badge manager source', responseBytes: 242, evidenceStatus: 'empty' }),
+      call({ query: 'badge manager source', responseBytes: 242, evidenceStatus: 'empty', returnedAt: recent - 20_000 }),
+      call({ query: 'badge manager source', responseBytes: 242, evidenceStatus: 'empty', returnedAt: recent }),
     ]);
-    const d = decideExploreRepeat(state, 'badge manager source');
-    expect(d.refuse).toBe(true);
-    expect(d.reason).toBe('hard-cap');
+    expect(decideExploreRepeat(state, 'badge manager source', recent + 1_000).reason).toBe('cooldown');
+    expect(decideExploreRepeat(state, 'badge manager source', recent + 10_000).refuse).toBe(false);
   });
 
   it('extracts Next anchor from Partial footer text', () => {
@@ -256,11 +261,14 @@ describe('evidence-aware recovery receipts', () => {
     const s = new ExploreSessionState();
     s.record(call({ query: 'feedback feature bottom menu', evidenceStatus, responseBytes: 170 }));
     const state = s.forProject('/repo');
-    expect(decideExploreRepeat(state, 'feedback feature bottom menu').refuse).toBe(false);
-    expect(decideExploreRepeat(state, 'bottom navigation menu resources configuration').refuse).toBe(false);
+    const after = state!.calls[0]!.returnedAt! + 10_000;
+    expect(decideExploreRepeat(state, 'feedback feature bottom menu', after).refuse).toBe(false);
+    expect(decideExploreRepeat(state, 'bottom navigation menu resources configuration', after).refuse).toBe(false);
     expect(decideDepthToolFuse(state, 0, 'homegraph_callers').refuse).toBe(false);
     s.record(call({ query: 'bottom navigation menu resources configuration', evidenceStatus, responseBytes: 120 }));
-    expect(decideExploreRepeat(s.forProject('/repo'), 'FeedbackPage').reason).toBe('hard-cap');
+    const recordedAt = s.forProject('/repo')!.calls.at(-1)!.returnedAt!;
+    expect(decideExploreRepeat(s.forProject('/repo'), 'FeedbackPage', recordedAt + 1_000).reason).toBe('cooldown');
+    expect(decideExploreRepeat(s.forProject('/repo'), 'FeedbackPage', recordedAt + 10_000).refuse).toBe(false);
   });
 
   it('deduplicates genuinely repeated requests once usable evidence was returned', () => {
@@ -277,10 +285,14 @@ describe('evidence-aware recovery receipts', () => {
     expect(decideExploreRepeat(state, 'BetaService calls AlphaController').refuse).toBe(false);
   });
 
-  it('does not lose the lifetime retrieval budget when old call detail was evicted', () => {
-    const state = prior([call({ query: 'one retained incomplete attempt', evidenceStatus: 'empty' })]);
+  it('does not refuse a later question just because many explores already ran', () => {
+    const state = prior([call({
+      query: 'one retained incomplete attempt',
+      evidenceStatus: 'empty',
+      returnedAt: Date.now() - 10_000,
+    })]);
     state.callCount = 10;
-    expect(decideExploreRepeat(state, 'new obligation').reason).toBe('hard-cap');
+    expect(decideExploreRepeat(state, 'new obligation').refuse).toBe(false);
   });
 
   it('infers empty and SDK-only legacy receipts from actual emitted source', () => {

@@ -106,7 +106,7 @@ import {
 import {
   decideDepthToolFuse,
   decideExploreRepeat,
-  EXPLORE_CALL_BUDGET,
+  exploreCooldownSeconds,
   formatDepthToolRefuse,
   formatExploreRepeatRefuse,
   formatMechanismPartialFooter,
@@ -392,12 +392,12 @@ export function getExploreBudget(fileCount: number): number {
 }
 
 /**
- * Session explore call ceiling shown to agents. Always {@link EXPLORE_CALL_BUDGET}
- * (the hard refuse), independent of {@link getExploreBudget}'s output tiers.
+ * Cooldown shown on `homegraph_explore` when the project is indexed.
+ * Matches {@link exploreCooldownSeconds}. Output tiers stay on {@link getExploreBudget}.
  */
 export function formatExploreCallBudgetNote(fileCount: number): string {
   const files = Math.max(0, fileCount).toLocaleString();
-  return `Budget: make at most ${EXPLORE_CALL_BUDGET} calls for this project (${files} files indexed).`;
+  return `Wait ${exploreCooldownSeconds()} seconds after homegraph_explore returns before calling it again (${files} files indexed).`;
 }
 
 /**
@@ -1483,7 +1483,7 @@ export const tools: ToolDefinition[] = [
       'Returns call paths and compact line-numbered source (Harmony route_map queries may lead with Registration sources; form/shortcuts queries may lead with Capability profiles; element/string.json literals may lead with Resource hits + optional bound .ets anchors; Seam notes may flag stubs). ArkTS symbol evidence uses complete declarations and bounded directed paths with intermediate source dependencies; explicit Gaps and stop reasons name omitted or unverified evidence. Qualify ambiguous symbols by owning type or file. State the missing relation with known anchors, requested action, scope and constraints; taskContext can carry the full task. ' +
       'Reuse unchanged complete ranges; refresh missing, edited or truncated evidence. ' +
       'No new evidence → change to a targeted source inspection, not a paraphrased explore. ' +
-      'Partial/busy → at most one focused recovery for the named gap; budgets are ceilings, not required calls. ' +
+      `After this tool returns, wait ${exploreCooldownSeconds()} seconds before calling it again. ` +
       'Retrieval completion is not task completion: continue implementation and required validation.',
     inputSchema: {
       type: 'object',
@@ -2170,8 +2170,8 @@ export class ToolHandler {
    * guidance so the frozen description and the live call-time response tell
    * the same story: failed build → say so (indexing is the user's call, so
    * the agent relays it); still building → point at homegraph_project and
-   * retry; genuinely empty → honest empty note. Only fileCount > 0 carries a
-   * call budget — there is nothing to budget over an unbuilt index.
+   * retry; genuinely empty → honest empty note. Only fileCount > 0 carries the
+   * return cooldown — there is nothing to cool down over an unbuilt index.
    */
   private exploreSuffix(fileCount: number): string {
     if (fileCount > 0) {
@@ -10264,14 +10264,9 @@ export class ToolHandler {
     const sessionPrior = viewForProject(readExploreSessionView(args), projectRoot);
     const repeat = decideExploreRepeat(sessionPrior, query);
     if (!plan && this.shouldRefuseRepeatedEvidence(repeat, projectRoot)) {
-      const text = formatExploreRepeatRefuse(repeat, query);
-      return this.exploreResult(text, {
-        projectRoot,
-        query,
-        files: [],
-        sourceBytes: 0,
-        responseBytes: text.length,
-      });
+      // Do not record this refusal. A recorded return would restart the cooldown
+      // and a client retrying inside the window would never get through.
+      return this.textResult(formatExploreRepeatRefuse(repeat, query));
     }
 
     // A planned step already tried fast paths once, before entering full explore.
@@ -12234,7 +12229,7 @@ export class ToolHandler {
         const stats = cg.getStats();
         lines.push('');
         lines.push(
-          `> **Usually one explore is enough** (budget ≤${EXPLORE_CALL_BUDGET} for ${stats.fileCount.toLocaleString()} files). ` +
+          `> **Usually one explore is enough** (wait ${exploreCooldownSeconds()}s after this result before another \`homegraph_explore\`; ${stats.fileCount.toLocaleString()} files). ` +
           'Answer from Flow + Source above. Extra explore/Read for the **same** symbols multiplies tokens — ' +
           'only call again for a missing **named** symbol.',
         );

@@ -134,21 +134,26 @@ export function inferExplorePartialMeta(text: string): { partial: boolean; nextA
 
 export interface ExploreRepeatDecision {
   refuse: boolean;
-  /** Matched prior call when refusing for overlap. */
+  /** Matched prior call when refusing for overlap or cooldown. */
   matched?: ExploreCallRecord;
-  reason: 'overlap' | 'call-budget' | 'hard-cap' | 'next-anchor' | 'ok';
+  reason: 'overlap' | 'call-budget' | 'cooldown' | 'next-anchor' | 'ok';
 }
 
 /**
- * Absolute retrieval budget per session/project. Empty receipts count as
- * attempts too, so failed recovery cannot create an unbounded retry loop.
+ * After `homegraph_explore` records a result (the response is about to be
+ * returned), refuse another explore on the same project until this elapses.
+ * There is no per-connection call ceiling — a later question on a long-lived
+ * MCP session must still be able to explore.
  *
- * Tool descriptions and explore footers must quote this same ceiling.
- * `getExploreBudget` scales output size only — it is not the call cap.
+ * Tool descriptions, initialize instructions, and explore footers must quote
+ * this same wait. `getExploreBudget` scales output size only.
  */
-export const EXPLORE_CALL_BUDGET = 2;
+export const EXPLORE_COOLDOWN_MS = 10_000;
 
-const MAX_EXPLORES = EXPLORE_CALL_BUDGET;
+/** Whole seconds shown to agents. Matches {@link EXPLORE_COOLDOWN_MS}. */
+export function exploreCooldownSeconds(): number {
+  return Math.round(EXPLORE_COOLDOWN_MS / 1000);
+}
 
 /**
  * After a counted Partial explore, allow this many depth tools
@@ -161,24 +166,34 @@ function isCountedCall(call: ExploreCallRecord): boolean {
   return call.evidenceStatus !== undefined || (call.responseBytes || 0) >= 400;
 }
 
+function latestReturnedCall(prior: ExploreProjectState): ExploreCallRecord | undefined {
+  for (let i = prior.calls.length - 1; i >= 0; i--) {
+    const call = prior.calls[i];
+    if (call && typeof call.returnedAt === 'number' && Number.isFinite(call.returnedAt)) return call;
+  }
+  return undefined;
+}
+
 /**
  * Whether this explore should short-refuse instead of re-running.
+ *
+ * `now` is injectable so tests can move past the cooldown without sleeping.
  */
 export function decideExploreRepeat(
   prior: ExploreProjectState | null | undefined,
   query: string,
+  now: number = Date.now(),
 ): ExploreRepeatDecision {
   if (!prior || prior.calls.length === 0) return { refuse: false, reason: 'ok' };
 
   const counted = prior.calls.filter(isCountedCall);
   const last = counted[counted.length - 1];
-
-  // Keep the lifetime budget even if bounded state has evicted early receipts.
-  if (Math.max(prior.callCount, counted.length) >= MAX_EXPLORES) {
+  const returned = latestReturnedCall(prior);
+  if (returned && now - returned.returnedAt! < EXPLORE_COOLDOWN_MS) {
     return {
       refuse: true,
-      matched: last,
-      reason: 'hard-cap',
+      matched: returned,
+      reason: 'cooldown',
     };
   }
 
@@ -217,8 +232,8 @@ export function formatExploreRepeatRefuse(
 
   let why: string;
   switch (decision.reason) {
-    case 'hard-cap':
-      why = `This session reached its **${MAX_EXPLORES}** \`homegraph_explore\` retrieval attempts on this project, including incomplete attempts.`;
+    case 'cooldown':
+      why = `The previous \`homegraph_explore\` result was returned less than **${exploreCooldownSeconds()}** seconds ago. Wait, reuse that result, or inspect with Read/Grep, then call explore again.`;
       break;
     case 'next-anchor':
       why = `Prior explore was Partial and named a **Next anchor** — do not re-explore a paraphrase of "${priorQ}${priorQ.length >= 100 ? '…' : ''}".`;
@@ -439,8 +454,8 @@ export function formatMechanismPartialFooter(nextCaption: string): string {
 }
 
 /**
- * Appended when a second counted Partial is emitted in the same session —
- * stop HomeGraph; do not take a third explore.
+ * Appended when another Partial is emitted after one earlier Partial in this
+ * session. The wait is the return cooldown, not a connection-long stop.
  */
 export function formatSecondPartialStopFooter(nextAnchor?: string): string {
   const next = nextAnchor
@@ -449,7 +464,7 @@ export function formatSecondPartialStopFooter(nextAnchor?: string): string {
   return [
     '',
     '---',
-    '> **Second Partial — explore retrieval budget reached.** Do not repeat `homegraph_explore`.'
+    `> **Second Partial.** Wait ${exploreCooldownSeconds()} seconds after this result before calling \`homegraph_explore\` again.`
     + next
     + ' Evidence remains incomplete. Inspect only missing source with targeted Read or narrow Grep, '
     + 'then continue the requested edits and validation. Reuse unchanged source already returned.',

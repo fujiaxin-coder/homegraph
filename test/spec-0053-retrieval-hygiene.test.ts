@@ -9,9 +9,6 @@ import * as os from 'os';
 import { DatabaseConnection } from '../src/db';
 import { QueryBuilder } from '../src/db/queries';
 import { backfillEdgeSynthesizedBy } from '../src/db/migrations';
-import { formatExploreCallBudgetNote } from '../src/mcp/tools';
-import { EXPLORE_CALL_BUDGET } from '../src/mcp/explore-repeat-guard';
-import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions';
 import type { Node } from '../src/types';
 
 function makeNode(id: string, name = id): Node {
@@ -31,16 +28,6 @@ function makeNode(id: string, name = id): Node {
 }
 
 describe('Spec 0053 retrieval hygiene', () => {
-  it('quotes the hard explore cap of 2 for every repo size', () => {
-    expect(EXPLORE_CALL_BUDGET).toBe(2);
-    expect(formatExploreCallBudgetNote(1)).toBe(
-      'Budget: make at most 2 calls for this project (1 files indexed).',
-    );
-    expect(formatExploreCallBudgetNote(20000)).toContain('at most 2 calls');
-    expect(formatExploreCallBudgetNote(20000)).not.toMatch(/at most [345] calls/);
-    expect(SERVER_INSTRUCTIONS).toMatch(/≤2 `homegraph_explore`/);
-  });
-
   describe('search and channel delete', () => {
     let dir: string;
     let db: DatabaseConnection;
