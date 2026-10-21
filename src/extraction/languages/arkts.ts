@@ -2289,6 +2289,48 @@ function filesHaveArkUiEntries(files: Iterable<ArkFile>): boolean {
 
 const VIEWTREE_CALLBACK_ATTRS = new Set<string>(CALLBACK_METHOD_NAME);
 
+/**
+ * Framework decorators with no project-local definition. Emitting them as
+ * unresolved `decorates` refs lets name-matcher bind @State → enum State, etc.
+ */
+const ARKUI_BUILTIN_DECORATORS = new Set([
+  'State',
+  'Prop',
+  'Link',
+  'Provide',
+  'Consume',
+  'Watch',
+  'Builder',
+  'BuilderParam',
+  'Styles',
+  'Extend',
+  'AnimatableExtend',
+  'Component',
+  'ComponentV2',
+  'Entry',
+  'CustomDialog',
+  'Observed',
+  'ObservedV2',
+  'ObjectLink',
+  'LocalStorageLink',
+  'LocalStorageProp',
+  'StorageLink',
+  'StorageProp',
+  'Track',
+  'Require',
+  'Once',
+  'Reusable',
+  'Concurrent',
+  'Sendable',
+  'Local',
+  'Param',
+  'Event',
+  'Monitor',
+  'Computed',
+  'Trace',
+  'Type',
+]);
+
 /** State decorator kinds on a field (@State, @Prop, @Link, …) from arkanalyzer. */
 export function stateDecoratorKinds(field: ArkField): string[] {
   const decs = field.getStateDecorators?.();
@@ -3049,6 +3091,10 @@ class ArkTSAdapter {
         const rel = this.normalizeRelPath(arkFile.getFilePath());
         if (!rel || excludeFiles.has(rel) || this.fileResults.has(rel)) continue;
         if (!this.scanned.has(rel) || !isArkAnalyzerSourcePath(rel)) continue;
+        // Already indexed (usually streamed to DB). Re-running indexScannedFile
+        // would hit addNode's nodeIds short-circuit and leave an empty shell;
+        // live IR rebind is handled by bindLiveMapsFromResident.
+        if (this.nodeIds.has(`file:${rel}`)) continue;
         this.indexScannedFile(arkFile);
         if (this.fileResults.has(rel)) seeded.push(rel);
       }
@@ -3646,6 +3692,24 @@ class ArkTSAdapter {
     return result?.nodes.some((n) => n.id === nodeId) ?? false;
   }
 
+  /**
+   * Same-file edges stay on the file's ExtractionResult (persistFileResult FK
+   * filter). Cross-file edges go to crossFileEdges and are inserted after all
+   * modules persist — do not require nodeIds.has(target) at emit time (target
+   * may be indexed later in the same batch).
+   */
+  private addMaybeCrossFileEdge(
+    result: ExtractionResult,
+    callerFile: string,
+    edge: Edge
+  ): void {
+    if (this.nodeInFile(edge.target, callerFile)) {
+      result.edges.push(edge);
+    } else {
+      this.crossFileEdges.push(edge);
+    }
+  }
+
   private ensureFileResult(relativePath: string, lineCount: number): ExtractionResult {
     let result = this.fileResults.get(relativePath);
     if (!result) {
@@ -3834,6 +3898,9 @@ class ArkTSAdapter {
     for (const dec of decorators) {
       const kind = dec.getKind();
       if (!kind) continue;
+      // Built-in ArkUI/ArkTS decorators have no project definition; name-match
+      // would falsely link @State → enum State, @Builder → class Builder, etc.
+      if (ARKUI_BUILTIN_DECORATORS.has(kind)) continue;
       result.unresolvedReferences.push({
         fromNodeId,
         referenceName: kind,
@@ -3965,19 +4032,69 @@ class ArkTSAdapter {
     if (superName) {
       const superCls = cls.getHeritageClass(superName);
       if (superCls && !superCls.isDefaultArkClass()) {
-        const superId = this.classToId.get(superCls);
+        const superId = this.classToId.get(superCls) ?? this.resolveClassNodeId(superCls);
+        const edgeKind =
+          superCls.getCategory() === CLASS_CATEGORY.INTERFACE ? 'implements' : 'extends';
         if (superId) {
-          const edgeKind =
-            superCls.getCategory() === CLASS_CATEGORY.INTERFACE ? 'implements' : 'extends';
-          result.edges.push(arkEdge(classNode.id, superId, edgeKind));
+          this.addMaybeCrossFileEdge(
+            result,
+            relativePath,
+            arkEdge(classNode.id, superId, edgeKind)
+          );
+        } else {
+          const simple = superName.includes('.') ? superName.split('.').pop()! : superName;
+          if (simple && simple !== 'Object') {
+            result.unresolvedReferences.push({
+              fromNodeId: classNode.id,
+              referenceName: simple,
+              referenceKind: edgeKind,
+              line,
+              column: col,
+              filePath: relativePath,
+              language,
+            });
+          }
+        }
+      } else if (superName && superName !== 'Object') {
+        const simple = superName.includes('.') ? superName.split('.').pop()! : superName;
+        if (simple) {
+          result.unresolvedReferences.push({
+            fromNodeId: classNode.id,
+            referenceName: simple,
+            referenceKind: 'extends',
+            line,
+            column: col,
+            filePath: relativePath,
+            language,
+          });
         }
       }
     }
 
     for (const ifaceName of cls.getImplementedInterfaceNames()) {
       const iface = cls.getImplementedInterface(ifaceName);
-      if (iface && this.classToId.has(iface)) {
-        result.edges.push(arkEdge(classNode.id, this.classToId.get(iface)!, 'implements'));
+      const ifaceId = iface
+        ? (this.classToId.get(iface) ?? this.resolveClassNodeId(iface))
+        : null;
+      if (ifaceId) {
+        this.addMaybeCrossFileEdge(
+          result,
+          relativePath,
+          arkEdge(classNode.id, ifaceId, 'implements')
+        );
+      } else if (ifaceName) {
+        const simple = ifaceName.includes('.') ? ifaceName.split('.').pop()! : ifaceName;
+        if (simple) {
+          result.unresolvedReferences.push({
+            fromNodeId: classNode.id,
+            referenceName: simple,
+            referenceKind: 'implements',
+            line,
+            column: col,
+            filePath: relativePath,
+            language,
+          });
+        }
       }
     }
 
@@ -4539,14 +4656,36 @@ class ArkTSAdapter {
         const targetFile = exportInfo.getDeclaringArkFile();
         if (targetFile) {
           const targetRel = this.normalizeRelPath(targetFile.getFilePath());
-          const targetFileId = `file:${targetRel}`;
-          if (this.nodeIds.has(targetFileId)) {
-            result.edges.push(
+          if (targetRel) {
+            const targetFileId = `file:${targetRel}`;
+            this.addMaybeCrossFileEdge(
+              result,
+              relativePath,
               arkEdge(importNode.id, targetFileId, 'imports', {
                 metadata: { synthesizedBy: 'arkanalyzer', module: modulePath },
               })
             );
+          } else if (modulePath) {
+            result.unresolvedReferences.push({
+              fromNodeId: importNode.id,
+              referenceName: modulePath,
+              referenceKind: 'imports',
+              line,
+              column: 0,
+              filePath: relativePath,
+              language,
+            });
           }
+        } else if (modulePath) {
+          result.unresolvedReferences.push({
+            fromNodeId: importNode.id,
+            referenceName: modulePath,
+            referenceKind: 'imports',
+            line,
+            column: 0,
+            filePath: relativePath,
+            language,
+          });
         }
       } else if (modulePath) {
         result.unresolvedReferences.push({

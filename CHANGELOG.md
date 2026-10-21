@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- ArkTS: cross-file `imports` and `extends`/`implements` edges are no longer dropped during per-file persist. They ride the same `crossFileEdges` path as calls. Built-in ArkUI decorators (`@State`, `@Builder`, …) are not fuzzy-matched onto unrelated same-named symbols (Spec 0059).
 
 ## [1.6.2] - 2026-10-19
 
