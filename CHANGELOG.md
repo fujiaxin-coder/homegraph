@@ -9,6 +9,13 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.6.3] - 2026-10-22
+
+### Improvements
+
+- Release workflow jobs are split so a failed stage can be re-run alone: unit tests, CHANGELOG prepare, GitHub Release, npm publish, long registry verify, then OHOS API db packages.
+
 ### Fixes
 
 - ArkTS: cross-file `imports` and `extends`/`implements` edges are no longer dropped during per-file persist. They ride the same `crossFileEdges` path as calls. Built-in ArkUI decorators (`@State`, `@Builder`, …) are not fuzzy-matched onto unrelated same-named symbols (Spec 0059).
@@ -308,3 +315,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.6.0]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.0
 [1.6.1]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.1
 [1.6.2]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.2
+[1.6.3]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.3

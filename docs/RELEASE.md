@@ -32,7 +32,7 @@
    git push origin vX.Y.Z
    ```
 
-GitHub Actions 的 [Release](https://github.com/fujiaxin-coder/homegraph/actions/workflows/release.yml) workflow 仍会在 `npm publish` 之前执行 `gh release create`，那一步会自己创建 tag。按上面的顺序发包时不要靠它来打 tag；本地 `npm publish` 也不要在 tag 之前做，除非维护者明确说这次由自己发包、成功后再补 tag。
+GitHub Actions 的 [Release](https://github.com/fujiaxin-coder/homegraph/actions/workflows/release.yml) workflow 拆成可单独重跑的 job：`Unit tests` → `Prepare CHANGELOG` →（并行）`GitHub Release` / `Publish homegraph` → `Verify homegraph on npm`（最长约 10 分钟轮询，避免刚发完查不到）→ `Publish OHOS API packages`。已发布的 npm 版本会 skip。`gh release create` 仍可能自建 tag——按上面的顺序发包时不要靠它来打 tag；本地 `npm publish` 也不要在 tag 之前做，除非维护者明确说这次由自己发包、成功后再补 tag。
 
 Secrets（仓库 **Settings → Secrets**，挂在 `fujiaxin-coder/homegraph`）：`NPM_TOKEN`、`RELEASE_PAT`（见 `.github/workflows/release.yml`）。
 
