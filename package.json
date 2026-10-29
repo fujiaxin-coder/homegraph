@@ -25,6 +25,7 @@
     "test:node-matrix": "bash scripts/test-node-matrix.sh",
     "test:explore-routing": "node scripts/run-explore-routing.mjs",
     "eval": "npm run build && npx tsx test/evaluation/runner.ts",
+    "eval:peak-mem": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types test/evaluation/index-peak-mem.ts",
     "clean": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true})\""
   },
   "keywords": [
