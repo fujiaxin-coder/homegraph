@@ -1,0 +1,7 @@
+{
+  module: {
+    name: 'mod_d',
+    type: 'feature',
+    deviceTypes: ['phone']
+  }
+}

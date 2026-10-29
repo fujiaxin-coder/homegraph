@@ -1,0 +1,9 @@
+{
+  modules: [
+    { name: 'mod_a', srcPath: './mod_a' },
+    { name: 'mod_b', srcPath: './mod_b' },
+    { name: 'mod_c', srcPath: './mod_c' },
+    { name: 'mod_d', srcPath: './mod_d' },
+    { name: 'mod_e', srcPath: './mod_e' }
+  ]
+}

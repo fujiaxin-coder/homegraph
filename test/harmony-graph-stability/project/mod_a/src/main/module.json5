@@ -1,0 +1,7 @@
+{
+  module: {
+    name: 'mod_a',
+    type: 'entry',
+    deviceTypes: ['phone']
+  }
+}

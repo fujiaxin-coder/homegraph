@@ -1,0 +1,7 @@
+{
+  module: {
+    name: 'mod_c',
+    type: 'feature',
+    deviceTypes: ['phone']
+  }
+}

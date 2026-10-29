@@ -955,7 +955,8 @@ function isArkuiBuildParent(n: Node): boolean {
  * (`Column() { Child() }`) are often attributed with tight method ranges that
  * omit nested call sites.
  */
-async function arkuiChildComponentEdges(ctx: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
+/** @internal exported for PERF kind-scan regression tests (resolveChild name-miss path). */
+export async function arkuiChildComponentEdges(ctx: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
   const edges: Edge[] = [];
   const seen = new Set<string>();
   const moduleDirs = (() => {

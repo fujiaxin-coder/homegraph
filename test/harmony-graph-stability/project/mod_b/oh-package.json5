@@ -1,0 +1,7 @@
+{
+  name: '@ohos/mod_b',
+  version: '1.0.0',
+  dependencies: {
+    "@ohos/mod_a": "file:../mod_a"
+  }
+}
