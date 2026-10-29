@@ -28,7 +28,16 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { SPEC_DATA_DIR, readMeta } from '../spec/utils';
 import { createMineConfig } from '../spec/config';
-import { getHomeGraphDir, isInitialized, unsafeIndexRootReason, findNearestHomeGraphRoot, planFrontload, hasStructuralKeyword, extractCodeTokens } from '../directory';
+import {
+  getHomeGraphDir,
+  isInitialized,
+  unsafeIndexRootReason,
+  findNearestHomeGraphRoot,
+  resolveCliMutatingProjectRoot,
+  planFrontload,
+  hasStructuralKeyword,
+  extractCodeTokens,
+} from '../directory';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -161,9 +170,12 @@ program
 // =============================================================================
 
 /**
- * Resolve project path from argument or current directory
- * Walks up parent directories to find nearest initialized HomeGraph project
- * (must have .homegraph/homegraph.db, not just .homegraph/lessons.db)
+ * Resolve project path for *read* CLI commands (status, query, …).
+ * Walks up to the nearest initialized HomeGraph project (has homegraph.db).
+ *
+ * Mutating commands (`init` / `index` / `sync`) must NOT use this — they use
+ * {@link resolveCliMutatingProjectRoot} (Spec 0061) so an ancestor harness
+ * `.homegraph` cannot hijack a nested Harmony project.
  */
 function resolveProjectPath(pathArg?: string): string {
   const absolutePath = path.resolve(pathArg || process.cwd());
@@ -474,12 +486,15 @@ function writeErrorLog(projectPath: string, errors: Array<{ message: string; fil
  */
 program
   .command('init [path]')
-  .description('Initialize HomeGraph in a project directory and build the initial index')
+  .description(
+    'Initialize HomeGraph in a project directory and build the initial index (explicit path is literal; bare init uses nearest build-profile.json5)'
+  )
   .option('-i, --index', 'Deprecated: indexing now runs by default; flag accepted for backward compatibility')
   .option('-f, --force', 'Initialize even if the path looks like your home directory or a filesystem root')
   .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
   .action(async (pathArg: string | undefined, options: { index?: boolean; force?: boolean; verbose?: boolean }) => {
-    const projectPath = path.resolve(pathArg || process.cwd());
+    // Spec 0061: explicit path is literal; bare init walks up to build-profile.json5.
+    const projectPath = resolveCliMutatingProjectRoot(pathArg);
     const clack = await importESM('@clack/prompts');
 
     clack.intro('Initializing HomeGraph');
@@ -609,7 +624,9 @@ program
  */
 program
   .command('index [path]')
-  .description('Rebuild the full index from scratch (same result as a fresh init)')
+  .description(
+    'Rebuild the full index from scratch (explicit path is literal; bare index uses nearest build-profile.json5)'
+  )
   .option('-f, --force', 'Index even if the path looks like your home directory or a filesystem root')
   .option('-q, --quiet', 'Suppress progress output')
   .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
@@ -618,7 +635,8 @@ program
     'Index into the existing database without recreating it (MCP auto-init; DB may already be open by the parent)',
   )
   .action(async (pathArg: string | undefined, options: { force?: boolean; quiet?: boolean; verbose?: boolean; inplace?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+    // Spec 0061: do not adopt an ancestor .homegraph (harness hijack).
+    const projectPath = resolveCliMutatingProjectRoot(pathArg);
 
     try {
       // Don't (re)index your home directory / a filesystem root (#845). --force
@@ -697,10 +715,13 @@ program
  */
 program
   .command('sync [path]')
-  .description('Sync changes since last index')
+  .description(
+    'Sync changes since last index (explicit path is literal; bare sync uses nearest build-profile.json5)'
+  )
   .option('-q, --quiet', 'Suppress output (for git hooks)')
   .action(async (pathArg: string | undefined, options: { quiet?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+    // Spec 0061: same root rules as init/index.
+    const projectPath = resolveCliMutatingProjectRoot(pathArg);
 
     try {
       if (!isInitialized(projectPath)) {

@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- CLI `init` / `index` / `sync`: an explicit directory argument is used as-is. With no argument, the commands walk up from the cwd to the nearest `build-profile.json5` (Harmony project root), otherwise stay at cwd. They no longer adopt an ancestor `.homegraph` from a parent harness or monorepo, which could silently index the wrong tree (Spec 0061).
 
 ## [1.6.3] - 2026-10-22
 

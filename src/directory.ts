@@ -147,6 +147,47 @@ export function unsafeIndexRootReason(projectRoot: string): string | null {
   return null;
 }
 
+/**
+ * Walk up from `startPath` looking for a HarmonyOS project root
+ * (`build-profile.json5`). Returns null if none is found before the
+ * filesystem root. Spec 0061.
+ */
+export function findNearestHarmonyProjectRoot(startPath: string): string | null {
+  let current = path.resolve(startPath);
+  const fsRoot = path.parse(current).root;
+  while (true) {
+    if (fs.existsSync(path.join(current, 'build-profile.json5'))) {
+      return current;
+    }
+    if (current === fsRoot) break;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+/**
+ * Resolve the project root for CLI mutating commands (`init` / `index` / `sync`).
+ *
+ * - Explicit `pathArg` → `path.resolve(cwd, pathArg)` literally (no walk-up).
+ * - Omitted / empty → nearest ancestor (or cwd) with `build-profile.json5`,
+ *   else `cwd`. Never adopts an ancestor `.homegraph` that is not that root
+ *   (Spec 0061 — fixes parent-harness index hijack).
+ *
+ * `cwd` is injectable for tests; production callers omit it.
+ */
+export function resolveCliMutatingProjectRoot(
+  pathArg?: string | null,
+  cwd: string = process.cwd()
+): string {
+  const base = path.resolve(cwd);
+  if (pathArg !== undefined && pathArg !== null && String(pathArg).trim() !== '') {
+    return path.resolve(base, String(pathArg).trim());
+  }
+  return findNearestHarmonyProjectRoot(base) ?? base;
+}
+
 export function findNearestHomeGraphRoot(startPath: string, floor?: string): string | null {
   // A floor (an MCP host's explicit --path / rootUri) bounds the walk: an
   // ancestor .homegraph above it must not be adopted — a stray ancestor index
