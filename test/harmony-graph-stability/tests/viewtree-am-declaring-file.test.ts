@@ -1,9 +1,5 @@
 /**
- * P3 — ViewTree lazy ensureMethodNode(handler, relativePath=importer) attributes
- * anonymous %AM handlers to the importer file instead of getDeclaringArkFile().
- * Fixture: AaaHost (sorts before DeclPane) embeds DeclPane; DeclPane owns
- * .onAreaChange(() => …). Desired: %AM file_path = DeclPane.ets.
- * Production fix deferred — suite skipped so CI stays green.
+ * Spec 0064 — ViewTree lazy %AM handlers hang on getDeclaringArkFile(), not the importer.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -12,26 +8,21 @@ import { HomeGraph } from '../../../src';
 import { cleanupArktsProjects, makeArktsProject } from '../../languages/arkts/helpers';
 import { resetArkTSBatch } from '../../../src/extraction/languages/arkts';
 import { resetExtractionContext } from '../../../src/extraction/context';
+import type { Node } from '../../../src/types';
 
-// TODO(P3): re-enable when ViewTree lazy AM nodes use declaring file path.
-describe.skip('P3 ViewTree AM declaring-file attribution', () => {
-  it(
-    'anonymous onAreaChange on DeclPane is stored under DeclPane.ets, not AaaHost.ets',
-    async () => {
-      resetArkTSBatch();
-      resetExtractionContext();
-      // Multi-file module: AaaHost sorts before DeclPane so Host ViewTree walks
-      // the nested DeclPane tree first and lazy-creates the %AM handler.
-      const dir = makeArktsProject({
-        'build-profile.json5': `{
+function makeP3Fixture(extra?: Record<string, string>): string {
+  resetArkTSBatch();
+  resetExtractionContext();
+  return makeArktsProject({
+    'build-profile.json5': `{
   modules: [{ name: 'entry', srcPath: './entry' }]
 }`,
-        'oh-package.json5': `{ name: 'p3-am-decl', version: '1.0.0' }`,
-        'entry/oh-package.json5': `{ name: 'entry', version: '1.0.0' }`,
-        'entry/src/main/module.json5': `{
+    'oh-package.json5': `{ name: 'p3-am-decl', version: '1.0.0' }`,
+    'entry/oh-package.json5': `{ name: 'entry', version: '1.0.0' }`,
+    'entry/src/main/module.json5': `{
   module: { name: 'entry', type: 'entry', deviceTypes: ['phone'] }
 }`,
-        'entry/src/main/ets/AaaHost.ets': `
+    'entry/src/main/ets/AaaHost.ets': `
 import { DeclPane } from './DeclPane';
 
 @Entry
@@ -44,7 +35,7 @@ struct AaaHost {
   }
 }
 `,
-        'entry/src/main/ets/DeclPane.ets': `
+    'entry/src/main/ets/DeclPane.ets': `
 @Component
 struct DeclPane {
   build() {
@@ -57,39 +48,130 @@ struct DeclPane {
 
 export { DeclPane };
 `,
-      });
+    ...extra,
+  });
+}
 
+function declAmNodes(dir: string, nodes: Node[]): Node[] {
+  const declRel = 'entry/src/main/ets/DeclPane.ets';
+  const declLines = fs.readFileSync(path.join(dir, declRel), 'utf8').split(/\r?\n/);
+  const markerLine = declLines.findIndex((l) => l.includes('decl-pane-marker')) + 1;
+  const onAreaLine = declLines.findIndex((l) => l.includes('onAreaChange')) + 1 || markerLine;
+  expect(markerLine).toBeGreaterThan(0);
+  return nodes.filter((n) => {
+    if (!/^%AM\d+/.test(n.name)) return false;
+    return n.startLine === onAreaLine || n.startLine === markerLine;
+  });
+}
+
+describe('P3 / Spec 0064 ViewTree AM declaring-file attribution', () => {
+  it(
+    'onAreaChange %AM file_path is DeclPane.ets and contains parent is DeclPane',
+    async () => {
+      const dir = makeP3Fixture();
       const cg = HomeGraph.initSync(dir);
       try {
         await cg.indexAll();
         const nodes = cg.getQueryBuilder().getAllNodes();
-        const ams = nodes.filter((n) => /^%AM\d+/.test(n.name));
+        const byId = new Map(nodes.map((n) => [n.id, n]));
+        const owned = declAmNodes(dir, nodes);
+        expect(owned.length).toBeGreaterThanOrEqual(1);
 
-        // Locate the handler whose source line is DeclPane's onAreaChange body.
-        const declRel = 'entry/src/main/ets/DeclPane.ets';
-        const declLines = fs.readFileSync(path.join(dir, declRel), 'utf8').split(/\r?\n/);
-        const markerLine = declLines.findIndex((l) => l.includes('decl-pane-marker')) + 1;
-        expect(markerLine).toBeGreaterThan(0);
-        // ArkAnalyzer usually attributes the anonymous method to the `.onAreaChange` line.
-        const onAreaLine =
-          declLines.findIndex((l) => l.includes('onAreaChange')) + 1 || markerLine;
-
-        const driftedOrOwned = ams.filter((n) => {
-          const abs = path.join(dir, n.filePath);
-          if (!fs.existsSync(abs)) return false;
-          // Match by startLine against DeclPane's onAreaChange / marker lines,
-          // regardless of which file_path the node currently claims.
-          return n.startLine === onAreaLine || n.startLine === markerLine;
-        });
-
-        expect(driftedOrOwned.length).toBeGreaterThanOrEqual(1);
-        for (const n of driftedOrOwned) {
+        for (const n of owned) {
           const norm = n.filePath.replace(/\\/g, '/');
-          expect(
-            norm.endsWith('DeclPane.ets'),
-            `AM ${n.name} @${n.startLine} file_path=${norm} (importer AaaHost is the bug)`
-          ).toBe(true);
+          expect(norm.endsWith('DeclPane.ets'), `file_path=${norm}`).toBe(true);
+
+          const parents = cg
+            .getIncomingEdges(n.id)
+            .filter((e) => e.kind === 'contains')
+            .map((e) => byId.get(e.source));
+          expect(parents.length).toBeGreaterThanOrEqual(1);
+          for (const p of parents) {
+            expect(p?.name).toBe('DeclPane');
+            expect(p?.filePath.replace(/\\/g, '/').endsWith('DeclPane.ets')).toBe(true);
+          }
         }
+      } finally {
+        cg.close();
+        cleanupArktsProjects();
+      }
+    },
+    180_000
+  );
+
+  it(
+    'two importers embedding DeclPane still pin the %AM on DeclPane only',
+    async () => {
+      const dir = makeP3Fixture({
+        'entry/src/main/ets/ZzzOtherHost.ets': `
+import { DeclPane } from './DeclPane';
+
+@Component
+struct ZzzOtherHost {
+  build() {
+    Column() {
+      DeclPane()
+    }
+  }
+}
+`,
+      });
+      const cg = HomeGraph.initSync(dir);
+      try {
+        await cg.indexAll();
+        const nodes = cg.getQueryBuilder().getAllNodes();
+        const owned = declAmNodes(dir, nodes);
+        expect(owned.length).toBeGreaterThanOrEqual(1);
+        for (const n of owned) {
+          expect(n.filePath.replace(/\\/g, '/').endsWith('DeclPane.ets')).toBe(true);
+          expect(n.filePath.replace(/\\/g, '/')).not.toMatch(/AaaHost|ZzzOtherHost/);
+        }
+        // One logical handler — not one drifted copy per importer.
+        const ids = new Set(owned.map((n) => n.id));
+        expect(ids.size).toBe(1);
+      } finally {
+        cg.close();
+        cleanupArktsProjects();
+      }
+    },
+    180_000
+  );
+
+  it(
+    'Host nested ViewTree and DeclPane own ViewTree share the same %AM node id',
+    async () => {
+      const dir = makeP3Fixture();
+      const cg = HomeGraph.initSync(dir);
+      try {
+        await cg.indexAll();
+        const nodes = cg.getQueryBuilder().getAllNodes();
+        const owned = declAmNodes(dir, nodes);
+        expect(owned.length).toBe(1);
+
+        const am = owned[0]!;
+        const hostBuild = nodes.find(
+          (n) =>
+            n.name === 'build' &&
+            n.filePath.replace(/\\/g, '/').endsWith('AaaHost.ets') &&
+            n.kind === 'method'
+        );
+        const declBuild = nodes.find(
+          (n) =>
+            n.name === 'build' &&
+            n.filePath.replace(/\\/g, '/').endsWith('DeclPane.ets') &&
+            n.kind === 'method'
+        );
+        expect(hostBuild && declBuild).toBeTruthy();
+
+        const fromHost = cg
+          .getOutgoingEdges(hostBuild!.id)
+          .filter((e) => e.target === am.id && e.metadata?.synthesizedBy === 'viewtree');
+        const fromDecl = cg
+          .getOutgoingEdges(declBuild!.id)
+          .filter((e) => e.target === am.id && e.metadata?.synthesizedBy === 'viewtree');
+        // Host nested walk and Decl's own tree both reference the same AM id.
+        expect(fromHost.length + fromDecl.length).toBeGreaterThanOrEqual(1);
+        expect(fromDecl.length).toBeGreaterThanOrEqual(1);
       } finally {
         cg.close();
         cleanupArktsProjects();
