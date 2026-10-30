@@ -98,22 +98,24 @@ vitest *.test.ts               # HomeGraph.indexAll(project 副本) ↔ CONTRACT
 | `summary` | 给人看的汇总数字（含 `extendsAllInScene`、`scene.files/classes/methods`、`reviewFlagCount`） |
 | `contract` | 拟写入 `CONTRACT.fingerprints` 的字段（测例比对用） |
 | `reviewFlags` | 采集期告警（如缺行号、ViewTree 无 root） |
-| `details` | 便于审阅的明细：`etsFiles`、`imports[]`、`heritage[]`、`anonymousMethods[]`、`viewtreeLinks[]`、`amByFile` 等 |
+| `details` | 明细：`etsFiles`、`imports[]`、`heritage[]`、`anonymousMethods[]`、`viewtreeLinks[]`、`contains`/`containsHg`、`calls`/`callsProject`、`amByFile` 等 |
 
 ### 4.2 `tests/contract.ts`（`CONTRACT`）
 
 | 层级 | 字段 | 含义 | 来源 |
 | --- | --- | --- | --- |
 | meta | `arkanalyzer` / `fixture` / `filled.*` | 钉版本；标明哪些段已审核生效 | sync 自 inventory |
-| L1 | `totals.nodes` / `totals.edges` | **HomeGraph 图**规模 | 目前 `null`（非 AA Scene 计数；`graph-totals` 仍 skip） |
-| L2 | `nodesByKind` / `edgesByKind` | HG 按 kind 直方图 | 目前 `null` |
-| L3 | `fingerprints.etsFileNodes` | 工程内 `.ets` 文件节点数（排除 `@dummyFile`） | AA |
-| L3 | `fingerprints.imports` | import 边/声明条数 | AA |
-| L3 | `fingerprints.extends` | 用户 `extends`（不含 SDK CustomComponent） | AA（过滤后） |
-| L3 | `fingerprints.implements` | `implements` | AA |
-| L3 | `fingerprints.amKeys` | 排序后的 `%AM` 指纹：`file\\0name\\0line` | AA 全量 Scene |
-| L3 | `fingerprints.amKeyCount` / `amFileCount` | 匿名方法个数 / 涉及文件数 | AA |
-| L3 | `fingerprints.viewtreeByVia` | ViewTree 合成关系按 `via` 分桶计数 | AA ViewTree 遍历（与 HG `synthesizedBy=viewtree` 的 via 对齐） |
+| scene | `files` / `classes` / `methods` / `*AllInScene` | AA 全量 Scene 规模（含合成 IR） | AA raw |
+| fingerprints | `etsFileNodes` / `imports` / `extends` / `implements` / `amKeys*` / `viewtreeByVia` | 稳定指纹（测例精确比对） | AA（heritage 已滤 SDK） |
+| expected | `nodesByKind` / `edgesByKind` / `containsTotal` / `callEdgeCount*` | **HG-comparable** 落库期望 | AA 映射后（见下） |
+
+**`expected` 映射口径（相对 raw AA）：**
+
+| 项 | 规则 |
+| --- | --- |
+| `nodesByKind` / contains 基线 | 排除 `%AC`；再加 DummyMain `file→class`(+1) 与额外 callable contains（`hgModelOffsets`） |
+| `calls` | 全量 RTA(project caller) − 无图节点 SDK（`callsUnresolvedDrop`）；全量见 `callEdgeCountAll` |
+| file/class/callable | 工程口径 + DummyMain：`*WithDummyMain` |
 
 `filled.* === false` 或字段为 `null` 时，对应测例应保持 `describe.skip`，禁止用宽松阈值顶替。
 
@@ -139,7 +141,7 @@ test/harmony-graph-stability/
     ├── heritage-edges.test.ts
     ├── anonymous-nodes.test.ts
     ├── viewtree-edges.test.ts
-    ├── graph-totals.test.ts          # skip：待 HG totals 基线
+    ├── graph-totals.test.ts          # AA fingerprints + expected contains/calls/kinds
     ├── double-index-stable.test.ts   # 两次索引一致（不依赖合同数字）
     ├── ets-typescript-parser-fallback.test.ts   # Spec 0062
     ├── resolve-child-kind-fallback.test.ts      # Spec 0063
@@ -222,9 +224,9 @@ npx vitest run test/harmony-graph-stability --pool=forks
 | `ets-file-count` | `fingerprints.etsFileNodes` | 启用 |
 | `cross-module-imports` | `fingerprints.imports` | 启用 |
 | `heritage-edges` | `fingerprints.extends` / `implements` | 启用 |
-| `anonymous-nodes` | `fingerprints.amKeys` **精确相等** | **skip**（HG `analyseByModule` 与全量 Scene 的 `%AM` 命名暂不一致；测例已写好 toEqual，修复后去 skip） |
+| `anonymous-nodes` | `amKeyCount` + 名 `%AM*` + `amFileCount`（全名清单仅审计） | 启用 |
 | `viewtree-edges` | `fingerprints.viewtreeByVia` | 启用 |
-| `graph-totals` | `totals` / `nodesByKind` / `edgesByKind` | **skip**（合同 `filled.totals=false`；待 HG 整图基线） |
+| `graph-totals` | fingerprints + `expected.edgesByKind`（contains/calls）+ 可映射 `nodesByKind` | 启用（对不上=映射残差或 HG 回归，禁止回填） |
 | `double-index-stable` | 两次索引节点边 / AM 键一致 | 启用（无合同数字） |
 | `ets-typescript-parser-fallback` | Spec 0062 | 启用 |
 | `resolve-child-kind-fallback` | Spec 0063 | 启用 |
