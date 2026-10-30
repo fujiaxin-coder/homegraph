@@ -1,15 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { GOLDEN } from './golden';
+import { CONTRACT, requireFilled, viewtreeEdgeTotal } from './contract';
 import { indexStabilityProject, synthBy } from './helpers';
+import type { Edge } from '../../../src/types';
 
-// TODO: source+rule prior = 35 (7×5); HG currently emits 30 viewtree edges.
-describe.skip('harmony-graph-stability / viewtree edges', () => {
+function viewtreeByVia(edges: Edge[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const e of synthBy(edges, 'viewtree')) {
+    const via = String((e.metadata as { via?: string } | undefined)?.via ?? '');
+    out[via] = (out[via] ?? 0) + 1;
+  }
+  return out;
+}
+
+describe('harmony-graph-stability / viewtree edges', () => {
   it(
-    'emits exactly 35 viewtree edges (7 per module × 5, source+rule prior)',
+    'viewtree edges by via match CONTRACT.fingerprints.viewtreeByVia',
     async () => {
       const { cg, edges } = await indexStabilityProject();
       try {
-        expect(synthBy(edges, 'viewtree').length).toBe(GOLDEN.viewtreeEdges);
+        const expected = requireFilled(
+          CONTRACT.fingerprints.viewtreeByVia,
+          'fingerprints.viewtreeByVia'
+        );
+        expect(viewtreeByVia(edges)).toEqual(expected);
+        expect(synthBy(edges, 'viewtree').length).toBe(viewtreeEdgeTotal(expected));
       } finally {
         cg.close();
       }

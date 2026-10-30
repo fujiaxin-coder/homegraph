@@ -1,0 +1,1075 @@
+{
+  "meta": {
+    "arkanalyzer": "1.0.94",
+    "fixture": "project/",
+    "build": "SceneConfig.buildFromProjectDir → Scene.buildSceneFromProjectDir → inferTypes",
+    "note": "AA full Scene inventory (unit-test style). Not analyseByModule. Feed summary/contract into tests/contract.ts.",
+    "capturedAt": "2026-10-30T06:55:21.868Z"
+  },
+  "summary": {
+    "etsFileNodes": 25,
+    "imports": 24,
+    "extends": 5,
+    "implements": 5,
+    "extendsAllInScene": 15,
+    "implementsAllInScene": 5,
+    "amKeyCount": 55,
+    "amFileCount": 20,
+    "viewtreeByVia": {
+      "onClick": 15,
+      "state-binding": 10,
+      "child-component": 5
+    },
+    "viewtreeEdgeTotal": 30,
+    "scene": {
+      "files": 25,
+      "classes": 65,
+      "methods": 200
+    },
+    "reviewFlagCount": 0
+  },
+  "contract": {
+    "etsFileNodes": 25,
+    "imports": 24,
+    "extends": 5,
+    "implements": 5,
+    "amKeys": [
+      "mod_a/src/main/ets/ChildA.ets\u0000%AM0$build\u00008",
+      "mod_a/src/main/ets/LibA.ets\u0000%AM0\u000018",
+      "mod_a/src/main/ets/LibA.ets\u0000%AM0\u00004",
+      "mod_a/src/main/ets/LibA.ets\u0000%AM1\u000013",
+      "mod_a/src/main/ets/LibA.ets\u0000%AM1$runLibA\u000020",
+      "mod_a/src/main/ets/LibA.ets\u0000%AM2$run\u00006",
+      "mod_a/src/main/ets/LibA.ets\u0000%AM3$%AM2$run\u00008",
+      "mod_a/src/main/ets/PageA.ets\u0000%AM0$aboutToAppear\u000011",
+      "mod_a/src/main/ets/PageA.ets\u0000%AM1$build\u000018",
+      "mod_a/src/main/ets/UtilA.ets\u0000%AM0$helperA\u00002",
+      "mod_a/src/main/ets/UtilA.ets\u0000%AM1$mapAllA\u00007",
+      "mod_b/src/main/ets/ChildB.ets\u0000%AM0$build\u00008",
+      "mod_b/src/main/ets/LibB.ets\u0000%AM0\u000018",
+      "mod_b/src/main/ets/LibB.ets\u0000%AM0\u00004",
+      "mod_b/src/main/ets/LibB.ets\u0000%AM1\u000013",
+      "mod_b/src/main/ets/LibB.ets\u0000%AM1$runLibB\u000020",
+      "mod_b/src/main/ets/LibB.ets\u0000%AM2$run\u00006",
+      "mod_b/src/main/ets/LibB.ets\u0000%AM3$%AM2$run\u00008",
+      "mod_b/src/main/ets/PageB.ets\u0000%AM0$aboutToAppear\u000011",
+      "mod_b/src/main/ets/PageB.ets\u0000%AM1$build\u000018",
+      "mod_b/src/main/ets/UtilB.ets\u0000%AM0$helperB\u00004",
+      "mod_b/src/main/ets/UtilB.ets\u0000%AM1$mapAllB\u00009",
+      "mod_c/src/main/ets/ChildC.ets\u0000%AM0$build\u00008",
+      "mod_c/src/main/ets/LibC.ets\u0000%AM0\u000018",
+      "mod_c/src/main/ets/LibC.ets\u0000%AM0\u00004",
+      "mod_c/src/main/ets/LibC.ets\u0000%AM1\u000013",
+      "mod_c/src/main/ets/LibC.ets\u0000%AM1$runLibC\u000020",
+      "mod_c/src/main/ets/LibC.ets\u0000%AM2$run\u00006",
+      "mod_c/src/main/ets/LibC.ets\u0000%AM3$%AM2$run\u00008",
+      "mod_c/src/main/ets/PageC.ets\u0000%AM0$aboutToAppear\u000011",
+      "mod_c/src/main/ets/PageC.ets\u0000%AM1$build\u000018",
+      "mod_c/src/main/ets/UtilC.ets\u0000%AM0$helperC\u00004",
+      "mod_c/src/main/ets/UtilC.ets\u0000%AM1$mapAllC\u00009",
+      "mod_d/src/main/ets/ChildD.ets\u0000%AM0$build\u00008",
+      "mod_d/src/main/ets/LibD.ets\u0000%AM0\u000018",
+      "mod_d/src/main/ets/LibD.ets\u0000%AM0\u00004",
+      "mod_d/src/main/ets/LibD.ets\u0000%AM1\u000013",
+      "mod_d/src/main/ets/LibD.ets\u0000%AM1$runLibD\u000020",
+      "mod_d/src/main/ets/LibD.ets\u0000%AM2$run\u00006",
+      "mod_d/src/main/ets/LibD.ets\u0000%AM3$%AM2$run\u00008",
+      "mod_d/src/main/ets/PageD.ets\u0000%AM0$aboutToAppear\u000011",
+      "mod_d/src/main/ets/PageD.ets\u0000%AM1$build\u000018",
+      "mod_d/src/main/ets/UtilD.ets\u0000%AM0$helperD\u00004",
+      "mod_d/src/main/ets/UtilD.ets\u0000%AM1$mapAllD\u00009",
+      "mod_e/src/main/ets/ChildE.ets\u0000%AM0$build\u00008",
+      "mod_e/src/main/ets/LibE.ets\u0000%AM0\u000018",
+      "mod_e/src/main/ets/LibE.ets\u0000%AM0\u00004",
+      "mod_e/src/main/ets/LibE.ets\u0000%AM1\u000013",
+      "mod_e/src/main/ets/LibE.ets\u0000%AM1$runLibE\u000020",
+      "mod_e/src/main/ets/LibE.ets\u0000%AM2$run\u00006",
+      "mod_e/src/main/ets/LibE.ets\u0000%AM3$%AM2$run\u00008",
+      "mod_e/src/main/ets/PageE.ets\u0000%AM0$aboutToAppear\u000011",
+      "mod_e/src/main/ets/PageE.ets\u0000%AM1$build\u000018",
+      "mod_e/src/main/ets/UtilE.ets\u0000%AM0$helperE\u00004",
+      "mod_e/src/main/ets/UtilE.ets\u0000%AM1$mapAllE\u00009"
+    ],
+    "amKeyCount": 55,
+    "amFileCount": 20,
+    "viewtreeByVia": {
+      "onClick": 15,
+      "state-binding": 10,
+      "child-component": 5
+    }
+  },
+  "reviewFlags": [],
+  "details": {
+    "etsFiles": [
+      "mod_a/src/main/ets/BaseA.ets",
+      "mod_a/src/main/ets/ChildA.ets",
+      "mod_a/src/main/ets/LibA.ets",
+      "mod_a/src/main/ets/PageA.ets",
+      "mod_a/src/main/ets/UtilA.ets",
+      "mod_b/src/main/ets/BaseB.ets",
+      "mod_b/src/main/ets/ChildB.ets",
+      "mod_b/src/main/ets/LibB.ets",
+      "mod_b/src/main/ets/PageB.ets",
+      "mod_b/src/main/ets/UtilB.ets",
+      "mod_c/src/main/ets/BaseC.ets",
+      "mod_c/src/main/ets/ChildC.ets",
+      "mod_c/src/main/ets/LibC.ets",
+      "mod_c/src/main/ets/PageC.ets",
+      "mod_c/src/main/ets/UtilC.ets",
+      "mod_d/src/main/ets/BaseD.ets",
+      "mod_d/src/main/ets/ChildD.ets",
+      "mod_d/src/main/ets/LibD.ets",
+      "mod_d/src/main/ets/PageD.ets",
+      "mod_d/src/main/ets/UtilD.ets",
+      "mod_e/src/main/ets/BaseE.ets",
+      "mod_e/src/main/ets/ChildE.ets",
+      "mod_e/src/main/ets/LibE.ets",
+      "mod_e/src/main/ets/PageE.ets",
+      "mod_e/src/main/ets/UtilE.ets"
+    ],
+    "imports": [
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "name": "BaseA",
+        "from": "./BaseA"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "name": "ChildA",
+        "from": "./ChildA"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "name": "helperA",
+        "from": "./UtilA"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "name": "runLibA",
+        "from": "./LibA"
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "name": "BaseB",
+        "from": "./BaseB"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "name": "ChildB",
+        "from": "./ChildB"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "name": "helperB",
+        "from": "./UtilB"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "name": "runLibB",
+        "from": "./LibB"
+      },
+      {
+        "file": "mod_b/src/main/ets/UtilB.ets",
+        "name": "helperA",
+        "from": "../../../../mod_a/src/main/ets/UtilA"
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "name": "BaseC",
+        "from": "./BaseC"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "name": "ChildC",
+        "from": "./ChildC"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "name": "helperC",
+        "from": "./UtilC"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "name": "runLibC",
+        "from": "./LibC"
+      },
+      {
+        "file": "mod_c/src/main/ets/UtilC.ets",
+        "name": "helperB",
+        "from": "../../../../mod_b/src/main/ets/UtilB"
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "name": "BaseD",
+        "from": "./BaseD"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "name": "ChildD",
+        "from": "./ChildD"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "name": "helperD",
+        "from": "./UtilD"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "name": "runLibD",
+        "from": "./LibD"
+      },
+      {
+        "file": "mod_d/src/main/ets/UtilD.ets",
+        "name": "helperC",
+        "from": "../../../../mod_c/src/main/ets/UtilC"
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "name": "BaseE",
+        "from": "./BaseE"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "name": "ChildE",
+        "from": "./ChildE"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "name": "helperE",
+        "from": "./UtilE"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "name": "runLibE",
+        "from": "./LibE"
+      },
+      {
+        "file": "mod_e/src/main/ets/UtilE.ets",
+        "name": "helperD",
+        "from": "../../../../mod_d/src/main/ets/UtilD"
+      }
+    ],
+    "heritage": [
+      {
+        "file": "mod_a/src/main/ets/BaseA.ets",
+        "class": "BaseA",
+        "kind": "implements",
+        "target": "IFaceA",
+        "resolved": true
+      },
+      {
+        "file": "mod_a/src/main/ets/ChildA.ets",
+        "class": "ChildA",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "WorkerA",
+        "kind": "extends",
+        "target": "BaseA",
+        "resolved": true
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "class": "PageA",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_b/src/main/ets/BaseB.ets",
+        "class": "BaseB",
+        "kind": "implements",
+        "target": "IFaceB",
+        "resolved": true
+      },
+      {
+        "file": "mod_b/src/main/ets/ChildB.ets",
+        "class": "ChildB",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "WorkerB",
+        "kind": "extends",
+        "target": "BaseB",
+        "resolved": true
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "class": "PageB",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_c/src/main/ets/BaseC.ets",
+        "class": "BaseC",
+        "kind": "implements",
+        "target": "IFaceC",
+        "resolved": true
+      },
+      {
+        "file": "mod_c/src/main/ets/ChildC.ets",
+        "class": "ChildC",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "WorkerC",
+        "kind": "extends",
+        "target": "BaseC",
+        "resolved": true
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "class": "PageC",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_d/src/main/ets/BaseD.ets",
+        "class": "BaseD",
+        "kind": "implements",
+        "target": "IFaceD",
+        "resolved": true
+      },
+      {
+        "file": "mod_d/src/main/ets/ChildD.ets",
+        "class": "ChildD",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "WorkerD",
+        "kind": "extends",
+        "target": "BaseD",
+        "resolved": true
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "class": "PageD",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_e/src/main/ets/BaseE.ets",
+        "class": "BaseE",
+        "kind": "implements",
+        "target": "IFaceE",
+        "resolved": true
+      },
+      {
+        "file": "mod_e/src/main/ets/ChildE.ets",
+        "class": "ChildE",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "WorkerE",
+        "kind": "extends",
+        "target": "BaseE",
+        "resolved": true
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "class": "PageE",
+        "kind": "extends",
+        "target": "CustomComponent",
+        "resolved": true
+      }
+    ],
+    "heritageUserExtends": [
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "WorkerA",
+        "kind": "extends",
+        "target": "BaseA",
+        "resolved": true
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "WorkerB",
+        "kind": "extends",
+        "target": "BaseB",
+        "resolved": true
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "WorkerC",
+        "kind": "extends",
+        "target": "BaseC",
+        "resolved": true
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "WorkerD",
+        "kind": "extends",
+        "target": "BaseD",
+        "resolved": true
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "WorkerE",
+        "kind": "extends",
+        "target": "BaseE",
+        "resolved": true
+      }
+    ],
+    "heritageUserImplements": [
+      {
+        "file": "mod_a/src/main/ets/BaseA.ets",
+        "class": "BaseA",
+        "kind": "implements",
+        "target": "IFaceA",
+        "resolved": true
+      },
+      {
+        "file": "mod_b/src/main/ets/BaseB.ets",
+        "class": "BaseB",
+        "kind": "implements",
+        "target": "IFaceB",
+        "resolved": true
+      },
+      {
+        "file": "mod_c/src/main/ets/BaseC.ets",
+        "class": "BaseC",
+        "kind": "implements",
+        "target": "IFaceC",
+        "resolved": true
+      },
+      {
+        "file": "mod_d/src/main/ets/BaseD.ets",
+        "class": "BaseD",
+        "kind": "implements",
+        "target": "IFaceD",
+        "resolved": true
+      },
+      {
+        "file": "mod_e/src/main/ets/BaseE.ets",
+        "class": "BaseE",
+        "kind": "implements",
+        "target": "IFaceE",
+        "resolved": true
+      }
+    ],
+    "anonymousMethods": [
+      {
+        "file": "mod_a/src/main/ets/ChildA.ets",
+        "class": "ChildA",
+        "name": "%AM0$build",
+        "line": 8,
+        "signature": "@project/mod_a/src/main/ets/ChildA.ets: ChildA.%AM0$build()"
+      },
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "%dflt",
+        "name": "%AM0",
+        "line": 18,
+        "signature": "@project/mod_a/src/main/ets/LibA.ets: %dflt.%AM0()"
+      },
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "WorkerA",
+        "name": "%AM0",
+        "line": 4,
+        "signature": "@project/mod_a/src/main/ets/LibA.ets: WorkerA.%AM0()"
+      },
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "WorkerA",
+        "name": "%AM1",
+        "line": 13,
+        "signature": "@project/mod_a/src/main/ets/LibA.ets: WorkerA.%AM1()"
+      },
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "%dflt",
+        "name": "%AM1$runLibA",
+        "line": 20,
+        "signature": "@project/mod_a/src/main/ets/LibA.ets: %dflt.%AM1$runLibA([cb])"
+      },
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "WorkerA",
+        "name": "%AM2$run",
+        "line": 6,
+        "signature": "@project/mod_a/src/main/ets/LibA.ets: WorkerA.%AM2$run([cb], number)"
+      },
+      {
+        "file": "mod_a/src/main/ets/LibA.ets",
+        "class": "WorkerA",
+        "name": "%AM3$%AM2$run",
+        "line": 8,
+        "signature": "@project/mod_a/src/main/ets/LibA.ets: WorkerA.%AM3$%AM2$run([cb])"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "class": "PageA",
+        "name": "%AM0$aboutToAppear",
+        "line": 11,
+        "signature": "@project/mod_a/src/main/ets/PageA.ets: PageA.%AM0$aboutToAppear()"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "class": "PageA",
+        "name": "%AM1$build",
+        "line": 18,
+        "signature": "@project/mod_a/src/main/ets/PageA.ets: PageA.%AM1$build()"
+      },
+      {
+        "file": "mod_a/src/main/ets/UtilA.ets",
+        "class": "%dflt",
+        "name": "%AM0$helperA",
+        "line": 2,
+        "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.%AM0$helperA(number)"
+      },
+      {
+        "file": "mod_a/src/main/ets/UtilA.ets",
+        "class": "%dflt",
+        "name": "%AM1$mapAllA",
+        "line": 7,
+        "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.%AM1$mapAllA(number)"
+      },
+      {
+        "file": "mod_b/src/main/ets/ChildB.ets",
+        "class": "ChildB",
+        "name": "%AM0$build",
+        "line": 8,
+        "signature": "@project/mod_b/src/main/ets/ChildB.ets: ChildB.%AM0$build()"
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "%dflt",
+        "name": "%AM0",
+        "line": 18,
+        "signature": "@project/mod_b/src/main/ets/LibB.ets: %dflt.%AM0()"
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "WorkerB",
+        "name": "%AM0",
+        "line": 4,
+        "signature": "@project/mod_b/src/main/ets/LibB.ets: WorkerB.%AM0()"
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "WorkerB",
+        "name": "%AM1",
+        "line": 13,
+        "signature": "@project/mod_b/src/main/ets/LibB.ets: WorkerB.%AM1()"
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "%dflt",
+        "name": "%AM1$runLibB",
+        "line": 20,
+        "signature": "@project/mod_b/src/main/ets/LibB.ets: %dflt.%AM1$runLibB([cb])"
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "WorkerB",
+        "name": "%AM2$run",
+        "line": 6,
+        "signature": "@project/mod_b/src/main/ets/LibB.ets: WorkerB.%AM2$run([cb], number)"
+      },
+      {
+        "file": "mod_b/src/main/ets/LibB.ets",
+        "class": "WorkerB",
+        "name": "%AM3$%AM2$run",
+        "line": 8,
+        "signature": "@project/mod_b/src/main/ets/LibB.ets: WorkerB.%AM3$%AM2$run([cb])"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "class": "PageB",
+        "name": "%AM0$aboutToAppear",
+        "line": 11,
+        "signature": "@project/mod_b/src/main/ets/PageB.ets: PageB.%AM0$aboutToAppear()"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "class": "PageB",
+        "name": "%AM1$build",
+        "line": 18,
+        "signature": "@project/mod_b/src/main/ets/PageB.ets: PageB.%AM1$build()"
+      },
+      {
+        "file": "mod_b/src/main/ets/UtilB.ets",
+        "class": "%dflt",
+        "name": "%AM0$helperB",
+        "line": 4,
+        "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.%AM0$helperB(number)"
+      },
+      {
+        "file": "mod_b/src/main/ets/UtilB.ets",
+        "class": "%dflt",
+        "name": "%AM1$mapAllB",
+        "line": 9,
+        "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.%AM1$mapAllB(number)"
+      },
+      {
+        "file": "mod_c/src/main/ets/ChildC.ets",
+        "class": "ChildC",
+        "name": "%AM0$build",
+        "line": 8,
+        "signature": "@project/mod_c/src/main/ets/ChildC.ets: ChildC.%AM0$build()"
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "%dflt",
+        "name": "%AM0",
+        "line": 18,
+        "signature": "@project/mod_c/src/main/ets/LibC.ets: %dflt.%AM0()"
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "WorkerC",
+        "name": "%AM0",
+        "line": 4,
+        "signature": "@project/mod_c/src/main/ets/LibC.ets: WorkerC.%AM0()"
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "WorkerC",
+        "name": "%AM1",
+        "line": 13,
+        "signature": "@project/mod_c/src/main/ets/LibC.ets: WorkerC.%AM1()"
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "%dflt",
+        "name": "%AM1$runLibC",
+        "line": 20,
+        "signature": "@project/mod_c/src/main/ets/LibC.ets: %dflt.%AM1$runLibC([cb])"
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "WorkerC",
+        "name": "%AM2$run",
+        "line": 6,
+        "signature": "@project/mod_c/src/main/ets/LibC.ets: WorkerC.%AM2$run([cb], number)"
+      },
+      {
+        "file": "mod_c/src/main/ets/LibC.ets",
+        "class": "WorkerC",
+        "name": "%AM3$%AM2$run",
+        "line": 8,
+        "signature": "@project/mod_c/src/main/ets/LibC.ets: WorkerC.%AM3$%AM2$run([cb])"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "class": "PageC",
+        "name": "%AM0$aboutToAppear",
+        "line": 11,
+        "signature": "@project/mod_c/src/main/ets/PageC.ets: PageC.%AM0$aboutToAppear()"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "class": "PageC",
+        "name": "%AM1$build",
+        "line": 18,
+        "signature": "@project/mod_c/src/main/ets/PageC.ets: PageC.%AM1$build()"
+      },
+      {
+        "file": "mod_c/src/main/ets/UtilC.ets",
+        "class": "%dflt",
+        "name": "%AM0$helperC",
+        "line": 4,
+        "signature": "@project/mod_c/src/main/ets/UtilC.ets: %dflt.%AM0$helperC(number)"
+      },
+      {
+        "file": "mod_c/src/main/ets/UtilC.ets",
+        "class": "%dflt",
+        "name": "%AM1$mapAllC",
+        "line": 9,
+        "signature": "@project/mod_c/src/main/ets/UtilC.ets: %dflt.%AM1$mapAllC(number)"
+      },
+      {
+        "file": "mod_d/src/main/ets/ChildD.ets",
+        "class": "ChildD",
+        "name": "%AM0$build",
+        "line": 8,
+        "signature": "@project/mod_d/src/main/ets/ChildD.ets: ChildD.%AM0$build()"
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "%dflt",
+        "name": "%AM0",
+        "line": 18,
+        "signature": "@project/mod_d/src/main/ets/LibD.ets: %dflt.%AM0()"
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "WorkerD",
+        "name": "%AM0",
+        "line": 4,
+        "signature": "@project/mod_d/src/main/ets/LibD.ets: WorkerD.%AM0()"
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "WorkerD",
+        "name": "%AM1",
+        "line": 13,
+        "signature": "@project/mod_d/src/main/ets/LibD.ets: WorkerD.%AM1()"
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "%dflt",
+        "name": "%AM1$runLibD",
+        "line": 20,
+        "signature": "@project/mod_d/src/main/ets/LibD.ets: %dflt.%AM1$runLibD([cb])"
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "WorkerD",
+        "name": "%AM2$run",
+        "line": 6,
+        "signature": "@project/mod_d/src/main/ets/LibD.ets: WorkerD.%AM2$run([cb], number)"
+      },
+      {
+        "file": "mod_d/src/main/ets/LibD.ets",
+        "class": "WorkerD",
+        "name": "%AM3$%AM2$run",
+        "line": 8,
+        "signature": "@project/mod_d/src/main/ets/LibD.ets: WorkerD.%AM3$%AM2$run([cb])"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "class": "PageD",
+        "name": "%AM0$aboutToAppear",
+        "line": 11,
+        "signature": "@project/mod_d/src/main/ets/PageD.ets: PageD.%AM0$aboutToAppear()"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "class": "PageD",
+        "name": "%AM1$build",
+        "line": 18,
+        "signature": "@project/mod_d/src/main/ets/PageD.ets: PageD.%AM1$build()"
+      },
+      {
+        "file": "mod_d/src/main/ets/UtilD.ets",
+        "class": "%dflt",
+        "name": "%AM0$helperD",
+        "line": 4,
+        "signature": "@project/mod_d/src/main/ets/UtilD.ets: %dflt.%AM0$helperD(number)"
+      },
+      {
+        "file": "mod_d/src/main/ets/UtilD.ets",
+        "class": "%dflt",
+        "name": "%AM1$mapAllD",
+        "line": 9,
+        "signature": "@project/mod_d/src/main/ets/UtilD.ets: %dflt.%AM1$mapAllD(number)"
+      },
+      {
+        "file": "mod_e/src/main/ets/ChildE.ets",
+        "class": "ChildE",
+        "name": "%AM0$build",
+        "line": 8,
+        "signature": "@project/mod_e/src/main/ets/ChildE.ets: ChildE.%AM0$build()"
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "%dflt",
+        "name": "%AM0",
+        "line": 18,
+        "signature": "@project/mod_e/src/main/ets/LibE.ets: %dflt.%AM0()"
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "WorkerE",
+        "name": "%AM0",
+        "line": 4,
+        "signature": "@project/mod_e/src/main/ets/LibE.ets: WorkerE.%AM0()"
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "WorkerE",
+        "name": "%AM1",
+        "line": 13,
+        "signature": "@project/mod_e/src/main/ets/LibE.ets: WorkerE.%AM1()"
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "%dflt",
+        "name": "%AM1$runLibE",
+        "line": 20,
+        "signature": "@project/mod_e/src/main/ets/LibE.ets: %dflt.%AM1$runLibE([cb])"
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "WorkerE",
+        "name": "%AM2$run",
+        "line": 6,
+        "signature": "@project/mod_e/src/main/ets/LibE.ets: WorkerE.%AM2$run([cb], number)"
+      },
+      {
+        "file": "mod_e/src/main/ets/LibE.ets",
+        "class": "WorkerE",
+        "name": "%AM3$%AM2$run",
+        "line": 8,
+        "signature": "@project/mod_e/src/main/ets/LibE.ets: WorkerE.%AM3$%AM2$run([cb])"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "class": "PageE",
+        "name": "%AM0$aboutToAppear",
+        "line": 11,
+        "signature": "@project/mod_e/src/main/ets/PageE.ets: PageE.%AM0$aboutToAppear()"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "class": "PageE",
+        "name": "%AM1$build",
+        "line": 18,
+        "signature": "@project/mod_e/src/main/ets/PageE.ets: PageE.%AM1$build()"
+      },
+      {
+        "file": "mod_e/src/main/ets/UtilE.ets",
+        "class": "%dflt",
+        "name": "%AM0$helperE",
+        "line": 4,
+        "signature": "@project/mod_e/src/main/ets/UtilE.ets: %dflt.%AM0$helperE(number)"
+      },
+      {
+        "file": "mod_e/src/main/ets/UtilE.ets",
+        "class": "%dflt",
+        "name": "%AM1$mapAllE",
+        "line": 9,
+        "signature": "@project/mod_e/src/main/ets/UtilE.ets: %dflt.%AM1$mapAllE(number)"
+      }
+    ],
+    "amByFile": {
+      "mod_a/src/main/ets/ChildA.ets": 1,
+      "mod_a/src/main/ets/LibA.ets": 6,
+      "mod_a/src/main/ets/PageA.ets": 2,
+      "mod_a/src/main/ets/UtilA.ets": 2,
+      "mod_b/src/main/ets/ChildB.ets": 1,
+      "mod_b/src/main/ets/LibB.ets": 6,
+      "mod_b/src/main/ets/PageB.ets": 2,
+      "mod_b/src/main/ets/UtilB.ets": 2,
+      "mod_c/src/main/ets/ChildC.ets": 1,
+      "mod_c/src/main/ets/LibC.ets": 6,
+      "mod_c/src/main/ets/PageC.ets": 2,
+      "mod_c/src/main/ets/UtilC.ets": 2,
+      "mod_d/src/main/ets/ChildD.ets": 1,
+      "mod_d/src/main/ets/LibD.ets": 6,
+      "mod_d/src/main/ets/PageD.ets": 2,
+      "mod_d/src/main/ets/UtilD.ets": 2,
+      "mod_e/src/main/ets/ChildE.ets": 1,
+      "mod_e/src/main/ets/LibE.ets": 6,
+      "mod_e/src/main/ets/PageE.ets": 2,
+      "mod_e/src/main/ets/UtilE.ets": 2
+    },
+    "viewtreeLinks": [
+      {
+        "file": "mod_a/src/main/ets/ChildA.ets",
+        "class": "ChildA",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_a/src/main/ets/ChildA.ets",
+        "class": "ChildA",
+        "via": "state-binding",
+        "detail": "label"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "class": "PageA",
+        "via": "child-component",
+        "detail": "ChildA"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "class": "PageA",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "class": "PageA",
+        "via": "onClick",
+        "detail": "%AM1$build",
+        "node": "Button"
+      },
+      {
+        "file": "mod_a/src/main/ets/PageA.ets",
+        "class": "PageA",
+        "via": "state-binding",
+        "detail": "count"
+      },
+      {
+        "file": "mod_b/src/main/ets/ChildB.ets",
+        "class": "ChildB",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_b/src/main/ets/ChildB.ets",
+        "class": "ChildB",
+        "via": "state-binding",
+        "detail": "label"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "class": "PageB",
+        "via": "child-component",
+        "detail": "ChildB"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "class": "PageB",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "class": "PageB",
+        "via": "onClick",
+        "detail": "%AM1$build",
+        "node": "Button"
+      },
+      {
+        "file": "mod_b/src/main/ets/PageB.ets",
+        "class": "PageB",
+        "via": "state-binding",
+        "detail": "count"
+      },
+      {
+        "file": "mod_c/src/main/ets/ChildC.ets",
+        "class": "ChildC",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_c/src/main/ets/ChildC.ets",
+        "class": "ChildC",
+        "via": "state-binding",
+        "detail": "label"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "class": "PageC",
+        "via": "child-component",
+        "detail": "ChildC"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "class": "PageC",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "class": "PageC",
+        "via": "onClick",
+        "detail": "%AM1$build",
+        "node": "Button"
+      },
+      {
+        "file": "mod_c/src/main/ets/PageC.ets",
+        "class": "PageC",
+        "via": "state-binding",
+        "detail": "count"
+      },
+      {
+        "file": "mod_d/src/main/ets/ChildD.ets",
+        "class": "ChildD",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_d/src/main/ets/ChildD.ets",
+        "class": "ChildD",
+        "via": "state-binding",
+        "detail": "label"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "class": "PageD",
+        "via": "child-component",
+        "detail": "ChildD"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "class": "PageD",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "class": "PageD",
+        "via": "onClick",
+        "detail": "%AM1$build",
+        "node": "Button"
+      },
+      {
+        "file": "mod_d/src/main/ets/PageD.ets",
+        "class": "PageD",
+        "via": "state-binding",
+        "detail": "count"
+      },
+      {
+        "file": "mod_e/src/main/ets/ChildE.ets",
+        "class": "ChildE",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_e/src/main/ets/ChildE.ets",
+        "class": "ChildE",
+        "via": "state-binding",
+        "detail": "label"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "class": "PageE",
+        "via": "child-component",
+        "detail": "ChildE"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "class": "PageE",
+        "via": "onClick",
+        "detail": "%AM0$build",
+        "node": "Text"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "class": "PageE",
+        "via": "onClick",
+        "detail": "%AM1$build",
+        "node": "Button"
+      },
+      {
+        "file": "mod_e/src/main/ets/PageE.ets",
+        "class": "PageE",
+        "via": "state-binding",
+        "detail": "count"
+      }
+    ]
+  }
+}
