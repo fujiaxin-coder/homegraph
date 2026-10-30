@@ -1,7 +1,5 @@
 /**
- * P1 — resolveChild name-miss → getNodesByKind full-table fallback.
- * Desired: miss returns null (or O(1) side index); no kind scans per miss.
- * Production fix deferred — suite skipped so CI stays green.
+ * P1 / Spec 0063 — resolveChild name-miss must not getNodesByKind full-table scan.
  */
 import { describe, expect, it } from 'vitest';
 import type { Node } from '../../../src/types';
@@ -21,8 +19,7 @@ function node(partial: Partial<Node> & Pick<Node, 'id' | 'name' | 'kind' | 'file
   };
 }
 
-// TODO(P1): re-enable when resolveChild stops kind-scanning on name miss.
-describe.skip('P1 resolveChild kind-scan on name miss', () => {
+describe('P1 resolveChild kind-scan on name miss', () => {
   it('does not call getNodesByKind when PascalCase framework names miss the name index', async () => {
     const child = node({
       id: 'struct:Child',
