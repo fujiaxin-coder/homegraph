@@ -4,13 +4,13 @@ import { countEdgesByKind, indexStabilityProject } from './helpers';
 
 describe('harmony-graph-stability / heritage edges', () => {
   it(
-    'emits extends and/or implements for Worker/Base/IFace',
+    'emits 5 extends + 5 implements (Worker→Base, Base→IFace per module)',
     async () => {
       const { cg, edges } = await indexStabilityProject();
       try {
         const byKind = countEdgesByKind(edges);
-        const n = (byKind.extends ?? 0) + (byKind.implements ?? 0);
-        expect(n).toBeGreaterThanOrEqual(GOLDEN.minExtendsOrImplements);
+        expect(byKind.extends ?? 0).toBe(GOLDEN.extendsEdges);
+        expect(byKind.implements ?? 0).toBe(GOLDEN.implementsEdges);
       } finally {
         cg.close();
       }

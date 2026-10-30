@@ -4,12 +4,12 @@ import { countEdgesByKind, indexStabilityProject } from './helpers';
 
 describe('harmony-graph-stability / cross-module imports', () => {
   it(
-    'persists imports edges (UtilB→UtilA chain and in-module imports)',
+    'persists exactly 24 imports edges (Page×3 + Lib×1 + UtilB–E×1)',
     async () => {
       const { cg, edges } = await indexStabilityProject();
       try {
         const byKind = countEdgesByKind(edges);
-        expect(byKind.imports ?? 0).toBeGreaterThanOrEqual(GOLDEN.minImportEdges);
+        expect(byKind.imports ?? 0).toBe(GOLDEN.importEdges);
       } finally {
         cg.close();
       }
