@@ -343,6 +343,13 @@ function expandGrammarLanguages(languages: Language[]): Language[] {
   if (languages.some((l) => l === 'cfml')) {
     languages = [...languages, 'cfscript', 'cfquery'];
   }
+  // ArkTS has no WASM of its own. After a modular AA batch, packageless /
+  // forgotten-HAR .ets that never entered a PROJECT module fall through to
+  // TreeSitterExtractor(..., 'typescript') as a shallow symbol fallback — so
+  // the TS grammar must be loaded even when the index set is pure .ets.
+  if (languages.some((l) => l === 'arkts')) {
+    languages = [...languages, 'typescript'];
+  }
   return languages;
 }
 
