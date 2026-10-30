@@ -4487,33 +4487,23 @@ class ArkTSAdapter {
     }
   }
 
+  /**
+   * Lazily index a method for ViewTree (and any caller that used to pass the
+   * ViewTree owner path). Attribution always follows the method's declaring
+   * ArkFile / class — same as {@link resolveMethodNodeId} — so nested ViewTree
+   * walks cannot pin `%AM*` handlers onto the importer (Spec 0064).
+   *
+   * `relativePath` / `result` / `parentId` from the caller are ignored for the
+   * node row (kept on the signature so ViewTree call sites stay unchanged);
+   * ViewTree *edges* still use the importer via {@link addViewTreeEdge}.
+   */
   private ensureMethodNode(
     method: ArkMethod,
-    relativePath: string,
-    result: ExtractionResult,
-    parentId: string
+    _relativePath: string,
+    _result: ExtractionResult,
+    _parentId: string
   ): string | null {
-    const existing = this.methodToId.get(method);
-    if (existing) return existing;
-    try {
-      const bySig = this.methodSigToId.get(method.getSignature().toString());
-      if (bySig) {
-        this.methodToId.set(method, bySig);
-        return bySig;
-      }
-    } catch {
-      // fall through
-    }
-
-    if (shouldSkipArkMethod(method) && !isAnonymousArkMethod(method)) return null;
-
-    const displayName = arkMethodDisplayName(method);
-    if (!displayName) return null;
-
-    const cls = method.getDeclaringArkClass();
-    const kind: NodeKind = cls.isDefaultArkClass() ? 'function' : 'method';
-    this.indexMethod(relativePath, languageForArkAnalyzerPath(relativePath), result, method, parentId, kind, displayName);
-    return this.methodToId.get(method) ?? null;
+    return this.resolveMethodNodeId(method);
   }
 
   private indexMethod(

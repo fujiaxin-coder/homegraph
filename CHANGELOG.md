@@ -14,6 +14,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CLI `init` / `index` / `sync`: an explicit directory argument is used as-is. With no argument, the commands walk up from the cwd to the nearest `build-profile.json5` (Harmony project root), otherwise stay at cwd. They no longer adopt an ancestor `.homegraph` from a parent harness or monorepo, which could silently index the wrong tree (Spec 0061).
 - ArkTS: after a modular batch, orphan `.ets` files (outside PROJECT modules; still tree-sitter TypeScript fallback per Spec 0036) no longer fail with `Failed to get parser for language: typescript` on ArkUI-only trees. Indexing preloads the TypeScript WASM whenever `arkts` is in the language set, including on the main thread when parse workers are enabled (Spec 0062).
 - ArkUI `arkui-child` synthesis: when a PascalCase call name misses the name index (typical for framework `Column`/`Button`/`Text`), do not fall back to scanning every `struct`/`component`/`function`/`method` node — return no edge. Cuts large-repo resolveChild CPU (Spec 0063).
+- ArkTS ViewTree lazy method nodes (including `%AM*` handlers): `file_path` and `contains` parent always follow `getDeclaringArkFile()` / declaring class, not the ViewTree importer that first walked the nested tree — so anonymous callbacks no longer drift onto `MainPageView`-style hosts (Spec 0064).
 
 ## [1.6.3] - 2026-10-22
 
