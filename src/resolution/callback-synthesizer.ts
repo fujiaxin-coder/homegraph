@@ -971,15 +971,10 @@ export async function arkuiChildComponentEdges(ctx: ResolutionContext, onYield: 
   };
 
   const resolveChild = (name: string, fromFile: string, parentId: string): Node | null => {
+    // Name index only — miss returns null. Framework PascalCase calls
+    // (Column/Button/Text/…) dominate misses and must not full-scan kinds
+    // (Spec 0063). Same drop policy as ambiguous multi-match below.
     let candidates = ctx.getNodesByName(name).filter(isArkuiChildTarget);
-    if (candidates.length === 0) {
-      candidates = [
-        ...ctx.getNodesByKind('struct'),
-        ...ctx.getNodesByKind('component'),
-        ...ctx.getNodesByKind('function'),
-        ...ctx.getNodesByKind('method'),
-      ].filter((n) => n.name === name && isArkuiChildTarget(n));
-    }
     candidates = candidates.filter((n) => n.id !== parentId);
     // Dedupe by id — name index can surface the same row twice across caches.
     candidates = [...new Map(candidates.map((n) => [n.id, n])).values()];
