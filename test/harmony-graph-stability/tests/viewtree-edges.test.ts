@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CONTRACT, requireFilled, viewtreeEdgeTotal } from './contract';
+import { CONTRACT, viewtreeEdgeTotal } from './contract';
 import { indexStabilityProject, synthBy } from './helpers';
 import type { Edge } from '../../../src/types';
 
@@ -18,10 +18,7 @@ describe('harmony-graph-stability / viewtree edges', () => {
     async () => {
       const { cg, edges } = await indexStabilityProject();
       try {
-        const expected = requireFilled(
-          CONTRACT.fingerprints.viewtreeByVia,
-          'fingerprints.viewtreeByVia'
-        );
+        const expected = CONTRACT.fingerprints.viewtreeByVia;
         expect(viewtreeByVia(edges)).toEqual(expected);
         expect(synthBy(edges, 'viewtree').length).toBe(viewtreeEdgeTotal(expected));
       } finally {
