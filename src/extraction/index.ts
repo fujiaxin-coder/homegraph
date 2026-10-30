@@ -1648,6 +1648,12 @@ export class ExtractionOrchestrator {
       });
       windowSize = Math.max(4, pool.size * 2);
       log(`Parse worker pool: ${poolSize} worker(s) (remaining files≈${remainingToParse})`);
+      // ArkTS extraction is in-process (requiresInProcessExtraction). Orphan
+      // .ets after the AA batch use TreeSitterExtractor('typescript') on this
+      // thread — workers loading TS wasm does not help the main isolate.
+      if (neededLanguages.includes('arkts')) {
+        await loadGrammarsForLanguages(neededLanguages);
+      }
     } else {
       await loadGrammarsForLanguages(neededLanguages);
     }
