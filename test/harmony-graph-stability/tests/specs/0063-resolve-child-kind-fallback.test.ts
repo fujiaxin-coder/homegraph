@@ -1,10 +1,10 @@
 /**
- * P1 / Spec 0063 — resolveChild name-miss must not getNodesByKind full-table scan.
+ * Spec 0063 — resolveChild name-miss must not getNodesByKind full-table scan.
  */
 import { describe, expect, it } from 'vitest';
-import type { Node } from '../../../src/types';
-import type { ResolutionContext } from '../../../src/resolution/types';
-import { arkuiChildComponentEdges } from '../../../src/resolution/callback-synthesizer';
+import type { Node } from '../../../../src/types';
+import type { ResolutionContext } from '../../../../src/resolution/types';
+import { arkuiChildComponentEdges } from '../../../../src/resolution/callback-synthesizer';
 
 function node(partial: Partial<Node> & Pick<Node, 'id' | 'name' | 'kind' | 'filePath'>): Node {
   return {
@@ -19,7 +19,7 @@ function node(partial: Partial<Node> & Pick<Node, 'id' | 'name' | 'kind' | 'file
   };
 }
 
-describe('P1 resolveChild kind-scan on name miss', () => {
+describe('Spec 0063 · resolveChild kind-scan on name miss', () => {
   it('does not call getNodesByKind when PascalCase framework names miss the name index', async () => {
     const child = node({
       id: 'struct:Child',

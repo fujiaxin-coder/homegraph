@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HomeGraph L1 — harmony-graph-stability</title>
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+  <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+  <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
+  <script src="./graph-data.js"></script>
+  <style>
+    :root {
+      --bg: #f3f4f6;
+      --panel: #fff;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    #layout { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+    #side { background: var(--panel); border-right: 1px solid var(--border); padding: 14px 16px 20px; overflow: auto; z-index: 2; }
+    #side h1 { font-size: 16px; margin: 0 0 6px; font-weight: 650; }
+    #side p { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    label { display: block; font-size: 11px; color: var(--muted); margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+    input, select { width: 100%; background: #fff; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+    .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text); text-transform: none; letter-spacing: 0; font-weight: 500; }
+    .check input { width: auto; }
+    .row { display: flex; gap: 8px; margin-top: 10px; }
+    button { flex: 1; background: #f3f4f6; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px; cursor: pointer; font-size: 12px; font-weight: 550; }
+    button:hover { background: #e5e7eb; }
+    .legend { margin-top: 14px; font-size: 12px; line-height: 1.7; color: var(--muted); }
+    .legend h3 { margin: 12px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #374151; }
+    .sw { display: inline-block; width: 12px; height: 12px; margin-right: 7px; vertical-align: -2px; border: 1px solid rgba(0,0,0,.2); }
+    .sw.r { border-radius: 50%; }
+    .sw.b { border-radius: 3px; }
+    .sw.d { width: 10px; height: 10px; transform: rotate(45deg); border-radius: 1px; }
+    .sw.h { clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); border: none; }
+    #meta { margin-top: 12px; font-size: 12px; color: var(--muted); line-height: 1.45; }
+    #meta.error { color: #b42318; background: #fef3f2; border: 1px solid #fecdca; border-radius: 8px; padding: 8px 10px; }
+    #hits { margin-top: 10px; font-size: 12px; max-height: 28vh; overflow: auto; }
+    #hits button.hit { display: block; width: 100%; text-align: left; margin: 0 0 4px; background: #fff; border: 1px solid transparent; padding: 6px 8px; border-radius: 7px; }
+    #hits button.hit:hover { border-color: #bfdbfe; background: #eff6ff; }
+    #cy {
+      width: 100%; height: 100vh;
+      background:
+        linear-gradient(90deg, rgba(15,23,42,.03) 1px, transparent 1px) 0 0 / 28px 28px,
+        linear-gradient(rgba(15,23,42,.03) 1px, transparent 1px) 0 0 / 28px 28px,
+        #fafbfc;
+    }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.45; }
+    #tip {
+      display: none; position: fixed; z-index: 50; pointer-events: none;
+      max-width: 340px; padding: 10px 12px; border-radius: 10px;
+      background: #0f172a; color: #f8fafc; font-size: 12px; line-height: 1.45;
+      box-shadow: 0 10px 30px rgba(15,23,42,.25); border: 1px solid rgba(255,255,255,.08);
+    }
+    #tip b { color: #93c5fd; font-weight: 650; }
+    #tip .k { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div id="layout">
+    <aside id="side">
+      <h1>L1 graph viewer</h1>
+      <p>模块 → 文件 → 类/结构体 分层框；关系边按类型着色。相同符号只保留一个节点。</p>
+      <label>搜索</label>
+      <input id="q" type="search" placeholder="mod_a · UtilA.ets · helperA · DateFmt" autocomplete="off" />
+      <label>关系边过滤</label>
+      <select id="kinds">
+        <option value="calls,imports,extends,implements,references" selected>常用关系（无 contains）</option>
+        <option value="calls">仅 calls</option>
+        <option value="calls,imports,extends,implements">calls + import/heritage</option>
+        <option value="all">全部关系边</option>
+      </select>
+      <label class="check"><input id="showAm" type="checkbox" /> 显示匿名 %AM 节点</label>
+      <div class="row">
+        <button type="button" id="clear">清除搜索</button>
+        <button type="button" id="fit">适应画布</button>
+      </div>
+
+      <div class="legend">
+        <h3>节点形状</h3>
+        <div><span class="sw b" style="background:#eef2ff;border-color:#6366f1"></span>模块框 / 文件框</div>
+        <div><span class="sw b" style="background:#dbeafe;border-color:#3b82f6"></span>class / struct（矩形）</div>
+        <div><span class="sw d" style="background:#ede9fe;border-color:#8b5cf6"></span>interface（菱形）</div>
+        <div><span class="sw h" style="background:#fce7f3;width:14px;height:14px;display:inline-block"></span>component（六边形）</div>
+        <div><span class="sw r" style="background:#d1fae5;border-color:#10b981"></span>method / function（圆）</div>
+        <div><span class="sw b" style="background:#fef3c7;border-color:#f59e0b;border-radius:2px;height:8px"></span>property / import（扁矩）</div>
+        <h3>边颜色</h3>
+        <div><span class="sw b" style="background:#475569"></span>calls</div>
+        <div><span class="sw b" style="background:#059669"></span>imports</div>
+        <div><span class="sw b" style="background:#7c3aed"></span>extends</div>
+        <div><span class="sw b" style="background:#db2777"></span>implements</div>
+        <div><span class="sw b" style="background:#ea580c"></span>references</div>
+        <div><span class="sw b" style="background:#94a3b8"></span>contains（结构，默认隐藏）</div>
+        <h3>搜索</h3>
+        <div>命中范围与跨界相邻：保持原色</div>
+        <div><span class="sw b" style="background:#e5e7eb"></span>其余变淡</div>
+      </div>
+      <div class="hint">滚轮缩放 · 拖拽平移 · 悬停看详情 · 拖模块框可整体挪动</div>
+      <div id="meta"></div>
+      <div id="hits"></div>
+    </aside>
+    <div id="cy"></div>
+    <div id="tip"></div>
+  </div>
+  <script>
+    if (typeof cytoscape !== 'undefined' && typeof cytoscapeFcose !== 'undefined') {
+      cytoscape.use(cytoscapeFcose);
+    }
+
+    // Soft borders for modules (pastel, readable on white)
+    const MODULE_COLOR = {
+      mod_a: '#0d9488',
+      mod_b: '#3b82f6',
+      mod_c: '#8b5cf6',
+      mod_d: '#ec4899',
+      mod_e: '#f59e0b',
+      other: '#64748b',
+    };
+    const EDGE_COLOR = {
+      calls: '#475569',
+      imports: '#059669',
+      extends: '#7c3aed',
+      implements: '#db2777',
+      references: '#ea580c',
+      contains: '#94a3b8',
+    };
+
+    let DATA = null;
+    let cy = null;
+
+    function moduleOf(file) {
+      const m = String(file || '').match(/^(mod_[a-z])/);
+      return m ? m[1] : 'other';
+    }
+
+    function fileBase(file) {
+      const parts = String(file || '').split('/');
+      return parts[parts.length - 1] || file;
+    }
+
+    function semanticKey(n) {
+      return [n.file, n.kind, n.name, n.startLine].join('\0');
+    }
+
+    function isAnon(n) {
+      return /^%AM\d+/.test(n.name || '');
+    }
+
+    function shapeFor(kind) {
+      switch (kind) {
+        case 'interface': return 'diamond';
+        case 'component': return 'hexagon';
+        case 'class':
+        case 'struct': return 'round-rectangle';
+        case 'method':
+        case 'function': return 'ellipse';
+        case 'property':
+        case 'field':
+        case 'import': return 'round-rectangle';
+        default: return 'ellipse';
+      }
+    }
+
+    function selectedEdgeKinds() {
+      const v = document.getElementById('kinds').value;
+      if (v === 'all') return null;
+      return new Set(v.split(','));
+    }
+
+    /** Deduplicate nodes; build module→file→type nesting from contains. */
+    function buildElements() {
+      const showAm = document.getElementById('showAm').checked;
+      const byId = new Map();
+      const idRemap = new Map(); // discarded duplicate id → kept id
+
+      // Prefer non-anon, earlier startLine when colliding on semantic key
+      const bySem = new Map();
+      for (const n of DATA.nodes) {
+        if (!showAm && isAnon(n)) continue;
+        const sk = semanticKey(n);
+        const prev = bySem.get(sk);
+        if (!prev) {
+          bySem.set(sk, n);
+          byId.set(n.id, n);
+        } else {
+          idRemap.set(n.id, prev.id);
+        }
+      }
+
+      // contains: parent ← child
+      const parentOf = new Map();
+      for (const e of DATA.edges) {
+        if (e.kind !== 'contains') continue;
+        const s = idRemap.get(e.source) || e.source;
+        const t = idRemap.get(e.target) || e.target;
+        if (!byId.has(t) && !DATA.nodes.some((n) => n.id === t)) continue;
+        // only record if child is kept (or is a type we still need)
+        parentOf.set(t, s);
+      }
+
+      // Ensure file/type containers exist even if filtered leaves removed
+      for (const n of DATA.nodes) {
+        if (['file', 'class', 'struct', 'interface'].includes(n.kind) && !byId.has(n.id)) {
+          if (!showAm && isAnon(n)) continue;
+          // always keep structural containers
+          if (['file', 'class', 'struct', 'interface'].includes(n.kind)) byId.set(n.id, n);
+        }
+      }
+      for (const n of DATA.nodes) {
+        if (['file', 'class', 'struct', 'interface'].includes(n.kind)) byId.set(n.id, n);
+      }
+
+      const mods = new Set();
+      for (const n of byId.values()) mods.add(moduleOf(n.file));
+
+      const elements = [];
+
+      for (const mod of [...mods].sort()) {
+        elements.push({
+          data: {
+            id: 'mod:' + mod,
+            label: mod,
+            kind: 'module',
+            module: mod,
+            role: 'module',
+          },
+          classes: 'compound module',
+        });
+      }
+
+      // Files as compounds under modules
+      for (const n of byId.values()) {
+        if (n.kind !== 'file') continue;
+        const mod = moduleOf(n.file);
+        elements.push({
+          data: {
+            id: n.id,
+            label: fileBase(n.file),
+            kind: 'file',
+            module: mod,
+            file: n.file,
+            parent: 'mod:' + mod,
+            role: 'file',
+            raw: n,
+          },
+          classes: 'compound file',
+        });
+      }
+
+      // Types as compounds under files
+      const TYPE_KINDS = new Set(['class', 'struct', 'interface']);
+      for (const n of byId.values()) {
+        if (!TYPE_KINDS.has(n.kind)) continue;
+        const mod = moduleOf(n.file);
+        const fileId = 'file:' + n.file;
+        const parent = byId.has(fileId) ? fileId : 'mod:' + mod;
+        elements.push({
+          data: {
+            id: n.id,
+            label: n.name,
+            kind: n.kind,
+            module: mod,
+            file: n.file,
+            parent,
+            role: 'type',
+            raw: n,
+          },
+          classes: 'compound type kind-' + n.kind,
+        });
+      }
+
+      // Leaves under type or file
+      const LEAF = new Set(['method', 'function', 'property', 'field', 'component', 'import']);
+      for (const n of byId.values()) {
+        if (!LEAF.has(n.kind)) continue;
+        const mod = moduleOf(n.file);
+        let parent = parentOf.get(n.id);
+        if (parent) parent = idRemap.get(parent) || parent;
+        // climb to a kept container
+        if (parent && !elements.some((el) => el.data.id === parent)) {
+          // parent might be type not yet — check byId
+          if (!byId.has(parent)) parent = null;
+        }
+        if (!parent || parent === n.id) {
+          const fileId = 'file:' + n.file;
+          parent = byId.has(fileId) ? fileId : 'mod:' + mod;
+        }
+        // If parent is another leaf, use its parent or file
+        const pNode = byId.get(parent);
+        if (pNode && LEAF.has(pNode.kind)) {
+          const fileId = 'file:' + n.file;
+          parent = byId.has(fileId) ? fileId : 'mod:' + mod;
+        }
+
+        elements.push({
+          data: {
+            id: n.id,
+            label: n.name.length > 28 ? n.name.slice(0, 26) + '…' : n.name,
+            kind: n.kind,
+            module: mod,
+            file: n.file,
+            parent,
+            role: 'leaf',
+            raw: n,
+          },
+          classes: 'leaf kind-' + n.kind,
+        });
+      }
+
+      const nodeIds = new Set(elements.map((el) => el.data.id));
+      const edgeKinds = selectedEdgeKinds();
+      const seenEdge = new Set();
+
+      for (const e of DATA.edges) {
+        if (edgeKinds && !edgeKinds.has(e.kind)) continue;
+        if (e.kind === 'contains' && edgeKinds && !edgeKinds.has('contains')) continue;
+        // contains used for nesting only unless user chose "all" or explicitly includes contains
+        if (e.kind === 'contains' && document.getElementById('kinds').value !== 'all') continue;
+
+        let s = idRemap.get(e.source) || e.source;
+        let t = idRemap.get(e.target) || e.target;
+        if (!nodeIds.has(s) || !nodeIds.has(t)) continue;
+        if (s === t && e.kind !== 'calls') continue; // allow recursive call loops
+
+        const ek = s + '\0' + t + '\0' + e.kind;
+        if (seenEdge.has(ek)) continue;
+        seenEdge.add(ek);
+
+        elements.push({
+          data: {
+            id: 'e:' + ek,
+            source: s,
+            target: t,
+            kind: e.kind,
+            label: e.kind,
+            role: 'edge',
+          },
+          classes: 'rel kind-' + e.kind,
+        });
+      }
+
+      return { elements, kept: byId.size, edges: seenEdge.size, remapped: idRemap.size };
+    }
+
+    function styleSheet() {
+      return [
+        {
+          selector: 'node',
+          style: {
+            'label': 'data(label)',
+            'text-valign': 'center',
+            'text-halign': 'center',
+            'font-size': 15,
+            'font-weight': 700,
+            'color': '#0f172a',
+            'text-wrap': 'wrap',
+            'text-max-width': 120,
+            'text-outline-width': 0,
+            'border-width': 1.5,
+            'border-color': '#94a3b8',
+            'background-color': '#e2e8f0',
+            'background-opacity': 1,
+            'min-zoomed-font-size': 10,
+          },
+        },
+        {
+          selector: 'node.compound',
+          style: {
+            'shape': 'round-rectangle',
+            'background-opacity': 0.14,
+            'border-width': 2,
+            'padding': 4,
+            'text-valign': 'top',
+            'text-halign': 'center',
+            'font-size': 16,
+            'font-weight': 750,
+            'color': '#0f172a',
+          },
+        },
+        {
+          selector: 'node.module',
+          style: {
+            'background-opacity': 0.08,
+            'border-width': 3,
+            'padding': 6,
+            'font-size': 18,
+            'color': '#0f172a',
+          },
+        },
+        ...Object.entries(MODULE_COLOR).map(([mod, color]) => ({
+          selector: `node.module[module = "${mod}"]`,
+          style: { 'border-color': color, 'background-color': color, 'color': '#0f172a' },
+        })),
+        {
+          selector: 'node.file',
+          style: {
+            'background-opacity': 0.10,
+            'border-style': 'dashed',
+            'padding': 4,
+            'font-size': 15,
+            'color': '#0f172a',
+          },
+        },
+        ...Object.entries(MODULE_COLOR).map(([mod, color]) => ({
+          selector: `node.file[module = "${mod}"]`,
+          style: { 'border-color': color, 'background-color': color, 'color': '#0f172a' },
+        })),
+        {
+          selector: 'node.type',
+          style: {
+            'background-opacity': 1,
+            'color': '#0f172a',
+            'padding': 4,
+            'font-size': 14,
+            'border-width': 1.5,
+          },
+        },
+        { selector: 'node.kind-class', style: { 'shape': 'round-rectangle', 'background-color': '#dbeafe', 'border-color': '#3b82f6' } },
+        { selector: 'node.kind-struct', style: { 'shape': 'round-rectangle', 'background-color': '#e0f2fe', 'border-color': '#0ea5e9' } },
+        { selector: 'node.kind-interface', style: { 'shape': 'diamond', 'background-color': '#ede9fe', 'border-color': '#8b5cf6' } },
+        {
+          selector: 'node.leaf',
+          style: {
+            'width': 86,
+            'height': 48,
+            'font-size': 13,
+            'color': '#0f172a',
+            'background-opacity': 1,
+          },
+        },
+        { selector: 'node.kind-method', style: { 'shape': 'ellipse', 'background-color': '#d1fae5', 'border-color': '#10b981', width: 82, height: 82 } },
+        { selector: 'node.kind-function', style: { 'shape': 'ellipse', 'background-color': '#ccfbf1', 'border-color': '#14b8a6', width: 82, height: 82 } },
+        { selector: 'node.kind-component', style: { 'shape': 'hexagon', 'background-color': '#fce7f3', 'border-color': '#ec4899', width: 88, height: 76 } },
+        { selector: 'node.kind-property', style: { 'shape': 'round-rectangle', 'background-color': '#fef3c7', 'border-color': '#f59e0b', width: 92, height: 40 } },
+        { selector: 'node.kind-field', style: { 'shape': 'round-rectangle', 'background-color': '#ffedd5', 'border-color': '#f97316', width: 92, height: 40 } },
+        { selector: 'node.kind-import', style: { 'shape': 'round-rectangle', 'background-color': '#f1f5f9', 'border-color': '#64748b', width: 90, height: 36, 'font-size': 12 } },
+
+        {
+          selector: 'edge',
+          style: {
+            'curve-style': 'bezier',
+            'target-arrow-shape': 'triangle',
+            'arrow-scale': 0.9,
+            'width': 2,
+            'line-color': '#64748b',
+            'target-arrow-color': '#64748b',
+            'opacity': 0.9,
+          },
+        },
+        ...Object.entries(EDGE_COLOR).map(([kind, color]) => ({
+          selector: `edge.kind-${kind}`,
+          style: {
+            'line-color': color,
+            'target-arrow-color': color,
+            width: kind === 'calls' ? 2.4 : 1.8,
+          },
+        })),
+
+        // 搜索：命中/相邻保持原色；仅其余变淡
+        {
+          selector: '.keep',
+          style: {
+            'opacity': 1,
+            'text-opacity': 1,
+            'z-index': 8,
+          },
+        },
+        { selector: '.dim', style: { opacity: 0.1, 'text-opacity': 0.08 } },
+        { selector: 'edge.dim', style: { opacity: 0.05 } },
+      ];
+    }
+
+    /**
+     * 整图自定义紧凑网格布局（不用力导向，避免模块框被撑空）。
+     * 模块 → 文件 → 类 → 叶子：自底向上测宽高，再绝对坐标密铺。
+     */
+    function runLayout() {
+      if (!cy) return;
+
+      const GAP = 8;
+      const PAD_X = 14;
+      const PAD_TOP = 26; // 给框标题留行高
+      const PAD_BOTTOM = 12;
+      const MOD_GAP = 28;
+      const MOD_COLS = 3;
+
+      function leafWH(n) {
+        // style 已设定宽高；compound 未 layout 前 width() 可能不准，给兜底
+        const w = Math.max(n.width() || 0, n.hasClass('leaf') ? 82 : 80);
+        const h = Math.max(n.height() || 0, n.hasClass('leaf') ? 82 : 40);
+        return { w, h };
+      }
+
+      function preferCols(n) {
+        if (n <= 1) return 1;
+        if (n <= 3) return n;
+        if (n <= 6) return 3;
+        if (n <= 12) return 4;
+        return Math.min(5, Math.ceil(Math.sqrt(n)));
+      }
+
+      /** @returns {{w:number,h:number, kids:any[]}} */
+      function measure(node) {
+        if (!node.isParent()) {
+          const { w, h } = leafWH(node);
+          return { w, h, kids: null };
+        }
+        const children = node.children().toArray();
+        const kids = children.map((c) => ({ c, m: measure(c) }));
+        const cols = preferCols(kids.length);
+        const rows = Math.ceil(kids.length / cols) || 1;
+        const colW = Array(cols).fill(0);
+        const rowH = Array(rows).fill(0);
+        kids.forEach((k, i) => {
+          const col = i % cols;
+          const row = Math.floor(i / cols);
+          colW[col] = Math.max(colW[col], k.m.w);
+          rowH[row] = Math.max(rowH[row], k.m.h);
+        });
+        const innerW = colW.reduce((a, b) => a + b, 0) + GAP * Math.max(0, cols - 1);
+        const innerH = rowH.reduce((a, b) => a + b, 0) + GAP * Math.max(0, rows - 1);
+        return {
+          w: innerW + PAD_X * 2,
+          h: innerH + PAD_TOP + PAD_BOTTOM,
+          kids,
+          cols,
+          colW,
+          rowH,
+        };
+      }
+
+      function place(node, x0, y0, measured) {
+        // compound 框由子节点包围盒自动生成，只摆叶子（和非空子树的内容）
+        if (!node.isParent()) {
+          const { w, h } = measured;
+          node.position({ x: x0 + w / 2, y: y0 + h / 2 });
+          return;
+        }
+        const { kids, cols, colW, rowH } = measured;
+        const colX = [];
+        let x = x0 + PAD_X;
+        for (let c = 0; c < cols; c++) {
+          colX[c] = x;
+          x += colW[c] + GAP;
+        }
+        const rowY = [];
+        let y = y0 + PAD_TOP;
+        for (let r = 0; r < rowH.length; r++) {
+          rowY[r] = y;
+          y += rowH[r] + GAP;
+        }
+        kids.forEach((k, i) => {
+          const col = i % cols;
+          const row = Math.floor(i / cols);
+          place(k.c, colX[col], rowY[row], k.m);
+        });
+      }
+
+      // 先让 style 生效，拿准 leaf 宽高
+      cy.resize();
+      const modules = cy.nodes('.module').sort((a, b) => a.id().localeCompare(b.id())).toArray();
+      const measuredMods = modules.map((m) => ({ m, mm: measure(m) }));
+
+      const modCols = Math.min(MOD_COLS, Math.max(1, measuredMods.length));
+      const modColW = Array(modCols).fill(0);
+      const modRowH = [];
+      measuredMods.forEach((item, i) => {
+        const col = i % modCols;
+        const row = Math.floor(i / modCols);
+        modColW[col] = Math.max(modColW[col], item.mm.w);
+        modRowH[row] = Math.max(modRowH[row] || 0, item.mm.h);
+      });
+
+      const positions = [];
+      measuredMods.forEach((item, i) => {
+        const col = i % modCols;
+        const row = Math.floor(i / modCols);
+        let x = 20;
+        for (let c = 0; c < col; c++) x += modColW[c] + MOD_GAP;
+        let y = 20;
+        for (let r = 0; r < row; r++) y += (modRowH[r] || 0) + MOD_GAP;
+        positions.push({ item, x, y });
+      });
+
+      // 批量锁位置，避免 compound 自动乱跳
+      cy.batch(() => {
+        positions.forEach(({ item, x, y }) => place(item.m, x, y, item.mm));
+      });
+
+      cy.fit(null, 20);
+    }
+
+    function rebuild() {
+      const meta = document.getElementById('meta');
+      if (typeof cytoscape === 'undefined') {
+        meta.classList.add('error');
+        meta.textContent = 'cytoscape 未加载（检查 CDN / 网络）';
+        return;
+      }
+      const { elements, kept, edges, remapped } = buildElements();
+      if (cy) {
+        cy.destroy();
+        cy = null;
+      }
+      cy = cytoscape({
+        container: document.getElementById('cy'),
+        elements,
+        style: styleSheet(),
+        wheelSensitivity: 0.3,
+        minZoom: 0.15,
+        maxZoom: 4,
+        layout: { name: 'null' },
+      });
+      cy.nodes('.module').forEach((n) => {
+        const c = MODULE_COLOR[n.data('module')] || MODULE_COLOR.other;
+        n.style({ 'border-color': c, 'background-color': c, color: '#0f172a' });
+      });
+      cy.nodes('.file').forEach((n) => {
+        const c = MODULE_COLOR[n.data('module')] || MODULE_COLOR.other;
+        n.style({ 'border-color': c, 'background-color': c, color: '#0f172a' });
+      });
+
+      bindTooltips();
+      runLayout();
+      meta.classList.remove('error');
+      meta.textContent = `${kept} 符号 · ${edges} 关系边 · 去重合并 ${remapped} · 分层框已启用`;
+      const q = document.getElementById('q').value;
+      if (q.trim()) applyHighlight(q);
+      else clearHighlight();
+    }
+
+    function tipHtmlFor(ele) {
+      if (ele.isEdge()) {
+        const s = ele.source();
+        const t = ele.target();
+        const sk = s.data('kind') || s.data('role');
+        const tk = t.data('kind') || t.data('role');
+        return (
+          `<b>${ele.data('kind')}</b> 边<br>` +
+          `<span class="k">from</span> ${sk} ${s.data('label')}<br>` +
+          `<span class="k">to</span> ${tk} ${t.data('label')}<br>` +
+          `<span class="k">source file</span> ${s.data('file') || '—'}<br>` +
+          `<span class="k">target file</span> ${t.data('file') || '—'}`
+        );
+      }
+      const raw = ele.data('raw');
+      const kind = ele.data('kind') || ele.data('role');
+      const lines = [
+        `<b>${kind}</b> ${ele.data('label')}`,
+        raw ? `<span class="k">name</span> ${raw.name}` : '',
+        ele.data('file') ? `<span class="k">file</span> ${ele.data('file')}${raw && raw.startLine != null ? ':' + raw.startLine : ''}` : '',
+        ele.data('module') ? `<span class="k">module</span> ${ele.data('module')}` : '',
+        raw && raw.endLine != null ? `<span class="k">span</span> L${raw.startLine}–${raw.endLine}` : '',
+        `<span class="k">id</span> ${ele.id()}`,
+      ];
+      return lines.filter(Boolean).join('<br>');
+    }
+
+    function bindTooltips() {
+      const tip = document.getElementById('tip');
+      const hide = () => { tip.style.display = 'none'; };
+      const show = (ele, ev) => {
+        tip.innerHTML = tipHtmlFor(ele);
+        tip.style.display = 'block';
+        const x = (ev && ev.originalEvent ? ev.originalEvent.clientX : 0) + 14;
+        const y = (ev && ev.originalEvent ? ev.originalEvent.clientY : 0) + 14;
+        tip.style.left = Math.min(x, window.innerWidth - 360) + 'px';
+        tip.style.top = Math.min(y, window.innerHeight - 120) + 'px';
+      };
+      cy.off('mouseover');
+      cy.off('mousemove');
+      cy.off('mouseout');
+      cy.on('mouseover', 'node, edge', (ev) => show(ev.target, ev));
+      cy.on('mousemove', 'node, edge', (ev) => {
+        if (tip.style.display === 'none') return;
+        const x = ev.originalEvent.clientX + 14;
+        const y = ev.originalEvent.clientY + 14;
+        tip.style.left = Math.min(x, window.innerWidth - 360) + 'px';
+        tip.style.top = Math.min(y, window.innerHeight - 120) + 'px';
+      });
+      cy.on('mouseout', 'node, edge', hide);
+      cy.on('viewport', hide);
+    }
+
+    function resolveFocus(query) {
+      const q = query.trim();
+      if (!q || !cy) return null;
+      const lower = q.toLowerCase();
+      if (/^mod_[a-z]$/i.test(q)) {
+        const mod = q.toLowerCase();
+        return {
+          type: 'module',
+          label: mod,
+          innerIds: () => cy.nodes().filter((n) => n.data('module') === mod || n.id() === 'mod:' + mod).map((n) => n.id()),
+        };
+      }
+      // file
+      const fileNodes = cy.nodes().filter((n) => {
+        const f = String(n.data('file') || '');
+        return f.toLowerCase() === lower || f.toLowerCase().endsWith('/' + lower) || f.toLowerCase().endsWith(lower);
+      });
+      if (fileNodes.length && (lower.includes('.ets') || lower.includes('/'))) {
+        const files = new Set(fileNodes.map((n) => n.data('file')));
+        return {
+          type: 'file',
+          label: [...files].join(', '),
+          innerIds: () => cy.nodes().filter((n) => files.has(n.data('file')) || files.has(String(n.id()).replace(/^file:/, ''))).map((n) => n.id()),
+        };
+      }
+      let hits = cy.nodes().filter((n) => String(n.data('label') || '') === q || (n.data('raw') && n.data('raw').name === q));
+      if (!hits.length) hits = cy.nodes().filter((n) => String(n.data('label') || '').toLowerCase().includes(lower) || String(n.data('file') || '').toLowerCase().includes(lower));
+      if (!hits.length) return null;
+      const seedIds = new Set(hits.map((n) => n.id()));
+      // include descendants of compound hits
+      hits.forEach((h) => {
+        if (h.isParent()) h.descendants().forEach((d) => seedIds.add(d.id()));
+      });
+      return {
+        type: 'symbol',
+        label: hits.slice(0, 5).map((n) => n.data('label')).join(', '),
+        innerIds: () => [...seedIds],
+      };
+    }
+
+    function clearHighlight() {
+      if (!cy) return;
+      cy.elements().removeClass('keep dim');
+      const tip = document.getElementById('tip');
+      if (tip) tip.style.display = 'none';
+    }
+
+    function applyHighlight(query) {
+      if (!cy) return;
+      clearHighlight();
+      const focus = resolveFocus(query);
+      const meta = document.getElementById('meta');
+      if (!focus) {
+        meta.textContent = (meta.textContent || '').split(' · 焦点')[0];
+        return;
+      }
+      // core = 选中范围及其祖先框（冻结，后面邻接只相对 core 算一跳）
+      const core = new Set(focus.innerIds());
+      [...core].forEach((id) => {
+        const n = cy.$id(id);
+        if (n.nonempty()) n.ancestors().forEach((a) => core.add(a.id()));
+      });
+
+      // 只保留与 core 直接相连的跨界节点/边（禁止沿调用链传递扩散）
+      const adjNodes = new Set();
+      const keepEdges = new Set();
+      cy.edges().forEach((e) => {
+        const s = e.source().id();
+        const t = e.target().id();
+        const a = core.has(s);
+        const b = core.has(t);
+        if (a && b) {
+          keepEdges.add(e.id());
+        } else if (a || b) {
+          keepEdges.add(e.id());
+          if (!a) adjNodes.add(s);
+          if (!b) adjNodes.add(t);
+        }
+      });
+
+      const keep = new Set([...core, ...adjNodes, ...keepEdges]);
+      adjNodes.forEach((id) => {
+        const n = cy.$id(id);
+        if (n.nonempty()) n.ancestors().forEach((a) => keep.add(a.id()));
+      });
+
+      cy.elements().forEach((el) => {
+        if (keep.has(el.id())) el.addClass('keep');
+        else el.addClass('dim');
+      });
+
+      meta.textContent =
+        `焦点 ${focus.type}: ${focus.label} · 内部 ${core.size} · 一跳相邻 ${adjNodes.size} · 其余已变淡`;
+      const eles = cy.nodes().filter((n) => keep.has(n.id()));
+      if (eles.length) cy.animate({ fit: { eles, padding: 28 }, duration: 280 });
+    }
+
+    function renderHits(query) {
+      const box = document.getElementById('hits');
+      box.innerHTML = '';
+      if (!query.trim() || !DATA) return;
+      const lower = query.trim().toLowerCase();
+      const hits = DATA.nodes
+        .filter((n) =>
+          n.name.toLowerCase().includes(lower) ||
+          n.file.toLowerCase().includes(lower) ||
+          moduleOf(n.file) === lower
+        )
+        .slice(0, 40);
+      for (const n of hits) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'hit';
+        b.textContent = `${n.kind} ${n.name}  ·  ${n.file}:${n.startLine}`;
+        b.onclick = () => {
+          document.getElementById('q').value = n.kind === 'file' ? n.file : n.name;
+          runSearch();
+          if (cy && cy.$id(n.id).length) cy.animate({ center: { eles: cy.$id(n.id) }, zoom: 1.3, duration: 200 });
+        };
+        box.appendChild(b);
+      }
+    }
+
+    function runSearch() {
+      const q = document.getElementById('q').value;
+      renderHits(q);
+      if (!q.trim()) clearHighlight();
+      else applyHighlight(q);
+    }
+
+    document.getElementById('q').addEventListener('input', () => {
+      clearTimeout(window.__qT);
+      window.__qT = setTimeout(runSearch, 140);
+    });
+    document.getElementById('clear').onclick = () => {
+      document.getElementById('q').value = '';
+      document.getElementById('hits').innerHTML = '';
+      clearHighlight();
+      if (cy) cy.fit(16);
+    };
+    document.getElementById('fit').onclick = () => cy && cy.fit(16);
+    document.getElementById('kinds').onchange = () => rebuild();
+    document.getElementById('showAm').onchange = () => rebuild();
+
+    function boot(data) {
+      DATA = data;
+      rebuild();
+    }
+
+    if (window.GRAPH_DATA) boot(window.GRAPH_DATA);
+    else {
+      fetch('./graph-data.json')
+        .then((r) => { if (!r.ok) throw new Error('缺少 graph-data'); return r.json(); })
+        .then(boot)
+        .catch((err) => {
+          const meta = document.getElementById('meta');
+          meta.classList.add('error');
+          meta.textContent = String(err.message || err);
+        });
+    }
+  </script>
+</body>
+</html>

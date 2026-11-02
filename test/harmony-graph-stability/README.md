@@ -108,6 +108,7 @@ vitest *.test.ts               # HomeGraph.indexAll(project 副本) ↔ CONTRACT
 | scene | `files` / `classes` / `methods` / `*AllInScene` | AA 全量 Scene 规模（含合成 IR） | AA raw |
 | fingerprints | `etsFileNodes` / `imports` / `extends` / `implements` / `amKeys*` / `viewtreeByVia` | 稳定指纹（测例精确比对） | AA（heritage 已滤 SDK） |
 | expected | `nodesByKind` / `edgesByKind` / `containsTotal` / `callEdgeCount*` | **HG-comparable** 落库期望 | AA 映射后（见下） |
+| calls gold | `tests/calls-gold.ts` → `CALLS_MUST` / `CALLS_MUST_NOT` | **源码可证** 边三元组（L1 质量） | 人工维护；**不被** sync 覆盖 |
 
 **`expected` 映射口径（相对 raw AA）：**
 
@@ -125,39 +126,38 @@ vitest *.test.ts               # HomeGraph.indexAll(project 副本) ↔ CONTRACT
 
 ```
 test/harmony-graph-stability/
-├── README.md                         # 本说明
-├── aa-scene-inventory.js             # AA 全量 Scene 采集脚本
-├── aa-scene-inventory.json           # 采集落盘（审阅 + 合同原料）
-├── sync-contract-from-inventory.js   # JSON.contract → tests/contract.ts
-├── project/                          # 被测鸿蒙工程（唯一源 fixture）
-│   ├── build-profile.json5
-│   ├── oh-package.json5
-│   └── mod_{a..e}/                   # 五模块；每模块 Page/Child/Lib/Base/Util .ets
+├── README.md
+├── aa-scene-inventory.js / .json
+├── sync-contract-from-inventory.js
+├── export-graph.mjs + viewer/
+├── project/                          # 多模块 fixture（桶 A–E 锚点）
 └── tests/
-    ├── contract.ts                   # 测例基线（唯一比对真值）
-    ├── helpers.ts                    # 拷贝 fixture、索引、计数、amKeys 等
-    ├── ets-file-count.test.ts
-    ├── cross-module-imports.test.ts
-    ├── heritage-edges.test.ts
-    ├── anonymous-nodes.test.ts
-    ├── viewtree-edges.test.ts
-    ├── graph-totals.test.ts          # AA fingerprints + expected contains/calls/kinds
-    ├── double-index-stable.test.ts   # 两次索引一致（不依赖合同数字）
-    ├── ets-typescript-parser-fallback.test.ts   # Spec 0062
-    ├── resolve-child-kind-fallback.test.ts      # Spec 0063
-    └── viewtree-am-declaring-file.test.ts       # Spec 0064
+    ├── contract.ts                   # 形状/规模基线（sync 生成）
+    ├── calls-gold.ts                 # 按桶拆分的 callsMust / MustNot
+    ├── calls-match.ts                # 边键匹配（file+name，允许 %AM*$name）
+    ├── helpers.ts
+    ├── buckets/                      # ★ L1 必收场景桶（主入口）
+    │   ├── A-cross-module-static.test.ts
+    │   ├── B-non-rta-helper.test.ts
+    │   ├── C-fanout-must-not.test.ts
+    │   ├── D-same-module-clear.test.ts
+    │   ├── E-lifecycle-rta.test.ts
+    │   └── F-shape-contract.test.ts  # import/heritage/指纹/规模
+    ├── hygiene/
+    │   └── double-index-stable.test.ts
+    └── specs/                        # 语义 Spec，不占用合同 totals
+        ├── 0062-ets-typescript-parser-fallback.test.ts
+        ├── 0063-resolve-child-kind-fallback.test.ts
+        └── 0064-viewtree-am-declaring-file.test.ts
 ```
 
-| 文件 | 职责 |
+| 路径 | 职责 |
 | --- | --- |
-| `aa-scene-inventory.js` | 构建全量 Scene，输出结构化 JSON；默认写到同目录 `aa-scene-inventory.json` |
-| `aa-scene-inventory.json` | 人工审核载体；`contract` 段供 sync；`details` 供抽查 |
-| `sync-contract-from-inventory.js` | 把已审核 JSON 的 `contract` / `meta.arkanalyzer` 写入 `tests/contract.ts` |
-| `project/` | 稳定性输入；直接改源文件，无代码生成器 |
-| `tests/contract.ts` | Vitest 侧唯一基线；勿手改大段数字，应走 inventory → 审核 → sync |
-| `tests/helpers.ts` | 临时目录克隆、`indexAll`、kind 计数、`amNodeKeys`、`synthBy` 等 |
-| 合同类 `*.test.ts` | 各断言一块 fingerprints /（未来）totals |
-| Spec 类 `*.test.ts` | 语义 bug 回归，独立 fixture，不占用合同 totals |
+| `tests/buckets/A–E-*.test.ts` | calls 金标边：must / must-not，禁止 `>= 1` |
+| `tests/buckets/F-shape-contract.test.ts` | import / heritage / viewtree / %AM / 规模指纹 |
+| `tests/calls-gold.ts` | 金标边清单（手维；sync 不覆盖） |
+| `tests/contract.ts` | AA 形状合同（sync 生成） |
+| `tests/specs/0062–0064` | 单点语义回归 |
 
 ---
 
@@ -217,20 +217,20 @@ npx vitest run test/harmony-graph-stability --pool=forks
 
 ---
 
-## 9. 测例与合同字段对照
+## 9. 场景桶 ↔ 测例对照
 
-| 测例 | 比对内容 | 状态 |
-| --- | --- | --- |
-| `ets-file-count` | `fingerprints.etsFileNodes` | 启用 |
-| `cross-module-imports` | `fingerprints.imports` | 启用 |
-| `heritage-edges` | `fingerprints.extends` / `implements` | 启用 |
-| `anonymous-nodes` | `amKeyCount` + 名 `%AM*` + `amFileCount`（全名清单仅审计） | 启用 |
-| `viewtree-edges` | `fingerprints.viewtreeByVia` | 启用 |
-| `graph-totals` | fingerprints + `expected.edgesByKind`（contains/calls）+ 可映射 `nodesByKind` | 启用（对不上=映射残差或 HG 回归，禁止回填） |
-| `double-index-stable` | 两次索引节点边 / AM 键一致 | 启用（无合同数字） |
-| `ets-typescript-parser-fallback` | Spec 0062 | 启用 |
-| `resolve-child-kind-fallback` | Spec 0063 | 启用 |
-| `viewtree-am-declaring-file` | Spec 0064 | 启用 |
+| 桶 | 测什么 | 测例要点 | 金标 |
+| --- | --- | --- | --- |
+| **A** 跨模块 static | 逐边 must + 跳级 must-not + 端点节点存在 | `A-*.test.ts` | `BUCKET_A_MUST` / `_MUST_NOT` |
+| **B** 非 RTA helper | 逐边 must + `hiddenHelper` 入边来源 + 出度上界 | `B-*.test.ts` | `BUCKET_B_MUST` |
+| **C** 扇出负例 | 符号存在 + 逐边 must-not + 入边/出度护栏 | `C-*.test.ts` | `BUCKET_C_MUST_NOT` |
+| **D** 同模块清晰 | 逐边 must（同模块）+ 灌跨界 must-not + 出度上界 | `D-*.test.ts` | `BUCKET_D_MUST` / `_MUST_NOT` |
+| **E** lifecycle RTA | 五模块 lifecycle 逐边 + Page/Child 节点 + 同模块约束 | `E-*.test.ts` | `BUCKET_E_MUST` |
+| **F** 形状合同 | fingerprints / edgesByKind / nodesByKind / import 抽查 | `F-*.test.ts` | `CONTRACT.*` |
+
+各桶 `beforeAll` 只索引一次（`openStabilityIndex`），`it` 按边/断言展开；禁止 `>= 1` 软过。
+| 卫生 | 两次索引一致 | `hygiene/double-index-stable.test.ts` | — |
+| Spec | 0062 / 0063 / 0064 | `specs/0062–0064-*.test.ts` | 独立 fixture |
 
 ---
 
@@ -245,8 +245,35 @@ npx vitest run test/harmony-graph-stability --pool=forks
 
 ---
 
-## 11. 相关文档
+## 11. L1 calls 金标（`calls-gold.ts`）
+
+边键：`(caller_file, caller_name|start?, callee_file, callee_name|start?, dispatch?)`。
+匹配时允许 `%AM*$name` 匿名包装与源码名对齐；**不以** `%AM` id / MethodSignature 字符串做主键。
+
+改调用点：先改对应 `BUCKET_*`，再视情况刷新 inventory/contract。只跑一桶：
+
+```bash
+npx vitest run test/harmony-graph-stability/tests/buckets/A-cross-module-static.test.ts --pool=forks
+```
+
+## 12. 图可视化（`viewer/`）
+
+```bash
+node test/harmony-graph-stability/export-graph.mjs   # → viewer/graph-data.json + graph-data.js
+# 可直接双击打开 viewer/index.html（内嵌 graph-data.js，不依赖本地服务器）
+# 或：npx --yes serve test/harmony-graph-stability/viewer
+```
+
+布局约定：
+
+- **分层框**：模块 → 文件 → 类/结构体/接口；成员落在对应框内（由 `contains` 边推导）。
+- **节点去重**：同一 `(file, kind, name, startLine)` 只保留一个；递归调用表现为自环边。
+- **形状 / 边色**：见侧栏图例；默认不画 `contains`（已用框表达）。
+- **搜索**：内部蓝、直接相邻橙，其余变淡；并自动缩放到命中区域。
+
+## 13. 相关文档
 
 - AA 用法参考：本机 / 上游 `arkanalyzer` 仓库中 `tests/unit/ViewTree.test.ts`、`Anonymous.test.ts` 等（`SceneConfig.buildFromProjectDir` + `buildSceneFromProjectDir` + `inferTypes`）。
 - 产品侧适配：`src/extraction/languages/arkts.ts`（Scene → 节点边；生产默认 `analyseByModule`）。
 - 语义 Spec：`docs/specs/0062-*.md`、`0063-*.md`、`0064-*.md`。
+

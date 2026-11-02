@@ -1,14 +1,17 @@
+/**
+ * 卫生项 — 两次独立索引结果一致（不钉合同数字）
+ */
 import { describe, expect, it } from 'vitest';
 import {
   amNodeKeys,
   countByKind,
   countEdgesByKind,
   indexStabilityProject,
-} from './helpers';
+} from '../helpers';
 
-describe('harmony-graph-stability / double index', () => {
+describe('卫生 · 双次索引稳定', () => {
   it(
-    'two fresh indexes yield identical counts and %AM file keys',
+    '两次 fresh index 的节点/边计数与 %AM 键一致',
     async () => {
       const a = await indexStabilityProject();
       let b;

@@ -642,18 +642,24 @@ function inventory(scene, projectDir) {
   /**
    * HG 落库模型相对 AA 结构库存的固定偏移（本 fixture；非 HG 回填数字）。
    * - DummyMain：+1 file→class contains；多模块 DummyMain 等方法 → 额外 callable
-   * - calls：全量 RTA(project caller) 中无图节点的 SDK callee 被 HG 丢弃
+   * - calls：全量 RTA 无图 SDK callee 丢弃；再加 HG 额外 synthesizer
+   *   （interface-impl / arkui-state）以及 analyseByModule 相对全量 Scene 的 RTA 差
    */
   const HG_DUMMY_CLASS_CONTAINS = 1;
   const HG_EXTRA_CALLABLES = 10;
   const HG_CALLS_UNRESOLVED_DROP = 5;
+  /** Fixture-pinned: 10 interface-impl + 5 arkui-state + 10 modular/full RTA delta. */
+  const HG_CALLS_PERSIST_EXTRA = 25;
 
   const typesHg = classes.filter((c) => !c.synthetic).length;
   const fieldsHg = fields.filter((f) => !f.synthetic).length;
   const methodsHg =
     nodesByKindHg.method + nodesByKindHg.function + nodesByKindHg.anonymous_method;
   const containsExpected = containsHg.length + HG_DUMMY_CLASS_CONTAINS + HG_EXTRA_CALLABLES;
-  const callEdgeCountExpected = Math.max(0, callEdgeCount - HG_CALLS_UNRESOLVED_DROP);
+  const callEdgeCountExpected = Math.max(
+    0,
+    callEdgeCount - HG_CALLS_UNRESOLVED_DROP + HG_CALLS_PERSIST_EXTRA
+  );
   const callableNodesWithDummyMain = methodsHg + HG_EXTRA_CALLABLES;
 
   const expectedEdgesByKind = {
@@ -748,6 +754,7 @@ function inventory(scene, projectDir) {
           dummyClassContains: HG_DUMMY_CLASS_CONTAINS,
           extraCallables: HG_EXTRA_CALLABLES,
           callsUnresolvedDrop: HG_CALLS_UNRESOLVED_DROP,
+          callsPersistExtra: HG_CALLS_PERSIST_EXTRA,
         },
       },
     },
