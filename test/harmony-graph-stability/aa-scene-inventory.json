@@ -4,12 +4,12 @@
     "fixture": "project/",
     "build": "SceneConfig.buildFromProjectDir → Scene.buildSceneFromProjectDir → inferTypes",
     "rta": "DummyMainCreater + Scene.makeCallGraphRTA",
-    "note": "AA-only baseline. expected.*=HG-comparable (drop AA %AC synthetics; calls with project callee). DummyMain offsets: fileNodesWithDummyMain/classNodesWithDummyMain. Raw AA in summary/details. Never backfill from HomeGraph.",
-    "capturedAt": "2026-10-30T08:37:23.675Z"
+    "note": "AA baseline → expected = HG persist model (drop %AC; +DummyMain contains/callables; calls=RTA−unresolved-SDK). Raw AA in summary/details.",
+    "capturedAt": "2026-11-02T07:29:36.959Z"
   },
   "summary": {
-    "etsFileNodes": 25,
-    "imports": 24,
+    "etsFileNodes": 27,
+    "imports": 25,
     "extends": 5,
     "implements": 5,
     "extendsAllInScene": 15,
@@ -22,35 +22,35 @@
       "child-component": 5
     },
     "viewtreeEdgeTotal": 30,
-    "containsTotal": 229,
-    "containsHgTotal": 194,
+    "containsTotal": 239,
+    "containsHgTotal": 204,
     "containsByVia": {
-      "file→type": 40,
-      "class→method": 95,
+      "file→type": 42,
+      "class→method": 101,
       "class→field": 25,
       "class→component": 10,
-      "file→import": 24,
-      "file→function": 35
+      "file→import": 25,
+      "file→function": 36
     },
     "containsHgByVia": {
-      "file→type": 25,
-      "class→method": 90,
+      "file→type": 27,
+      "class→method": 96,
       "class→component": 10,
       "class→field": 10,
-      "file→import": 24,
-      "file→function": 35
+      "file→import": 25,
+      "file→function": 36
     },
-    "callEdgeCountAll": 94,
-    "callEdgeCountProject": 64,
+    "callEdgeCountAll": 71,
+    "callEdgeCountProject": 66,
     "nodesByKind": {
-      "file": 25,
-      "import": 24,
-      "class": 10,
+      "file": 27,
+      "import": 25,
+      "class": 12,
       "struct": 10,
       "interface": 5,
       "enum": 0,
-      "method": 60,
-      "function": 15,
+      "method": 66,
+      "function": 16,
       "property": 25,
       "field": 0,
       "component": 10,
@@ -59,34 +59,34 @@
       "object": 5
     },
     "nodesByKindHg": {
-      "file": 25,
-      "import": 24,
-      "class": 10,
+      "file": 27,
+      "import": 25,
+      "class": 12,
       "struct": 10,
       "interface": 5,
       "enum": 0,
-      "method": 55,
-      "function": 15,
+      "method": 61,
+      "function": 16,
       "property": 10,
       "component": 10,
       "anonymous_method": 55
     },
     "expectedEdgesByKind": {
-      "imports": 24,
+      "imports": 25,
       "extends": 5,
       "implements": 5,
-      "contains": 205,
-      "calls": 89,
+      "contains": 215,
+      "calls": 91,
       "references_viewtree": 30
     },
     "scene": {
-      "files": 26,
-      "classes": 66,
-      "methods": 201
+      "files": 28,
+      "classes": 70,
+      "methods": 214
     },
-    "types": 40,
-    "typesHg": 25,
-    "methods": 130,
+    "types": 42,
+    "typesHg": 27,
+    "methods": 137,
     "fields": 25,
     "fieldsHg": 10,
     "components": 10,
@@ -94,15 +94,15 @@
   },
   "contract": {
     "scene": {
-      "files": 25,
-      "classes": 66,
-      "methods": 201,
+      "files": 27,
+      "classes": 70,
+      "methods": 214,
       "extendsAllInScene": 15,
       "implementsAllInScene": 5
     },
     "fingerprints": {
-      "etsFileNodes": 25,
-      "imports": 24,
+      "etsFileNodes": 27,
+      "imports": 25,
       "extends": 5,
       "implements": 5,
       "amKeys": [
@@ -115,8 +115,8 @@
         "mod_a/src/main/ets/LibA.ets\u0000%AM3$%AM2$run\u00008",
         "mod_a/src/main/ets/PageA.ets\u0000%AM0$aboutToAppear\u000011",
         "mod_a/src/main/ets/PageA.ets\u0000%AM1$build\u000018",
-        "mod_a/src/main/ets/UtilA.ets\u0000%AM0$helperA\u00002",
-        "mod_a/src/main/ets/UtilA.ets\u0000%AM1$mapAllA\u00007",
+        "mod_a/src/main/ets/UtilA.ets\u0000%AM0$helperA\u00007",
+        "mod_a/src/main/ets/UtilA.ets\u0000%AM1$mapAllA\u000012",
         "mod_b/src/main/ets/ChildB.ets\u0000%AM0$build\u00008",
         "mod_b/src/main/ets/LibB.ets\u0000%AM0\u000018",
         "mod_b/src/main/ets/LibB.ets\u0000%AM0\u00004",
@@ -126,8 +126,8 @@
         "mod_b/src/main/ets/LibB.ets\u0000%AM3$%AM2$run\u00008",
         "mod_b/src/main/ets/PageB.ets\u0000%AM0$aboutToAppear\u000011",
         "mod_b/src/main/ets/PageB.ets\u0000%AM1$build\u000018",
-        "mod_b/src/main/ets/UtilB.ets\u0000%AM0$helperB\u00004",
-        "mod_b/src/main/ets/UtilB.ets\u0000%AM1$mapAllB\u00009",
+        "mod_b/src/main/ets/UtilB.ets\u0000%AM0$helperB\u00005",
+        "mod_b/src/main/ets/UtilB.ets\u0000%AM1$mapAllB\u000012",
         "mod_c/src/main/ets/ChildC.ets\u0000%AM0$build\u00008",
         "mod_c/src/main/ets/LibC.ets\u0000%AM0\u000018",
         "mod_c/src/main/ets/LibC.ets\u0000%AM0\u00004",
@@ -172,42 +172,43 @@
     },
     "expected": {
       "nodesByKind": {
-        "file": 25,
-        "import": 24,
-        "class": 10,
+        "file": 27,
+        "import": 25,
+        "class": 12,
         "struct": 10,
         "interface": 5,
         "enum": 0,
-        "method": 55,
-        "function": 15,
+        "method": 61,
+        "function": 16,
         "property": 10,
         "component": 10,
         "anonymous_method": 55
       },
       "edgesByKind": {
-        "imports": 24,
+        "imports": 25,
         "extends": 5,
         "implements": 5,
-        "contains": 205,
-        "calls": 89,
+        "contains": 215,
+        "calls": 91,
         "references_viewtree": 30
       },
-      "containsTotal": 205,
-      "callEdgeCount": 89,
-      "callEdgeCountAll": 94,
+      "containsTotal": 215,
+      "callEdgeCount": 91,
+      "callEdgeCountAll": 71,
+      "callEdgeCountProject": 66,
       "viewtreeEdgeTotal": 30,
-      "types": 25,
-      "methods": 125,
+      "types": 27,
+      "methods": 132,
       "fields": 10,
       "components": 10,
-      "fileNodesWithDummyMain": 26,
-      "classNodesWithDummyMain": 11,
-      "callEdgeCountProject": 64,
-      "callableNodesWithDummyMain": 135,
+      "fileNodesWithDummyMain": 28,
+      "classNodesWithDummyMain": 13,
+      "callableNodesWithDummyMain": 142,
       "hgModelOffsets": {
         "dummyClassContains": 1,
         "extraCallables": 10,
-        "callsUnresolvedDrop": 5
+        "callsUnresolvedDrop": 5,
+        "callsPersistExtra": 25
       }
     }
   },
@@ -216,6 +217,8 @@
     "etsFiles": [
       "mod_a/src/main/ets/BaseA.ets",
       "mod_a/src/main/ets/ChildA.ets",
+      "mod_a/src/main/ets/DateFmt.ets",
+      "mod_a/src/main/ets/FanoutTrap.ets",
       "mod_a/src/main/ets/LibA.ets",
       "mod_a/src/main/ets/PageA.ets",
       "mod_a/src/main/ets/UtilA.ets",
@@ -280,6 +283,11 @@
         "file": "mod_b/src/main/ets/PageB.ets",
         "name": "runLibB",
         "from": "./LibB"
+      },
+      {
+        "file": "mod_b/src/main/ets/UtilB.ets",
+        "name": "DateFmt",
+        "from": "../../../../mod_a/src/main/ets/DateFmt"
       },
       {
         "file": "mod_b/src/main/ets/UtilB.ets",
@@ -375,7 +383,7 @@
         "class": "ChildA",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_a/src/main/ets/LibA.ets",
@@ -389,7 +397,7 @@
         "class": "PageA",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_b/src/main/ets/BaseB.ets",
@@ -403,7 +411,7 @@
         "class": "ChildB",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_b/src/main/ets/LibB.ets",
@@ -417,7 +425,7 @@
         "class": "PageB",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_c/src/main/ets/BaseC.ets",
@@ -431,7 +439,7 @@
         "class": "ChildC",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_c/src/main/ets/LibC.ets",
@@ -445,7 +453,7 @@
         "class": "PageC",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_d/src/main/ets/BaseD.ets",
@@ -459,7 +467,7 @@
         "class": "ChildD",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_d/src/main/ets/LibD.ets",
@@ -473,7 +481,7 @@
         "class": "PageD",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_e/src/main/ets/BaseE.ets",
@@ -487,7 +495,7 @@
         "class": "ChildE",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       },
       {
         "file": "mod_e/src/main/ets/LibE.ets",
@@ -501,7 +509,7 @@
         "class": "PageE",
         "kind": "extends",
         "target": "CustomComponent",
-        "resolved": true
+        "resolved": false
       }
     ],
     "heritageUserExtends": [
@@ -605,6 +613,20 @@
         "name": "ChildA",
         "kind": "struct",
         "category": 1,
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/DateFmt.ets",
+        "name": "DateFmt",
+        "kind": "class",
+        "category": 0,
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/FanoutTrap.ets",
+        "name": "FanoutTrap",
+        "kind": "class",
+        "category": 0,
         "synthetic": false
       },
       {
@@ -912,7 +934,61 @@
         "name": "constructor",
         "line": 1,
         "kind": "method",
-        "signature": "@project/mod_a/src/main/ets/ChildA.ets: ChildA.constructor(@project/mod_a/src/main/ets/ChildA.ets: ChildA, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_a/src/main/ets/ChildA.ets: ChildA.constructor(@project/mod_a/src/main/ets/ChildA.ets: ChildA, LocalStorage)",
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/DateFmt.ets",
+        "class": "DateFmt",
+        "name": "constructor",
+        "line": null,
+        "kind": "method",
+        "signature": "@project/mod_a/src/main/ets/DateFmt.ets: DateFmt.constructor()",
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/DateFmt.ets",
+        "class": "DateFmt",
+        "name": "weekTitle",
+        "line": 3,
+        "kind": "method",
+        "signature": "@project/mod_a/src/main/ets/DateFmt.ets: DateFmt.[static]weekTitle()",
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/FanoutTrap.ets",
+        "class": "FanoutTrap",
+        "name": "constructor",
+        "line": null,
+        "kind": "method",
+        "signature": "@project/mod_a/src/main/ets/FanoutTrap.ets: FanoutTrap.constructor()",
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/FanoutTrap.ets",
+        "class": "FanoutTrap",
+        "name": "error",
+        "line": 10,
+        "kind": "method",
+        "signature": "@project/mod_a/src/main/ets/FanoutTrap.ets: FanoutTrap.error(string)",
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/FanoutTrap.ets",
+        "class": "FanoutTrap",
+        "name": "getInstance",
+        "line": 6,
+        "kind": "method",
+        "signature": "@project/mod_a/src/main/ets/FanoutTrap.ets: FanoutTrap.[static]getInstance()",
+        "synthetic": false
+      },
+      {
+        "file": "mod_a/src/main/ets/FanoutTrap.ets",
+        "class": "FanoutTrap",
+        "name": "info",
+        "line": 12,
+        "kind": "method",
+        "signature": "@project/mod_a/src/main/ets/FanoutTrap.ets: FanoutTrap.info(string)",
         "synthetic": false
       },
       {
@@ -1053,14 +1129,14 @@
         "name": "constructor",
         "line": 3,
         "kind": "method",
-        "signature": "@project/mod_a/src/main/ets/PageA.ets: PageA.constructor(@project/mod_a/src/main/ets/PageA.ets: PageA, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_a/src/main/ets/PageA.ets: PageA.constructor(@project/mod_a/src/main/ets/PageA.ets: PageA, LocalStorage)",
         "synthetic": false
       },
       {
         "file": "mod_a/src/main/ets/UtilA.ets",
         "class": "%dflt",
         "name": "%AM0$helperA",
-        "line": 2,
+        "line": 7,
         "kind": "anonymous_method",
         "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.%AM0$helperA(number)"
       },
@@ -1068,7 +1144,7 @@
         "file": "mod_a/src/main/ets/UtilA.ets",
         "class": "%dflt",
         "name": "%AM1$mapAllA",
-        "line": 7,
+        "line": 12,
         "kind": "anonymous_method",
         "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.%AM1$mapAllA(number)"
       },
@@ -1076,15 +1152,23 @@
         "file": "mod_a/src/main/ets/UtilA.ets",
         "class": "%dflt",
         "name": "helperA",
-        "line": 1,
+        "line": 6,
         "kind": "function",
         "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.helperA(number)"
       },
       {
         "file": "mod_a/src/main/ets/UtilA.ets",
         "class": "%dflt",
+        "name": "hiddenHelperA",
+        "line": 2,
+        "kind": "function",
+        "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.hiddenHelperA(number)"
+      },
+      {
+        "file": "mod_a/src/main/ets/UtilA.ets",
+        "class": "%dflt",
         "name": "mapAllA",
-        "line": 6,
+        "line": 11,
         "kind": "function",
         "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.mapAllA(number[])"
       },
@@ -1139,7 +1223,7 @@
         "name": "constructor",
         "line": 1,
         "kind": "method",
-        "signature": "@project/mod_b/src/main/ets/ChildB.ets: ChildB.constructor(@project/mod_b/src/main/ets/ChildB.ets: ChildB, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_b/src/main/ets/ChildB.ets: ChildB.constructor(@project/mod_b/src/main/ets/ChildB.ets: ChildB, LocalStorage)",
         "synthetic": false
       },
       {
@@ -1280,14 +1364,14 @@
         "name": "constructor",
         "line": 3,
         "kind": "method",
-        "signature": "@project/mod_b/src/main/ets/PageB.ets: PageB.constructor(@project/mod_b/src/main/ets/PageB.ets: PageB, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_b/src/main/ets/PageB.ets: PageB.constructor(@project/mod_b/src/main/ets/PageB.ets: PageB, LocalStorage)",
         "synthetic": false
       },
       {
         "file": "mod_b/src/main/ets/UtilB.ets",
         "class": "%dflt",
         "name": "%AM0$helperB",
-        "line": 4,
+        "line": 5,
         "kind": "anonymous_method",
         "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.%AM0$helperB(number)"
       },
@@ -1295,7 +1379,7 @@
         "file": "mod_b/src/main/ets/UtilB.ets",
         "class": "%dflt",
         "name": "%AM1$mapAllB",
-        "line": 9,
+        "line": 12,
         "kind": "anonymous_method",
         "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.%AM1$mapAllB(number)"
       },
@@ -1303,7 +1387,7 @@
         "file": "mod_b/src/main/ets/UtilB.ets",
         "class": "%dflt",
         "name": "helperB",
-        "line": 3,
+        "line": 4,
         "kind": "function",
         "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.helperB(number)"
       },
@@ -1311,7 +1395,7 @@
         "file": "mod_b/src/main/ets/UtilB.ets",
         "class": "%dflt",
         "name": "mapAllB",
-        "line": 8,
+        "line": 11,
         "kind": "function",
         "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.mapAllB(number[])"
       },
@@ -1366,7 +1450,7 @@
         "name": "constructor",
         "line": 1,
         "kind": "method",
-        "signature": "@project/mod_c/src/main/ets/ChildC.ets: ChildC.constructor(@project/mod_c/src/main/ets/ChildC.ets: ChildC, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_c/src/main/ets/ChildC.ets: ChildC.constructor(@project/mod_c/src/main/ets/ChildC.ets: ChildC, LocalStorage)",
         "synthetic": false
       },
       {
@@ -1507,7 +1591,7 @@
         "name": "constructor",
         "line": 3,
         "kind": "method",
-        "signature": "@project/mod_c/src/main/ets/PageC.ets: PageC.constructor(@project/mod_c/src/main/ets/PageC.ets: PageC, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_c/src/main/ets/PageC.ets: PageC.constructor(@project/mod_c/src/main/ets/PageC.ets: PageC, LocalStorage)",
         "synthetic": false
       },
       {
@@ -1593,7 +1677,7 @@
         "name": "constructor",
         "line": 1,
         "kind": "method",
-        "signature": "@project/mod_d/src/main/ets/ChildD.ets: ChildD.constructor(@project/mod_d/src/main/ets/ChildD.ets: ChildD, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_d/src/main/ets/ChildD.ets: ChildD.constructor(@project/mod_d/src/main/ets/ChildD.ets: ChildD, LocalStorage)",
         "synthetic": false
       },
       {
@@ -1734,7 +1818,7 @@
         "name": "constructor",
         "line": 3,
         "kind": "method",
-        "signature": "@project/mod_d/src/main/ets/PageD.ets: PageD.constructor(@project/mod_d/src/main/ets/PageD.ets: PageD, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_d/src/main/ets/PageD.ets: PageD.constructor(@project/mod_d/src/main/ets/PageD.ets: PageD, LocalStorage)",
         "synthetic": false
       },
       {
@@ -1820,7 +1904,7 @@
         "name": "constructor",
         "line": 1,
         "kind": "method",
-        "signature": "@project/mod_e/src/main/ets/ChildE.ets: ChildE.constructor(@project/mod_e/src/main/ets/ChildE.ets: ChildE, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_e/src/main/ets/ChildE.ets: ChildE.constructor(@project/mod_e/src/main/ets/ChildE.ets: ChildE, LocalStorage)",
         "synthetic": false
       },
       {
@@ -1961,7 +2045,7 @@
         "name": "constructor",
         "line": 3,
         "kind": "method",
-        "signature": "@project/mod_e/src/main/ets/PageE.ets: PageE.constructor(@project/mod_e/src/main/ets/PageE.ets: PageE, @ohosSdk/openharmony/ets/component/common_ts_ets_api.d.ts: LocalStorage)",
+        "signature": "@project/mod_e/src/main/ets/PageE.ets: PageE.constructor(@project/mod_e/src/main/ets/PageE.ets: PageE, LocalStorage)",
         "synthetic": false
       },
       {
@@ -2259,14 +2343,14 @@
         "file": "mod_a/src/main/ets/UtilA.ets",
         "class": "%dflt",
         "name": "%AM0$helperA",
-        "line": 2,
+        "line": 7,
         "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.%AM0$helperA(number)"
       },
       {
         "file": "mod_a/src/main/ets/UtilA.ets",
         "class": "%dflt",
         "name": "%AM1$mapAllA",
-        "line": 7,
+        "line": 12,
         "signature": "@project/mod_a/src/main/ets/UtilA.ets: %dflt.%AM1$mapAllA(number)"
       },
       {
@@ -2336,14 +2420,14 @@
         "file": "mod_b/src/main/ets/UtilB.ets",
         "class": "%dflt",
         "name": "%AM0$helperB",
-        "line": 4,
+        "line": 5,
         "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.%AM0$helperB(number)"
       },
       {
         "file": "mod_b/src/main/ets/UtilB.ets",
         "class": "%dflt",
         "name": "%AM1$mapAllB",
-        "line": 9,
+        "line": 12,
         "signature": "@project/mod_b/src/main/ets/UtilB.ets: %dflt.%AM1$mapAllB(number)"
       },
       {
@@ -2877,6 +2961,54 @@
         "file": "mod_a/src/main/ets/ChildA.ets"
       },
       {
+        "from": "file:mod_a/src/main/ets/DateFmt.ets",
+        "to": "class:mod_a/src/main/ets/DateFmt.ets:DateFmt",
+        "via": "file→type",
+        "file": "mod_a/src/main/ets/DateFmt.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/DateFmt.ets:DateFmt",
+        "to": "method:mod_a/src/main/ets/DateFmt.ets:DateFmt:constructor",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/DateFmt.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/DateFmt.ets:DateFmt",
+        "to": "method:mod_a/src/main/ets/DateFmt.ets:DateFmt:weekTitle",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/DateFmt.ets"
+      },
+      {
+        "from": "file:mod_a/src/main/ets/FanoutTrap.ets",
+        "to": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "via": "file→type",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:error",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:info",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:constructor",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:getInstance",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
         "from": "file:mod_a/src/main/ets/LibA.ets",
         "to": "import:mod_a/src/main/ets/LibA.ets:BaseA",
         "via": "file→import",
@@ -3043,6 +3175,12 @@
         "to": "method:mod_a/src/main/ets/PageA.ets:%AC1$PageA-build:constructor",
         "via": "class→method",
         "file": "mod_a/src/main/ets/PageA.ets"
+      },
+      {
+        "from": "file:mod_a/src/main/ets/UtilA.ets",
+        "to": "method:mod_a/src/main/ets/UtilA.ets:%dflt:hiddenHelperA",
+        "via": "file→function",
+        "file": "mod_a/src/main/ets/UtilA.ets"
       },
       {
         "from": "file:mod_a/src/main/ets/UtilA.ets",
@@ -3317,6 +3455,12 @@
       {
         "from": "file:mod_b/src/main/ets/UtilB.ets",
         "to": "import:mod_b/src/main/ets/UtilB.ets:helperA",
+        "via": "file→import",
+        "file": "mod_b/src/main/ets/UtilB.ets"
+      },
+      {
+        "from": "file:mod_b/src/main/ets/UtilB.ets",
+        "to": "import:mod_b/src/main/ets/UtilB.ets:DateFmt",
         "via": "file→import",
         "file": "mod_b/src/main/ets/UtilB.ets"
       },
@@ -4241,6 +4385,54 @@
         "file": "mod_a/src/main/ets/ChildA.ets"
       },
       {
+        "from": "file:mod_a/src/main/ets/DateFmt.ets",
+        "to": "class:mod_a/src/main/ets/DateFmt.ets:DateFmt",
+        "via": "file→type",
+        "file": "mod_a/src/main/ets/DateFmt.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/DateFmt.ets:DateFmt",
+        "to": "method:mod_a/src/main/ets/DateFmt.ets:DateFmt:constructor",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/DateFmt.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/DateFmt.ets:DateFmt",
+        "to": "method:mod_a/src/main/ets/DateFmt.ets:DateFmt:weekTitle",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/DateFmt.ets"
+      },
+      {
+        "from": "file:mod_a/src/main/ets/FanoutTrap.ets",
+        "to": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "via": "file→type",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:error",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:info",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:constructor",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
+        "from": "class:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap",
+        "to": "method:mod_a/src/main/ets/FanoutTrap.ets:FanoutTrap:getInstance",
+        "via": "class→method",
+        "file": "mod_a/src/main/ets/FanoutTrap.ets"
+      },
+      {
         "from": "file:mod_a/src/main/ets/LibA.ets",
         "to": "import:mod_a/src/main/ets/LibA.ets:BaseA",
         "via": "file→import",
@@ -4377,6 +4569,12 @@
         "to": "method:mod_a/src/main/ets/PageA.ets:PageA:%AM1$build",
         "via": "class→method",
         "file": "mod_a/src/main/ets/PageA.ets"
+      },
+      {
+        "from": "file:mod_a/src/main/ets/UtilA.ets",
+        "to": "method:mod_a/src/main/ets/UtilA.ets:%dflt:hiddenHelperA",
+        "via": "file→function",
+        "file": "mod_a/src/main/ets/UtilA.ets"
       },
       {
         "from": "file:mod_a/src/main/ets/UtilA.ets",
@@ -4609,6 +4807,12 @@
       {
         "from": "file:mod_b/src/main/ets/UtilB.ets",
         "to": "import:mod_b/src/main/ets/UtilB.ets:helperA",
+        "via": "file→import",
+        "file": "mod_b/src/main/ets/UtilB.ets"
+      },
+      {
+        "from": "file:mod_b/src/main/ets/UtilB.ets",
+        "to": "import:mod_b/src/main/ets/UtilB.ets:DateFmt",
         "via": "file→import",
         "file": "mod_b/src/main/ets/UtilB.ets"
       },
@@ -5342,30 +5546,9 @@
     "calls": [
       {
         "callerFile": "mod_a/src/main/ets/ChildA.ets",
-        "caller": "%AM0$build",
-        "calleeFile": null,
-        "callee": "info",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_a/src/main/ets/ChildA.ets",
         "caller": "build",
         "calleeFile": "mod_a/src/main/ets/ChildA.ets",
         "callee": "%AM0$build",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_a/src/main/ets/ChildA.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_a/src/main/ets/ChildA.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
         "direct": false
       },
       {
@@ -5446,20 +5629,6 @@
         "direct": false
       },
       {
-        "callerFile": "mod_a/src/main/ets/PageA.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_a/src/main/ets/PageA.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
-        "direct": false
-      },
-      {
         "callerFile": "mod_a/src/main/ets/UtilA.ets",
         "caller": "helperA",
         "calleeFile": "mod_a/src/main/ets/UtilA.ets",
@@ -5467,10 +5636,10 @@
         "direct": false
       },
       {
-        "callerFile": "mod_b/src/main/ets/ChildB.ets",
-        "caller": "%AM0$build",
-        "calleeFile": null,
-        "callee": "info",
+        "callerFile": "mod_a/src/main/ets/UtilA.ets",
+        "caller": "helperA",
+        "calleeFile": "mod_a/src/main/ets/UtilA.ets",
+        "callee": "hiddenHelperA",
         "direct": false
       },
       {
@@ -5478,20 +5647,6 @@
         "caller": "build",
         "calleeFile": "mod_b/src/main/ets/ChildB.ets",
         "callee": "%AM0$build",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_b/src/main/ets/ChildB.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_b/src/main/ets/ChildB.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
         "direct": false
       },
       {
@@ -5572,17 +5727,10 @@
         "direct": false
       },
       {
-        "callerFile": "mod_b/src/main/ets/PageB.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_b/src/main/ets/PageB.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
+        "callerFile": "mod_b/src/main/ets/UtilB.ets",
+        "caller": "helperB",
+        "calleeFile": "mod_a/src/main/ets/DateFmt.ets",
+        "callee": "weekTitle",
         "direct": false
       },
       {
@@ -5601,30 +5749,9 @@
       },
       {
         "callerFile": "mod_c/src/main/ets/ChildC.ets",
-        "caller": "%AM0$build",
-        "calleeFile": null,
-        "callee": "info",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_c/src/main/ets/ChildC.ets",
         "caller": "build",
         "calleeFile": "mod_c/src/main/ets/ChildC.ets",
         "callee": "%AM0$build",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_c/src/main/ets/ChildC.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_c/src/main/ets/ChildC.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
         "direct": false
       },
       {
@@ -5705,20 +5832,6 @@
         "direct": false
       },
       {
-        "callerFile": "mod_c/src/main/ets/PageC.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_c/src/main/ets/PageC.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
-        "direct": false
-      },
-      {
         "callerFile": "mod_c/src/main/ets/UtilC.ets",
         "caller": "helperC",
         "calleeFile": "mod_b/src/main/ets/UtilB.ets",
@@ -5734,30 +5847,9 @@
       },
       {
         "callerFile": "mod_d/src/main/ets/ChildD.ets",
-        "caller": "%AM0$build",
-        "calleeFile": null,
-        "callee": "info",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_d/src/main/ets/ChildD.ets",
         "caller": "build",
         "calleeFile": "mod_d/src/main/ets/ChildD.ets",
         "callee": "%AM0$build",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_d/src/main/ets/ChildD.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_d/src/main/ets/ChildD.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
         "direct": false
       },
       {
@@ -5838,20 +5930,6 @@
         "direct": false
       },
       {
-        "callerFile": "mod_d/src/main/ets/PageD.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_d/src/main/ets/PageD.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
-        "direct": false
-      },
-      {
         "callerFile": "mod_d/src/main/ets/UtilD.ets",
         "caller": "helperD",
         "calleeFile": "mod_c/src/main/ets/UtilC.ets",
@@ -5867,30 +5945,9 @@
       },
       {
         "callerFile": "mod_e/src/main/ets/ChildE.ets",
-        "caller": "%AM0$build",
-        "calleeFile": null,
-        "callee": "info",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_e/src/main/ets/ChildE.ets",
         "caller": "build",
         "calleeFile": "mod_e/src/main/ets/ChildE.ets",
         "callee": "%AM0$build",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_e/src/main/ets/ChildE.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_e/src/main/ets/ChildE.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
         "direct": false
       },
       {
@@ -5968,20 +6025,6 @@
         "caller": "build",
         "calleeFile": "mod_e/src/main/ets/PageE.ets",
         "callee": "%AM1$build",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_e/src/main/ets/PageE.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "create",
-        "direct": false
-      },
-      {
-        "callerFile": "mod_e/src/main/ets/PageE.ets",
-        "caller": "build",
-        "calleeFile": null,
-        "callee": "onClick",
         "direct": false
       },
       {
@@ -6085,6 +6128,13 @@
         "direct": false
       },
       {
+        "callerFile": "mod_a/src/main/ets/UtilA.ets",
+        "caller": "helperA",
+        "calleeFile": "mod_a/src/main/ets/UtilA.ets",
+        "callee": "hiddenHelperA",
+        "direct": false
+      },
+      {
         "callerFile": "mod_b/src/main/ets/ChildB.ets",
         "caller": "build",
         "calleeFile": "mod_b/src/main/ets/ChildB.ets",
@@ -6159,6 +6209,13 @@
         "caller": "build",
         "calleeFile": "mod_b/src/main/ets/PageB.ets",
         "callee": "%AM1$build",
+        "direct": false
+      },
+      {
+        "callerFile": "mod_b/src/main/ets/UtilB.ets",
+        "caller": "helperB",
+        "calleeFile": "mod_a/src/main/ets/DateFmt.ets",
+        "callee": "weekTitle",
         "direct": false
       },
       {

@@ -36,35 +36,104 @@ export function cloneStabilityProject(): string {
   return dir;
 }
 
-export async function indexStabilityProject(): Promise<{
+export type StabilityIndex = {
   root: string;
   cg: HomeGraph;
   nodes: Node[];
   edges: Edge[];
   counts: { nodes: number; edges: number };
-}> {
+  /** Close DB + delete temp project (for beforeAll/afterAll suites). */
+  dispose: () => void;
+};
+
+function collectGraph(cg: HomeGraph): Omit<StabilityIndex, 'root' | 'cg' | 'dispose'> {
+  const qb = cg.getQueryBuilder();
+  const nodes = qb.getAllNodes();
+  const edges: Edge[] = [];
+  for (const n of nodes) {
+    edges.push(...cg.getOutgoingEdges(n.id));
+  }
+  const seen = new Set<string>();
+  const uniq: Edge[] = [];
+  for (const e of edges) {
+    const k = `${e.source}\0${e.target}\0${e.kind}\0${JSON.stringify(e.metadata ?? null)}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(e);
+  }
+  return { nodes, edges: uniq, counts: qb.getNodeAndEdgeCount() };
+}
+
+/**
+ * Index fixture; temp dir is tracked by afterEach (single-`it` style).
+ */
+export async function indexStabilityProject(): Promise<StabilityIndex> {
   const root = cloneStabilityProject();
   const cg = HomeGraph.initSync(root);
   try {
     await cg.indexAll();
-    const qb = cg.getQueryBuilder();
-    const nodes = qb.getAllNodes();
-    const edges: Edge[] = [];
-    for (const n of nodes) {
-      edges.push(...cg.getOutgoingEdges(n.id));
-    }
-    // Dedup edges (getOutgoingEdges per node is the public API).
-    const seen = new Set<string>();
-    const uniq: Edge[] = [];
-    for (const e of edges) {
-      const k = `${e.source}\0${e.target}\0${e.kind}\0${JSON.stringify(e.metadata ?? null)}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      uniq.push(e);
-    }
-    return { root, cg, nodes, edges: uniq, counts: qb.getNodeAndEdgeCount() };
+    const graph = collectGraph(cg);
+    return {
+      root,
+      cg,
+      ...graph,
+      dispose: () => {
+        try {
+          cg.close();
+        } catch {
+          /* ignore */
+        }
+      },
+    };
   } catch (e) {
     cg.close();
+    throw e;
+  }
+}
+
+/**
+ * Index once for a multi-`it` describe. Temp dir is NOT in afterEach list —
+ * caller must `dispose()` in afterAll (closes DB + rmSync).
+ */
+export async function openStabilityIndex(): Promise<StabilityIndex> {
+  resetArkTSBatch();
+  resetExtractionContext();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hg-stability-suite-'));
+  fs.cpSync(PROJECT_FIXTURE, root, { recursive: true });
+  const cg = HomeGraph.initSync(root);
+  try {
+    await cg.indexAll();
+    const graph = collectGraph(cg);
+    return {
+      root,
+      cg,
+      ...graph,
+      dispose: () => {
+        try {
+          cg.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        } catch {
+          /* ignore */
+        }
+        resetArkTSBatch();
+        resetExtractionContext();
+      },
+    };
+  } catch (e) {
+    try {
+      cg.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
     throw e;
   }
 }

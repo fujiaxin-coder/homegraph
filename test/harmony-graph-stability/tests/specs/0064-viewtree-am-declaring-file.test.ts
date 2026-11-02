@@ -4,11 +4,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { describe, expect, it } from 'vitest';
-import { HomeGraph } from '../../../src';
-import { cleanupArktsProjects, makeArktsProject } from '../../languages/arkts/helpers';
-import { resetArkTSBatch } from '../../../src/extraction/languages/arkts';
-import { resetExtractionContext } from '../../../src/extraction/context';
-import type { Node } from '../../../src/types';
+import { HomeGraph } from '../../../../src';
+import { cleanupArktsProjects, makeArktsProject } from '../../../languages/arkts/helpers';
+import { resetArkTSBatch } from '../../../../src/extraction/languages/arkts';
+import { resetExtractionContext } from '../../../../src/extraction/context';
+import type { Node } from '../../../../src/types';
 
 function makeP3Fixture(extra?: Record<string, string>): string {
   resetArkTSBatch();
@@ -64,7 +64,7 @@ function declAmNodes(dir: string, nodes: Node[]): Node[] {
   });
 }
 
-describe('P3 / Spec 0064 ViewTree AM declaring-file attribution', () => {
+describe('Spec 0064 · ViewTree AM declaring-file attribution', () => {
   it(
     'onAreaChange %AM file_path is DeclPane.ets and contains parent is DeclPane',
     async () => {

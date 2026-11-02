@@ -1,19 +1,19 @@
 /**
- * P2 — non-persisted .ets after ArkTS batch → TreeSitterExtractor forced to
+ * Spec 0062 — non-persisted .ets after ArkTS batch → TreeSitterExtractor forced to
  * 'typescript' → "Failed to get parser for language: typescript" when the TS
  * wasm grammar was never loaded (ArkUI-only trees).
  * Fix: expandGrammarLanguages(arkts) preloads typescript wasm so the orphan
  * TreeSitterExtractor('typescript') path has a parser.
  */
 import { describe, expect, it } from 'vitest';
-import { extractFromSource } from '../../../src/extraction/tree-sitter';
+import { extractFromSource } from '../../../../src/extraction/tree-sitter';
 import {
   isArkTSBatchCommitted,
   isArkTSBatchPersisted,
-} from '../../../src/extraction/languages/arkts';
-import { indexStabilityProject } from './helpers';
+} from '../../../../src/extraction/languages/arkts';
+import { indexStabilityProject } from '../helpers';
 
-describe('P2 .ets → typescript parser fallback', () => {
+describe('Spec 0062 · .ets → typescript parser fallback', () => {
   it(
     'non-persisted .ets with batch committed must not error Failed to get parser for language: typescript',
     async () => {
