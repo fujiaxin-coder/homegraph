@@ -1,0 +1,117 @@
+{
+  "bucket": "B",
+  "polarity": "must-not",
+  "targetRepo": "applications_photos",
+  "edges": [
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "browserCommon/src/main/ets/default/view/actionbar/ActionBarButton.ets",
+      "callerName": "buildAlbumMenu",
+      "calleeFile": "browserCommon/src/main/ets/default/view/actionbar/ActionBarButton.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "common/src/main/ets/default/access/AlbumSortFetchOptions.ets",
+      "callerName": "getUnionAlbumsCountFetchOption",
+      "calleeFile": "common/src/main/ets/default/access/AlbumSortFetchOptions.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "demo/picker_demo/application1/src/main/ets/pages/SaveCompressPhotoPage.ets",
+      "callerName": "compressedImage",
+      "calleeFile": "demo/picker_demo/application1/src/main/ets/pages/SaveCompressPhotoPage.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "feature/browser/src/main/ets/default/view/SideBar.ets",
+      "callerName": "userAlbumContent",
+      "calleeFile": "feature/browser/src/main/ets/default/view/SideBar.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "feature/dataProvider/src/main/ets/database/DatabaseOperationHelper.ets",
+      "callerName": "doInsert",
+      "calleeFile": "feature/dataProvider/src/main/ets/database/DatabaseOperationHelper.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "feature/extensions/src/main/ets/default/CommonPickerUIExtensionAbility.ets",
+      "callerName": "onSessionDestroy",
+      "calleeFile": "feature/extensions/src/main/ets/default/CommonPickerUIExtensionAbility.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "feature/thirdselect/src/main/ets/default/view/ThirdSelectAlbumGridBase.ets",
+      "callerName": "buildPhotoViewPreView",
+      "calleeFile": "feature/thirdselect/src/main/ets/default/view/ThirdSelectAlbumGridBase.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "feature/timeline/src/main/ets/photogrid/view/DayGridView.ets",
+      "callerName": "buildDayGridView",
+      "calleeFile": "feature/timeline/src/main/ets/photogrid/view/DayGridView.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "imageEditor/common/src/main/ets/common/components/VideoTool.ets",
+      "callerName": "ToolTips",
+      "calleeFile": "imageEditor/common/src/main/ets/common/components/VideoTool.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "B",
+      "kind": "calls",
+      "callerFile": "imageEditor/product/editor_pc/src/main/ets/component/crop/component/RulerItem.ets",
+      "callerName": "RotateButton",
+      "calleeFile": "imageEditor/product/editor_pc/src/main/ets/component/crop/component/RulerItem.ets",
+      "calleeName": "getInstance",
+      "note": "local helper caller must not flood getInstance",
+      "status": "active",
+      "provenance": "source-mine+review"
+    }
+  ]
+}

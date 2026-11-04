@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "harmony-callgraph-soak-gold-edge",
+  "title": "CallgraphSoakGoldFile",
+  "type": "object",
+  "required": ["bucket", "polarity", "edges"],
+  "properties": {
+    "bucket": { "enum": ["A", "B", "C", "D", "E", "F"] },
+    "polarity": { "enum": ["must", "must-not"] },
+    "targetRepo": { "type": "string" },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["bucket", "callerFile", "callerName", "calleeFile", "calleeName"],
+        "properties": {
+          "bucket": { "enum": ["A", "B", "C", "D", "E", "F"] },
+          "kind": {
+            "enum": ["calls", "imports", "extends", "implements", "references"]
+          },
+          "callerFile": { "type": "string" },
+          "callerName": { "type": "string" },
+          "callerStart": { "type": "integer" },
+          "calleeFile": { "type": "string" },
+          "calleeName": { "type": "string" },
+          "calleeStart": { "type": "integer" },
+          "note": { "type": "string" },
+          "status": {
+            "enum": ["active", "deferred"],
+            "description": "deferred = known HG bug; excluded from L2 scores, listed in report"
+          },
+          "provenance": { "type": "string" },
+          "bug": { "type": "string", "description": "Optional bug ticket id when deferred" }
+        }
+      }
+    }
+  }
+}

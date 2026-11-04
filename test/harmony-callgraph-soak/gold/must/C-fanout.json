@@ -1,0 +1,128 @@
+{
+  "bucket": "C",
+  "polarity": "must",
+  "targetRepo": "applications_photos",
+  "edges": [
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "common/src/main/ets/default/access/UserFileManagerAccess.ets",
+      "callerName": "createNewImage",
+      "callerStart": 1639,
+      "calleeFile": "common/src/main/ets/default/utils/TraceControllerUtils.ets",
+      "calleeName": "startTrace",
+      "note": "TraceControllerUtils.startTrace()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "feature/dataProvider/src/main/ets/database/DatabaseOperationHelper.ets",
+      "callerName": "doInsert",
+      "callerStart": 83,
+      "calleeFile": "feature/dataProvider/src/main/ets/database/DatabaseProxy.ets",
+      "calleeName": "getInstance",
+      "note": "DatabaseProxy.getInstance()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "feature/faCard/src/main/ets/formability/FACardServiceAbilityCommon.ets",
+      "callerName": "handler",
+      "callerStart": 37,
+      "calleeFile": "feature/faCard/src/main/ets/formability/FACardServiceStub.ets",
+      "calleeName": "getInstance",
+      "note": "FaCardServiceStub.getInstance()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "imageEditor/common/src/main/ets/common/components/CompareTool.ets",
+      "callerName": "build",
+      "callerStart": 75,
+      "calleeFile": "imageEditor/common/src/main/ets/common/util/HiLog.ts",
+      "calleeName": "w",
+      "note": "HiLog.w()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "imageEditor/product/editor_pc/src/main/ets/component/adjust/AdjustTab.ets",
+      "callerName": "build",
+      "callerStart": 191,
+      "calleeFile": "imageEditor/common/index.ets",
+      "calleeName": "i",
+      "note": "HiLog.i()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "tools/src/main/global/Rsc.ets",
+      "callerName": "getManager",
+      "callerStart": 57,
+      "calleeFile": "tools/src/main/global/Contexts.ts",
+      "calleeName": "uiAbilityContext",
+      "note": "global.uiAbilityContext()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "browserCommon/src/main/ets/default/view/actionbar/ActionBar.ets",
+      "callerName": "aboutToAppear",
+      "callerStart": 321,
+      "calleeFile": "common/src/main/ets/default/model/common/ScreenManager.ets",
+      "calleeName": "getScreen",
+      "calleeStart": 25,
+      "note": "imported getScreen()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "common/src/main/ets/default/access/UserFileManagerAccess.ets",
+      "callerName": "createNewImage",
+      "callerStart": 1639,
+      "calleeFile": "common/src/main/ets/default/utils/TraceControllerUtils.ets",
+      "calleeName": "finishTrace",
+      "note": "TraceControllerUtils.finishTrace()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "feature/browser/src/main/ets/default/view/SideBar.ets",
+      "callerName": "aboutToAppear",
+      "callerStart": 535,
+      "calleeFile": "common/src/main/ets/default/access/UserFileManagerAccess.ets",
+      "calleeName": "getInstance",
+      "note": "UserFileManagerAccess.getInstance()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "C",
+      "kind": "calls",
+      "callerFile": "feature/dataProvider/src/main/ets/database/DatabaseOperationHelper.ets",
+      "callerName": "doBatchInsert",
+      "callerStart": 110,
+      "calleeFile": "feature/dataProvider/src/main/ets/database/DatabaseProxy.ets",
+      "calleeName": "getInstance",
+      "note": "DatabaseProxy.getInstance()",
+      "status": "active",
+      "provenance": "source-mine+review"
+    }
+  ]
+}
