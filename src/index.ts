@@ -616,7 +616,36 @@ export class HomeGraph {
             options.signal,
             options.verbose,
             walValve ? () => walValve!.backpressure() : undefined,
-            freshDb ? { dbPath: this.db.getPath(), fastInit } : null
+            freshDb
+              ? {
+                  dbPath: this.db.getPath(),
+                  fastInit,
+                  // Spec 0065: exclusive store-worker handoff (close main → worker → reopen).
+                  exclusiveHandoff: {
+                    release: () => {
+                      this.db.closeForExclusiveWriter();
+                    },
+                    reclaim: () => {
+                      this.db.reopenAfterExclusiveWriter({ fastInit });
+                      this.queries.rebind(this.db.getDb());
+                      bindExtractionContext(this.projectRoot, this.queries);
+                      // ATTACH is per-connection. ohosApiDbPath survives rebind and
+                      // would make attachOhosApiDb early-return while the schema
+                      // is gone → "no such table: ohos_api.nodes". Clear then reattach.
+                      const priorOhos = this.queries.getOhosApiDbPath();
+                      this.queries.attachOhosApiDb(null);
+                      if (priorOhos) {
+                        this.queries.attachOhosApiDb(priorOhos);
+                      } else if (graphSourceFlags(this.graphSources).sdk) {
+                        restoreOhosApiDbAttach(this.queries);
+                        if (!this.queries.getOhosApiDbPath()) {
+                          attachExistingOhosApiDbForProject(this.projectRoot, this.queries);
+                        }
+                      }
+                    },
+                  },
+                }
+              : null
           );
         } finally {
           if (freshDb) {

@@ -94,6 +94,11 @@ export class DatabaseConnection {
    * dead inode forever (#925). See `isReplacedOnDisk`.
    */
   private openedInode: string | null;
+  /**
+   * True after {@link closeForExclusiveWriter} until {@link reopenAfterExclusiveWriter}.
+   * The underlying handle is closed; callers must not use {@link getDb} in this window.
+   */
+  private releasedForExclusiveWriter = false;
 
   private constructor(db: SqliteDatabase, dbPath: string, backend: SqliteBackend) {
     this.db = db;
@@ -756,6 +761,7 @@ export class DatabaseConnection {
    * Close the database connection
    */
   close(): void {
+    this.releasedForExclusiveWriter = false;
     this.db.close();
   }
 
@@ -763,7 +769,55 @@ export class DatabaseConnection {
    * Check if the database connection is open
    */
   isOpen(): boolean {
+    if (this.releasedForExclusiveWriter) return false;
     return this.db.open;
+  }
+
+  /**
+   * Close this handle so another writer (fresh-index store-worker) can own the
+   * DB file exclusively. On-disk bulk-load state (dropped secondary indexes /
+   * missing FTS triggers) is preserved — do NOT use {@link open} to come back.
+   * Pair with {@link reopenAfterExclusiveWriter}. Spec 0065.
+   */
+  closeForExclusiveWriter(): void {
+    if (this.releasedForExclusiveWriter) return;
+    this.db.close();
+    this.releasedForExclusiveWriter = true;
+  }
+
+  /**
+   * Re-open after {@link closeForExclusiveWriter}. Skips `open()` healers so a
+   * mid-`indexAll` bulk window stays open until `endBulk*`. When `fastInit` is
+   * set, restores MEMORY journal + OFF synchronous to match the pre-handoff
+   * fresh-index path. Spec 0065.
+   */
+  reopenAfterExclusiveWriter(opts: { fastInit: boolean }): void {
+    if (!this.releasedForExclusiveWriter) {
+      throw new Error('reopenAfterExclusiveWriter: connection was not released for exclusive writer');
+    }
+    const { db, backend } = createDatabase(this.dbPath);
+    // Mirror configureConnection essentials without healBulkNodeLoad / migrations.
+    db.pragma('busy_timeout = 5000');
+    db.pragma('foreign_keys = ON');
+    if (opts.fastInit) {
+      try {
+        db.pragma('journal_mode = MEMORY');
+        db.pragma('synchronous = OFF');
+      } catch {
+        /* keep whatever the backend allows */
+      }
+    } else {
+      db.pragma('journal_mode = WAL');
+      db.pragma('synchronous = NORMAL');
+    }
+    db.pragma('cache_size = -16000');
+    db.pragma('temp_store = MEMORY');
+    db.pragma('mmap_size = 0');
+    db.pragma(`journal_size_limit = ${WAL_HEAL_THRESHOLD_BYTES}`);
+    this.db = db;
+    this.backend = backend;
+    this.openedInode = statInode(this.dbPath);
+    this.releasedForExclusiveWriter = false;
   }
 
   /**

@@ -24,6 +24,7 @@ import { QueryBuilder } from '../db/queries';
 import { extractFromSource } from './tree-sitter';
 import { ParseWorkerPool, resolveParsePoolSize } from './parse-pool';
 import { StoreWriter, StoreBundle, finalizeStoreBundle } from './store-writer';
+import { throwIfStoreFlushFailed } from './store-flush-guard';
 import { createYielder, type MaybeYield } from '../resolution/cooperative-yield';
 import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, requiresInProcessExtraction, initGrammars, loadGrammarsForLanguages } from './grammars';
 import { loadExtensionOverrides, loadIncludeIgnoredPatterns, loadExcludePatterns, loadIncludePatterns } from '../project-config';
@@ -1384,7 +1385,12 @@ export class ExtractionOrchestrator {
     signal?: AbortSignal,
     verbose?: boolean,
     walBackpressure?: () => Promise<void> | null,
-    storeWriterOpts?: { dbPath: string; fastInit: boolean } | null
+    storeWriterOpts?: {
+      dbPath: string;
+      fastInit: boolean;
+      /** Spec 0065: close main DB before worker open; reclaim after worker close. */
+      exclusiveHandoff?: { release: () => void; reclaim: () => void };
+    } | null
   ): Promise<IndexResult> {
     await initGrammars();
     const startTime = Date.now();
@@ -1609,6 +1615,7 @@ export class ExtractionOrchestrator {
       // advances (buffered items hold whole file contents, so this bound is
       // load-bearing for memory).
       while (nextSeq - nextToStore >= windowSize) {
+        throwIfStoreFlushFailed(aborted, flushError);
         if (inFlight.size > 0) await Promise.race(inFlight);
         else await flushOrdered();
       }
@@ -1659,13 +1666,32 @@ export class ExtractionOrchestrator {
     }
 
     const storeWorkerPath = path.join(__dirname, 'store-worker.js');
+    /** Spec 0065: true after exclusiveHandoff.release until matching reclaim. */
+    let storeHandoffReleased = false;
+    const reclaimStoreHandoff = (): void => {
+      if (!storeHandoffReleased) return;
+      storeHandoffReleased = false;
+      storeWriterOpts?.exclusiveHandoff?.reclaim();
+    };
     if (
       storeWriterOpts &&
       process.env.HOMEGRAPH_NO_STORE_WORKER !== '1' &&
       fs.existsSync(storeWorkerPath)
     ) {
-      storeWriter = new StoreWriter(storeWorkerPath, storeWriterOpts.dbPath, storeWriterOpts.fastInit);
-      log('Store writer thread active');
+      // Phase A (ArkTS / main-thread writes) is done; close the main connection
+      // before the worker opens its own — dual MEMORY/DELETE connections are
+      // what turn a transient SQLITE_BUSY into a hung index (Spec 0065).
+      if (storeWriterOpts.exclusiveHandoff) {
+        storeWriterOpts.exclusiveHandoff.release();
+        storeHandoffReleased = true;
+      }
+      try {
+        storeWriter = new StoreWriter(storeWorkerPath, storeWriterOpts.dbPath, storeWriterOpts.fastInit);
+        log('Store writer thread active');
+      } catch (err) {
+        reclaimStoreHandoff();
+        throw err;
+      }
     }
 
     // Parsing progress only after ArkTS batch (avoids false "Parsing - done").
@@ -1676,6 +1702,7 @@ export class ExtractionOrchestrator {
     });
     await new Promise((resolve) => setImmediate(resolve));
 
+    try {
     for (let i = 0; i < files.length; i += FILE_IO_BATCH_SIZE) {
       if (signal?.aborted) { aborted = true; break; }
 
@@ -1780,7 +1807,10 @@ export class ExtractionOrchestrator {
       await Promise.all(inFlight);
       await flushOrdered();
       if (flushError) {
-        if (storeWriter) await storeWriter.close();
+        if (storeWriter) {
+          await storeWriter.close();
+          storeWriter = null;
+        }
         throw flushError;
       }
       if (storeWriter) {
@@ -1794,7 +1824,10 @@ export class ExtractionOrchestrator {
     }
 
     if (signal?.aborted || aborted) {
-      if (storeWriter) await storeWriter.close();
+      if (storeWriter) {
+        await storeWriter.close();
+        storeWriter = null;
+      }
       if (pool) await pool.destroy();
       return {
         success: false,
@@ -1807,6 +1840,14 @@ export class ExtractionOrchestrator {
         errors: [{ message: 'Aborted', severity: 'error' }, ...errors],
         durationMs: Date.now() - startTime,
       };
+    }
+    } finally {
+      // Reclaim before retry / endBulk* — those paths need the main connection.
+      if (storeWriter) {
+        try { await storeWriter.close(); } catch { /* best-effort */ }
+        storeWriter = null;
+      }
+      reclaimStoreHandoff();
     }
 
     // Report 100% so the progress bar doesn't hang at 99%

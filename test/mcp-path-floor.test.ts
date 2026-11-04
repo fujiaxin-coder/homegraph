@@ -203,17 +203,26 @@ describe('MCP server --path floor against a poisoned ancestor (spec 0028)', () =
 
     // The incident's signature failure: .homegraph never appeared at the
     // project. It must now — created at the DECLARED root within seconds.
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + 45_000;
     while (!fs.existsSync(path.join(declared, '.homegraph', 'homegraph.db'))) {
       if (Date.now() > deadline) throw new Error('auto-init never created the declared root index');
       await new Promise((r) => setTimeout(r, 100));
     }
 
-    send(child, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'homegraph_project', arguments: {} } });
-    const result = await waitForMessage(messages, (m) => m.id === 2, 10_000);
-    const text = toolResultText(result);
-    expect(text).not.toContain('No HomeGraph project is loaded');
+    // DB file appears at init start; auto-init may still be inside indexAll
+    // (status=syncing). Poll until the declared project's own file shows up.
+    let text = '';
+    let callId = 2;
+    while (Date.now() < deadline) {
+      const id = callId++;
+      send(child, { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'homegraph_project', arguments: {} } });
+      const result = await waitForMessage(messages, (m) => m.id === id, 10_000);
+      text = toolResultText(result);
+      expect(text).not.toContain('No HomeGraph project is loaded');
+      expect(text).not.toContain('marker.ts'); // ancestor must never leak, even mid-sync
+      if (text.includes('Entry.ts')) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
     expect(text).toContain('Entry.ts');      // the declared project's own file
-    expect(text).not.toContain('marker.ts'); // the ancestor's file must not leak in
   }, 60_000);
 });

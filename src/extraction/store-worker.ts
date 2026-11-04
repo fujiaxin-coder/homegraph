@@ -6,8 +6,9 @@
  * connection: the orchestrator posts one message per file (in file order) and
  * the worker applies them in arrival order, which preserves the #1015
  * insertion-order determinism exactly as if the main thread had run the same
- * calls. The main thread performs NO database access while the writer is
- * active (fresh-DB path only), so there is no cross-connection contention.
+ * calls. Spec 0065: the main connection is closed for the worker's lifetime
+ * (`exclusiveHandoff`) — an idle open handle on MEMORY/non-WAL backends was
+ * enough to surface SQLITE_BUSY during ArkTS→store handoff.
  *
  * Protocol (main → worker):
  *   {type:'open', dbPath, fastInit}  → open connection, reply {type:'ready'}
