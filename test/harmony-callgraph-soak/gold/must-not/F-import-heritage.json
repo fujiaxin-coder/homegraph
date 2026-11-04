@@ -1,0 +1,117 @@
+{
+  "bucket": "F",
+  "polarity": "must-not",
+  "targetRepo": "applications_photos",
+  "edges": [
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "browserCommon/src/main/ets/default/utils/CustomModifier.ets",
+      "callerName": "AttributeUpdater",
+      "calleeFile": "browserCommon/src/main/ets/default/utils/CustomModifier.ets",
+      "calleeName": "PhotoItemStackModifier",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "common/src/main/ets/default/model/AccurateUpdater.ets",
+      "callerName": "AccurateUpdater",
+      "calleeFile": "common/src/main/ets/default/model/AlbumAccurateUpdater.ets",
+      "calleeName": "AlbumAccurateUpdater",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "tools/src/main/utils/LogExtender.ets",
+      "callerName": "LogExtender",
+      "calleeFile": "common/src/main/ets/default/model/browser/BrowserDataImpl.ets",
+      "calleeName": "BrowserDataImpl",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "browserCommon/src/main/ets/default/utils/CustomModifier.ets",
+      "callerName": "AttributeUpdater",
+      "calleeFile": "browserCommon/src/main/ets/default/utils/CustomModifier.ets",
+      "calleeName": "PhotoItemImageModifier",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "common/src/main/ets/default/model/DataSource.ets",
+      "callerName": "LoadingTask",
+      "calleeFile": "common/src/main/ets/default/model/AlbumDataSource.ets",
+      "calleeName": "AlbumLoadingTask",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "browserCommon/src/main/ets/default/viewModel/base/BaseAttributeUpdater.ets",
+      "callerName": "BaseAttributeUpdater",
+      "calleeFile": "browserCommon/src/main/ets/default/viewModel/base/ImageUpdater.ets",
+      "calleeName": "ImageUpdater",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "common/src/main/ets/default/model/browser/photo/MediaDataSource.ets",
+      "callerName": "MediaDataSource",
+      "calleeFile": "common/src/main/ets/default/model/AlbumDataSource.ets",
+      "calleeName": "AlbumDataSource",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "browserCommon/src/main/ets/default/viewModel/base/BaseAttributeUpdater.ets",
+      "callerName": "BaseAttributeUpdater",
+      "calleeFile": "browserCommon/src/main/ets/default/viewModel/base/ItemStackUpdater.ets",
+      "calleeName": "ItemStackUpdater",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "common/src/main/ets/default/model/browser/BrowserDataImpl.ets",
+      "callerName": "BrowserDataImpl",
+      "calleeFile": "common/src/main/ets/default/model/browser/album/AlbumDataImpl.ets",
+      "calleeName": "AlbumDataImpl",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    },
+    {
+      "bucket": "F",
+      "kind": "extends",
+      "callerFile": "browserCommon/src/main/ets/default/viewModel/base/ItemStackUpdater.ets",
+      "callerName": "ItemStackUpdater",
+      "calleeFile": "browserCommon/src/main/ets/default/viewModel/base/MovingPhotoUpdater.ets",
+      "calleeName": "MovingPhotoUpdater",
+      "note": "extends reverse forbidden",
+      "status": "active",
+      "provenance": "source-mine+review"
+    }
+  ]
+}

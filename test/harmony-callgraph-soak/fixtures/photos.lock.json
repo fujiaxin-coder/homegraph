@@ -1,0 +1,7 @@
+{
+  "name": "applications_photos",
+  "url": "https://gitcode.com/openharmony/applications_photos.git",
+  "commit": "282f7c21c72e110451897197b1254d5e3702fb15",
+  "localHint": "D:/code/applications_photos",
+  "note": "Pin commit for reproducible L2/L3 soak. Bump deliberately when refreshing gold."
+}
