@@ -154,6 +154,7 @@ test/harmony-graph-stability/
 | 路径 | 职责 |
 | --- | --- |
 | `tests/buckets/A–E-*.test.ts` | calls 金标边：must / must-not，禁止 `>= 1` |
+| `tests/buckets/G-hg-heuristic.test.ts` | HG 启发式 calls（仅 pin fixture 里真实存在的正确合成边） |
 | `tests/buckets/F-shape-contract.test.ts` | import / heritage / viewtree / %AM / 规模指纹 |
 | `tests/calls-gold.ts` | 金标边清单（手维；sync 不覆盖） |
 | `tests/contract.ts` | AA 形状合同（sync 生成） |
@@ -227,8 +228,10 @@ npx vitest run test/harmony-graph-stability --pool=forks
 | **D** 同模块清晰 | 逐边 must（同模块）+ 灌跨界 must-not + 出度上界 | `D-*.test.ts` | `BUCKET_D_MUST` / `_MUST_NOT` |
 | **E** lifecycle RTA | 五模块 lifecycle 逐边 + Page/Child 节点 + 同模块约束 | `E-*.test.ts` | `BUCKET_E_MUST` |
 | **F** 形状合同 | fingerprints / edgesByKind / nodesByKind / import 抽查 | `F-*.test.ts` | `CONTRACT.*` |
+| **G** HG heuristic | 仅 pin 索引中真实存在的正确合成边（interface-impl / arkui-state） | `G-*.test.ts` | `BUCKET_G_MUST` |
 
 各桶 `beforeAll` 只索引一次（`openStabilityIndex`），`it` 按边/断言展开；禁止 `>= 1` 软过。
+
 | 卫生 | 两次索引一致 | `hygiene/double-index-stable.test.ts` | — |
 | Spec | 0062 / 0063 / 0064 | `specs/0062–0064-*.test.ts` | 独立 fixture |
 
@@ -254,7 +257,10 @@ npx vitest run test/harmony-graph-stability --pool=forks
 
 ```bash
 npx vitest run test/harmony-graph-stability/tests/buckets/A-cross-module-static.test.ts --pool=forks
+npx vitest run test/harmony-graph-stability/tests/buckets/G-hg-heuristic.test.ts --pool=forks
 ```
+
+桶 **G** 只断言「本工程索引里已经出现、且源码可证」的 HG 启发式边（如 `interface-impl`、`arkui-state`）；图中不存在的合成边不要写进 must。
 
 ## 12. 图可视化（`viewer/`）
 

@@ -1,5 +1,5 @@
 /**
- * Shared matcher + probes for L1 calls gold (buckets A–E).
+ * Shared matcher + probes for L1 calls gold (buckets A–E, G).
  * Edge key: file + name [| startLine]; %AM*$name wrappers allowed.
  */
 import { expect } from 'vitest';
@@ -36,7 +36,30 @@ export type IndexedCall = {
   calleeName: string;
   calleeStart: number;
   dispatch?: string;
+  synthesizedBy?: string;
 };
+
+function toIndexedCall(e: Edge, s: Node, t: Node): IndexedCall {
+  const synth = e.metadata?.synthesizedBy;
+  const dispatch =
+    e.metadata?.dispatch != null
+      ? String(e.metadata.dispatch)
+      : e.metadata?.direct === true
+        ? 'direct'
+        : e.metadata?.direct === false
+          ? 'indirect'
+          : undefined;
+  return {
+    callerFile: normPath(s.filePath),
+    callerName: s.name,
+    callerStart: s.startLine,
+    calleeFile: normPath(t.filePath),
+    calleeName: t.name,
+    calleeStart: t.startLine,
+    dispatch,
+    synthesizedBy: synth != null ? String(synth) : undefined,
+  };
+}
 
 export function collectArkCalls(nodes: Node[], edges: Edge[]): IndexedCall[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -48,23 +71,23 @@ export function collectArkCalls(nodes: Node[], edges: Edge[]): IndexedCall[] {
     const s = byId.get(e.source);
     const t = byId.get(e.target);
     if (!s || !t) continue;
-    const dispatch =
-      e.metadata?.dispatch != null
-        ? String(e.metadata.dispatch)
-        : e.metadata?.direct === true
-          ? 'direct'
-          : e.metadata?.direct === false
-            ? 'indirect'
-            : undefined;
-    out.push({
-      callerFile: normPath(s.filePath),
-      callerName: s.name,
-      callerStart: s.startLine,
-      calleeFile: normPath(t.filePath),
-      calleeName: t.name,
-      calleeStart: t.startLine,
-      dispatch,
-    });
+    out.push(toIndexedCall(e, s, t));
+  }
+  return out;
+}
+
+/** HomeGraph heuristic / synthesized calls (non-arkanalyzer). */
+export function collectHeuristicCalls(nodes: Node[], edges: Edge[]): IndexedCall[] {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const out: IndexedCall[] = [];
+  for (const e of edges) {
+    if (e.kind !== 'calls') continue;
+    const synth = e.metadata?.synthesizedBy;
+    if (!synth || synth === 'arkanalyzer') continue;
+    const s = byId.get(e.source);
+    const t = byId.get(e.target);
+    if (!s || !t) continue;
+    out.push(toIndexedCall(e, s, t));
   }
   return out;
 }
@@ -81,6 +104,13 @@ export function edgeMatchesGold(call: IndexedCall, gold: CallEdgeGold): boolean 
     if (call.calleeName === gold.calleeName) return false;
   }
   if (gold.dispatch != null && call.dispatch != null && call.dispatch !== gold.dispatch) {
+    return false;
+  }
+  if (
+    gold.synthesizedBy != null &&
+    call.synthesizedBy != null &&
+    call.synthesizedBy !== gold.synthesizedBy
+  ) {
     return false;
   }
   return true;

@@ -11,6 +11,11 @@ struct PageB {
     runLibB(() => { this.count += 1; });
   }
 
+  /** Mutates @State — HG arkui-state synthesizes bumpCount → build. */
+  bumpCount(): void {
+    this.count += 1;
+  }
+
   build() {
     Column() {
       Text('PageB ' + this.count)

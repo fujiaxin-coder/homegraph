@@ -13,9 +13,10 @@
  *   D 同模块清晰 — this.foo()，不应靠 CFG 灌满
  *   E DummyMain/export lifecycle — Component → 子调用
  *   F import/heritage — 见 buckets/F-shape-contract.test.ts（形状合同，非 calls 边）
+ *   G HG heuristic calls — 仅 pin 本 fixture 索引里真实存在且源码可证的合成边
  */
 
-export type CallBucket = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
+export type CallBucket = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
 
 /** Stable call-edge gold key. Prefer startLine when known; name+file is required. */
 export type CallEdgeGold = {
@@ -28,6 +29,8 @@ export type CallEdgeGold = {
   calleeName: string;
   calleeStart?: number;
   dispatch?: string;
+  /** Expected metadata.synthesizedBy when bucket G */
+  synthesizedBy?: string;
 };
 
 export function goldByBucket(
@@ -353,12 +356,88 @@ export const BUCKET_A_MUST_NOT: CallEdgeGold[] = [
   },
 ];
 
+/**
+ * G — HomeGraph heuristic must（只写 fixture 里已验证存在的正确边）
+ * 不含：constructor 桥、aboutToAppear→build 的 arkui-state 过近似。
+ */
+export const BUCKET_G_MUST: CallEdgeGold[] = [
+  {
+    bucket: 'G',
+    note: 'interface-impl: IFaceA.tag → BaseA.tag',
+    synthesizedBy: 'interface-impl',
+    callerFile: 'mod_a/src/main/ets/BaseA.ets',
+    callerName: 'tag',
+    calleeFile: 'mod_a/src/main/ets/BaseA.ets',
+    calleeName: 'tag',
+    calleeStart: 6,
+  },
+  {
+    bucket: 'G',
+    note: 'interface-impl: IFaceB.tag → BaseB.tag',
+    synthesizedBy: 'interface-impl',
+    callerFile: 'mod_b/src/main/ets/BaseB.ets',
+    callerName: 'tag',
+    calleeFile: 'mod_b/src/main/ets/BaseB.ets',
+    calleeName: 'tag',
+    calleeStart: 6,
+  },
+  {
+    bucket: 'G',
+    note: 'interface-impl: IFaceC.tag → BaseC.tag',
+    synthesizedBy: 'interface-impl',
+    callerFile: 'mod_c/src/main/ets/BaseC.ets',
+    callerName: 'tag',
+    calleeFile: 'mod_c/src/main/ets/BaseC.ets',
+    calleeName: 'tag',
+    calleeStart: 6,
+  },
+  {
+    bucket: 'G',
+    note: 'interface-impl: IFaceD.tag → BaseD.tag',
+    synthesizedBy: 'interface-impl',
+    callerFile: 'mod_d/src/main/ets/BaseD.ets',
+    callerName: 'tag',
+    calleeFile: 'mod_d/src/main/ets/BaseD.ets',
+    calleeName: 'tag',
+    calleeStart: 6,
+  },
+  {
+    bucket: 'G',
+    note: 'interface-impl: IFaceE.tag → BaseE.tag',
+    synthesizedBy: 'interface-impl',
+    callerFile: 'mod_e/src/main/ets/BaseE.ets',
+    callerName: 'tag',
+    calleeFile: 'mod_e/src/main/ets/BaseE.ets',
+    calleeName: 'tag',
+    calleeStart: 6,
+  },
+  {
+    bucket: 'G',
+    note: 'arkui-state: PageA.bumpCount → build（@State 赋值）',
+    synthesizedBy: 'arkui-state',
+    callerFile: 'mod_a/src/main/ets/PageA.ets',
+    callerName: 'bumpCount',
+    calleeFile: 'mod_a/src/main/ets/PageA.ets',
+    calleeName: 'build',
+  },
+  {
+    bucket: 'G',
+    note: 'arkui-state: PageB.bumpCount → build（@State 赋值）',
+    synthesizedBy: 'arkui-state',
+    callerFile: 'mod_b/src/main/ets/PageB.ets',
+    callerName: 'bumpCount',
+    calleeFile: 'mod_b/src/main/ets/PageB.ets',
+    calleeName: 'build',
+  },
+];
+
 /** Flat lists for tooling / full-suite scans */
 export const CALLS_MUST: CallEdgeGold[] = [
   ...BUCKET_A_MUST,
   ...BUCKET_B_MUST,
   ...BUCKET_D_MUST,
   ...BUCKET_E_MUST,
+  ...BUCKET_G_MUST,
 ];
 
 export const CALLS_MUST_NOT: CallEdgeGold[] = [
