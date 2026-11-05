@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Improvements
+
+- Return and parameter types link to type nodes as `returns` / `type_of` edges (unique match only), so a type can be reverse-queried for methods that return or take it. Signature annotations are preferred; JSDoc `@returns` / `@param {Type}` fill gaps when the signature omits types. `nodes.return_type` is unchanged for chained-call inference (Spec 0066).
+
 ### Fixes
 
 - Fresh index store-worker: the main DB connection is closed before the worker opens (and reopened after it drains), so ArkTS Phase-A writes and the worker no longer share the file. Stops `SQLITE_BUSY` / 100% CPU hangs on MEMORY or non-WAL backends. Reclaim clears and re-ATTACHes `ohos_api` (stale in-memory path after reopen caused `no such table: ohos_api.nodes`). Store flush failures now abort the feed backpressure loop instead of spinning (Spec 0065).

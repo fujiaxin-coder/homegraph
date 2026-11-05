@@ -14,6 +14,7 @@ import {
   ExtractionResult,
   ExtractionError,
   UnresolvedReference,
+  ReferenceKind,
 } from '../types';
 import { getParser, detectLanguage, isLanguageSupported, isFileLevelOnlyLanguage } from './grammars';
 import { generateNodeId, getNodeText, getChildByField, getPrecedingDocstring } from './tree-sitter-helpers';
@@ -22,6 +23,7 @@ import { isGeneratedFile } from './generated-detection';
 import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types';
 import { EXTRACTORS } from './languages';
 import { stripCppTemplateArgs } from './languages/c-cpp';
+import { parseJsdocParams, parseJsdocReturns } from './jsdoc-type-tags';
 import { LiquidExtractor } from './liquid-extractor';
 import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
@@ -1555,6 +1557,8 @@ export class TreeSitterExtractor {
 
     // Extract type annotations (parameter types and return type)
     this.extractTypeAnnotations(node, funcNode.id);
+    // Spec 0066: JSDoc @returns/@param when the signature omitted types.
+    this.emitJsdocTypeFallbacks(funcNode.id, docstring);
 
     // Extract decorators applied to the function (rare in JS/TS but
     // present in Python `@decorator def f():` and Java/Kotlin
@@ -1777,6 +1781,8 @@ export class TreeSitterExtractor {
 
     // Extract type annotations (parameter types and return type)
     this.extractTypeAnnotations(node, methodNode.id);
+    // Spec 0066: JSDoc @returns/@param when the signature omitted types.
+    this.emitJsdocTypeFallbacks(methodNode.id, docstring);
 
     // Extract decorators (`@Get('/list') list() {}`).
     this.extractDecoratorsFor(node, methodNode.id);
@@ -5698,7 +5704,8 @@ export class TreeSitterExtractor {
 
   /**
    * Extract type references from type annotations on a function/method/field node.
-   * Creates 'references' edges for parameter types, return types, and field types.
+   * Spec 0066: parameter / field types → `type_of`; return types → `returns`.
+   * Dart / Scala mixed signature walks stay `references` (out of this Spec).
    */
   private extractTypeAnnotations(node: SyntaxNode, nodeId: string): void {
     if (!this.extractor) return;
@@ -5731,6 +5738,7 @@ export class TreeSitterExtractor {
     // `type_identifier` child, not a `type` field — so getChildByField below
     // finds neither. Walk the inner signature: param names / the method name are
     // `identifier` (not `type_identifier`), so only types surface.
+    // Spec 0066: leave as `references` (mixed return+param walk).
     if (this.language === 'dart') {
       let sig: SyntaxNode | undefined = node;
       if (node.type === 'method_signature') {
@@ -5743,7 +5751,7 @@ export class TreeSitterExtractor {
             c.type === 'factory_constructor_signature'
         ) ?? node;
       }
-      this.extractTypeRefsFromSubtree(sig, nodeId);
+      this.extractTypeRefsFromSubtree(sig, nodeId, 'references');
       return;
     }
 
@@ -5753,19 +5761,19 @@ export class TreeSitterExtractor {
     // just getChildByField's first match.
     if (this.language === 'scala') {
       for (const pc of node.namedChildren) {
-        if (pc.type === 'parameters') this.extractTypeRefsFromSubtree(pc, nodeId);
+        if (pc.type === 'parameters') this.extractTypeRefsFromSubtree(pc, nodeId, 'type_of');
       }
     } else {
       const params = getChildByField(node, this.extractor.paramsField || 'parameters');
       if (params) {
-        this.extractTypeRefsFromSubtree(params, nodeId);
+        this.extractTypeRefsFromSubtree(params, nodeId, 'type_of');
       }
     }
 
     // Extract return type annotation
     const returnType = getChildByField(node, this.extractor.returnField || 'return_type');
     if (returnType) {
-      this.extractTypeRefsFromSubtree(returnType, nodeId);
+      this.extractTypeRefsFromSubtree(returnType, nodeId, 'returns');
     }
 
     // Scala context bounds / type-parameter bounds: `def f[A: Monoid]`,
@@ -5780,7 +5788,7 @@ export class TreeSitterExtractor {
         (c: SyntaxNode) => c.type === 'type_parameters'
       );
       if (typeParams) {
-        this.extractTypeRefsFromSubtree(typeParams, nodeId);
+        this.extractTypeRefsFromSubtree(typeParams, nodeId, 'type_of');
       }
     }
 
@@ -5789,7 +5797,44 @@ export class TreeSitterExtractor {
       (c: SyntaxNode) => c.type === 'type_annotation'
     );
     if (typeAnnotation) {
-      this.extractTypeRefsFromSubtree(typeAnnotation, nodeId);
+      this.extractTypeRefsFromSubtree(typeAnnotation, nodeId, 'type_of');
+    }
+  }
+
+  /**
+   * Spec 0066: when the AST omitted return/param types, emit unresolved
+   * `returns` / `type_of` refs from JSDoc `@returns` / `@param {Type}`.
+   */
+  private emitJsdocTypeFallbacks(fromNodeId: string, docstring: string | undefined): void {
+    if (!docstring) return;
+    const hasReturns = this.unresolvedReferences.some(
+      (r) => r.fromNodeId === fromNodeId && r.referenceKind === 'returns'
+    );
+    if (!hasReturns) {
+      const ret = parseJsdocReturns(docstring);
+      if (ret) {
+        this.unresolvedReferences.push({
+          fromNodeId,
+          referenceName: ret,
+          referenceKind: 'returns',
+          line: 1,
+          column: 0,
+        });
+      }
+    }
+    const hasTypeOf = this.unresolvedReferences.some(
+      (r) => r.fromNodeId === fromNodeId && r.referenceKind === 'type_of'
+    );
+    if (!hasTypeOf) {
+      for (const p of parseJsdocParams(docstring)) {
+        this.unresolvedReferences.push({
+          fromNodeId,
+          referenceName: p.typeName,
+          referenceKind: 'type_of',
+          line: 1,
+          column: 0,
+        });
+      }
     }
   }
 
@@ -5994,22 +6039,27 @@ export class TreeSitterExtractor {
       (c: SyntaxNode) => c.type === 'type_annotation'
     );
     if (typeAnnotation) {
-      this.extractTypeRefsFromSubtree(typeAnnotation, nodeId);
+      this.extractTypeRefsFromSubtree(typeAnnotation, nodeId, 'type_of');
     }
   }
 
   /**
    * Recursively walk a subtree and extract all type_identifier references.
    * Handles unions, intersections, generics, arrays, etc.
+   * Spec 0066: callers pass `returns` / `type_of` for signature positions.
    */
-  private extractTypeRefsFromSubtree(node: SyntaxNode, fromNodeId: string): void {
+  private extractTypeRefsFromSubtree(
+    node: SyntaxNode,
+    fromNodeId: string,
+    referenceKind: ReferenceKind = 'references'
+  ): void {
     if (node.type === 'type_identifier') {
       const typeName = getNodeText(node, this.source);
       if (typeName && !this.BUILTIN_TYPES.has(typeName)) {
         this.unresolvedReferences.push({
           fromNodeId,
           referenceName: typeName,
-          referenceKind: 'references',
+          referenceKind,
           line: node.startPosition.row + 1,
           column: node.startPosition.column,
         });
@@ -6021,7 +6071,7 @@ export class TreeSitterExtractor {
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
       if (child) {
-        this.extractTypeRefsFromSubtree(child, fromNodeId);
+        this.extractTypeRefsFromSubtree(child, fromNodeId, referenceKind);
       }
     }
   }
