@@ -89,6 +89,7 @@ import {
 } from '../../arkui/migrate-semantics';
 import { collectPassagesForViewTreeNode } from '../../arkui/migrate-passage';
 import { generateNodeId } from '../tree-sitter-helpers';
+import { parseJsdocParams, parseJsdocReturns } from '../jsdoc-type-tags';
 import { buildRelaunchArgv, maxOldSpaceSizeFlag, resolveMaxOldSpaceSizeMb } from '../wasm-runtime-flags';
 import ignore, { type Ignore } from 'ignore';
 
@@ -4550,6 +4551,70 @@ class ArkTSAdapter {
     result.edges.push(arkEdge(parentId, methodNode.id, 'contains'));
     this.indexDecorators(result, methodNode.id, method, relativePath, language, line);
     this.indexNativeNapiCalls(method, methodNode.id, relativePath, language, result);
+    // Spec 0066: return/param types as resolvable `returns` / `type_of` refs.
+    this.emitMethodTypeEdges(
+      method,
+      methodNode.id,
+      relativePath,
+      language,
+      line,
+      returnType,
+      methodNode.docstring,
+      result
+    );
+  }
+
+  /**
+   * Spec 0066 — push unresolved `returns` / `type_of` from signature types,
+   * falling back to JSDoc `@returns` / `@param` when the signature lacks them.
+   */
+  private emitMethodTypeEdges(
+    method: ArkMethod,
+    fromNodeId: string,
+    relativePath: string,
+    language: Language,
+    line: number,
+    returnType: string | undefined,
+    docstring: string | undefined,
+    result: ExtractionResult
+  ): void {
+    const push = (referenceName: string, referenceKind: 'returns' | 'type_of'): void => {
+      result.unresolvedReferences.push({
+        fromNodeId,
+        referenceName,
+        referenceKind,
+        line,
+        column: 0,
+        filePath: relativePath,
+        language,
+      });
+    };
+
+    if (returnType) {
+      push(returnType, 'returns');
+    } else {
+      const fromDoc = parseJsdocReturns(docstring);
+      if (fromDoc) push(fromDoc, 'returns');
+    }
+
+    let emittedParam = false;
+    try {
+      for (const p of method.getParameters()) {
+        const raw = p.getType()?.toString();
+        const base = normalizeArktsReturnType(raw);
+        if (base) {
+          push(base, 'type_of');
+          emittedParam = true;
+        }
+      }
+    } catch {
+      // parameters unavailable
+    }
+    if (!emittedParam) {
+      for (const p of parseJsdocParams(docstring)) {
+        push(p.typeName, 'type_of');
+      }
+    }
   }
 
   private indexNativeNapiCalls(

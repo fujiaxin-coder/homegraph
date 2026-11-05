@@ -74,11 +74,11 @@ describe('TS/JS class field classification (#808)', () => {
       expect(kindOf('handleClick')).toBe('method');
       expect(kindOf('value')).toBe('method');
 
-      // Parity: the property keeps its type-annotation reference edge.
+      // Spec 0066: field type annotations resolve as `type_of` (not `references`).
       const fontsProp = cg.getNodesByName('fonts').find((n) => n.kind === 'property')!;
       const fontsRefs = cg
         .getOutgoingEdges(fontsProp.id)
-        .filter((e) => e.kind === 'references')
+        .filter((e) => e.kind === 'type_of')
         .map((e) => cg.getNode(e.target)?.name);
       expect(fontsRefs).toContain('Fonts');
 

@@ -188,13 +188,79 @@ export function crossesKnownFamily(a: string, b: string): boolean {
  *    both-known filter so `.vue`/`.svelte` (own tag) importing `.ts` survives.
  */
 function applyLanguageGate(candidates: Node[], ref: UnresolvedRef): Node[] {
-  if (ref.referenceKind === 'references' || ref.referenceKind === 'function_ref') {
+  if (
+    ref.referenceKind === 'references' ||
+    ref.referenceKind === 'function_ref' ||
+    ref.referenceKind === 'returns' ||
+    ref.referenceKind === 'type_of'
+  ) {
     return candidates.filter((c) => sameLanguageFamily(c.language, ref.language));
   }
   if (ref.referenceKind === 'imports') {
     return candidates.filter((c) => !crossesKnownFamily(c.language, ref.language));
   }
   return candidates;
+}
+
+/** Spec 0066 — targets for `returns` / `type_of` edges (type-as-node). */
+const TYPE_EDGE_KINDS = new Set([
+  'class',
+  'interface',
+  'type_alias',
+  'enum',
+  'struct',
+  'protocol',
+  'trait',
+  'component',
+]);
+
+/**
+ * Spec 0066: resolve a return/param type name to a unique type node.
+ * Ambiguous same-named types → no edge (wrong type hub is worse than none).
+ */
+export function matchTypeEdge(
+  ref: UnresolvedRef,
+  context: ResolutionContext
+): ResolvedRef | null {
+  if (ref.referenceKind !== 'returns' && ref.referenceKind !== 'type_of') return null;
+
+  const simple =
+    ref.referenceName.includes('.') || ref.referenceName.includes('::')
+      ? (ref.referenceName.split(/[.:]+/).filter(Boolean).pop() ?? ref.referenceName)
+      : ref.referenceName;
+
+  let candidates = context
+    .getNodesByName(simple)
+    .filter((n) => TYPE_EDGE_KINDS.has(n.kind) && n.id !== ref.fromNodeId);
+  candidates = applyLanguageGate(candidates, ref);
+  if (candidates.length === 0) return null;
+
+  // Qualified exact: unique_id-style `A.B.Foo` / `A::Foo` against qualifiedName.
+  if (ref.referenceName.includes('.') || ref.referenceName.includes('::')) {
+    const qnHits = candidates.filter(
+      (n) =>
+        n.qualifiedName === ref.referenceName ||
+        n.qualifiedName.endsWith(`.${simple}`) ||
+        n.qualifiedName.endsWith(`::${simple}`)
+    );
+    if (qnHits.length === 1) {
+      return {
+        original: ref,
+        targetNodeId: qnHits[0]!.id,
+        confidence: 0.95,
+        resolvedBy: 'qualified-name',
+      };
+    }
+  }
+
+  const ordered = preferCallSiteFile(candidates, ref.filePath);
+  if (ordered.length !== 1) return null;
+  return {
+    original: ref,
+    targetNodeId: ordered[0]!.id,
+    confidence: 0.9,
+    resolvedBy: 'exact-match',
+  };
 }
 
 /**
@@ -2298,6 +2364,11 @@ export function matchReference(
   // worse than none).
   if (ref.referenceKind === 'function_ref') {
     return matchFunctionRef(ref, context);
+  }
+
+  // Spec 0066: returns / type_of — unique type node only; no fuzzy fallthrough.
+  if (ref.referenceKind === 'returns' || ref.referenceKind === 'type_of') {
+    return matchTypeEdge(ref, context);
   }
 
   // ArkTS chained UI attributes — emitted with a leading dot (`.titleStyle`,

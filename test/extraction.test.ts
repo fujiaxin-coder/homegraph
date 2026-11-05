@@ -516,7 +516,8 @@ interface Hprops {
 `;
     const result = extractFromSource('HeaderFilter.ts', code);
 
-    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references');
+    // Spec 0066: property type positions emit `type_of` (not generic `references`).
+    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'type_of');
     expect(refs.some((r) => r.referenceName === 'IPage')).toBe(true);
     expect(refs.some((r) => r.referenceName === 'IOrderField')).toBe(true);
   });
@@ -532,9 +533,11 @@ interface MethodForm {
 `;
     const result = extractFromSource('MethodForm.ts', code);
 
-    const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references');
-    expect(refs.some((r) => r.referenceName === 'IPage')).toBe(true);
-    expect(refs.some((r) => r.referenceName === 'IOrderField')).toBe(true);
+    // Spec 0066: param → type_of, return → returns.
+    const typeOf = result.unresolvedReferences.filter((r) => r.referenceKind === 'type_of');
+    const returns = result.unresolvedReferences.filter((r) => r.referenceKind === 'returns');
+    expect(typeOf.some((r) => r.referenceName === 'IPage')).toBe(true);
+    expect(returns.some((r) => r.referenceName === 'IOrderField')).toBe(true);
   });
 
   it('extracts type references from in-body local variable annotations', () => {
@@ -567,8 +570,9 @@ export const handler = {
 `;
     const result = extractFromSource('inbody.ts', code);
 
+    // Spec 0066: local variable annotations emit `type_of`.
     const fooRefs = result.unresolvedReferences.filter(
-      (r) => r.referenceKind === 'references' && r.referenceName === 'Foo'
+      (r) => r.referenceKind === 'type_of' && r.referenceName === 'Foo'
     );
     // One per body scope: build(), K.run(), handler.handle().
     expect(fooRefs.length).toBeGreaterThanOrEqual(3);
