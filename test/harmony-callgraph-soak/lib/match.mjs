@@ -1,4 +1,4 @@
-/** Gold edge matching — L1-aligned names; soak-tolerant on lines / import→file. */
+/** Gold edge matching — soak-tolerant on lines / import→file. */
 
 export function normPath(p) {
   return String(p || '').replace(/\\/g, '/');
@@ -16,24 +16,21 @@ function baseName(p) {
   return n.replace(/\.(ets|ts|d\.ets)$/i, '');
 }
 
-/** imports: HG is import-node → file-node; gold often names the exported symbol as callee. */
 function importCalleeMatches(actual, gold) {
   const gName = gold.calleeName;
   const aName = actual.calleeName;
   if (nameMatches(aName, gName)) return true;
-  // file node "BroadCast.ts" vs gold "BroadCast"
   if (baseName(actual.calleeFile) === gName) return true;
   if (baseName(aName) === gName) return true;
   return false;
 }
 
-export function edgeKey(e) {
-  return `${e.kind || 'calls'}|${normPath(e.callerFile)}|${e.callerName}|${normPath(e.calleeFile)}|${e.calleeName}`;
-}
-
 export function goldLabel(g) {
-  return `[${g.bucket}] ${g.kind || 'calls'} ${g.callerFile}:${g.callerName} → ${g.calleeFile}:${g.calleeName}` +
-    (g.note ? ` (${g.note})` : '');
+  return (
+    `[${g.bucket}] ${g.kind || 'calls'} ${g.callerFile}:${g.callerName} → ${g.calleeFile}:${g.calleeName}` +
+    (g.evidence ? ` @${g.evidence}` : '') +
+    (g.note ? ` (${g.note})` : '')
+  );
 }
 
 export function edgeMatchesGold(actual, gold) {
@@ -48,8 +45,6 @@ export function edgeMatchesGold(actual, gold) {
   } else if (!nameMatches(actual.calleeName, gold.calleeName)) {
     return false;
   }
-
-  // startLine is advisory only (miner vs HG off-by-one is common) — do not fail match
   return true;
 }
 
@@ -57,14 +52,51 @@ export function findMatches(actuals, gold) {
   return actuals.filter((a) => edgeMatchesGold(a, gold));
 }
 
-/** Obvious non-call / SDK / UI gold noise — exclude from active L2 scores. */
+/** ArkTS AA call edges (missing synth counts as ark). */
+export function isArkCall(e) {
+  if ((e.kind || 'calls') !== 'calls') return false;
+  return !e.synthesizedBy || e.synthesizedBy === 'arkanalyzer';
+}
+
+/** HomeGraph heuristic / synthesized call edges (non-AA). */
+export function isHeuristicCall(e) {
+  if ((e.kind || 'calls') !== 'calls') return false;
+  return !!(e.synthesizedBy && e.synthesizedBy !== 'arkanalyzer');
+}
+
+export function isAnyCall(e) {
+  return (e.kind || 'calls') === 'calls';
+}
+
+/**
+ * @param {'ark'|'heuristic'|'all'} [provenance]
+ *   ark (default): AA calls only for kind=calls
+ *   heuristic: HG synthesized calls only
+ *   all: all calls (AA + HG heuristic)
+ * Non-call kinds always use full kind pool.
+ */
+export function poolForGold(actualEdges, gold, provenance = 'ark') {
+  const kind = gold.kind || 'calls';
+  if (kind !== 'calls') {
+    return actualEdges.filter((e) => (e.kind || 'calls') === kind);
+  }
+  if (provenance === 'heuristic') return actualEdges.filter(isHeuristicCall);
+  if (provenance === 'all') return actualEdges.filter(isAnyCall);
+  return actualEdges.filter(isArkCall);
+}
+
+export function provenanceOfCall(e) {
+  if (!isAnyCall(e)) return 'n/a';
+  if (isHeuristicCall(e)) return 'hg-heuristic';
+  return 'arkanalyzer';
+}
+
 const NOISE_CALLEES = new Set([
   'PanGesture',
   'PinchGesture',
   'LongPressGesture',
   'TapGesture',
   'SwipeGesture',
-  'RotationGesture',
   'List',
   'ListItem',
   'Column',
@@ -76,13 +108,22 @@ const NOISE_CALLEES = new Set([
   'LazyForEach',
   'MenuItem',
   'SubHeader',
+  'animateTo',
+  'animateToImmediately',
 ]);
 
 export function isNoisyGold(g) {
   if (NOISE_CALLEES.has(g.calleeName) || NOISE_CALLEES.has(g.callerName)) return true;
   const cf = normPath(g.callerFile || '');
   const tf = normPath(g.calleeFile || '');
-  if (cf.startsWith('demo/') || tf.startsWith('demo/')) return true;
-  if (/\/index\.ets$/i.test(tf) && /^[ei]$/i.test(g.calleeName)) return true; // HiLog barrel
+  if (/\/index\.ets$/i.test(tf) && /^[ei]$/i.test(g.calleeName)) return true;
   return false;
+}
+
+/** Eligible for P/R denominator: active + label true|false (not unknown) + not noise. */
+export function scoringEligible(g) {
+  if ((g.status || 'active') !== 'active') return false;
+  if (isNoisyGold(g)) return false;
+  const label = g.label || (g.polarity === 'must-not' ? 'false' : 'true');
+  return label === 'true' || label === 'false';
 }

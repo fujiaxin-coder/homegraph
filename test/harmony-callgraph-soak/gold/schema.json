@@ -5,18 +5,35 @@
   "type": "object",
   "required": ["bucket", "polarity", "edges"],
   "properties": {
-    "bucket": { "enum": ["A", "B", "C", "D", "E", "F"] },
+    "bucket": { "enum": ["A", "B", "C", "D", "E", "F", "G"] },
     "polarity": { "enum": ["must", "must-not"] },
     "targetRepo": { "type": "string" },
     "edges": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["bucket", "callerFile", "callerName", "calleeFile", "calleeName"],
+        "required": [
+          "bucket",
+          "kind",
+          "callerFile",
+          "callerName",
+          "calleeFile",
+          "calleeName",
+          "label",
+          "evidence"
+        ],
         "properties": {
-          "bucket": { "enum": ["A", "B", "C", "D", "E", "F"] },
+          "bucket": { "enum": ["A", "B", "C", "D", "E", "F", "G"] },
           "kind": {
-            "enum": ["calls", "imports", "extends", "implements", "references"]
+            "enum": [
+              "calls",
+              "imports",
+              "extends",
+              "implements",
+              "contains",
+              "references",
+              "instantiates"
+            ]
           },
           "callerFile": { "type": "string" },
           "callerName": { "type": "string" },
@@ -24,13 +41,27 @@
           "calleeFile": { "type": "string" },
           "calleeName": { "type": "string" },
           "calleeStart": { "type": "integer" },
+          "label": {
+            "enum": ["true", "false", "unknown"],
+            "description": "true=must fact, false=must-not fact, unknown excluded from P/R"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Source evidence as file:line (caller site preferred)"
+          },
+          "scope": {
+            "enum": ["cross-module", "cross-file", "same-file"]
+          },
+          "suite": { "enum": ["prod", "test"] },
+          "callerNodeKind": { "type": "string" },
+          "calleeNodeKind": { "type": "string" },
           "note": { "type": "string" },
           "status": {
             "enum": ["active", "deferred"],
-            "description": "deferred = known HG bug; excluded from L2 scores, listed in report"
+            "description": "deferred = known HG bug; excluded like unknown from scoring"
           },
           "provenance": { "type": "string" },
-          "bug": { "type": "string", "description": "Optional bug ticket id when deferred" }
+          "bug": { "type": "string" }
         }
       }
     }

@@ -46,7 +46,9 @@ export async function indexProject(root, { skipIndex = false } = {}) {
   const seen = new Set();
   for (const n of nodes) {
     for (const e of cg.getOutgoingEdges(n.id)) {
-      const k = `${e.source}\0${e.target}\0${e.kind}`;
+      // Keep AA + heuristic parallels between the same endpoints (provenance arms need both).
+      const synth = e.metadata?.synthesizedBy ?? '';
+      const k = `${e.source}\0${e.target}\0${e.kind}\0${synth}`;
       if (seen.has(k)) continue;
       seen.add(k);
       edges.push(e);
@@ -65,9 +67,11 @@ export async function indexProject(root, { skipIndex = false } = {}) {
       callerFile: norm(s.filePath),
       callerName: s.name,
       callerStart: s.startLine,
+      callerKind: s.kind,
       calleeFile: norm(t.filePath),
       calleeName: t.name,
       calleeStart: t.startLine,
+      calleeKind: t.kind,
       synthesizedBy: synth != null ? String(synth) : undefined,
       via: e.metadata?.via != null ? String(e.metadata.via) : undefined,
       dispatch:
@@ -87,6 +91,17 @@ export async function indexProject(root, { skipIndex = false } = {}) {
   for (const e of edges) edgesByKind[e.kind] = (edgesByKind[e.kind] || 0) + 1;
 
   const calls = actualEdges.filter((e) => e.kind === 'calls');
+  const arkCalls = calls.filter((c) => !c.synthesizedBy || c.synthesizedBy === 'arkanalyzer');
+  const heuristicCalls = calls.filter(
+    (c) => c.synthesizedBy && c.synthesizedBy !== 'arkanalyzer'
+  );
+  const arkDirect = arkCalls.filter((c) => c.dispatch === 'direct');
+  const arkIndirect = arkCalls.filter((c) => c.dispatch === 'indirect');
+  const callsBySynthesizedBy = {};
+  for (const c of calls) {
+    const k = c.synthesizedBy || 'arkanalyzer';
+    callsBySynthesizedBy[k] = (callsBySynthesizedBy[k] || 0) + 1;
+  }
   const fanout = new Map();
   for (const c of calls) {
     const k = `${c.calleeFile}\0${c.calleeName}`;
@@ -114,7 +129,19 @@ export async function indexProject(root, { skipIndex = false } = {}) {
     callEdges: calls.length,
     callDirect: calls.filter((c) => c.dispatch === 'direct').length,
     callIndirect: calls.filter((c) => c.dispatch === 'indirect').length,
-    callArk: calls.filter((c) => !c.synthesizedBy || c.synthesizedBy === 'arkanalyzer').length,
+    callArk: arkCalls.length,
+    callHeuristic: heuristicCalls.length,
+    arkCallsDirect: arkDirect.length,
+    arkCallsIndirect: arkIndirect.length,
+    arkCallsTotal: arkCalls.length,
+    arkCallsUnknownDispatch: arkCalls.filter(
+      (c) => c.dispatch !== 'direct' && c.dispatch !== 'indirect'
+    ).length,
+    callsByProvenanceClass: {
+      arkanalyzer: arkCalls.length,
+      'hg-heuristic': heuristicCalls.length,
+    },
+    callsBySynthesizedBy,
     fanoutTop,
     zeroCallFileCount: zeroCallFiles.length,
     zeroCallFilesSample: zeroCallFiles.slice(0, 20),
