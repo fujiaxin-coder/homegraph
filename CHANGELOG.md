@@ -9,6 +9,9 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.6.4] - 2026-11-05
+
 ### Improvements
 
 - Return and parameter types link to type nodes as `returns` / `type_of` edges (unique match only), so a type can be reverse-queried for methods that return or take it. Signature annotations are preferred; JSDoc `@returns` / `@param {Type}` fill gaps when the signature omits types. `nodes.return_type` is unchanged for chained-call inference (Spec 0066).
@@ -327,3 +330,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.6.1]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.1
 [1.6.2]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.2
 [1.6.3]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.3
+[1.6.4]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.4
