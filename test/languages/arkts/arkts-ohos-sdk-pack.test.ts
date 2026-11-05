@@ -8,14 +8,17 @@ import { resetExtractionContext } from '../../../src/extraction/context';
 import {
   OhosSdkInputError,
   findOhosSdkHome,
+  findOhosApiDtsTrigger,
   hasOpenHarmonyEts,
   indexOhosApiDb,
   isArchivePath,
+  isOhosApiSdkHome,
   listOhosApiEtsRoots,
   ohosApiDbFilename,
   ohosApiDbPackageName,
   parseOhosToolsVersionFromName,
   resetArkTSBatch,
+  resolveOhosApiKg,
   resolveOhosSdkInput,
   detectOhosCompileSdkVersion,
   discoverLocalOhosSdkCandidates,
@@ -39,6 +42,11 @@ function makeToolsTree(
   const sdkHome = path.join(root, 'command-line-tools', 'sdk', 'default');
   const etsApi = path.join(sdkHome, 'openharmony', 'ets', 'api');
   fs.mkdirSync(etsApi, { recursive: true });
+  // Spec 0067 gate: at least one `@ohos.*.d.ts` must exist.
+  fs.writeFileSync(
+    path.join(etsApi, '@ohos.sample.d.ts'),
+    'export declare function sampleFn(): void;\n'
+  );
   const fixture = options?.fixtureName ?? '@ohos.sample.d.ets';
   const body =
     fixture === '@ohos.fixture.d.ets'
@@ -47,7 +55,7 @@ function makeToolsTree(
 }
 export declare function fixtureMain(): void;
 `
-      : 'export declare function sampleFn(): void;\n';
+      : 'export declare function sampleFnEts(): void;\n';
   fs.writeFileSync(path.join(etsApi, fixture), body);
   fs.writeFileSync(path.join(root, `commandline-tools-linux-x64-${versionLabel}.marker`), '');
   if (options?.includeHms) {
@@ -108,8 +116,95 @@ describe('languages/arkts ohos-sdk-pack', () => {
     tempDirs.push(dir);
     const sdkHome = path.join(dir, 'sdk', 'default');
     fs.mkdirSync(path.join(sdkHome, 'openharmony', 'ets', 'api'), { recursive: true });
-    fs.writeFileSync(path.join(sdkHome, 'openharmony', 'ets', 'api', '@ohos.sample.d.ets'), 'export {};\n');
+    fs.writeFileSync(path.join(sdkHome, 'openharmony', 'ets', 'api', '@ohos.sample.d.ts'), 'export {};\n');
     expect(() => resolveOhosSdkInput({ inputPath: dir })).toThrow(OhosSdkInputError);
+  });
+
+  it('skips SDK trees that lack @ohos.*.d.ts', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-ohos-no-dts-'));
+    tempDirs.push(dir);
+    const sdkHome = path.join(dir, 'sdk', 'default');
+    fs.mkdirSync(path.join(sdkHome, 'openharmony', 'ets', 'api'), { recursive: true });
+    fs.writeFileSync(path.join(sdkHome, 'openharmony', 'ets', 'api', 'README.md'), 'no api\n');
+    fs.writeFileSync(path.join(sdkHome, 'openharmony', 'ets', 'api', '@ohos.only.d.ets'), 'export {};\n');
+    expect(hasOpenHarmonyEts(sdkHome)).toBe(true);
+    expect(findOhosApiDtsTrigger(sdkHome)).toBeNull();
+    expect(isOhosApiSdkHome(sdkHome)).toBe(false);
+    expect(findOhosSdkHome(dir)).toBeNull();
+    expect(() => resolveOhosSdkInput({ inputPath: dir, versionOverride: '6.0.1' })).toThrow(
+      /@ohos\.\*\.d\.ts|usable OHOS SDK/i
+    );
+  });
+
+  it('resolveOhosApiKg reports version reason and uses --sdk', () => {
+    const { root, sdkHome } = makeToolsTree('6.1.0.100');
+    fs.writeFileSync(
+      path.join(sdkHome, 'sdk-pkg.json'),
+      JSON.stringify({ data: { platformVersion: '6.1.0', version: '6.1.0.100' } })
+    );
+    const out = path.join(root, 'out', 'ohos-api-6.1.0.db');
+    const resolved = resolveOhosApiKg({
+      outputPath: out,
+      sdkInput: root,
+    });
+    expect(resolved.sdkHome).toBe(sdkHome);
+    expect(resolved.version).toBe('6.1.0');
+    expect(resolved.versionReason).toMatch(/platformVersion|--sdk/i);
+    expect(resolved.apiDtsTrigger).toMatch(/@ohos\.sample\.d\.ts$/);
+    expect(resolved.outputPath).toBe(path.resolve(out));
+  });
+
+  it('resolveOhosApiKg prefers explicit version and warns on platform mismatch', () => {
+    const { root, sdkHome } = makeToolsTree('6.1.0.100');
+    fs.writeFileSync(
+      path.join(sdkHome, 'sdk-pkg.json'),
+      JSON.stringify({ data: { platformVersion: '6.1.0', version: '6.1.0.100' } })
+    );
+    const resolved = resolveOhosApiKg({
+      outputPath: path.join(root, 'api.db'),
+      version: '6.0.1',
+      sdkInput: root,
+    });
+    expect(resolved.version).toBe('6.0.1');
+    expect(resolved.versionReason).toBe('explicit argument');
+    expect(resolved.warnings.some((w) => /differs from SDK platformVersion/i.test(w))).toBe(true);
+  });
+
+  it('resolveOhosApiKg discovers via HOMEGRAPH_OHOS_SDK when --sdk omitted', () => {
+    const { root, sdkHome } = makeToolsTree('6.0.1.100');
+    fs.writeFileSync(
+      path.join(sdkHome, 'sdk-pkg.json'),
+      JSON.stringify({ data: { platformVersion: '6.0.1', version: '6.0.1.100' } })
+    );
+    const prevSdk = process.env.HOMEGRAPH_OHOS_SDK;
+    const prevOhos = process.env.OHOS_SDK_HOME;
+    const prevDevEco = process.env.DEVECO_SDK_HOME;
+    const prevHos = process.env.HOS_SDK_HOME;
+    const prevVer = process.env.HOMEGRAPH_OHOS_API_VERSION;
+    process.env.HOMEGRAPH_OHOS_SDK = root;
+    delete process.env.OHOS_SDK_HOME;
+    delete process.env.DEVECO_SDK_HOME;
+    delete process.env.HOS_SDK_HOME;
+    delete process.env.HOMEGRAPH_OHOS_API_VERSION;
+    try {
+      const resolved = resolveOhosApiKg({
+        outputPath: path.join(root, 'api.db'),
+      });
+      expect(resolved.sdkHome).toBe(sdkHome);
+      expect(resolved.version).toBe('6.0.1');
+      expect(resolved.versionReason).toMatch(/HOMEGRAPH_OHOS_SDK|platformVersion/i);
+    } finally {
+      if (prevSdk === undefined) delete process.env.HOMEGRAPH_OHOS_SDK;
+      else process.env.HOMEGRAPH_OHOS_SDK = prevSdk;
+      if (prevOhos === undefined) delete process.env.OHOS_SDK_HOME;
+      else process.env.OHOS_SDK_HOME = prevOhos;
+      if (prevDevEco === undefined) delete process.env.DEVECO_SDK_HOME;
+      else process.env.DEVECO_SDK_HOME = prevDevEco;
+      if (prevHos === undefined) delete process.env.HOS_SDK_HOME;
+      else process.env.HOS_SDK_HOME = prevHos;
+      if (prevVer === undefined) delete process.env.HOMEGRAPH_OHOS_API_VERSION;
+      else process.env.HOMEGRAPH_OHOS_API_VERSION = prevVer;
+    }
   });
 
   it('names versioned API db files', () => {

@@ -19,7 +19,7 @@
  *   homegraph callers <symbol>   Find what calls a function/method
  *   homegraph callees <symbol>   Find what a function/method calls
  *   homegraph impact <symbol>    Analyze what code is affected by changing a symbol
- *   homegraph index-api <tools>   Build OHOS API db from command-line-tools
+ *   homegraph api-kg <output> [version]  Build OHOS API knowledge-graph db
  *   homegraph upgrade [version]  Update HomeGraph to the latest release
  */
 
@@ -3275,38 +3275,43 @@ evolveCommand
 registerAddonCommands(program, { success, info, warn, error });
 
 /**
- * homegraph index-api <input> [version]
- * Build a standalone OHOS API database from command-line-tools SDK.
+ * homegraph api-kg <output> [version]
+ * Build a standalone OHOS API knowledge-graph db from a local DevEco/OHOS SDK.
+ * `index-api` is a same-shape compatibility alias (Spec 0067).
  */
 program
-  .command('index-api <input> [version]')
-  .description('Index OpenHarmony SDK API declarations into a standalone SQLite db')
-  .option('-o, --output <path>', 'Output database path')
+  .command('api-kg <output> [version]')
+  .alias('index-api')
+  .description(
+    'Build OHOS / HarmonyOS API knowledge-graph db (output required; version and --sdk optional)'
+  )
+  .option('--sdk <path>', 'SDK or command-line-tools archive/directory (otherwise discover locally)')
   .option('-q, --quiet', 'Suppress progress output')
-  .action(async (input: string, versionArg: string | undefined, options: { output?: string; quiet?: boolean }) => {
+  .action(async (output: string, versionArg: string | undefined, options: { sdk?: string; quiet?: boolean }) => {
     try {
-      const { resolveOhosSdkInput, ohosApiDbFilename, indexOhosApiDb } = await import(
-        '../extraction/languages/arkts'
-      );
+      const { resolveOhosApiKg, indexOhosApiDb } = await import('../extraction/languages/arkts');
 
-      const resolved = resolveOhosSdkInput({
-        inputPath: input,
-        versionOverride: versionArg,
+      const resolved = resolveOhosApiKg({
+        outputPath: output,
+        version: versionArg,
+        sdkInput: options.sdk,
       });
 
-      const outputPath =
-        options.output ?? path.join(process.cwd(), ohosApiDbFilename(resolved.version));
-
       if (!options.quiet) {
-        info(`SDK home: ${resolved.sdkHome}`);
+        for (const w of resolved.warnings) {
+          warn(w);
+        }
         info(`API version: ${resolved.version}`);
-        info(`Output: ${outputPath}`);
+        info(`Version reason: ${resolved.versionReason}`);
+        info(`SDK home: ${resolved.sdkHome}`);
+        info(`API gate: ${resolved.apiDtsTrigger}`);
+        info(`Output: ${resolved.outputPath}`);
       }
 
       const result = await indexOhosApiDb({
         sdkHome: resolved.sdkHome,
         version: resolved.version,
-        outputPath,
+        outputPath: resolved.outputPath,
         onProgress: options.quiet
           ? undefined
           : (progress) => {
