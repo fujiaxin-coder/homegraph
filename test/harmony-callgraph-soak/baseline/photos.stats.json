@@ -1,0 +1,218 @@
+{
+  "commit": "282f7c21c72e110451897197b1254d5e3702fb15",
+  "updatedAt": "2026-11-05T06:24:16.444Z",
+  "stats": {
+    "nodes": 126891,
+    "edges": 179932,
+    "nodesByKind": {
+      "file": 2160,
+      "namespace": 75,
+      "function": 15966,
+      "variable": 248,
+      "class": 1591,
+      "method": 32009,
+      "property": 19868,
+      "constant": 27915,
+      "import": 21489,
+      "enum": 498,
+      "enum_member": 3237,
+      "interface": 712,
+      "type_alias": 323,
+      "struct": 444,
+      "component": 315,
+      "route": 41
+    },
+    "edgesByKind": {
+      "contains": 99756,
+      "calls": 56626,
+      "imports": 16124,
+      "references": 6283,
+      "extends": 782,
+      "implements": 182,
+      "instantiates": 179
+    },
+    "callEdges": 56626,
+    "arkCallsDirect": 45,
+    "arkCallsIndirect": 47091,
+    "arkCallsTotal": 53596,
+    "indirectDirectRatio": 1046.467,
+    "fanoutTop10Share": 0.1832,
+    "fanoutTop10Sum": 10373,
+    "zeroCallFileCount": 259,
+    "zeroCallFilesSample": [
+      "tools/index.ets",
+      "tools/src/main/global/HapVariables.ets",
+      "tools/src/main/global/pages/PageTitle.ets",
+      "tools/src/main/global/Variables.ets",
+      "tools/src/main/interface/ArkUI.ets",
+      "tools/src/main/interface/PointData.ets",
+      "tools/src/main/model/common/Empty.ets",
+      "tools/src/main/variables/FocusCtrl.ets",
+      "tools/src/ohosTest/ets/Config.test.ets",
+      "tools/src/ohosTest/ets/Dt.ets",
+      "tools/src/ohosTest/ets/MustAt.ets",
+      "tools/src/ohosTest/ets/Swipes.ets",
+      "tools/src/ohosTest/ets/Switcher.test.ets",
+      "tools/src/ohosTest/ets/TestConstants.ets",
+      "tools/src/ohosTest/ets/Ui.ets",
+      "tools/src/ohosTest/ets/utils/DtLog.ets",
+      "common/index.ets",
+      "common/src/main/ets/default/access/IIdlCommonService.ets",
+      "common/src/main/ets/default/access/ScenarioDefaultDataFactory.ets",
+      "common/src/main/ets/default/interface/ActionWrapper.ets"
+    ],
+    "fanoutTop": [
+      {
+        "file": "common/src/main/ets/default/utils/Log.ts",
+        "name": "info",
+        "inDegree": 4788
+      },
+      {
+        "file": "common/src/main/ets/default/utils/Log.ts",
+        "name": "error",
+        "inDegree": 1139
+      },
+      {
+        "file": "tools/src/ohosTest/ets/Comp.ets",
+        "name": "ratioAtLine",
+        "inDegree": 914
+      },
+      {
+        "file": "tools/src/ohosTest/ets/Dt.ets",
+        "name": "init",
+        "inDegree": 620
+      },
+      {
+        "file": "tools/src/main/utils/Log.ts",
+        "name": "info",
+        "inDegree": 566
+      },
+      {
+        "file": "imageEditor/common/src/main/ets/common/util/HiLog.ts",
+        "name": "i",
+        "inDegree": 556
+      },
+      {
+        "file": "common/src/main/ets/default/utils/DeviceInfo.ets",
+        "name": "isPc",
+        "inDegree": 504
+      },
+      {
+        "file": "common/src/main/ets/default/utils/Log.ts",
+        "name": "debug",
+        "inDegree": 447
+      },
+      {
+        "file": "common/src/main/ets/default/model/common/ScreenManager.ets",
+        "name": "getScreen",
+        "inDegree": 433
+      },
+      {
+        "file": "imageEditor/common/src/main/ets/common/util/PhotoAssetUtil.ets",
+        "name": "buildNewAssetDisplayName",
+        "inDegree": 406
+      },
+      {
+        "file": "common/src/main/ets/default/utils/BroadCast.ts",
+        "name": "emit",
+        "inDegree": 284
+      },
+      {
+        "file": "tools/src/ohosTest/ets/Factory.test.ets",
+        "name": "run",
+        "inDegree": 273
+      },
+      {
+        "file": "common/src/main/ets/default/access/UserFileManagerAccess.ets",
+        "name": "getInstance",
+        "inDegree": 260
+      },
+      {
+        "file": "common/src/main/ets/default/utils/Log.ts",
+        "name": "warn",
+        "inDegree": 256
+      },
+      {
+        "file": "imageEditor/common/src/main/cpp/sdk/libs/JsonCpp/include/json/value.h",
+        "name": "c_str",
+        "inDegree": 249
+      },
+      {
+        "file": "imageEditor/common/src/main/ets/common/util/types.ets",
+        "name": "constructor",
+        "inDegree": 231
+      },
+      {
+        "file": "imageEditor/common/src/main/cpp/sdk/src/Bridge/ohos/interface/JSArguments.hpp",
+        "name": "JSValue",
+        "inDegree": 229
+      },
+      {
+        "file": "imageEditor/common/src/main/ets/common/util/HiLog.ts",
+        "name": "e",
+        "inDegree": 217
+      },
+      {
+        "file": "tools/src/ohosTest/ets/AppStart.test.ets",
+        "name": "photos",
+        "inDegree": 215
+      },
+      {
+        "file": "common/src/main/ets/default/utils/ReportToBigDataUtil.ets",
+        "name": "report",
+        "inDegree": 211
+      },
+      {
+        "file": "tools/src/ohosTest/ets/Exit.ets",
+        "name": "browser",
+        "inDegree": 203
+      },
+      {
+        "file": "imageEditor/common/src/main/ets/common/util/FormatUtil.ts",
+        "name": "RGBAHexToR_G_B",
+        "inDegree": 203
+      },
+      {
+        "file": "common/src/main/ets/sdk/openharmony/ets/api/@ohos.bundle.bundleManager.d.ts",
+        "name": "SINGLETON",
+        "inDegree": 203
+      },
+      {
+        "file": "imageEditor/common/src/main/ets/common/util/PositionUtil.ets",
+        "name": "getCenterById",
+        "inDegree": 201
+      },
+      {
+        "file": "common/src/main/ets/default/model/browser/photo/MediaItem.ets",
+        "name": "constructor",
+        "inDegree": 185
+      },
+      {
+        "file": "tools/src/main/utils/Log.ts",
+        "name": "error",
+        "inDegree": 160
+      },
+      {
+        "file": "common/src/main/ets/default/model/browser/photo/MediaDataSource.ets",
+        "name": "constructor",
+        "inDegree": 149
+      },
+      {
+        "file": "common/src/main/ets/default/utils/DeviceInfo.ets",
+        "name": "isTv",
+        "inDegree": 148
+      },
+      {
+        "file": "common/src/main/ets/default/utils/LogUtils.ts",
+        "name": "info",
+        "inDegree": 134
+      },
+      {
+        "file": "common/src/main/ets/default/model/browser/album/AlbumInfo.ets",
+        "name": "constructor",
+        "inDegree": 122
+      }
+    ],
+    "etsFileNodes": 1639
+  }
+}

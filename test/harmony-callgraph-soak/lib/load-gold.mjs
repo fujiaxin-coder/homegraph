@@ -12,6 +12,7 @@ const BUCKET_FILES = [
   'D-same-module.json',
   'E-lifecycle-ui.json',
   'F-import-heritage.json',
+  'G-hg-heuristic.json',
 ];
 
 function readEdges(file) {
