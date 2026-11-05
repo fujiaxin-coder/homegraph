@@ -5196,15 +5196,16 @@ export function isArchivePath(inputPath: string): boolean {
   return OHOS_ARCHIVE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
-/** Locate `sdk/default` that contains `openharmony/ets` under an extracted tree. */
+/** Locate `sdk/default` that contains usable OHOS API decls (`@ohos.*.d.ts`) under a tree. */
 export function findOhosSdkHome(searchRoot: string): string | null {
   const resolved = path.resolve(searchRoot);
   const direct = [
     path.join(resolved, 'sdk', 'default'),
     path.join(resolved, 'command-line-tools', 'sdk', 'default'),
+    resolved,
   ];
   for (const candidate of direct) {
-    if (hasOpenHarmonyEts(candidate)) {
+    if (isOhosApiSdkHome(candidate)) {
       return candidate;
     }
   }
@@ -5217,8 +5218,11 @@ export function findOhosSdkHome(searchRoot: string): string | null {
     seen.add(dir);
 
     const sdkDefault = path.join(dir, 'sdk', 'default');
-    if (hasOpenHarmonyEts(sdkDefault)) {
+    if (isOhosApiSdkHome(sdkDefault)) {
       return sdkDefault;
+    }
+    if (isOhosApiSdkHome(dir)) {
+      return dir;
     }
 
     if (depth >= 5) continue;
@@ -5240,6 +5244,59 @@ export function findOhosSdkHome(searchRoot: string): string | null {
 
 export function hasOpenHarmonyEts(sdkHome: string): boolean {
   return fs.existsSync(path.join(sdkHome, 'openharmony', 'ets'));
+}
+
+/**
+ * True when `name` looks like an OpenHarmony API declaration file:
+ * `@ohos.` prefix (case-sensitive) + `.d.ts` extension (case-insensitive).
+ */
+export function isOhosApiDtsFileName(name: string): boolean {
+  return name.startsWith('@ohos.') && name.toLowerCase().endsWith('.d.ts');
+}
+
+/** Recursively find one `@ohos.*.d.ts` under an ets root; return path relative to that root. */
+export function findOhosApiDtsUnder(etsRoot: string): string | null {
+  let found: string | null = null;
+  function walk(dir: string): void {
+    if (found) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        walk(full);
+      } else if (entry.isFile() && isOhosApiDtsFileName(entry.name)) {
+        found = path.relative(etsRoot, full).replace(/\\/g, '/');
+        return;
+      }
+    }
+  }
+  walk(etsRoot);
+  return found;
+}
+
+/**
+ * API-kg / discover gate: SDK home must expose at least one `@ohos.*.d.ts`
+ * under openharmony/ets (or listed ets roots). Returns path relative to sdkHome.
+ */
+export function findOhosApiDtsTrigger(sdkHome: string): string | null {
+  for (const etsRoot of listOhosApiEtsRoots(sdkHome)) {
+    const hit = findOhosApiDtsUnder(etsRoot);
+    if (hit) {
+      return path.relative(sdkHome, path.join(etsRoot, hit)).replace(/\\/g, '/');
+    }
+  }
+  return null;
+}
+
+/** Layout + API declaration gate used by api-kg and local SDK discovery. */
+export function isOhosApiSdkHome(sdkHome: string): boolean {
+  return hasOpenHarmonyEts(sdkHome) && findOhosApiDtsTrigger(sdkHome) != null;
 }
 
 export function listOhosApiEtsRoots(sdkHome: string): string[] {
@@ -5294,21 +5351,29 @@ export function resolveOhosSdkInput(options: ResolveOhosSdkInputOptions): Resolv
   if (!sdkHome) {
     cleanup?.();
     throw new OhosSdkInputError(
-      `Could not find sdk/default/openharmony/ets under ${inputPath}. ` +
-        'Expected HarmonyOS command-line-tools layout.'
+      `Could not find a usable OHOS SDK (openharmony/ets with at least one @ohos.*.d.ts) under ${inputPath}.`
+    );
+  }
+
+  const dts = findOhosApiDtsTrigger(sdkHome);
+  if (!dts) {
+    cleanup?.();
+    throw new OhosSdkInputError(
+      `SDK at ${sdkHome} has openharmony/ets but no @ohos.*.d.ts API declarations.`
     );
   }
 
   const version =
     options.versionOverride?.trim() ||
+    readOhosSdkPlatformVersion(sdkHome) ||
     parseOhosToolsVersionFromName(inputPath) ||
     parseOhosToolsVersionFromName(searchRoot);
 
   if (!version) {
     cleanup?.();
     throw new OhosSdkInputError(
-      'Could not determine API db version. Use a path like commandline-tools-linux-x64-6.1.1.290.zip ' +
-        'or pass the version as the second argument.'
+      'Could not determine API db version. Pass [version], set HOMEGRAPH_OHOS_API_VERSION, ' +
+        'or use an SDK whose sdk-pkg.json / oh-uni-package.json has platformVersion.'
     );
   }
 
@@ -5317,6 +5382,205 @@ export function resolveOhosSdkInput(options: ResolveOhosSdkInputOptions): Resolv
     version,
     sourcePath: inputPath,
     cleanup,
+  };
+}
+
+export interface OhosApiKgResolveOptions {
+  /** Required output db path (file). */
+  outputPath: string;
+  /** Optional API version label (e.g. 6.0.1). */
+  version?: string;
+  /** Optional SDK / command-line-tools archive or directory. */
+  sdkInput?: string;
+  /** Working directory for weak build-profile fallback. Default process.cwd(). */
+  cwd?: string;
+}
+
+export interface ResolvedOhosApiKg {
+  sdkHome: string;
+  version: string;
+  /** Why this version was chosen (printed by the CLI). */
+  versionReason: string;
+  outputPath: string;
+  /** Relative `@ohos.*.d.ts` path that satisfied the gate. */
+  apiDtsTrigger: string;
+  sourcePath?: string;
+  cleanup?: () => void;
+  warnings: string[];
+}
+
+function compareOhosApiVersionDesc(a: string, b: string): number {
+  const pa = a.split('.').map((x) => Number.parseInt(x, 10) || 0);
+  const pb = b.split('.').map((x) => Number.parseInt(x, 10) || 0);
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const da = pa[i] ?? 0;
+    const db = pb[i] ?? 0;
+    if (da !== db) return db - da;
+  }
+  return b.localeCompare(a);
+}
+
+/**
+ * Resolve target SDK + version for `homegraph api-kg` (standalone; project optional).
+ * Only SDK homes that contain at least one `@ohos.*.d.ts` are considered.
+ */
+export function resolveOhosApiKg(options: OhosApiKgResolveOptions): ResolvedOhosApiKg {
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  const outputPath = path.resolve(options.outputPath);
+  const warnings: string[] = [];
+
+  const explicitRaw = options.version?.trim();
+  const envVersionRaw = process.env.HOMEGRAPH_OHOS_API_VERSION?.trim();
+  const preferredVersion =
+    (explicitRaw ? normalizeOhosApiVersion(explicitRaw) ?? explicitRaw : null) ||
+    (envVersionRaw ? normalizeOhosApiVersion(envVersionRaw) ?? envVersionRaw : null) ||
+    null;
+  const preferredReason = explicitRaw
+    ? 'explicit argument'
+    : envVersionRaw
+      ? 'env HOMEGRAPH_OHOS_API_VERSION'
+      : null;
+
+  if (options.sdkInput?.trim()) {
+    const resolved = resolveOhosSdkInput({
+      inputPath: options.sdkInput.trim(),
+      versionOverride: preferredVersion ?? undefined,
+    });
+    const apiDtsTrigger = findOhosApiDtsTrigger(resolved.sdkHome);
+    if (!apiDtsTrigger) {
+      resolved.cleanup?.();
+      throw new OhosSdkInputError(
+        `SDK at ${resolved.sdkHome} has no @ohos.*.d.ts — not a usable API tree.`
+      );
+    }
+    const platform = readOhosSdkPlatformVersion(resolved.sdkHome);
+    if (preferredVersion && platform && platform !== preferredVersion) {
+      warnings.push(
+        `Preferred version ${preferredVersion} differs from SDK platformVersion ${platform} at ${resolved.sdkHome}`
+      );
+    }
+    let versionReason: string;
+    if (preferredReason) {
+      versionReason = preferredReason;
+    } else if (platform && platform === resolved.version) {
+      versionReason = `SDK platformVersion at --sdk (${resolved.sdkHome})`;
+    } else {
+      versionReason = `resolved from --sdk path (${resolved.sdkHome})`;
+    }
+    return {
+      sdkHome: resolved.sdkHome,
+      version: resolved.version,
+      versionReason,
+      outputPath,
+      apiDtsTrigger,
+      sourcePath: resolved.sourcePath,
+      cleanup: resolved.cleanup,
+      warnings,
+    };
+  }
+
+  type Cand = { sdkHome: string; version: string | null; source: string };
+  const candidates: Cand[] = [];
+  const seen = new Set<string>();
+
+  for (const c of discoverLocalOhosSdkCandidates()) {
+    if (seen.has(c.sdkHome)) continue;
+    if (!isOhosApiSdkHome(c.sdkHome)) continue;
+    seen.add(c.sdkHome);
+    let source = 'local SDK scan';
+    for (const key of ['HOMEGRAPH_OHOS_SDK', 'OHOS_SDK_HOME', 'DEVECO_SDK_HOME', 'HOS_SDK_HOME'] as const) {
+      const root = process.env[key]?.trim();
+      if (!root) continue;
+      const resolvedRoot = path.resolve(root);
+      if (
+        c.sdkHome === resolvedRoot ||
+        c.sdkHome.startsWith(resolvedRoot + path.sep) ||
+        expandLocalOhosSdkHomes(root).includes(c.sdkHome)
+      ) {
+        source = `env ${key}`;
+        break;
+      }
+    }
+    candidates.push({ sdkHome: c.sdkHome, version: c.version, source });
+  }
+
+  if (candidates.length === 0) {
+    throw new OhosSdkInputError(
+      'No usable OHOS SDK found (need openharmony/ets with at least one @ohos.*.d.ts). ' +
+        'Pass --sdk <path>, or set HOMEGRAPH_OHOS_SDK / OHOS_SDK_HOME / DEVECO_SDK_HOME.'
+    );
+  }
+
+  let chosen: Cand;
+  let version: string;
+  let versionReason: string;
+
+  if (preferredVersion) {
+    const match = candidates.find((c) => c.version === preferredVersion);
+    if (!match) {
+      const listed = candidates
+        .map((c) => `${c.version ?? '?'} @ ${c.sdkHome}`)
+        .join('; ');
+      throw new OhosSdkInputError(
+        `No SDK matching version ${preferredVersion} with @ohos.*.d.ts. Candidates: ${listed}`
+      );
+    }
+    chosen = match;
+    version = preferredVersion;
+    versionReason = `${preferredReason} (SDK from ${chosen.source})`;
+  } else {
+    const withVer = candidates.filter((c): c is Cand & { version: string } => !!c.version);
+    if (withVer.length === 0) {
+      throw new OhosSdkInputError(
+        'Found SDK tree(s) with @ohos.*.d.ts but no platformVersion — pass [version] explicitly.'
+      );
+    }
+    const fromProfile = detectOhosCompileSdkVersion(cwd);
+    const profileMatch = fromProfile
+      ? withVer.find((c) => c.version === fromProfile)
+      : undefined;
+    if (profileMatch) {
+      chosen = profileMatch;
+      version = fromProfile!;
+      versionReason = 'cwd build-profile.json5 compileSdkVersion (weak fallback)';
+    } else if (withVer.length === 1) {
+      const only = withVer[0]!;
+      chosen = only;
+      version = only.version;
+      versionReason = `SDK platformVersion via ${only.source}`;
+    } else {
+      withVer.sort((a, b) => compareOhosApiVersionDesc(a.version, b.version));
+      const newest = withVer[0]!;
+      chosen = newest;
+      version = newest.version;
+      versionReason = `newest local SDK platformVersion via ${newest.source} (among ${withVer.length} candidates)`;
+      warnings.push(
+        `Multiple SDKs found; auto-selected ${version}. Pass [version] to pin.`
+      );
+    }
+  }
+
+  const platform = chosen.version;
+  if (preferredVersion && platform && platform !== preferredVersion) {
+    warnings.push(
+      `Preferred version ${preferredVersion} differs from SDK platformVersion ${platform} at ${chosen.sdkHome}`
+    );
+  }
+
+  const apiDtsTrigger = findOhosApiDtsTrigger(chosen.sdkHome);
+  if (!apiDtsTrigger) {
+    throw new OhosSdkInputError(`SDK at ${chosen.sdkHome} lost @ohos.*.d.ts gate unexpectedly.`);
+  }
+
+  return {
+    sdkHome: chosen.sdkHome,
+    version,
+    versionReason,
+    outputPath,
+    apiDtsTrigger,
+    sourcePath: chosen.sdkHome,
+    warnings,
   };
 }
 
@@ -5437,8 +5701,10 @@ function countOhosApiSources(etsRoot: string): number {
 /** Index OpenHarmony (and optional HMS) SDK API declarations into a SQLite db. */
 export async function indexOhosApiDb(options: OhosApiIndexOptions): Promise<IndexResult> {
   const sdkHome = path.resolve(options.sdkHome);
-  if (!hasOpenHarmonyEts(sdkHome)) {
-    throw new Error(`SDK home is missing openharmony/ets: ${sdkHome}`);
+  if (!isOhosApiSdkHome(sdkHome)) {
+    throw new Error(
+      `SDK home is missing openharmony/ets with @ohos.*.d.ts API decls: ${sdkHome}`
+    );
   }
 
   const etsRoots = listOhosApiEtsRoots(sdkHome);
@@ -5788,14 +6054,14 @@ export function readOhosSdkPlatformVersion(sdkHome: string): string | null {
   return normalizeOhosApiVersion(path.basename(sdkHome));
 }
 
-/** Expand a user/env path into concrete sdk/default-style homes that contain openharmony/ets. */
+/** Expand a user/env path into concrete sdk homes that pass the `@ohos.*.d.ts` gate. */
 function expandLocalOhosSdkHomes(input: string): string[] {
   const resolved = path.resolve(input);
   if (!fs.existsSync(resolved)) return [];
 
   const homes: string[] = [];
   const push = (p: string) => {
-    if (hasOpenHarmonyEts(p)) homes.push(p);
+    if (isOhosApiSdkHome(p)) homes.push(p);
   };
 
   push(resolved);
@@ -5999,7 +6265,7 @@ export async function ensureOhosApiDb(
       code: 'ohos_api_db_missing',
       message:
         `${ohosApiDbFilename(version)} is not under ~/.homegraph/api/ yet. ` +
-        'Re-run `homegraph init -i` / `homegraph index` with a local OHOS SDK, or `homegraph index-api <sdk>`. ' +
+        'Re-run `homegraph init -i` / `homegraph index` with a local OHOS SDK, or `homegraph api-kg <output> --sdk <sdk>`. ' +
         'Explore will use project code only.',
     };
   }
