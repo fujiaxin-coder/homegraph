@@ -224,8 +224,16 @@ export class FileLock {
   private lockPath: string;
   private held = false;
 
-  /** Locks older than this are considered stale regardless of PID status */
-  private static readonly STALE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+  /**
+   * PID-reuse staleness floor. The lock holder NEVER refreshes the lock's
+   * mtime, so mtime is NOT a liveness signal. This floor exists only to
+   * handle the rare case where a lock file's PID has been recycled by an
+   * unrelated process: if the file is older than this AND the PID is alive,
+   * assume the "holder" is actually a recycled-PID impostor and steal the
+   * lock. Long legitimate operations (multi-minute indexes) must never be
+   * pre-empted by mtime alone.
+   */
+  private static readonly STALE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes, PID-reuse floor only
 
   constructor(lockPath: string) {
     this.lockPath = lockPath;
@@ -243,16 +251,23 @@ export class FileLock {
         const stat = fs.statSync(this.lockPath);
         const lockAge = Date.now() - stat.mtimeMs;
 
-        // Treat locks older than the timeout as stale, regardless of PID
-        if (lockAge < FileLock.STALE_TIMEOUT_MS && !isNaN(pid) && this.isProcessAlive(pid)) {
+        // Liveness is PID-based, NOT age-based. The holder never refreshes the
+        // lock's mtime, so a long-running index (minutes) must never be
+        // pre-empted just because the file is "old". We only steal the lock
+        // when the PID is dead/unparseable, or when the file is SO old that the
+        // PID is probably recycled (PID-reuse floor; see STALE_TIMEOUT_MS).
+        if (isNaN(pid)) {
+          // Unparseable lock — treat as stale and remove it.
+          fs.unlinkSync(this.lockPath);
+        } else if (this.isProcessAlive(pid) && lockAge < FileLock.STALE_TIMEOUT_MS) {
           throw new Error(
-            `HomeGraph database is locked by another process (PID ${pid}). ` +
-            `If this is stale, run 'homegraph unlock' or delete ${this.lockPath}`
+            `HomeGraph database is locked by another process (PID ${pid}, lock age ${Math.round(lockAge / 1000)}s). ` +
+            `If the process is truly gone, wait for it to exit, run 'homegraph unlock', or delete ${this.lockPath}`
           );
+        } else {
+          // PID is dead, or the lock predates the PID-reuse floor — stale.
+          fs.unlinkSync(this.lockPath);
         }
-
-        // Stale lock (dead process or timed out) - remove it
-        fs.unlinkSync(this.lockPath);
       } catch (err) {
         if (err instanceof Error && err.message.includes('locked by another')) {
           throw err;
@@ -298,6 +313,9 @@ export class FileLock {
   /**
    * True when another live process holds this lock file (Spec 0032).
    * Does not acquire; stale/dead locks count as not held.
+   *
+   * Liveness is PID-based. mtime is only consulted as the PID-reuse floor
+   * (an ancient lock whose PID happens to be alive is presumed recycled).
    */
   isHeldByOther(): boolean {
     if (this.held) return false;
@@ -305,11 +323,13 @@ export class FileLock {
     try {
       const content = fs.readFileSync(this.lockPath, 'utf-8').trim();
       const pid = parseInt(content, 10);
+      if (isNaN(pid)) return false;
+      if (pid === process.pid) return false;
+      if (!this.isProcessAlive(pid)) return false;
       const stat = fs.statSync(this.lockPath);
       const lockAge = Date.now() - stat.mtimeMs;
-      if (lockAge >= FileLock.STALE_TIMEOUT_MS || isNaN(pid)) return false;
-      if (pid === process.pid) return false;
-      return this.isProcessAlive(pid);
+      // Live PID + older than the reuse floor ⇒ recycled-PID impostor, not a holder.
+      return lockAge < FileLock.STALE_TIMEOUT_MS;
     } catch {
       return false;
     }
@@ -340,13 +360,67 @@ export class FileLock {
   }
 
   /**
-   * Check if a process is still running
+   * Read-only snapshot of who holds this lock, for diagnostics (`homegraph
+   * status --json`). Never mutates the lock file, never throws. `held` is true
+   * only when another LIVE process owns it (same PID-reuse rule as
+   * {@link isHeldByOther}).
+   */
+  inspect(): {
+    present: boolean;
+    held: boolean;
+    pid: number | null;
+    ageMs: number | null;
+    stale: boolean;
+  } {
+    let present = false;
+    try {
+      present = fs.existsSync(this.lockPath);
+    } catch {
+      return { present: false, held: false, pid: null, ageMs: null, stale: false };
+    }
+    if (!present) return { present: false, held: false, pid: null, ageMs: null, stale: false };
+
+    try {
+      const content = fs.readFileSync(this.lockPath, 'utf-8').trim();
+      const pid = parseInt(content, 10);
+      const stat = fs.statSync(this.lockPath);
+      const ageMs = Date.now() - stat.mtimeMs;
+      if (isNaN(pid)) {
+        // Unparseable ⇒ a leftover we would clear on acquire.
+        return { present: true, held: false, pid: null, ageMs, stale: true };
+      }
+      if (pid === process.pid) {
+        // Held by this very process — not a foreign holder.
+        return { present: true, held: false, pid, ageMs, stale: false };
+      }
+      const alive = this.isProcessAlive(pid);
+      const recycled = alive && ageMs >= FileLock.STALE_TIMEOUT_MS;
+      return {
+        present: true,
+        held: alive && !recycled,
+        pid,
+        ageMs,
+        stale: !alive || recycled,
+      };
+    } catch {
+      return { present: true, held: false, pid: null, ageMs: null, stale: true };
+    }
+  }
+
+  /**
+   * Check if a process is still running.
+   *
+   * EPERM means the PID exists but belongs to another user — treat it as ALIVE
+   * (same convention as `mcp/daemon.ts:isProcessAlive`). Treating EPERM as dead
+   * would let us steal a live holder's lock.
    */
   private isProcessAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EPERM') return true; // exists, just not ours to signal
       return false;
     }
   }

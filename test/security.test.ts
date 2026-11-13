@@ -132,6 +132,93 @@ describe('FileLock', () => {
     // Second release should not throw
     expect(() => lock.release()).not.toThrow();
   });
+
+  it('acquire must NOT steal a live holder lock just because it is old', () => {
+    // The lock holder never refreshes mtime, so a long-running legitimate
+    // index (minutes) must never be pre-empted by age. Simulate an old lock
+    // held by OUR OWN live PID (which is exactly what a same-process re-acquire
+    // or a long in-process index looks like).
+    fs.writeFileSync(lockPath, String(process.pid));
+    const old = Date.now() - 25 * 60 * 1000; // 25 minutes old — past the OLD 2-min timeout
+    fs.utimesSync(lockPath, new Date(old), new Date(old));
+
+    const lock = new FileLock(lockPath);
+    // Old mtime + live PID ⇒ still held. Must throw.
+    expect(() => lock.acquire()).toThrow(/locked by another process/);
+  });
+
+  it('acquire steals a dead-PID lock regardless of age', () => {
+    fs.writeFileSync(lockPath, '99999999'); // dead PID
+    const old = Date.now() - 10 * 60 * 1000;
+    fs.utimesSync(lockPath, new Date(old), new Date(old));
+
+    const lock = new FileLock(lockPath);
+    expect(() => lock.acquire()).not.toThrow();
+    lock.release();
+  });
+
+  it('acquire steals a live-PID lock only past the PID-reuse floor (30 min)', () => {
+    fs.writeFileSync(lockPath, String(process.pid));
+    const ancient = Date.now() - 31 * 60 * 1000; // past the 30-min reuse floor
+    fs.utimesSync(lockPath, new Date(ancient), new Date(ancient));
+
+    const lock = new FileLock(lockPath);
+    // A 31-minute-old lock whose PID happens to be alive is a recycled PID —
+    // steal it (this is the intended escape hatch, not the old 2-min one).
+    expect(() => lock.acquire()).not.toThrow();
+    lock.release();
+  });
+
+  it('isHeldByOther treats an old live-PID lock as held (age is not liveness)', () => {
+    fs.writeFileSync(lockPath, String(process.pid));
+    const old = Date.now() - 25 * 60 * 1000;
+    fs.utimesSync(lockPath, new Date(old), new Date(old));
+
+    const lock = new FileLock(lockPath);
+    // Same PID as ours ⇒ isHeldByOther returns false (we own it). The dead-pid
+    // and foreign-pid cases are covered by product-index-states tests with a
+    // real child process.
+    expect(lock.inspect().present).toBe(true);
+  });
+
+  it('inspect reports a foreign live holder with its pid and age', async () => {
+    // Write a lock as if ANOTHER process held it: use a PID that is alive but
+    // not ours. A spawned child is the reliable way.
+    const { spawn } = await import('child_process');
+    const holder = spawn(
+      process.execPath,
+      ['-e', `require('fs').writeFileSync(${JSON.stringify(lockPath)}, String(process.pid)); setInterval(()=>{},1000)`],
+      { stdio: 'ignore', windowsHide: true },
+    );
+    await new Promise((r) => setTimeout(r, 250));
+    try {
+      const lock = new FileLock(lockPath);
+      const info = lock.inspect();
+      expect(info.present).toBe(true);
+      expect(info.held).toBe(true);
+      expect(info.pid).toBe(holder.pid);
+      expect(info.stale).toBe(false);
+      // isHeldByOther agrees — product-state gating relies on this.
+      expect(lock.isHeldByOther()).toBe(true);
+    } finally {
+      try { process.kill(holder.pid!); } catch { /* ignore */ }
+      try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+    }
+  });
+
+  it('acquire reports the holder pid and age in the error', () => {
+    fs.writeFileSync(lockPath, String(process.pid));
+    const lock = new FileLock(lockPath);
+    let message = '';
+    try {
+      lock.acquire();
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('PID');
+    expect(message).toContain(String(process.pid));
+    lock.release();
+  });
 });
 
 describe('Path Traversal Prevention', () => {

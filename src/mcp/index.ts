@@ -318,8 +318,13 @@ export class MCPServer {
       this.session = null;
     }
     if (this.engine) {
-      this.engine.stop();
-      this.engine = null;
+      // Direct mode has no background build, so this resolves immediately;
+      // awaiting keeps teardown ordered with process.exit below.
+      void Promise.resolve(this.engine.stop()).finally(() => {
+        this.engine = null;
+        process.exit(0);
+      });
+      return;
     }
     process.exit(0);
   }

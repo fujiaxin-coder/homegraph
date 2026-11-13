@@ -98,6 +98,15 @@ export class MCPEngine {
   private deferredAutoInitRoot: string | null = null;
   private deferProbeTimer: ReturnType<typeof setInterval> | null = null;
   private deferAutoInitPromise: Promise<boolean> | null = null;
+  /**
+   * Cancels the background full build started by auto-init. `stop()` aborts
+   * this and awaits {@link backgroundBuildPromise} so the DB is never closed
+   * mid-write when the daemon exits on idle (product rule: closing the host
+   * must release memory, but an interrupted index must land in a consistent
+   * state, never a corrupted one).
+   */
+  private buildAbort: AbortController | null = null;
+  private backgroundBuildPromise: Promise<void> | null = null;
 
   constructor(opts: MCPEngineOptions = {}) {
     this.opts = { watch: opts.watch ?? true, queryPool: opts.queryPool ?? false, rootFloor: opts.rootFloor ?? null };
@@ -246,9 +255,15 @@ export class MCPEngine {
   /**
    * Close everything. Used on graceful daemon shutdown (SIGTERM/idle timeout)
    * and on direct-mode stop. Idempotent.
+   *
+   * If a background full build is running, ABORT it first and await it so the
+   * SQLite handle is only closed at a batch boundary (the index yields between
+   * file batches) — closing mid-write could corrupt the DB. Returns the
+   * abort-and-await promise so callers (daemon idle exit) can wait before the
+   * process exits.
    */
-  stop(): void {
-    if (this.closed) return;
+  stop(): Promise<void> {
+    if (this.closed) return Promise.resolve();
     this.closed = true;
     this.clearDeferProbe();
     // Detach + terminate the worker pool first so no tool call routes to a
@@ -258,11 +273,27 @@ export class MCPEngine {
       void this.queryPool.destroy();
       this.queryPool = null;
     }
-    this.toolHandler.closeAll();
-    if (this.cg) {
-      try { this.cg.close(); } catch { /* ignore */ }
-      this.cg = null;
+
+    const build = this.backgroundBuildPromise;
+    if (this.buildAbort) {
+      try { this.buildAbort.abort(); } catch { /* ignore */ }
+      this.buildAbort = null;
     }
+
+    this.toolHandler.closeAll();
+
+    const finish = (): void => {
+      if (this.cg) {
+        try { this.cg.close(); } catch { /* ignore */ }
+        this.cg = null;
+      }
+    };
+    // Close the DB only after an in-flight index has settled at a yield point.
+    if (build) {
+      return build.then(finish, finish);
+    }
+    finish();
+    return Promise.resolve();
   }
 
   private async doInitialize(searchFrom: string, floor?: string): Promise<void> {
@@ -363,9 +394,11 @@ export class MCPEngine {
       this.cg = cg;
       this.projectPath = root;
       this.toolHandler.setDefaultHomeGraph(cg);
-      // Defer watch/catch-up until the full build finishes so auto-sync does not
-      // contend with the same-process writer (Spec 0032).
-      this.maybeStartPool(root);
+      // Defer watch/catch-up AND the query pool until the full build finishes.
+      // Starting the pool before the build would open a second connection onto
+      // the fresh MEMORY-journal DB and deadlock the store-worker's exclusive
+      // write ("database is locked") — Spec 0065's exclusive handoff only
+      // covers the main connection, not pool workers.
       // Fast build in-process (seconds). Full build continues in *this* process
       // as a background task — no sibling CLI (avoids second writer / lock fights).
       // indexAll already yields between batches so MCP stdio can still answer
@@ -517,8 +550,12 @@ export class MCPEngine {
       projectRoot = this.projectPath ?? undefined;
     }
     logLifecycle('index.start', { projectRoot, via: 'auto-init' });
-    void cg
-      .indexAll()
+    // Abortable so an idle/signal shutdown can stop the build at the next
+    // batch boundary instead of closing the DB mid-write (see stop()).
+    this.buildAbort = new AbortController();
+    const signal = this.buildAbort.signal;
+    const run = cg
+      .indexAll({ signal })
       .then((result) => {
         const files =
           result && typeof result === 'object' && 'filesIndexed' in result
@@ -550,6 +587,11 @@ export class MCPEngine {
       })
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
+        // Aborted shutdown is expected — log at debug level, don't flip phase.
+        if (signal.aborted) {
+          process.stderr.write('[HomeGraph MCP] Full build aborted on shutdown\n');
+          return;
+        }
         process.stderr.write(`[HomeGraph MCP] Full build failed: ${msg}\n`);
         logLifecycleError('index.fail', { projectRoot, msg });
         try {
@@ -570,11 +612,17 @@ export class MCPEngine {
         }
         this.startWatchingAfterAutoInit();
       });
+    this.backgroundBuildPromise = run;
   }
 
   /** Enable watch + catch-up once auto-init full build is done (or gave up). */
   private startWatchingAfterAutoInit(): void {
     if (this.watcherStarted) return;
+    // Start the query pool only AFTER the full build finished — opening worker
+    // connections while the fresh index's store worker owns the DB exclusively
+    // deadlocks it (see runAutoInitCreate). Pool start is idempotent.
+    const poolRoot = this.cg?.getProjectRoot() ?? this.projectPath;
+    if (poolRoot) this.maybeStartPool(poolRoot);
     this.startWatching();
     this.catchUpSync();
   }

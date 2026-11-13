@@ -67,8 +67,19 @@ const BUILD_IDLE_POLL_MS = 2_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 
 /**
+ * Ceiling on how long the daemon waits (with 0 clients) for an in-flight full
+ * index before giving up. Spec 0047 waited forever, which pinned memory when
+ * the last window closed mid-build and the build wedged or took pathological
+ * minutes. The interrupted index is non-destructive to recover: it leaves
+ * `index_state = indexing`, and the next open heals it in place. `0` disables
+ * the ceiling (Spec 0047 behavior).
+ */
+const DEFAULT_INDEX_STALL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
  * Spec 0047: phases that block daemon idle-exit when clients=0.
- * Routine watch/sync is NOT included.
+ * Routine watch/sync is NOT included. A closing host waits for the build
+ * (bounded by the stall ceiling) so a half-built graph is not thrown away.
  */
 export function isBuildPhaseBlockingIdle(phase: string | null | undefined): boolean {
   return phase === 'building_fast' || phase === 'indexing';
@@ -87,9 +98,30 @@ export function decideIdleExitAction(opts: {
   return 'exit';
 }
 
+/**
+ * Decide whether the build-blocking idle wait must abort (stall guard).
+ * Pure helper for unit tests.
+ */
+export function decideIndexStallAction(opts: {
+  buildBlocking: boolean;
+  stallCeilingMs: number;
+  waitedMs: number;
+  ceilingDisabled: boolean;
+}): 'exit' | 'poll-build' | 'rearm-idle' {
+  if (!opts.buildBlocking) return 'rearm-idle'; // build settled — arm full idle linger
+  if (opts.ceilingDisabled) return 'poll-build'; // Spec 0047: wait forever
+  if (opts.waitedMs >= opts.stallCeilingMs) return 'exit';
+  return 'poll-build';
+}
+
 /** Default idle linger after last client (exported for tests). */
 export function defaultDaemonIdleTimeoutMs(): number {
   return DEFAULT_IDLE_TIMEOUT_MS;
+}
+
+/** Default index-stall ceiling (exported for tests). */
+export function defaultIndexStallTimeoutMs(): number {
+  return DEFAULT_INDEX_STALL_TIMEOUT_MS;
 }
 
 /**
@@ -204,6 +236,7 @@ export class Daemon {
   private idleTimer: NodeJS.Timeout | null = null;
   private idleTimeoutMs: number;
   private maxIdleMs: number;
+  private indexStallTimeoutMs: number;
   private lastActivityAt = Date.now();
   private maxIdleTimer: NodeJS.Timeout | null = null;
   private clientSweepTimer: NodeJS.Timeout | null = null;
@@ -211,15 +244,18 @@ export class Daemon {
   private stopping = false;
   private socketPath: string;
   private pidPath: string;
+  /** Wall-clock when the daemon FIRST waited on an in-flight build with 0 clients. */
+  private indexBlockingIdleSince: number | null = null;
 
   constructor(
     private projectRoot: string,
-    opts: { idleTimeoutMs?: number; maxIdleMs?: number } = {},
+    opts: { idleTimeoutMs?: number; maxIdleMs?: number; indexStallTimeoutMs?: number } = {},
   ) {
     this.socketPath = getDaemonSocketPath(projectRoot);
     this.pidPath = getDaemonPidPath(projectRoot);
     this.idleTimeoutMs = opts.idleTimeoutMs ?? resolveIdleTimeoutMs();
     this.maxIdleMs = opts.maxIdleMs ?? resolveMaxIdleMs();
+    this.indexStallTimeoutMs = opts.indexStallTimeoutMs ?? resolveIndexStallTimeoutMs();
     // Daemon mode serves many concurrent clients on one event loop, so off-load
     // read-tool dispatch to a worker pool — otherwise concurrent explores
     // serialize and starve the MCP transport (clients time out). Direct mode
@@ -364,7 +400,10 @@ export class Daemon {
       await new Promise<void>((resolve) => this.server!.close(() => resolve()));
       this.server = null;
     }
-    this.engine.stop();
+    // Abort an in-flight background index and WAIT for it to settle at a batch
+    // boundary before the DB handle closes — the product rule is "closing the
+    // host releases memory", not "closing the host corrupts the index".
+    try { await this.engine.stop(); } catch { /* best-effort teardown */ }
     this.cleanupLockfile();
     deregisterDaemon(this.projectRoot);
     if (process.platform !== 'win32') {
@@ -421,18 +460,45 @@ export class Daemon {
     // Spec 0047: if the last window closed mid-index, wait for build to finish
     // before starting the idle linger — never exit while clients>0 either.
     if (this.clients.size === 0 && this.engine.isIndexBuildInProgress()) {
+      // Bounded wait. Spec 0047 waited forever, so a wedged (or pathologically
+      // slow) build with no client pinned the daemon's memory indefinitely.
+      // After the stall ceiling we abort the daemon; the interrupted index
+      // leaves `index_state = indexing`, which the next open heals in place
+      // (stop() aborts at a batch boundary, so the DB stays consistent).
+      if (this.indexBlockingIdleSince === null) this.indexBlockingIdleSince = Date.now();
+      const waitedMs = Date.now() - this.indexBlockingIdleSince;
+      const stallAction = decideIndexStallAction({
+        buildBlocking: true,
+        stallCeilingMs: this.indexStallTimeoutMs,
+        waitedMs,
+        ceilingDisabled: this.indexStallTimeoutMs <= 0,
+      });
+      if (stallAction === 'exit') {
+        process.stderr.write(
+          `[HomeGraph daemon] Build still in progress after ${Math.round(waitedMs / 1000)}s with no client ` +
+          `(stall guard ${Math.round(this.indexStallTimeoutMs / 1000)}s); exiting. ` +
+          `Next open rebuilds in place.\n`,
+        );
+        void this.stop('index stall guard');
+        return;
+      }
+
       this.idleTimer = setTimeout(() => {
         this.idleTimer = null;
         if (this.clients.size > 0) return; // reconnect disarmed the need
         if (this.engine.isIndexBuildInProgress()) {
-          this.armIdleTimer(); // keep polling until build settles
+          this.armIdleTimer(); // keep polling until build settles (or stall ceiling)
           return;
         }
+        this.indexBlockingIdleSince = null; // build settled — reset the stall clock
         this.armIdleTimer(); // build done → arm full idle linger
       }, BUILD_IDLE_POLL_MS);
       this.idleTimer.unref?.();
       return;
     }
+
+    // A client arrived (or the build settled) — the stall window no longer applies.
+    this.indexBlockingIdleSince = null;
 
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
@@ -790,6 +856,19 @@ function resolveMaxIdleMs(): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MAX_IDLE_MS;
   return Math.floor(parsed); // 0 disables the backstop
+}
+
+/**
+ * Resolve the index-stall ceiling (`HOMEGRAPH_DAEMON_INDEX_STALL_TIMEOUT_MS`).
+ * `0` disables it (Spec 0047 behavior: wait forever for the build). Anything
+ * non-numeric or negative falls back to the 10-minute default.
+ */
+function resolveIndexStallTimeoutMs(): number {
+  const raw = process.env.HOMEGRAPH_DAEMON_INDEX_STALL_TIMEOUT_MS;
+  if (raw === undefined || raw === '') return DEFAULT_INDEX_STALL_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_INDEX_STALL_TIMEOUT_MS;
+  return Math.floor(parsed); // 0 disables the ceiling
 }
 
 function resolveClientSweepMs(): number {
