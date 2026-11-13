@@ -339,8 +339,14 @@ export class HomeGraph {
     );
     try {
       bootLock.acquire();
-    } catch {
-      throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
+    } catch (err) {
+      // A live process (MCP daemon auto-init, another CLI, a git hook) holds the
+      // lock. "Already initialized" is the wrong diagnosis when a foreign writer
+      // is mid-flight — surface the real reason instead of telling the caller to
+      // re-init into a live index.
+      throw new Error(
+        `Cannot initialize ${resolvedRoot}: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
 
     try {
@@ -387,8 +393,10 @@ export class HomeGraph {
     );
     try {
       bootLock.acquire();
-    } catch {
-      throw new Error(`HomeGraph already initialized in ${resolvedRoot}`);
+    } catch (err) {
+      throw new Error(
+        `Cannot initialize ${resolvedRoot}: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
 
     try {
@@ -818,7 +826,11 @@ export class HomeGraph {
       try {
         this.fileLock.acquire();
       } catch {
-        return { filesChecked: 0, filesAdded: 0, filesModified: 0, filesRemoved: 0, nodesUpdated: 0, durationMs: 0 };
+        // LockUnavailable: another live writer (MCP daemon, CLI, git hook) is
+        // mid-index. Zero-shape is unambiguous now — a real empty sync always
+        // has filesChecked > 0 (scanDirectory ran) — and callers check
+        // `lockUnavailable` instead of guessing from the exit code (#449).
+        return { filesChecked: 0, filesAdded: 0, filesModified: 0, filesRemoved: 0, nodesUpdated: 0, durationMs: 0, lockUnavailable: true };
       }
       const deferWal = process.env.HOMEGRAPH_NO_WAL_DEFER !== '1' && this.db.getJournalMode() === 'wal';
       let walValve: WalCheckpointValve | null = null;
@@ -1008,6 +1020,31 @@ export class HomeGraph {
    */
   isWriteLockedByOther(): boolean {
     return this.fileLock.isHeldByOther();
+  }
+
+  /**
+   * Read-only lock snapshot for diagnostics (`homegraph status --json`).
+   *
+   * Callers need to tell "another process is indexing right now" apart from
+   * "a previous index was killed and left a stale lock / `indexing` marker".
+   * Without this they can only guess from `index.state`, which is exactly the
+   * ambiguity that turned a transient state into a destructive rebuild.
+   */
+  getLockInfo(): {
+    present: boolean;
+    heldByOther: boolean;
+    pid: number | null;
+    ageMs: number | null;
+    stale: boolean;
+  } {
+    const raw = this.fileLock.inspect();
+    return {
+      present: raw.present,
+      heldByOther: raw.held,
+      pid: raw.pid,
+      ageMs: raw.ageMs,
+      stale: raw.stale,
+    };
   }
 
   // ===========================================================================

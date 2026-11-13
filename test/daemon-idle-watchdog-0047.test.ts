@@ -7,7 +7,9 @@ import {
 } from '../src/mcp/liveness-watchdog';
 import {
   decideIdleExitAction,
+  decideIndexStallAction,
   defaultDaemonIdleTimeoutMs,
+  defaultIndexStallTimeoutMs,
   isBuildPhaseBlockingIdle,
 } from '../src/mcp/daemon';
 
@@ -59,5 +61,47 @@ describe('daemon idle + build gate (Spec 0047)', () => {
     expect(decideIdleExitAction({ clientCount: 1, buildBlocking: true })).toBe('rearm-idle');
     expect(decideIdleExitAction({ clientCount: 0, buildBlocking: true })).toBe('poll-build');
     expect(decideIdleExitAction({ clientCount: 0, buildBlocking: false })).toBe('exit');
+  });
+});
+
+describe('index stall guard (bounded build-blocking idle)', () => {
+  it('default ceiling is 10 minutes', () => {
+    expect(defaultIndexStallTimeoutMs()).toBe(10 * 60 * 1000);
+  });
+
+  it('exits once the build has blocked idle past the ceiling', () => {
+    expect(decideIndexStallAction({
+      buildBlocking: true,
+      stallCeilingMs: 600_000,
+      waitedMs: 600_001,
+      ceilingDisabled: false,
+    })).toBe('exit');
+  });
+
+  it('keeps polling while the build is running but under the ceiling', () => {
+    expect(decideIndexStallAction({
+      buildBlocking: true,
+      stallCeilingMs: 600_000,
+      waitedMs: 60_000,
+      ceilingDisabled: false,
+    })).toBe('poll-build');
+  });
+
+  it('re-arms the full idle linger once the build settles', () => {
+    expect(decideIndexStallAction({
+      buildBlocking: false,
+      stallCeilingMs: 600_000,
+      waitedMs: 999_999,
+      ceilingDisabled: false,
+    })).toBe('rearm-idle');
+  });
+
+  it('ceiling 0 disables the guard (Spec 0047 wait-forever behavior)', () => {
+    expect(decideIndexStallAction({
+      buildBlocking: true,
+      stallCeilingMs: 0,
+      waitedMs: Number.MAX_SAFE_INTEGER,
+      ceilingDisabled: true,
+    })).toBe('poll-build');
   });
 });

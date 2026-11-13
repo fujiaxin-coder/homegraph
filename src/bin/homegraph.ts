@@ -514,6 +514,37 @@ program
 
       if (isInitialized(projectPath)) {
         clack.log.warn(`Already initialized in ${projectPath}`);
+        // `init` on an existing project does NOT build an index — but exiting 0
+        // while the index is missing/stale/in-flight makes bootstraps believe
+        // the graph is ready. Report the real state and fail when it isn't ready
+        // instead of a bare "already initialized" success.
+        let ready = false;
+        let stateDetail = 'unknown';
+        try {
+          const { default: HomeGraph } = await loadHomeGraph();
+          const existing = await HomeGraph.open(projectPath);
+          try {
+            const indexState = existing.getIndexState();
+            const changes = existing.getChangedFiles();
+            const pending = changes.added.length + changes.modified.length + changes.removed.length;
+            stateDetail = `index.state=${indexState ?? 'null'}` +
+              (pending > 0 ? `, pendingChanges=${pending}` : '');
+            ready = indexState === 'complete' && pending === 0;
+          } finally {
+            existing.destroy();
+          }
+        } catch (err) {
+          stateDetail = `status unavailable (${err instanceof Error ? err.message : String(err)})`;
+        }
+
+        if (!ready) {
+          clack.log.error(`Index is not ready: ${stateDetail}`);
+          clack.log.info('Run "homegraph index" (full rebuild) or "homegraph sync" to build it.');
+          clack.outro('');
+          process.exitCode = 1;
+          return;
+        }
+
         clack.log.info('Use "homegraph index" to re-index or "homegraph sync" to update');
         try {
           const { offerWatchFallback } = await import('../installer');
@@ -551,6 +582,11 @@ program
         supervision.stop();
       }
       printIndexResult(clack, result, projectPath);
+      // A failed init must not exit 0 — lock contention or parse failures are
+      // real failures, and callers (scripts, bootstraps) rely on the code.
+      if (!result.success) {
+        process.exitCode = 1;
+      }
 
       try {
         const { offerWatchFallback } = await import('../installer');
@@ -735,7 +771,12 @@ program
       const cg = await HomeGraph.open(projectPath, { sources: 'both' });
 
       if (options.quiet) {
-        await cg.sync();
+        const quietResult = await cg.sync();
+        // A lock-failed sync is NOT "up to date" — exit non-zero so callers
+        // (git hooks, ProjectSpec-style bootstraps) never mistake it for success.
+        if (quietResult.lockUnavailable) {
+          process.exit(1);
+        }
         cg.destroy();
         return;
       }
@@ -751,6 +792,16 @@ program
       });
 
       await progress.stop();
+
+      // Another writer holds the lock — the sync did NOT run. Report it as the
+      // retryable condition it is, never as "Already up to date".
+      if (result.lockUnavailable) {
+        clack.log.error('Sync skipped: another HomeGraph process is currently indexing this project (write lock held).');
+        clack.log.info('Wait for that index to finish, then run "homegraph sync" again.');
+        clack.outro('Done');
+        cg.destroy();
+        process.exit(1);
+      }
 
       const totalChanges = result.filesAdded + result.filesModified + result.filesRemoved;
 
@@ -820,10 +871,29 @@ program
       const reindexRecommended = cg.isIndexStale();
       const indexState = cg.getIndexState();
       const ohosApi = cg.getOhosApiBinding();
+      const lockInfo = cg.getLockInfo();
+      const buildPhase = cg.getBuildPhase();
 
       // JSON output mode
       if (options.json) {
         const lastIndexedMs = cg.getLastIndexedAt();
+        // Recommended next action, so callers (bootstraps) never have to
+        // reverse-engineer `index.state` + `lock` + `pendingChanges` into a
+        // decision. This is the contract ProjectSpec's bootstrap can rely on.
+        let action: 'none' | 'wait' | 'sync' | 'index-inplace' | 'reindex' | 'recreate';
+        if (lockInfo.heldByOther || buildPhase === 'indexing' || buildPhase === 'building_fast') {
+          action = 'wait'; // another process is actively building — wait, never touch
+        } else if (indexState === 'indexing') {
+          action = 'index-inplace'; // a previous index was killed mid-run — in-place rebuild heals
+        } else if (indexState === 'failed' || indexState === 'partial') {
+          action = 'reindex'; // real corruption — full rebuild
+        } else if (buildInfo.extractionVersion != null && buildInfo.extractionVersion < EXTRACTION_VERSION) {
+          action = 'recreate'; // engine upgraded — stale index needs a full rebuild
+        } else if (changes.added.length + changes.modified.length + changes.removed.length > 0) {
+          action = 'sync'; // index is complete but the working tree moved
+        } else {
+          action = 'none'; // fully current
+        }
         console.log(JSON.stringify({
           initialized: true,
           version: packageJson.version,
@@ -851,12 +921,16 @@ program
             ? { version: ohosApi.version, packageName: ohosApi.packageName, dbPath: ohosApi.dbPath }
             : null,
           graphSources: cg.getGraphSources(),
+          lock: lockInfo,
+          buildPhase,
           index: {
             state: indexState,
             builtWithVersion: buildInfo.version,
             builtWithExtractionVersion: buildInfo.extractionVersion,
             currentExtractionVersion: EXTRACTION_VERSION,
             reindexRecommended,
+            // Machine-readable recommended action (see above for precedence).
+            action,
           },
         }));
         cg.destroy();
@@ -932,6 +1006,18 @@ program
         console.log(`  DB:        ${ohosApi.dbPath}`);
         console.log();
       }
+
+      // Index lifecycle — build phase + write lock. This is how an operator
+      // tells "indexing right now" from "killed mid-run" at a glance.
+      console.log(chalk.bold('Index Lifecycle:'));
+      console.log(`  Build Phase: ${buildPhase}`);
+      const lockDesc = !lockInfo.present
+        ? 'free'
+        : lockInfo.heldByOther
+          ? `held by PID ${lockInfo.pid} (${lockInfo.stale ? 'stale' : 'active'})`
+          : `present (PID ${lockInfo.pid}, ${lockInfo.stale ? 'stale' : 'this process'})`;
+      console.log(`  Write Lock:  ${lockDesc}`);
+      console.log();
 
       // Pending changes
       const totalChanges = changes.added.length + changes.modified.length + changes.removed.length;
@@ -1689,6 +1775,30 @@ program
       if (!fs.existsSync(lockPath)) {
         info(`No lock file found ${getGlyphs().dash} nothing to do`);
         return;
+      }
+
+      // PID-verified delete: never remove a lock held by a LIVE process.
+      // Deleting a live lock opens a second writer onto the same database.
+      let holderPid: number | null = null;
+      try {
+        const content = fs.readFileSync(lockPath, 'utf-8').trim();
+        const parsed = parseInt(content, 10);
+        if (!isNaN(parsed)) holderPid = parsed;
+      } catch { /* fall through — unreadable locks are safe to remove */ }
+
+      if (holderPid !== null) {
+        let alive = false;
+        try {
+          process.kill(holderPid, 0);
+          alive = true;
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code === 'EPERM') alive = true;
+        }
+        if (alive && holderPid !== process.pid) {
+          error(`Lock is held by a live process (PID ${holderPid}). Not removing it — deleting a live lock allows two writers on the same database.`);
+          info(`Wait for that process to exit, or inspect it first (e.g. 'homegraph status --json').`);
+          process.exit(1);
+        }
       }
 
       fs.unlinkSync(lockPath);

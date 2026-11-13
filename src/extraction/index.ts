@@ -125,6 +125,13 @@ export interface SyncResult {
   durationMs: number;
   changedFilePaths?: string[];
   /**
+   * True when the sync could NOT acquire the cross-process write lock and
+   * returned without touching anything (`filesChecked === 0`). Distinguishes
+   * "nothing changed" from "another writer holds the lock" — callers (CLI,
+   * watcher, MCP) must not report a lock-failed sync as success (#449).
+   */
+  lockUnavailable?: boolean;
+  /**
    * Symbol names whose set of definitions this sync CHANGED — names the synced
    * files gained or lost, as the symmetric difference of their `file\0name`
    * definition pairs before and after the store phase (per file, so a name
