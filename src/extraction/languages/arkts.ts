@@ -889,17 +889,32 @@ function persistFileResult(
   queries.upsertFile(fileRecord);
 }
 
-/** Force-rewrite every file in an incremental module index (edges may change without content). */
+/** Force-rewrite every file in an incremental module index (edges may change without content).
+ *
+ * With `allowedPathPrefixes` (Spec 0070): only files under one of the dirty
+ * module srcPaths are force-written. Files seeded into `fileResults` by
+ * `seedMapsFromOtherLoadedFiles` (clean SIGNATURES-level deps) stay in memory
+ * and are dropped with the batch payload — a force-write here would clobber
+ * their richer rows already persisted by a previous index.
+ */
 function persistIncrementalModuleResults(
   rootDir: string,
   queries: QueryBuilder,
-  index: Pick<ArkTSBatchIndex, 'fileResults'>
+  index: Pick<ArkTSBatchIndex, 'fileResults'>,
+  allowedPathPrefixes?: string[]
 ): void {
+  const matchesAllowedPrefix = (p: string): boolean => {
+    if (!allowedPathPrefixes || allowedPathPrefixes.length === 0) return true;
+    return allowedPathPrefixes.some(
+      (prefix) => p === prefix || p.startsWith(`${prefix}/`)
+    );
+  };
   const persistTotal = index.fileResults.size;
   let persistIndex = 0;
   for (const [filePath, fileResult] of index.fileResults) {
     persistIndex++;
     reportBatchProgress('persist', persistIndex, persistTotal, filePath);
+    if (!matchesAllowedPrefix(normIndexPath(filePath))) continue;
     const isVirtual = filePath.startsWith('@');
     const full = path.join(rootDir, filePath);
     const content = isVirtual ? '' : fs.readFileSync(full, 'utf-8');
@@ -1483,7 +1498,10 @@ async function runArkTSBatchIncrementalModules(
   setArktsBatchRunning(true);
   try {
     reportBatchProgress('scene', 0, etsFiles.length);
-    queries.deleteArkTSCrossFileCallEdges();
+    // Spec 0070: no global ark-call-edge delete here. Edges whose source is
+    // in a dirty module are removed by the nodes' ON DELETE CASCADE during
+    // `deleteFile` re-index and re-emitted by the fresh module walk; a global
+    // delete also removed clean-module-source edges that are never re-emitted.
     const index = buildArkTSIndexByModule(rootDir, etsFiles, {
       targetModuleSrcPaths: moduleSrcPaths,
       streamQueries: queries,
@@ -1519,7 +1537,7 @@ async function runArkTSBatchIncrementalModules(
     }
 
     if (index.fileResults.size > 0) {
-      persistIncrementalModuleResults(rootDir, queries, index);
+      persistIncrementalModuleResults(rootDir, queries, index, moduleSrcPaths);
     }
 
     if (index.crossFileEdges.length > 0) {
