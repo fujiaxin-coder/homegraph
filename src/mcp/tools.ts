@@ -1998,6 +1998,10 @@ export class ToolHandler {
   // main loop stays free for the MCP transport under concurrent load. Null in
   // direct/in-process mode (one client, no concurrency to parallelize).
   private queryPool: QueryPool | null = null;
+  // Spec 0069: in-flight background on-demand project-map build (set by
+  // startBackgroundProjectMapBuild so concurrent first calls don't fan out
+  // into multiple full-repo scans).
+  private projectMapBuilding = false;
 
   constructor(private cg: HomeGraph | null) {}
 
@@ -2880,7 +2884,13 @@ export class ToolHandler {
       // main connection. Serving them here — before the query-pool offload —
       // avoids cold-worker / wedged-daemon paths that otherwise surface as empty
       // MCP client `-32001` (the handler itself is fine; the transport times out).
-      if ((toolName === 'homegraph_explore' || toolName === 'homegraph_search')
+      // Spec 0069: when the query pool is warm+healthy, SKIP the in-process
+      // fast paths for explore — these surveys run real DB/IO work synchronously
+      // on the transport thread BEFORE the deadline race starts, so a slow one
+      // bypasses the tool deadline entirely (timers can't fire while the loop
+      // is blocked). Inside the pool the same fast paths still run (via
+      // executeReadTool), but now the soft deadline actually protects the call.
+      if (this.shouldRunInProcessFastPaths(toolName)
         && (!requestPlan || (requestPlan.source === 'rules' && requestPlan.steps.length === 1
           && !requestPlan.telemetry.requestCount))) {
         const q = typeof args.query === 'string' ? args.query : '';
@@ -3160,6 +3170,23 @@ export class ToolHandler {
    * callback with the full natural-language query, freezing the event loop so
    * the success-shaped reply never flushed → empty client `-32001`.
    */
+  /**
+   * Whether the explore/search pre-dispatch fast-path block may run in-process
+   * (Spec 0069). Those surveys do real DB/IO work synchronously on the
+   * transport thread BEFORE the deadline race starts, so with a warm, healthy
+   * query pool they must be skipped: the pool's soft timeout is what makes
+   * the tool deadline enforceable, and the same fast paths re-run inside the
+   * worker via executeReadTool. A cold pool (worker still starting) or an
+   * unhealthy one keeps them — serving on the warm main connection beats
+   * queuing behind a cold worker.
+   */
+  shouldRunInProcessFastPaths(toolName: string): boolean {
+    if (toolName !== 'homegraph_explore' && toolName !== 'homegraph_search') return false;
+    const pool = this.queryPool;
+    if (!pool) return true;
+    return !(pool.healthy && pool.ready);
+  }
+
   private async runReadToolWithDeadline(
     toolName: string,
     args: Record<string, unknown>,
@@ -13133,6 +13160,36 @@ export class ToolHandler {
   /**
    * Handle homegraph_project — shallow module → file map (fast build).
    */
+  /**
+   * Build the project map off the transport thread (Spec 0069). The scan is a
+   * synchronous full-repo walk — a 100k-file monorepo takes tens of seconds,
+   * which used to run inline on `homegraph_project`'s first call: the tool
+   * deadline is a timer, timers can't fire while the loop is blocked, and the
+   * MCP client timed out at ~60s with an empty error. Runs once — subsequent
+   * calls see `projectMapBuilding` and return syncing guidance immediately.
+   */
+  private startBackgroundProjectMapBuild(cg: HomeGraph): void {
+    if (this.projectMapBuilding) return;
+    this.projectMapBuilding = true;
+    void (async () => {
+      try {
+        // Yield first so the caller's syncing reply flushes before the scan
+        // monopolizes the loop.
+        await new Promise<void>((r) => setImmediate(r));
+        cg.buildProjectMap();
+        if (cg.getBuildPhase() === 'none') {
+          cg.setBuildPhase(cg.getStats().nodeCount > 0 ? 'full' : 'fast');
+        }
+        process.stderr.write('[HomeGraph MCP] Background project-map build finished\n');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[HomeGraph MCP] Background project-map build failed: ${msg}\n`);
+      } finally {
+        this.projectMapBuilding = false;
+      }
+    })();
+  }
+
   private async handleProject(args: Record<string, unknown>): Promise<ToolResult> {
     const cg = this.getHomeGraph(args.projectPath as string | undefined);
     const state = resolveProductIndexState(cg);
@@ -13155,31 +13212,20 @@ export class ToolHandler {
       }
     }
 
-    const phase = cg.getBuildPhase();
-
     let map = cg.getProjectMap({
       module: typeof args.module === 'string' ? args.module : undefined,
       includeFiles: args.includeFiles !== false,
     });
 
-    // On-demand build for indexes that never ran the fast path (legacy / CLI init).
+    // On-demand build for indexes that never ran the fast path (legacy / CLI
+    // init). The build is a synchronous full-repo scan — minutes on large
+    // monorepos, which runs on the MCP transport thread and blows past the tool
+    // deadline (setTimeout cannot fire while the loop is blocked; Spec 0069).
+    // Kick it off in the background and answer with syncing guidance NOW; the
+    // next call (agent retry) finds the map persisted.
     if (map.modules.length === 0) {
-      try {
-        cg.buildProjectMap();
-        if (phase === 'none') {
-          cg.setBuildPhase(cg.getStats().nodeCount > 0 ? 'full' : 'fast');
-        }
-        map = cg.getProjectMap({
-          module: typeof args.module === 'string' ? args.module : undefined,
-          includeFiles: args.includeFiles !== false,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (isSqliteBusyMessage(message)) {
-          return this.textResult(productIndexGuidance('syncing'));
-        }
-        return this.textResult(`Failed to build project map: ${message}`);
-      }
+      this.startBackgroundProjectMapBuild(cg);
+      return this.textResult(productIndexGuidance('syncing'));
     }
 
     if (map.modules.length === 0) {

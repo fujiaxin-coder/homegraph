@@ -25,7 +25,7 @@
  *     pool). A crash budget trips a circuit breaker (`healthy` → false) so the
  *     caller falls back to in-process dispatch instead of thrashing respawns.
  *   - graceful backstop: a call that can't be served within `softTimeoutMs`
- *     (default 20s, clamped ≤30s — well under typical ~60s MCP client timeouts)
+ *     (default 15s, clamped ≤45s — well under typical ~60s MCP client timeouts)
  *     resolves with SUCCESS-shaped static "Partial / busy, retry" guidance —
  *     never `isError`, and never DB/FTS work on the timeout callback (that
  *     can freeze the transport so the client still sees empty `-32001`).
@@ -60,10 +60,10 @@ export interface PoolWorker {
  * raise via `CODEGRAPH_QUERY_BUSY_TIMEOUT_MS` (clamped to
  * {@link MAX_BUSY_TIMEOUT_MS}) when large monorepos need more headroom.
  */
-const DEFAULT_BUSY_TIMEOUT_MS = 15_000;
+export const DEFAULT_BUSY_TIMEOUT_MS = 15_000;
 
 /** Hard ceiling — leave headroom under ~60s client timeouts. */
-const MAX_BUSY_TIMEOUT_MS = 45_000;
+export const MAX_BUSY_TIMEOUT_MS = 45_000;
 
 /**
  * Default concurrent workers when env is unset. Keep at 1: a second connection
@@ -118,7 +118,7 @@ export interface QueryPoolOptions {
   root: string;
   /** Max worker threads. Defaults to `clamp(cores-1, 1, DEFAULT_POOL_CAP)`. */
   size?: number;
-  /** Linger before a queued/in-flight call gets busy-guidance. Default 20s (≤30s clamp). */
+  /** Linger before a queued/in-flight call gets busy-guidance. Default 15s (≤45s clamp). */
   softTimeoutMs?: number;
   /** Retries for an in-flight call whose worker crashed. Default 1. */
   maxRetries?: number;
