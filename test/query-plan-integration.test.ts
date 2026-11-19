@@ -67,6 +67,11 @@ describe('structured query planning at the MCP boundary', () => {
     cg = HomeGraph.initSync(tmp, { config: { include: ['**/*.ts'], exclude: [] } });
     await cg.indexAll();
     cg.setBuildPhase('full');
+    // Spec 0069: handleProject no longer builds an empty map inline — it
+    // kicks a background build and answers with syncing guidance. Pre-fill
+    // the map so the tool's first call (what a warm product index serves)
+    // returns the real module/file overview.
+    cg.buildProjectMap();
     handler = new ToolHandler(cg);
     // Any unintended request must fail locally, never contact a real provider.
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Unexpected network request'); }));
