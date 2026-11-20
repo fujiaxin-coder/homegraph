@@ -870,6 +870,12 @@ describe('Scoped sync parity (#watcher-scoped)', () => {
       fs.writeFileSync(path.join(repoDir, '.gitignore'), 'node_modules/\n');
 
       git('init', '-q');
+      // Pin the identity in the repo's own config: `git merge --no-ff` creates
+      // a commit, which needs a committer. A developer machine usually has a
+      // global identity and hides the omission; a CI runner has none, so the
+      // merge fails with "Committer identity unknown".
+      git('config', 'user.email', 'test@test.com');
+      git('config', 'user.name', 'Test');
       commitAll('initial');
 
       repo = HomeGraph.initSync(repoDir, { config: { include: ['**/*.ts'], exclude: [] } });
