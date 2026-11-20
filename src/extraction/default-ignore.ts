@@ -5,7 +5,9 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import ignore, { Ignore } from 'ignore';
 import { logWarn } from '../errors';
 
@@ -103,6 +105,27 @@ function isValidUtf8(buf: Buffer): boolean {
 }
 
 /**
+ * Drop patterns that name nothing.
+ *
+ * A lone `!` (or `!` followed only by whitespace) is the dangerous case: git
+ * treats it as a no-op — there is no pattern after the negation prefix to
+ * re-include — but the `ignore` library compiles it into "negate everything",
+ * which silently disables EVERY rule above it. One stray `!` therefore pulls
+ * `node_modules/`, `dist/` and the rest of the tree back into the index, which
+ * on a large JS project means hundreds of thousands of files (Spec 0074).
+ *
+ * Applies to every source that funnels through `readGitignorePatterns` — the
+ * project `.gitignore`, `.git/info/exclude` and `core.excludesFile` — because
+ * git's own parser treats a lone `!` the same way in all three.
+ */
+function dropEmptyPatterns(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '!')
+    .join('\n');
+}
+
+/**
  * Read a `.gitignore` and return patterns safe to hand to the `ignore` matcher —
  * never throwing, even when the file isn't real gitignore text. Two failure
  * modes, both seen in the wild (issue #682):
@@ -141,13 +164,16 @@ export function readGitignorePatterns(giPath: string): string {
   // so if it doesn't throw, the whole file is safe to use verbatim.
   try {
     ignore().add(content).ignores('.homegraph-probe');
-    return content;
+    return dropEmptyPatterns(content);
   } catch {
     // Fall through: a line is uncompilable — keep the good ones, drop the bad.
   }
   const kept: string[] = [];
   let dropped = 0;
   for (const line of content.split(/\r?\n/)) {
+    // A lone `!` compiles fine but reverses every rule above it, so it must be
+    // dropped here too — the compile check would never catch it.
+    if (line.trim() === '!') continue;
     try {
       ignore().add(line).ignores('.homegraph-probe');
       kept.push(line);
@@ -165,14 +191,98 @@ export function readGitignorePatterns(giPath: string): string {
 }
 
 /**
+ * The repository's `.git` directory, or null outside a repo.
+ *
+ * Uses `rev-parse --absolute-git-dir` rather than joining `rootDir/.git`, so a
+ * worktree (where `.git` is a file pointing elsewhere) and a submodule resolve
+ * to the real directory that holds `info/exclude`.
+ */
+function resolveGitDir(rootDir: string): string | null {
+  try {
+    const out = execFileSync('git', ['-C', rootDir, 'rev-parse', '--absolute-git-dir'], {
+      encoding: 'utf-8',
+      timeout: 5_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }).trim();
+    return out || null;
+  } catch {
+    return null; // not a repo, git absent, or timed out
+  }
+}
+
+/** Expand a leading `~` the way git does for `core.excludesFile`. */
+function expandUserPath(p: string): string {
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+/**
+ * git's exclude sources beyond the project `.gitignore`: `.git/info/exclude` and
+ * whichever file `core.excludesFile` names.
+ *
+ * Both are real ignore configuration — same format, same "default ignore"
+ * semantics, and overridable by a `.gitignore` negation — but neither is a
+ * `.gitignore`, so before this the indexer never saw them: a file the user
+ * explicitly excluded landed in the graph, and a private or secret-bearing
+ * directory got read into SQLite (Spec 0074).
+ *
+ * Best-effort throughout: outside a repo, without git, or if a file is
+ * unreadable, the contribution is simply empty. Never throws.
+ */
+function readGitExcludeExtraPatterns(rootDir: string): string {
+  const chunks: string[] = [];
+
+  const gitDir = resolveGitDir(rootDir);
+  if (gitDir) {
+    const excludePath = path.join(gitDir, 'info', 'exclude');
+    if (fs.existsSync(excludePath)) {
+      const patterns = readGitignorePatterns(excludePath);
+      if (patterns) chunks.push(patterns);
+    }
+  }
+
+  try {
+    const configured = execFileSync('git', ['-C', rootDir, 'config', '--get', 'core.excludesFile'], {
+      encoding: 'utf-8',
+      timeout: 5_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    }).trim();
+    if (configured) {
+      const abs = expandUserPath(configured);
+      if (fs.existsSync(abs)) {
+        const patterns = readGitignorePatterns(abs);
+        if (patterns) chunks.push(patterns);
+      }
+    }
+  } catch {
+    // No git, unset, or timeout — leave extras empty.
+  }
+
+  return chunks.join('\n');
+}
+
+/**
  * An `ignore` matcher seeded with the built-in defaults, merged with the project's
  * root .gitignore so a negation there (e.g. `!vendor/`) overrides a default. Shared
  * by both enumeration paths so behavior is identical with or without git — and so
  * the defaults apply to tracked files too (committing a dependency dir doesn't make
  * it project code; the explicit `.gitignore` negation is the only opt-in).
+ *
+ * git's other exclude sources (`.git/info/exclude`, `core.excludesFile`) are
+ * added BEFORE the root `.gitignore`, because a later pattern wins in the
+ * `ignore` library — and git gives `.gitignore` the highest precedence, so its
+ * negation must be able to override them (Spec 0074).
  */
 export function buildDefaultIgnore(rootDir: string): Ignore {
   const ig = ignore().add(DEFAULT_IGNORE_PATTERNS);
+  // Lower precedence first: git's non-.gitignore exclude sources.
+  const extra = readGitExcludeExtraPatterns(rootDir);
+  if (extra) ig.add(extra);
+  // Highest precedence last: the project .gitignore, so its `!` overrides both
+  // a built-in default and anything the exclude sources said.
   const rootGitignore = path.join(rootDir, '.gitignore');
   if (fs.existsSync(rootGitignore)) ig.add(readGitignorePatterns(rootGitignore));
   return ig;
