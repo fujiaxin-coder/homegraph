@@ -612,6 +612,7 @@ export class HomeGraph {
         walValve.start();
       }
       try {
+        const gitState = this.orchestrator.beginGitIndexState(true);
         const before = this.queries.getNodeAndEdgeCount();
         try { this.queries.setMetadata('index_state', 'indexing'); } catch { /* metadata is advisory */ }
         try { this.queries.clearNameSegmentVocab(); } catch { /* vocab is advisory — never fail an index over it */ }
@@ -752,6 +753,14 @@ export class HomeGraph {
           }
         }
 
+        // Stamp the commit this index is up to date at. Only a fully-successful
+        // index with no discovered-file shortfall advances it — a partial run
+        // must not claim freshness it doesn't have (#1829).
+        if (result.success && result.filesErrored === 0 &&
+          (result.filesDiscovered === undefined || result.filesIndexed + result.filesSkipped >= result.filesDiscovered)) {
+          this.orchestrator.finishGitIndexState(gitState, true);
+        }
+
         try {
           if (!result.success) {
             this.queries.setMetadata('index_state', 'failed');
@@ -850,6 +859,9 @@ export class HomeGraph {
         const vocabWasEmpty = (() => {
           try { return this.queries.isNameSegmentVocabEmpty(); } catch { return false; }
         })();
+
+        const fullReconcile = !options.paths || options.paths.length === 0;
+        const gitState = this.orchestrator.beginGitIndexState(fullReconcile);
 
         const result = await this.orchestrator.sync(options.onProgress, options.paths);
 
@@ -995,6 +1007,13 @@ export class HomeGraph {
             await this.rebuildNameSegmentVocab();
           }
         } catch { /* vocab is advisory — never fail a sync over it */ }
+
+        // Stamp what this sync brought the index up to date at. A sync never
+        // advances the commit stamp itself — beginGitIndexState captured the
+        // commit the index was built at, and only a full index moves it. The
+        // dirty set (uncommitted edits the sync just indexed) is written so a
+        // crash cannot make them read as clean (#1829).
+        this.orchestrator.finishGitIndexState(gitState, fullReconcile, []);
 
         return result;
       } finally {

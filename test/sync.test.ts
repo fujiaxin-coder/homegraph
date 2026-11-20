@@ -826,3 +826,167 @@ describe('Scoped sync parity (#watcher-scoped)', () => {
     expect(cg.searchNodes('beta').length).toBeGreaterThan(0);
   });
 });
+
+  // ---------------------------------------------------------------------------
+  // Spec 0071 — status must see COMMITTED changes, not just working-tree edits.
+  //
+  // Before this, `getChangedFiles()` fed only `git status --porcelain` into the
+  // candidate set. Committing (or merging, fast-forward included) makes the
+  // working tree clean, so `homegraph status` reported `Index is up to date`
+  // while the index still held the OLD content hash — a silent lie. The fix
+  // stamps the commit the index was last brought up to date at
+  // (`indexed_at_commit`) and adds `git diff <stamp> HEAD` to the candidate set.
+  // ---------------------------------------------------------------------------
+  describe('status detects committed changes (Spec 0071)', () => {
+    let repoDir: string;
+    let repo: HomeGraph;
+
+    const git = (...args: string[]): string =>
+      execFileSync('git', args, {
+        cwd: repoDir,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      });
+
+    const commitAll = (message: string): void => {
+      execFileSync('git', ['add', '-A'], { cwd: repoDir, stdio: 'pipe' });
+      execFileSync(
+        'git',
+        ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', message],
+        { cwd: repoDir, stdio: 'pipe' }
+      );
+    };
+
+    const pendingCount = (): number => {
+      const c = repo.getChangedFiles();
+      return c.added.length + c.modified.length + c.removed.length;
+    };
+
+    beforeEach(async () => {
+      repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-spec0071-'));
+      fs.mkdirSync(path.join(repoDir, 'src'));
+      fs.writeFileSync(path.join(repoDir, 'src', 'index.ts'), `export function hello() { return 'world'; }\n`);
+      fs.writeFileSync(path.join(repoDir, '.gitignore'), 'node_modules/\n');
+
+      git('init', '-q');
+      commitAll('initial');
+
+      repo = HomeGraph.initSync(repoDir, { config: { include: ['**/*.ts'], exclude: [] } });
+      await repo.indexAll();
+    });
+
+    afterEach(() => {
+      if (repo) repo.destroy();
+      if (fs.existsSync(repoDir)) removeTempDir(repoDir);
+    });
+
+    it('a fresh index of a committed tree reports no pending changes', () => {
+      expect(pendingCount()).toBe(0);
+    });
+
+    it('a committed edit is reported as pending (was a false "up to date")', () => {
+      fs.writeFileSync(path.join(repoDir, 'src', 'index.ts'), `export function hello() { return 'committed'; }\n`);
+      commitAll('edit hello');
+
+      // Working tree is clean — `git status` says nothing. The old code stopped
+      // here and reported the index as up to date.
+      expect(git('status', '--porcelain').trim()).toBe('');
+
+      const changes = repo.getChangedFiles();
+      expect(changes.modified).toContain('src/index.ts');
+    });
+
+    it('a committed NEW file is reported as pending', () => {
+      fs.writeFileSync(path.join(repoDir, 'src', 'added.ts'), `export function fresh() { return 1; }\n`);
+      commitAll('add fresh');
+
+      expect(git('status', '--porcelain').trim()).toBe('');
+      expect(repo.getChangedFiles().added).toContain('src/added.ts');
+    });
+
+    it('a committed DELETION is reported as pending', () => {
+      const victim = path.join(repoDir, 'src', 'index.ts');
+      fs.unlinkSync(victim);
+      commitAll('drop index');
+
+      expect(git('status', '--porcelain').trim()).toBe('');
+      expect(repo.getChangedFiles().removed).toContain('src/index.ts');
+    });
+
+    it('a fast-forward merge of another branch is reported as pending', () => {
+      const baseBranch = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+
+      // Branch off, commit, return, ff-merge — no merge commit, only the pointer moves.
+      git('checkout', '-q', '-b', 'feature');
+      fs.writeFileSync(path.join(repoDir, 'src', 'feature.ts'), `export function fromFeature() { return 2; }\n`);
+      commitAll('feature work');
+      git('checkout', '-q', baseBranch);
+      git('merge', '-q', '--ff-only', 'feature');
+
+      // ff merge leaves a clean tree; HEAD moved but the index never saw the file.
+      expect(git('status', '--porcelain').trim()).toBe('');
+      const changes = repo.getChangedFiles();
+      expect(changes.added).toContain('src/feature.ts');
+    });
+
+    it('a --no-ff merge is reported as pending', () => {
+      const baseBranch = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+
+      git('checkout', '-q', '-b', 'feature2');
+      fs.writeFileSync(path.join(repoDir, 'src', 'merged.ts'), `export function mergedIn() { return 3; }\n`);
+      commitAll('merge work');
+      git('checkout', '-q', baseBranch);
+      git('merge', '-q', '--no-ff', 'feature2', '-m', 'merge feature2');
+
+      expect(git('status', '--porcelain').trim()).toBe('');
+      expect(repo.getChangedFiles().added).toContain('src/merged.ts');
+    });
+
+    it('sync after a commit clears the pending change for good', async () => {
+      fs.writeFileSync(path.join(repoDir, 'src', 'index.ts'), `export function hello() { return 'after-sync'; }\n`);
+      commitAll('edit again');
+
+      expect(pendingCount()).toBeGreaterThan(0);
+
+      await repo.sync();
+
+      // Sync indexed the committed content. HEAD is still ahead of the stamp
+      // (only a full index advances it), but the candidates re-hash to the same
+      // content, so nothing reads as pending.
+      expect(pendingCount()).toBe(0);
+    });
+
+    it('an uncommitted edit after a fresh index is still reported as pending', () => {
+      fs.writeFileSync(path.join(repoDir, 'src', 'index.ts'), `export function hello() { return 'dirty'; }\n`);
+      expect(repo.getChangedFiles().modified).toContain('src/index.ts');
+    });
+
+    it('an index stamped with an unknown commit falls back to a full scan', () => {
+      // Simulate a rebase/force-push: the stamp names a commit the repo no
+      // longer has. `canTrustGitFastPath` must decline, and the full scan must
+      // still answer correctly from disk.
+      const queries = (repo as unknown as { queries: { setMetadata(k: string, v: string): void } }).queries;
+      queries.setMetadata('indexed_at_commit', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
+
+      fs.writeFileSync(path.join(repoDir, 'src', 'index.ts'), `export function hello() { return 'orphan-stamp'; }\n`);
+      commitAll('after fake stamp');
+
+      // Even with a clean tree and an unusable stamp, the disk-vs-DB scan sees
+      // the committed edit.
+      const changes = repo.getChangedFiles();
+      expect(changes.modified).toContain('src/index.ts');
+    });
+
+    it('a torn dirty-paths pair (commit mismatch) is rejected, not trusted', () => {
+      const queries = (repo as unknown as {
+        queries: { setMetadata(k: string, v: string): void };
+      }).queries;
+      // Write a dirty set whose embedded commit doesn't match the stamp.
+      queries.setMetadata('indexed_dirty_paths', JSON.stringify({ commit: 'mismatch', paths: ['src/index.ts'] }));
+
+      // indexedDirtyPaths() returns null on a mismatch, so the fast path is
+      // declined and the full scan answers — no phantom pending from the torn pair.
+      expect(pendingCount()).toBe(0);
+    });
+  });
