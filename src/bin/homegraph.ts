@@ -47,6 +47,7 @@ import { installFatalHandlers } from './fatal-handler';
 import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
 import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
+import type { IndexHealth } from '../types';
 import { registerAddonCommands } from './addon-commands';
 // Lazy-load heavy modules (HomeGraph, runInstaller) to keep CLI startup fast.
 async function loadHomeGraph(): Promise<typeof import('../index')> {
@@ -833,7 +834,8 @@ program
   .command('status [path]')
   .description('Show index status and statistics')
   .option('-j, --json', 'Output as JSON')
-  .action(async (pathArg: string | undefined, options: { json?: boolean }) => {
+  .option('--strict', 'Exit non-zero when the index is incomplete, stale, missing symbols, or has pending changes')
+  .action(async (pathArg: string | undefined, options: { json?: boolean; strict?: boolean }) => {
     const projectPath = resolveProjectPath(pathArg);
     // The directory the user actually ran from, before walking up to the index
     // root. Used to detect when the resolved index lives in a different git
@@ -870,6 +872,7 @@ program
       const buildInfo = cg.getIndexBuildInfo();
       const reindexRecommended = cg.isIndexStale();
       const indexState = cg.getIndexState();
+      const indexHealth = cg.getIndexHealth();
       const ohosApi = cg.getOhosApiBinding();
       const lockInfo = cg.getLockInfo();
       const buildPhase = cg.getBuildPhase();
@@ -891,6 +894,8 @@ program
           action = 'recreate'; // engine upgraded — stale index needs a full rebuild
         } else if (changes.added.length + changes.modified.length + changes.removed.length > 0) {
           action = 'sync'; // index is complete but the working tree moved
+        } else if (indexHealth.needsReindex.length > 0) {
+          action = 'sync'; // rows are current but empty — a re-read of those files repairs them
         } else {
           action = 'none'; // fully current
         }
@@ -923,6 +928,12 @@ program
           graphSources: cg.getGraphSources(),
           lock: lockInfo,
           buildPhase,
+          // Files whose content is current but whose symbols are missing
+          // (Spec 0073) — invisible to `pendingChanges`, which compares bytes.
+          indexHealth: {
+            needsReindex: indexHealth.needsReindex,
+            parseErrors: indexHealth.parseErrors,
+          },
           index: {
             state: indexState,
             builtWithVersion: buildInfo.version,
@@ -934,6 +945,18 @@ program
           },
         }));
         cg.destroy();
+        // `--strict` turns the report into a gate: a caller that shells out to
+        // `status` (CI, a bootstrap, a pre-commit check) needs a verdict, not
+        // text it has to parse. Every condition below means "this index cannot
+        // be trusted as complete" (Spec 0073).
+        if (options.strict && (
+          indexState !== 'complete' ||
+          indexHealth.needsReindex.length > 0 ||
+          indexHealth.parseErrors.length > 0 ||
+          changes.added.length + changes.modified.length + changes.removed.length > 0
+        )) {
+          process.exit(1);
+        }
         return;
       }
 
@@ -1033,6 +1056,27 @@ program
           console.log(`  Removed:   ${changes.removed.length} files`);
         }
         info('Run "homegraph sync" to update the index');
+      }
+
+      // Index health (Spec 0073): files whose bytes are current but whose
+      // symbols are missing. The Pending Changes block above compares content
+      // hashes, so it reports zero for these — an "up to date" index that
+      // answers no query about them. Printed before the verdict so the verdict
+      // can stop claiming everything is fine.
+      const healthLines = describeIndexHealth(indexHealth);
+      const unhealthy = healthLines.length > 0;
+      if (unhealthy) {
+        console.log(chalk.bold('Index Health:'));
+        for (const line of healthLines) console.log(`  ${line}`);
+        console.log();
+      }
+
+      if (totalChanges > 0) {
+        // Pending Changes already told the user what to run; nothing to add.
+      } else if (unhealthy) {
+        // Deliberately NOT a plain "up to date": the last index run finished,
+        // but the graph is missing symbols the user is entitled to know about.
+        warn('Index is up to date, but the files above yielded no symbols');
       } else {
         success('Index is up to date');
       }
@@ -1048,11 +1092,50 @@ program
       }
 
       cg.destroy();
+
+      // `--strict` gate, text mode: same conditions as the JSON path above.
+      if (options.strict && (indexState !== 'complete' || unhealthy || totalChanges > 0)) {
+        process.exit(1);
+      }
     } catch (err) {
       error(`Failed to get status: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
+
+/**
+ * The `status` lines for indexed files whose symbols are missing although their
+ * content is current (Spec 0073): one line per group, saying what is wrong and
+ * what to run, naming up to three of the files.
+ *
+ * Kept as a pure function so the wording is testable without a project on disk.
+ */
+function describeIndexHealth(health: IndexHealth): string[] {
+  const lines: string[] = [];
+  const reindex = health.needsReindex.length;
+  if (reindex > 0) {
+    // "re-read", not "will be fixed": a file tree-sitter parsed into an error
+    // tree yields the same empty result again. The wording promises the action,
+    // not the outcome (a syntax error still has to be corrected by the user).
+    lines.push(
+      `${formatNumber(reindex)} ${reindex === 1 ? 'file is missing its' : 'files are missing their'} symbols ${getGlyphs().dash} ` +
+        `run "homegraph sync" to re-read ${reindex === 1 ? 'it' : 'them'}: ${samplePaths(health.needsReindex)}`
+    );
+  }
+  const unparsed = health.parseErrors.length;
+  if (unparsed > 0) {
+    lines.push(
+      `${formatNumber(unparsed)} ${unparsed === 1 ? 'file could not be parsed, so its symbols are' : 'files could not be parsed, so their symbols are'} ` +
+        `missing: ${samplePaths(health.parseErrors)} ${getGlyphs().dash} "homegraph files --json" shows the errors`
+    );
+  }
+  return lines;
+}
+
+/** Up to three of `paths`, and how many more there are. */
+function samplePaths(paths: string[]): string {
+  return paths.slice(0, 3).join(', ') + (paths.length > 3 ? ` (+${formatNumber(paths.length - 3)} more)` : '');
+}
 
 /**
  * homegraph query <search>

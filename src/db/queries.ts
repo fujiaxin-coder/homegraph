@@ -242,6 +242,7 @@ export class QueryBuilder {
     deleteFile?: SqliteStatement;
     getFileByPath?: SqliteStatement;
     getAllFiles?: SqliteStatement;
+    getFilesWithoutSymbols?: SqliteStatement;
     insertNameSegment?: SqliteStatement;
     insertUnresolved?: SqliteStatement;
     deleteUnresolvedByNode?: SqliteStatement;
@@ -2061,6 +2062,31 @@ export class QueryBuilder {
       this.stmts.getAllFiles = this.db.prepare('SELECT * FROM files ORDER BY path');
     }
     const rows = this.stmts.getAllFiles.all() as FileRow[];
+    return rows.map(rowToFileRecord);
+  }
+
+  /**
+   * Files whose row is current but whose symbols are missing (Spec 0073).
+   *
+   * Two shapes, both invisible to a content-hash comparison:
+   *
+   *  - `node_count <= 1` with no recorded error — the row exists and hashes
+   *    match, but the only node is the file node itself (every indexed file
+   *    stores one), so the extractor yielded nothing. Zero means a wiped row
+   *    (#1541); one is the file node left alone.
+   *  - any recorded `errors` — the parse failed, or the size limit /
+   *    unsupported grammar stopped it. Symbols may exist but are incomplete.
+   *
+   * Callers must still filter file-level-only languages (a `yaml`/`json` file
+   * legitimately has no symbols) and classify by error code.
+   */
+  getFilesWithoutSymbols(): FileRecord[] {
+    if (!this.stmts.getFilesWithoutSymbols) {
+      this.stmts.getFilesWithoutSymbols = this.db.prepare(
+        'SELECT * FROM files WHERE node_count <= 1 OR errors IS NOT NULL ORDER BY path'
+      );
+    }
+    const rows = this.stmts.getFilesWithoutSymbols.all() as FileRow[];
     return rows.map(rowToFileRecord);
   }
 

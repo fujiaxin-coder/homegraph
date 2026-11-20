@@ -6,6 +6,7 @@
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
 import {
   Node,
   Edge,
@@ -17,6 +18,7 @@ import {
   SearchResult,
   Context,
   GraphStats,
+  IndexHealth,
   TaskInput,
   TaskContext,
   BuildContextOptions,
@@ -41,6 +43,7 @@ import {
   extractFromSource,
   initGrammars,
 } from './extraction';
+import { isFileLevelOnlyLanguage } from './extraction/grammars';
 import { bindExtractionContext } from './extraction/context';
 import {
   bindOhosApiDbForProject,
@@ -1244,6 +1247,57 @@ export class HomeGraph {
   }
 
   /**
+   * Indexed files whose row is current but whose symbols are missing
+   * (Spec 0073). A content-hash comparison — and therefore `status`'s pending
+   * check, `sync`, and the `indexed_at_commit` stamp — calls these "up to
+   * date": the bytes match, yet the index holds no symbols for them, so every
+   * query silently misses that file's code.
+   *
+   * Split by what the user should do next:
+   *
+   *  - `needsReindex` — no symbols and no recorded error, i.e. the row was
+   *    written but its nodes are gone. Re-reading the file fixes it.
+   *  - `parseErrors` — the file was read and failed (bad syntax, unloadable
+   *    grammar, unsupported dialect). Re-indexing alone won't help; the file
+   *    or its grammar has to change.
+   *
+   * File-level-only languages (`yaml`, `json`, ...) legitimately produce no
+   * symbols and are never reported.
+   */
+  getIndexHealth(): IndexHealth {
+    const needsReindex: string[] = [];
+    const parseErrors: string[] = [];
+    for (const file of this.queries.getFilesWithoutSymbols()) {
+      // A language whose unit of meaning IS the file yields no symbol nodes by
+      // design — an empty node list is the correct result, not a defect.
+      if (isFileLevelOnlyLanguage(file.language)) continue;
+
+      const errors = file.errors ?? [];
+      // Only the file node survived (or the row was wiped to zero): nothing was
+      // extracted, whatever the cause. `nodeCount === 1` is this engine's
+      // "empty" — every indexed file stores one `file` node.
+      const noSymbols = file.nodeCount <= 1;
+
+      if (errors.some((e) => e.code === 'parse_error' || e.code === 'parser_error' || e.code === 'unsupported_language')) {
+        // Read but not understood. Re-indexing the same bytes reproduces this.
+        parseErrors.push(file.path);
+      } else if (noSymbols) {
+        // A barrel (`export * from './x'`) declares nothing of its own, and a
+        // minified data payload (`window.DATA = {...}` on one line) is not code
+        // — both are legitimately symbol-free. Only flag a file that ought to
+        // have declarations.
+        if (isReExportOnlyFile(this.projectRoot, file.path)) continue;
+        needsReindex.push(file.path);
+      } else if (errors.some((e) => e.severity === 'error')) {
+        // Symbols exist but the file reported a hard error; the index is
+        // knowingly incomplete, so surface it with the parse failures.
+        parseErrors.push(file.path);
+      }
+    }
+    return { needsReindex, parseErrors };
+  }
+
+  /**
    * Extract nodes and edges from source code (without storing)
    */
   extractFromSource(filePath: string, source: string): ExtractionResult {
@@ -2059,3 +2113,68 @@ export class HomeGraph {
 
 // Default export
 export default HomeGraph;
+
+/**
+ * True when a file is nothing but re-exports and imports — a barrel
+ * (`export * from './x'`, `export { A } from './a'`).
+ *
+ * A barrel legitimately declares no symbols of its own: its whole job is to
+ * forward names declared elsewhere. Flagging it as "missing symbols" would fire
+ * on every `index.ts` in a modern TypeScript tree and teach the user to ignore
+ * the report (Spec 0073).
+ *
+ * Conservative by design — it must recognise a barrel from the source alone, so
+ * it errs toward "not a barrel" (flag the file) rather than hiding a real
+ * defect. A declaration of any kind, a `const`/`function`/`class`, even a
+ * default export of a value, disqualifies the file.
+ */
+function isReExportOnlyFile(rootDir: string, relPath: string): boolean {
+  // Only JS/TS have the barrel idiom; other languages fall through to "flag it".
+  if (!/\.(?:[cm]?[jt]sx?)$/i.test(relPath)) return false;
+
+  let source: string;
+  try {
+    source = fs.readFileSync(path.join(rootDir, relPath), 'utf-8');
+  } catch {
+    return false; // unreadable now — let the caller flag it as missing symbols
+  }
+
+  // A minified data payload (one enormous line) is not code and has no
+  // declarations by construction. Treat it as intentionally symbol-free rather
+  // than noise the user cannot act on.
+  const lines = source.split('\n');
+  if (lines.length <= 2 && source.length > 4096) return true;
+
+  let sawStatement = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) continue;
+
+    // Only these two statement forms forward names. Anything else in a file
+    // that produced no symbols is suspicious enough to report.
+    if (line.startsWith('export ') || line.startsWith('import ')) {
+      sawStatement = true;
+      // `export const x = …`, `export function f`, `export default class` — a
+      // DECLARATION exported directly, not a forwarding statement. `export type
+      // { A } from '…'` is forwarding, so a `type` followed by `{` is excluded
+      // before this test can misread it as a type alias declaration.
+      const forwardsTypeList = /^export\s+type\s*\{/.test(line);
+      if (!forwardsTypeList &&
+        /^export\s+(?:default\s+)?(?:const|let|var|function|class|async|interface|type|enum|namespace|abstract)\b/.test(line)) {
+        return false;
+      }
+      continue;
+    }
+
+    // `} from './x';` — the continuation of a multi-line export block.
+    if (/^\}\s*from\s+['"]/.test(line)) continue;
+    // Interior lines of a multi-line `export {` block: names, commas, `type`.
+    if (/^(?:type\s+)?[\w$]+\s*(?:as\s+[\w$]+)?\s*,?$/.test(line)) continue;
+
+    // Any other statement (expression, assignment, call) means this file does
+    // something besides forward names.
+    return false;
+  }
+
+  return sawStatement;
+}

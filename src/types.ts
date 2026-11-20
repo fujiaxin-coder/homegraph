@@ -563,6 +563,20 @@ export interface GraphStats {
   lastUpdated: number;
 }
 
+/**
+ * Indexed files that are current but hold no symbols (Spec 0073).
+ *
+ * Both lists are repository-relative paths. They are disjoint — a file lands in
+ * exactly one — and split by the action that would fix them.
+ */
+export interface IndexHealth {
+  /** No symbols, nothing blamed for it: re-reading the file repairs it. */
+  needsReindex: string[];
+
+  /** Read but not understood: the file or its grammar has to change. */
+  parseErrors: string[];
+}
+
 // =============================================================================
 // Task Context Types (for buildContext)
 // =============================================================================
