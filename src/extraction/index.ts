@@ -2548,7 +2548,15 @@ export class ExtractionOrchestrator {
     }
 
     const removedArkAnalyzerFiles: string[] = [];
-    let reconcileChecks = 0;
+    // Two independent counters, one per loop. A single shared counter used to
+    // drive BOTH the cooperative yield and the progress report, so `current`
+    // was the cumulative work of both loops while `total` was only the disk
+    // file count — on a repo whose tracked count nears a 1000 multiple the
+    // adds/mods loop reported `current` past `total` (2000 vs 1059 on
+    // arkanalyzer), the bar computed a negative fill, and `String.repeat(-22)`
+    // crashed the whole sync (Spec 0072). The removals loop walks the DB's
+    // PREVIOUS file set, so it contributes nothing to this scan's progress.
+    let removedChecks = 0;
     for (const tracked of trackedFiles) {
       if (!currentSet.has(tracked.path) || !fs.existsSync(path.join(this.rootDir, tracked.path))) {
         if (tracked.path.startsWith('@')) {
@@ -2572,17 +2580,20 @@ export class ExtractionOrchestrator {
         this.queries.deleteFile(tracked.path);
         filesRemoved++;
       }
-      if (++reconcileChecks % SYNC_RECONCILE_YIELD_INTERVAL === 0) {
+      if (++removedChecks % SYNC_RECONCILE_YIELD_INTERVAL === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
     }
 
     // Adds / modifications.
+    // `addedChecks` counts only THIS loop, so it never exceeds
+    // `currentFiles.length` — the progress invariant the bar depends on.
+    let addedChecks = 0;
     for (const filePath of currentFiles) {
-      if (++reconcileChecks % SYNC_RECONCILE_YIELD_INTERVAL === 0) {
+      if (++addedChecks % SYNC_RECONCILE_YIELD_INTERVAL === 0) {
         onProgress?.({
           phase: 'scanning',
-          current: reconcileChecks,
+          current: addedChecks,
           total: currentFiles.length,
         });
         await new Promise<void>((resolve) => setImmediate(resolve));

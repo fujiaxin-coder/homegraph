@@ -990,3 +990,75 @@ describe('Scoped sync parity (#watcher-scoped)', () => {
       expect(pendingCount()).toBe(0);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Spec 0072 — sync must not report progress past its own total.
+  //
+  // Regression: reconcile used ONE counter shared by the removals loop (which
+  // walks the DB's previous file set) and the adds/mods loop (which walks the
+  // disk). `current` was therefore the cumulative work of both while `total`
+  // was only the disk count. On a repo with ~1059 files the sync emitted
+  // `{current: 2000, total: 1059}`; the CLI's progress bar turned that into a
+  // 189% bar, computed `empty = 25 - 47 = -22`, and `String.repeat(-22)` threw
+  // `RangeError: Invalid count value` from a UI timer — killing the process.
+  //
+  // The invariant below is the contract the bar relies on. It only trips once a
+  // count crosses SYNC_RECONCILE_YIELD_INTERVAL (1000), so the fixture is large
+  // on purpose.
+  // ---------------------------------------------------------------------------
+  describe('sync progress never exceeds its total (Spec 0072)', () => {
+    let bigDir: string;
+    let bigRepo: HomeGraph;
+
+    const FILE_COUNT = 1100; // past the 1000 yield interval
+
+    beforeEach(async () => {
+      bigDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homegraph-spec0072-'));
+      fs.mkdirSync(path.join(bigDir, 'src'));
+      for (let i = 0; i < FILE_COUNT; i++) {
+        fs.writeFileSync(
+          path.join(bigDir, 'src', `mod${i}.ts`),
+          `export function fn${i}() { return ${i}; }\n`
+        );
+      }
+      bigRepo = HomeGraph.initSync(bigDir, { config: { include: ['**/*.ts'], exclude: [] } });
+      await bigRepo.indexAll();
+    });
+
+    afterEach(() => {
+      if (bigRepo) bigRepo.destroy();
+      if (fs.existsSync(bigDir)) removeTempDir(bigDir);
+    });
+
+    it('every scanning progress event satisfies current <= total', async () => {
+      const events: Array<{ phase: string; current: number; total: number }> = [];
+
+      // Delete a slice so the removals loop runs a meaningful number of times
+      // AND the adds/mods loop still walks the full disk set — the exact shape
+      // that used to make the shared counter overshoot.
+      for (let i = 0; i < 60; i++) fs.unlinkSync(path.join(bigDir, 'src', `mod${i}.ts`));
+
+      await bigRepo.sync({
+        onProgress: (p) => {
+          if (p && p.phase === 'scanning' && p.total > 0) {
+            events.push({ phase: p.phase, current: p.current, total: p.total });
+          }
+        },
+      });
+
+      // The yield interval fired at least once, else the assertion is vacuous.
+      expect(events.length).toBeGreaterThan(0);
+
+      for (const e of events) {
+        expect(e.current).toBeLessThanOrEqual(e.total);
+        expect(e.current).toBeGreaterThan(0);
+        // The bar computes percent from this ratio; 100 is the hard ceiling.
+        expect(Math.round((e.current / e.total) * 100)).toBeLessThanOrEqual(100);
+      }
+    });
+
+    it('a sync over the yield threshold completes without throwing', async () => {
+      // The user-visible symptom was a crash, so assert the whole call settles.
+      await expect(bigRepo.sync()).resolves.toBeDefined();
+    });
+  });

@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'worker_threads';
 import { writeSync } from 'fs';
 import { getGlyphs } from './glyphs';
+import { barGeometry, clampCellCount } from './progress-bar';
 import type { ShimmerWorkerMessage } from './types';
 
 // Write directly to fd 1 (stdout) instead of writeStdout().
@@ -48,13 +49,25 @@ function formatNumber(n: number): string {
   return n.toLocaleString();
 }
 
+/**
+ * Render one progress bar row.
+ *
+ * `filled` / `empty` are clamped defensively via `clampCellCount`: an upstream
+ * percent outside [0, 100] used to produce `empty < 0`, and
+ * `String.repeat(-22)` throws `RangeError: Invalid count value`, which killed
+ * the whole indexing process from inside a UI timer (Spec 0072). The caller
+ * clamps too (see `barGeometry`) — this is the second layer, so no future
+ * caller can turn a display glitch into a crash.
+ */
 function renderBar(frame: number, filled: number, empty: number): string {
-  if (filled === 0) return `${DM}${G.barEmpty.repeat(empty)}${RST}`;
+  const f = clampCellCount(filled);
+  const e = clampCellCount(empty);
+  if (f === 0) return `${DM}${G.barEmpty.repeat(e)}${RST}`;
   const cycleFrames = 24;
-  const shimmerPos = ((frame % cycleFrames) / cycleFrames) * (filled + 6) - 3;
+  const shimmerPos = ((frame % cycleFrames) / cycleFrames) * (f + 6) - 3;
   const shimmerWidth = 3;
   let bar = '';
-  for (let i = 0; i < filled; i++) {
+  for (let i = 0; i < f; i++) {
     const dist = Math.abs(i - shimmerPos);
     const t = Math.max(0, 1 - dist / shimmerWidth);
     const r = lerp(160, 251, t);
@@ -62,7 +75,7 @@ function renderBar(frame: number, filled: number, empty: number): string {
     const b = lerp(9, 36, t);
     bar += `\x1b[38;2;${r};${g};${b}m${BOLD}${G.barFilled}`;
   }
-  bar += `${RST}${DM}${G.barEmpty.repeat(empty)}${RST}`;
+  bar += `${RST}${DM}${G.barEmpty.repeat(e)}${RST}`;
   return bar;
 }
 
@@ -80,10 +93,13 @@ function render(): void {
 
   let line: string;
   if (currentPercent >= 0) {
-    const barWidth = 25;
-    const filled = Math.round(barWidth * currentPercent / 100);
-    const empty = barWidth - filled;
-    line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}  ${renderBar(frame, filled, empty)}  ${currentPercent}%`;
+    // Geometry is computed by the pure helper: it clamps the percent to
+    // [0, 100] before splitting the bar, so a progress source that overshoots
+    // renders a full bar instead of throwing on a negative repeat count
+    // (Spec 0072). "189%" was the symptom, not a label — the displayed number
+    // is clamped too.
+    const { filled, empty, percent: pct } = barGeometry(currentPercent);
+    line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}  ${renderBar(frame, filled, empty)}  ${pct}%`;
   } else if (currentCount > 0) {
     line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}... ${formatNumber(currentCount)} found`;
   } else {
