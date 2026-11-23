@@ -9,6 +9,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-11-23
+
 ### New Features
 
 - CLI `homegraph api-kg <output> [version] [--sdk <path>]` builds a standalone OHOS / HarmonyOS API knowledge-graph db. `output` is required; version and SDK path are optional (discover via `HOMEGRAPH_OHOS_*` / DevEco install paths). Prints the chosen version and reason; only SDK trees that contain at least one `@ohos.*.d.ts` are accepted. `index-api` remains a same-shape alias (old `index-api <input> [-o]` form is removed) (Spec 0067).
@@ -349,3 +351,4 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [1.6.2]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.2
 [1.6.3]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.3
 [1.6.4]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.4
+[1.6.5]: https://github.com/fujiaxin-coder/homegraph/releases/tag/v1.6.5
